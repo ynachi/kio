@@ -1,0 +1,120 @@
+# Prerequisites
+*.d
+.venv
+build
+build-*/
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Fortran module files
+*.mod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# CLion files
+*.iml
+.idea
+cmake-build-*
+
+# Directories used by popular Visual Studio build systems.
+out/  # .NET Core
+obj/  # MSBuild
+
+# Temporary files
+tmp/
+temp/
+
+# Logs
+*.log
+
+# Test files
+test_cases/
+
+# Package Files #
+*.7z
+*.dmg
+*.gz
+*.iso
+*.jar
+*.rar
+*.tar
+*.zip
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+CTestTestfile.cmake
+cmake_install.cmake
+CMakeScripts/
+*.cmake.*.bak
+CMakeDoxyfile.tpl
+CMakeDoxyfile
+/*/CMakeFiles/CMakeOutput.log
+/*/CMakeFiles/CMakeError.log
+
+# Qt files
+cmake-build-*/
+.cache
+CMakeLists.txt.user
+
+# Build
+[Build]
+[Ccache]
+Makefile
+.ninja
+ninja_deps
+ninja_log
+
+# Visual Studio with CMake
+.vs/
+build/
+cmake-build-*
+debug/
+
+# Clion
+.idea/
+
+# Mac
+.DS_Store
+
+# Google Test artifacts
+libgtest.a
+libgtest_main.a
+
+Testing
+tests/file*.txt
+
+.idea/workspace.xml
+
+/home/ulozaka/codes/aio/tests/file.txt"
+
+compile_commands.json
+
+# Rust
+Cargo.lock
+/target
+dump.rdb
+go-benchmark.iml
+/testdata
+**/*/.rustc_info.json
