@@ -23,8 +23,9 @@ include(cmake/FindSPlog.cmake)
 #-----------------------------------------------
 # Includes
 #----------------------------------------------
+include_directories(${CMAKE_SOURCE_DIR})
 add_subdirectory(coro)
-
+add_subdirectory(demo)
 
 #------------------------------
 # Targets
