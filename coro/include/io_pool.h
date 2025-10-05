@@ -48,6 +48,7 @@ namespace kio {
         io_uring ring_{};
         IoWorkerConfig config_;
         size_t id_{0};
+        std::stop_token stop_token_;
 
         struct io_op_data {
             std::coroutine_handle<> handle_;
@@ -104,16 +105,22 @@ namespace kio {
         {
             op_data_pool_[op_id].handle_.resume();
         }
-        void event_loop(const std::stop_token& stoken);
+        void event_loop();
         // sends a stop request signal
         void request_stop();
-        std::stop_token& get_stop_token() const;
+        [[nodiscard]]
+        std::stop_token get_stop_token() const noexcept
+        {
+            return stop_token_;
+        }
+        [[nodiscard]]
+        size_t get_id() const noexcept { return id_; }
         IOWorker(const IOWorker&) = delete;
         IOWorker& operator=(const IOWorker&) = delete;
         IOWorker(IOWorker&&) = delete;
         IOWorker& operator=(IOWorker&&) = delete;
         IOWorker(size_t id, const IoWorkerConfig& config, std::shared_ptr<std::latch> init_latch,
-                           std::shared_ptr<std::latch> shutdown_latch);
+                           std::shared_ptr<std::latch> shutdown_latch, std::stop_token stop_token);
         ~IOWorker();
 
         // Io methods

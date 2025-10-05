@@ -87,8 +87,9 @@ namespace kio {
          const size_t id,
          const IoWorkerConfig &config,
          std::shared_ptr<std::latch> init_latch,
-         std::shared_ptr<std::latch> shutdown_latch):
-    config_(config), id_(id), init_latch_(std::move(init_latch)), shutdown_latch_(std::move(shutdown_latch))
+         std::shared_ptr<std::latch> shutdown_latch,
+         std::stop_token stop_token):
+    config_(config), id_(id), stop_token_(std::move(stop_token)), init_latch_(std::move(init_latch)), shutdown_latch_(std::move(shutdown_latch))
     {
         config.check();
         check_kernel_version();
@@ -143,7 +144,7 @@ namespace kio {
     }
 
 
-    void IOWorker::event_loop(const std::stop_token& stoken)
+    void IOWorker::event_loop()
     {
         // 1. CPU Pinning - do this FIRST before anything else
         cpu_set_t cpuset;
@@ -172,7 +173,7 @@ namespace kio {
 
         spdlog::info("Worker {} starting event loop", id_);
 
-        while (!stoken.stop_requested())
+        while (!stop_token_.stop_requested())
         {
             // Submit pending operations
             // TODO: find a way to not pay runtime cost for  this if check, as submit_wait takes care of checking errors already
@@ -307,15 +308,15 @@ namespace kio {
             worker_threads_.emplace_back([this, i](const std::stop_token& stoken) {
                 try {
                     // Construct a worker on this thread
-                    IOWorker worker(i, config_, init_latch_, shutdown_latch_);
+                    IOWorker worker(i, config_, init_latch_, shutdown_latch_, stoken);
 
-                    // Store pointer for external access if needed
+                    // Store pointer for external access to workers
                     workers_[i] = &worker;
 
                     worker.signal_init_complete();
 
                     // Run event loop
-                    worker.event_loop(stoken);
+                    worker.event_loop();
 
                 } catch (const std::exception& e) {
                     spdlog::error("Worker {} failed: {}", i, e.what());
@@ -340,7 +341,7 @@ namespace kio {
             worker_threads_.emplace_back([this, i, worker_init](const std::stop_token& stoken) {
                 try {
                     // Construct worker on THIS thread
-                    IOWorker worker(i, config_, init_latch_, shutdown_latch_);
+                    IOWorker worker(i, config_, init_latch_, shutdown_latch_, stoken);
 
                     worker.signal_init_complete();
 
@@ -349,7 +350,7 @@ namespace kio {
                     worker_init(worker);
 
                     // Run event loop
-                    worker.event_loop(stoken);
+                    worker.event_loop();
 
                 } catch (const std::exception& e) {
                     spdlog::error("Worker {} failed: {}", i, e.what());

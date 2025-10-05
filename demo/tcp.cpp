@@ -10,8 +10,9 @@
 // User defines their application logic as coroutines
 kio::DetachedTask handle_client(kio::IOWorker& worker, const int client_fd) {
     char buffer[8192];
+    const auto st = worker.get_stop_token();
 
-    while (true) {
+    while (!st.stop_requested()) {
         // Read from the client - this co_await runs on the worker thread
         int n = co_await worker.async_read(client_fd, std::span(buffer, sizeof(buffer)), -1);
         if (n < 0)
@@ -48,8 +49,9 @@ kio::DetachedTask handle_client(kio::IOWorker& worker, const int client_fd) {
 // Accept loop - runs on each worker independently
 kio::DetachedTask accept_loop(kio::IOWorker& worker, int listen_fd) {
     spdlog::info("Worker accepting connections");
+    const auto st = worker.get_stop_token();
 
-    while (true) {
+    while (!st.stop_requested()) {
         sockaddr_storage client_addr{};
         socklen_t addr_len = sizeof(client_addr);
 
@@ -71,6 +73,7 @@ kio::DetachedTask accept_loop(kio::IOWorker& worker, int listen_fd) {
         // Each connection runs independently on this worker
         handle_client(worker, client_fd).detach();
     }
+    spdlog::info("Worker {} stop accepting connexions", worker.get_id());
 }
 
 // Main function - user's entry point
