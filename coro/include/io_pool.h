@@ -112,7 +112,7 @@ namespace kio {
         // Io methods
         Task<int> async_accept(int server_fd, sockaddr* addr, socklen_t* addrlen);
         Task<int> async_read(int client_fd, std::span<char> buf, uint64_t offset);
-        Task<int> async_openat(std::string_view path, int flags, mode_t mode);
+        Task<int> async_openat(std::string path, int flags, mode_t mode);
         Task<int> async_write(int client_fd, std::span<const char> buf, uint64_t offset);
         Task<int> async_readv(int client_fd, const iovec* iov, int iovcnt, uint64_t offset);
         Task<int> async_writev(int client_fd, const iovec* iov, int iovcnt, uint64_t offset);

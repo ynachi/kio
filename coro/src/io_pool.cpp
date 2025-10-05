@@ -267,20 +267,32 @@ namespace kio {
         co_return co_await make_uring_awaitable(*this, prep, client_fd, addr, addrlen);
     }
 
-    // Task<int> IOWorker::async_openat(std::string_view path, const int flags, const mode_t mode)
-    // {
-    //     auto prep = [](io_uring_sqe* sqe, const int fd, const char* p, const int f, const mode_t m) {
-    //         io_uring_prep_openat(sqe, fd, p, f, m);
-    //     };
-    //     co_return co_await make_uring_awaitable(*this, prep, path.data(), path.size(), flags, mode);
-    // }
-    // Task<int> IOWorker::async_fallocate(const int file_fd, const int mode, const off_t size)
-    // {
-    //     auto prep = [](io_uring_sqe* sqe, const int fd, const int mode, off_t offset, off_t len) {
-    //         io_uring_prep_fallocate(sqe, fd, mode, offset, len);
-    //     };
-    //     co_return co_await make_uring_awaitable(*this, prep, file_fd, mode, size);
-    // }
+    Task<int> IOWorker::async_openat(std::string path, const int flags, const mode_t mode)
+    {
+        auto prep = [](io_uring_sqe* sqe, int dfd, const char* p, int f, mode_t m) {
+            io_uring_prep_openat(sqe, dfd, p, f, m);
+        };
+
+        co_return co_await make_uring_awaitable(*this, prep, AT_FDCWD, path.c_str(), flags, mode);
+    }
+
+    Task<int> IOWorker::async_fallocate(int fd, int mode, off_t size)
+    {
+        auto prep = [](io_uring_sqe* sqe, int file_fd, int p_mode, off_t offset, off_t len) {
+            io_uring_prep_fallocate(sqe, file_fd, p_mode, offset, len);
+        };
+
+        off_t offset = 0;
+        co_return co_await make_uring_awaitable(*this, prep, fd, mode, offset, size);
+    }
+
+    Task<int> IOWorker::async_close(int fd)
+    {
+        auto prep = [](io_uring_sqe* sqe, int file_fd) {
+            io_uring_prep_close(sqe, file_fd);
+        };
+        co_return co_await make_uring_awaitable(*this, prep, fd);
+    }
 
      IOPool::IOPool(size_t num_workers, const IoWorkerConfig& config)
     : config_(config),
