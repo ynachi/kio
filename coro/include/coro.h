@@ -91,12 +91,8 @@ namespace kio {
             if (h_.promise().result_.index() == 2) {
                 std::rethrow_exception(std::get<2>(h_.promise().result_));
             }
-            // return void or value depending on the case
-            if constexpr (std::is_void_v<T>) {
-                return;
-            } else {
-                return std::get<1>(std::move(h_.promise().result_));
-            }
+
+            return std::get<1>(std::move(h_.promise().result_));
         }
     };
 
@@ -126,7 +122,6 @@ namespace kio {
         }
 
         struct promise_type {
-            // Variant without T for the void case
             std::variant<std::monostate, std::exception_ptr> result_;
             std::coroutine_handle<> continuation_;
 
@@ -181,7 +176,7 @@ namespace kio {
             std::suspend_never final_suspend() noexcept { return {}; }
             void return_void() noexcept {}
             void unhandled_exception() noexcept {
-                // swallow or log exception
+                // TODO: better manage this exception
                 try {
                     throw;
                 } catch (const std::exception &e) {

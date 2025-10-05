@@ -25,22 +25,28 @@ namespace kio {
         uint8_t uring_submit_timeout_ms{100};
         int uring_default_flags = 0;
         size_t default_op_slots{1024};
+        float op_slots_growth_factor{1.5};
         size_t max_op_slots{1024 * 1024};
 
         constexpr IoWorkerConfig() = default;
         void check() const {
-            if (uring_queue_depth == 0 || uring_submit_batch_size == 0 || tcp_backlog == 0) {
-                throw std::invalid_argument("Invalid worker config, some fields cannot be zero");
+            if (uring_queue_depth == 0 || uring_submit_batch_size == 0 || tcp_backlog == 0 || op_slots_growth_factor <= 1.0f) {
+                throw std::invalid_argument("Invalid worker config, some fields cannot be zero, or op_slots_growth_factor must be greater than 1.0f");
             }
         }
     };
 
-    class IOWorker;
-
+    /**
+     * An OI Worker is a self-contained event loop struct. It is not thread-safe and meant
+     * to be used in a single thread setup only. Because we use the io uring single issuer
+     * flag, the thread that constructs a worker instance must be the one submitting and
+     * processing io requests. This is a tradeoff we made between API flexibility and
+     * high horizontal scalability in a pure share-nothing manner. To see how to properly
+     * set it up, you can look at the IOPool code.
+     */
     class IOWorker {
         io_uring ring_{};
         IoWorkerConfig config_;
-        bool running_{false};
         size_t id_{0};
 
         struct io_op_data {
@@ -101,6 +107,7 @@ namespace kio {
         void event_loop(const std::stop_token& stoken);
         // sends a stop request signal
         void request_stop();
+        std::stop_token& get_stop_token() const;
         IOWorker(const IOWorker&) = delete;
         IOWorker& operator=(const IOWorker&) = delete;
         IOWorker(IOWorker&&) = delete;
@@ -112,7 +119,7 @@ namespace kio {
         // Io methods
         Task<int> async_accept(int server_fd, sockaddr* addr, socklen_t* addrlen);
         Task<int> async_read(int client_fd, std::span<char> buf, uint64_t offset);
-        Task<int> async_openat(std::string path, int flags, mode_t mode);
+        Task<int> async_openat(std::string_view path, int flags, mode_t mode);
         Task<int> async_write(int client_fd, std::span<const char> buf, uint64_t offset);
         Task<int> async_readv(int client_fd, const iovec* iov, int iovcnt, uint64_t offset);
         Task<int> async_writev(int client_fd, const iovec* iov, int iovcnt, uint64_t offset);
@@ -218,15 +225,14 @@ namespace kio {
             return nullptr;
         }
 
-        void stop() const
+        void stop()
         {
-            for (auto* worker : workers_) {
-                worker->request_stop();
+            for (auto& worker : worker_threads_) {
+                worker.request_stop();
             }
             shutdown_latch_->wait();
         }
     };
-
 }
 
 #endif //KIO_IO_POOL_H

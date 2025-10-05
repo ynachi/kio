@@ -60,9 +60,17 @@ namespace kio {
             throw std::runtime_error("Op slot pool exhausted");
         }
 
-        const auto id = op_data_pool_.size();
-        op_data_pool_.emplace_back();
-        spdlog::debug("Growing op_data_pool_ to {}", op_data_pool_.size());
+        const auto cur_size = op_data_pool_.size();
+        size_t new_size = std::min(static_cast<size_t>(static_cast<float>(cur_size) * config_.op_slots_growth_factor), config_.max_op_slots);
+        spdlog::debug("Growing op_data_pool_ from {} to {}", cur_size, new_size);
+        op_data_pool_.resize(new_size);
+        for (size_t i = cur_size; i < new_size; ++i)
+        {
+            free_op_ids.push_back(i);
+        }
+
+        const auto id = free_op_ids.back();
+        free_op_ids.pop_back();
         return id;
     }
 
@@ -122,13 +130,6 @@ namespace kio {
             count++;
             const uint64_t op_id = io_uring_cqe_get_data64(cqe);
 
-            if (op_id == ioWorkerStopSentinel)
-            {
-                spdlog::debug("stop signal received — shutting down");
-                running_ = false;
-                break;
-            }
-
             set_op_result(op_id, cqe->res);
             resume_coro_by_id(op_id);
             release_op_id(op_id);
@@ -170,9 +171,8 @@ namespace kio {
         }
 
         spdlog::info("Worker {} starting event loop", id_);
-        running_ = true;
 
-        while (running_ && !stoken.stop_requested())
+        while (!stoken.stop_requested())
         {
             // Submit pending operations
             // TODO: find a way to not pay runtime cost for  this if check, as submit_wait takes care of checking errors already
@@ -267,13 +267,15 @@ namespace kio {
         co_return co_await make_uring_awaitable(*this, prep, client_fd, addr, addrlen);
     }
 
-    Task<int> IOWorker::async_openat(std::string path, const int flags, const mode_t mode)
+    Task<int> IOWorker::async_openat(std::string_view path, const int flags, const mode_t mode)
     {
-        auto prep = [](io_uring_sqe* sqe, int dfd, const char* p, int f, mode_t m) {
+        // make the coroutine own its own copy of the path in its frame
+        const std::string path_str(path);
+        auto prep = [](io_uring_sqe* sqe, const int dfd, const char* p, const int f, const mode_t m) {
             io_uring_prep_openat(sqe, dfd, p, f, m);
         };
 
-        co_return co_await make_uring_awaitable(*this, prep, AT_FDCWD, path.c_str(), flags, mode);
+        co_return co_await make_uring_awaitable(*this, prep, AT_FDCWD, path_str.c_str(), flags, mode);
     }
 
     Task<int> IOWorker::async_fallocate(int fd, int mode, off_t size)
@@ -343,7 +345,7 @@ namespace kio {
                     worker.signal_init_complete();
 
                     // Call user's initialization callback
-                    // This is where user starts their coroutines (accept_loop, etc.)
+                    // This is where the user starts their coroutines (accept_loop, etc.)
                     worker_init(worker);
 
                     // Run event loop

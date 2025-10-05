@@ -1,19 +1,24 @@
 //
 // Created by Yao ACHI on 04/10/2025.
 //
-#include "coro/include/io_pool.h"
+#include <csignal>
+#include <iostream>
 #include <netinet/in.h>
 
+#include "coro/include/io_pool.h"
+
 // User defines their application logic as coroutines
-kio::DetachedTask handle_client(kio::IOWorker& worker, int client_fd) {
+kio::DetachedTask handle_client(kio::IOWorker& worker, const int client_fd) {
     char buffer[8192];
 
     while (true) {
         // Read from the client - this co_await runs on the worker thread
-        int n = co_await worker.async_read(client_fd, buffer, -1);
+        int n = co_await worker.async_read(client_fd, std::span(buffer, sizeof(buffer)), -1);
         if (n < 0)
         {
-            spdlog::error("Read failed {}", strerror(-n));
+            spdlog::debug("Read failed {}", strerror(-n));
+            // in the io_uring world, most of the errors are fatal, so no need to specialize
+            break;
         }
 
         if (n == 0) {
@@ -71,6 +76,8 @@ kio::DetachedTask accept_loop(kio::IOWorker& worker, int listen_fd) {
 // Main function - user's entry point
 using namespace kio;
 int main() {
+    // ignore
+    signal(SIGPIPE, SIG_IGN);
     // Setup logging
     spdlog::set_level(spdlog::level::info);
 
@@ -115,7 +122,13 @@ int main() {
     spdlog::info("Server running with 4 workers. Press Ctrl+C to stop.");
 
     // Main thread waits (or handles signals)
-    std::this_thread::sleep_until(std::chrono::steady_clock::time_point::max());
+    std::cout << "Server running. Press Enter to stop..." << std::endl;
+    std::cin.get();  // Blocks until user presses Enter
+    pool.stop();
+
+    spdlog::info("Server stopped from main");
+
+    // std::this_thread::sleep_until(std::chrono::steady_clock::time_point::max());
 
     // Pool destructor stops all workers gracefully
     return 0;
