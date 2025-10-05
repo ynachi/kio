@@ -19,6 +19,9 @@ find_package(PkgConfig REQUIRED)
 # spdlog
 include(cmake/FindSPlog.cmake)
 
+# gtest
+include(cmake/FindGtest.cmake)
+
 
 #-----------------------------------------------
 # Includes
@@ -26,6 +29,8 @@ include(cmake/FindSPlog.cmake)
 include_directories(${CMAKE_SOURCE_DIR})
 add_subdirectory(coro)
 add_subdirectory(demo)
+
+add_subdirectory(tests)
 
 #------------------------------
 # Targets
