@@ -14,9 +14,6 @@
 
 namespace kio {
 
-    // stop sentinel, max uint64 is reserved
-    static constexpr uint64_t ioWorkerStopSentinel = std::numeric_limits<uint64_t>::max();
-
     struct IoWorkerConfig
     {
         size_t uring_queue_depth{1024};
@@ -48,7 +45,6 @@ namespace kio {
         io_uring ring_{};
         IoWorkerConfig config_;
         size_t id_{0};
-        std::stop_token stop_token_;
 
         struct io_op_data {
             std::coroutine_handle<> handle_;
@@ -61,6 +57,12 @@ namespace kio {
 
         std::shared_ptr<std::latch> init_latch_;
         std::shared_ptr<std::latch> shutdown_latch_;
+        std::jthread thread_;
+        // reading the stoken directly from the thread has been creating data races, so store a copy here
+        std::stop_token stoken_;
+
+        std::function<void(IOWorker&)> worker_init_callback_;
+        void run(const std::stop_token& stoken);
 
         static void check_kernel_version();
         static void check_syscall_return(int ret);
@@ -105,13 +107,22 @@ namespace kio {
         {
             op_data_pool_[op_id].handle_.resume();
         }
-        void event_loop();
         // sends a stop request signal
-        void request_stop();
+        void request_stop()
+        {
+            if (thread_.joinable())
+            {
+                // drain the completion queue
+                drain_completions();
+                // request stop if not already requested
+                thread_.request_stop();
+                // jthread joins on destruction automatically; but we ensure io_uring exit after thread finishes
+            }
+        };
         [[nodiscard]]
         std::stop_token get_stop_token() const noexcept
         {
-            return stop_token_;
+            return stoken_;
         }
         [[nodiscard]]
         size_t get_id() const noexcept { return id_; }
@@ -119,8 +130,11 @@ namespace kio {
         IOWorker& operator=(const IOWorker&) = delete;
         IOWorker(IOWorker&&) = delete;
         IOWorker& operator=(IOWorker&&) = delete;
-        IOWorker(size_t id, const IoWorkerConfig& config, std::shared_ptr<std::latch> init_latch,
-                           std::shared_ptr<std::latch> shutdown_latch, std::stop_token stop_token);
+        IOWorker(size_t id,
+                 const IoWorkerConfig& config,
+                 std::shared_ptr<std::latch> init_latch,
+                 std::shared_ptr<std::latch> shutdown_latch,
+                 std::function<void(IOWorker&)> worker_init_callback = {});
         ~IOWorker();
 
         // Io methods
@@ -204,9 +218,7 @@ namespace kio {
  */
     class IOPool
     {
-        std::vector<std::jthread> worker_threads_;
-        // For accessing workers after init
-        std::vector<IOWorker*> workers_;
+        std::vector<std::unique_ptr<IOWorker>> workers_;
         IoWorkerConfig config_;
         std::shared_ptr<std::latch> init_latch_;
         std::shared_ptr<std::latch> shutdown_latch_;
@@ -220,25 +232,27 @@ namespace kio {
         }
 
         [[nodiscard]]
-        size_t num_workers() const { return worker_threads_.size(); }
+        size_t num_workers() const { return workers_.size(); }
 
         // Get worker by id (for submitting tasks to specific workers)
         [[nodiscard]]
         IOWorker* get_worker(const size_t id) const
         {
             if (id < workers_.size()) {
-                return workers_[id];
+                return workers_[id].get();
             }
             return nullptr;
         }
 
         void stop()
         {
-            for (auto& worker : worker_threads_) {
-                worker.request_stop();
+            for (const auto& worker : workers_) {
+                worker->request_stop();
             }
             shutdown_latch_->wait();
         }
+
+        size_t get_io_worker_id_by_key(std::string_view string);
     };
 }
 

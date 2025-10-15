@@ -30,6 +30,8 @@ include_directories(${CMAKE_SOURCE_DIR})
 add_subdirectory(coro)
 add_subdirectory(demo)
 
+include(CTest)
+enable_testing()
 add_subdirectory(tests)
 
 #------------------------------

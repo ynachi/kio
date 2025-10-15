@@ -83,32 +83,105 @@ namespace kio {
         }
     }
 
-     IOWorker::IOWorker(
+    IOWorker::IOWorker(
          const size_t id,
          const IoWorkerConfig &config,
          std::shared_ptr<std::latch> init_latch,
          std::shared_ptr<std::latch> shutdown_latch,
-         std::stop_token stop_token):
-    config_(config), id_(id), stop_token_(std::move(stop_token)), init_latch_(std::move(init_latch)), shutdown_latch_(std::move(shutdown_latch))
+         std::function<void(IOWorker&)> worker_init_callback)
+    : config_(config), id_(id), init_latch_(std::move(init_latch)), shutdown_latch_(std::move(shutdown_latch)),
+      worker_init_callback_(std::move(worker_init_callback))
     {
-        config.check();
-        check_kernel_version();
+        config_.check();
 
-        io_uring_params params{};
-        params.flags |= IORING_SETUP_COOP_TASKRUN | IORING_SETUP_SINGLE_ISSUER;
-
-        if (const int ret = io_uring_queue_init_params(config_.uring_queue_depth, &ring_, &params); ret < 0)
-        {
-            throw std::system_error(-ret, std::system_category(), "io_uring_queue_init failed");
-        }
-
+        // pre-allocate op pool metadata on the constructing thread to avoid allocation races
         op_data_pool_.resize(config_.default_op_slots);
         free_op_ids.reserve(config_.default_op_slots);
-        // All slots start as free
         for (size_t i = 0; i < config_.default_op_slots; ++i) {
             free_op_ids.push_back(i);
         }
-        spdlog::info("IO uring initialized with queue size of {}", config_.uring_queue_depth);
+
+        // spawn the worker thread; run() will perform io_uring init and event loop
+        thread_ = std::jthread([this](const std::stop_token& stoken) {
+            this->run(stoken);
+        });
+    }
+
+        // The main per-thread body that used to be inside the thread lambda.
+    void IOWorker::run(const std::stop_token& stoken)
+    {
+        stoken_ = stoken;
+
+        try {
+            check_kernel_version();
+
+            io_uring_params params{};
+            params.flags |= IORING_SETUP_COOP_TASKRUN | IORING_SETUP_SINGLE_ISSUER;
+
+            if (const int ret = io_uring_queue_init_params(config_.uring_queue_depth, &ring_, &params); ret < 0)
+            {
+                throw std::system_error(-ret, std::system_category(), "io_uring_queue_init failed");
+            }
+
+            spdlog::info("IO uring initialized with queue size of {}", config_.uring_queue_depth);
+
+            // After io_uring init, we can set CPU affinity and iowq affinity and then signal init complete
+            cpu_set_t cpuset;
+            CPU_ZERO(&cpuset);
+            const uint cpu = id_ % std::thread::hardware_concurrency();
+            CPU_SET(cpu, &cpuset);
+
+            if (const int rc = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset); rc != 0)
+            {
+                spdlog::warn("Worker {}: Failed to set CPU affinity: {}", id_, strerror(rc));
+            }
+            else
+            {
+                spdlog::info("Worker {} pinned to CPU {}", id_, cpu);
+            }
+
+            if (const int ret = io_uring_register_iowq_aff(&ring_, 1, &cpuset); ret < 0)
+            {
+                spdlog::warn("Worker {}: Failed to set io-wq affinity: {}", id_, strerror(-ret));
+            }
+            else
+            {
+                spdlog::info("Worker {}: io-wq threads pinned to CPU {}", id_, cpu);
+            }
+
+            // signal that initialization (including io_uring init) is complete
+            signal_init_complete();
+
+            // Init callback to run inside the worker, respect io_uring single issuer
+            if (worker_init_callback_) {
+                worker_init_callback_(*this);
+            }
+
+            spdlog::info("Worker {} starting event loop", id_);
+
+            // event loop (split out to reuse the same logic as before)
+            while (!stoken.stop_requested())
+            {
+                if (auto sqe_num = submit_sqes_wait(); sqe_num > 0)
+                {
+                    spdlog::trace("Worker {} submitted {} operations", id_, sqe_num);
+                }
+                process_completions();
+            }
+
+            spdlog::info("Worker {} exiting event loop", id_);
+
+            drain_completions();
+
+            // signal shutdown complete
+            signal_shutdown_complete();
+
+        } catch (const std::exception& e) {
+            spdlog::error("Worker {} failed during run(): {}", id_, e.what());
+            // ensure latches are released so pool doesn't wait forever
+            init_latch_->count_down();
+            shutdown_latch_->count_down();
+        }
     }
 
     int IOWorker::submit_sqes_wait()
@@ -143,77 +216,14 @@ namespace kio {
         process_completions();
     }
 
-
-    void IOWorker::event_loop()
-    {
-        // 1. CPU Pinning - do this FIRST before anything else
-        cpu_set_t cpuset;
-        CPU_ZERO(&cpuset);
-        const uint cpu = id_ % std::thread::hardware_concurrency();
-        CPU_SET(cpu, &cpuset);
-
-        if (const int rc = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset); rc != 0)
-        {
-            spdlog::warn("Worker {}: Failed to set CPU affinity: {}", id_, strerror(rc));
-        }
-        else
-        {
-            spdlog::info("Worker {} pinned to CPU {}", id_, cpu);
-        }
-
-        // 2. io-wq affinity (pin io_uring's kernel worker threads)
-        if (const int ret = io_uring_register_iowq_aff(&ring_, 1, &cpuset); ret < 0)
-        {
-            spdlog::warn("Worker {}: Failed to set io-wq affinity: {}", id_, strerror(-ret));
-        }
-        else
-        {
-            spdlog::info("Worker {}: io-wq threads pinned to CPU {}", id_, cpu);
-        }
-
-        spdlog::info("Worker {} starting event loop", id_);
-
-        while (!stop_token_.stop_requested())
-        {
-            // Submit pending operations
-            // TODO: find a way to not pay runtime cost for  this if check, as submit_wait takes care of checking errors already
-            if (auto sqe_num = submit_sqes_wait(); sqe_num > 0)
-            {
-                spdlog::trace("Worker {} submitted {} operations", id_, sqe_num);
-                // TODO: place for metrics
-            }
-
-            // Process completions we got
-            process_completions();
-        }
-
-        spdlog::info("Worker {} exiting event loop", id_);
-
-        // Drain remaining completions
-        drain_completions();
-
-        // If we reach here, we are shutting down
-        shutdown_latch_->count_down();
-
-    }
-
-    void IOWorker::request_stop()
-    {
-        if (auto* sqe = io_uring_get_sqe(&ring_)) {
-            io_uring_prep_nop(sqe);
-            io_uring_sqe_set_data64(sqe, ioWorkerStopSentinel);
-            io_uring_submit(&ring_);
-        }
-        else
-        {
-            spdlog::error("failed to request stop");
-            // TODO: retry
-        }
-    }
-
     IOWorker::~IOWorker()
     {
         spdlog::debug("Worker {} destructor called", id_);
+        // request stop if not already requested
+        if (thread_.joinable()) {
+            thread_.request_stop();
+        }
+
         if (this->ring_.ring_fd >= 0)
         {
             io_uring_queue_exit(&ring_);
@@ -297,39 +307,21 @@ namespace kio {
         co_return co_await make_uring_awaitable(*this, prep, fd);
     }
 
-     IOPool::IOPool(size_t num_workers, const IoWorkerConfig& config)
+    IOPool::IOPool(size_t num_workers, const IoWorkerConfig& config)
     : config_(config),
-     init_latch_(std::make_shared<std::latch>(num_workers)),
-     shutdown_latch_(std::make_shared<std::latch>(num_workers))
+      init_latch_(std::make_shared<std::latch>(num_workers)),
+      shutdown_latch_(std::make_shared<std::latch>(num_workers))
     {
-        workers_.resize(num_workers, nullptr);
-
+        workers_.reserve(num_workers);
         for (size_t i = 0; i < num_workers; ++i) {
-            worker_threads_.emplace_back([this, i](const std::stop_token& stoken) {
-                try {
-                    // Construct a worker on this thread
-                    IOWorker worker(i, config_, init_latch_, shutdown_latch_, stoken);
-
-                    // Store pointer for external access to workers
-                    workers_[i] = &worker;
-
-                    worker.signal_init_complete();
-
-                    // Run event loop
-                    worker.event_loop();
-
-                } catch (const std::exception& e) {
-                    spdlog::error("Worker {} failed: {}", i, e.what());
-                    init_latch_->count_down();
-                    shutdown_latch_->count_down();
-                }
-            });
+            workers_.emplace_back(std::make_unique<IOWorker>(i, config_, init_latch_, shutdown_latch_));
         }
 
-        // Wait for all workers to initialize
+        // Wait for all workers to initialize (each worker signals init_latch_ after io_uring init)
         init_latch_->wait();
         spdlog::info("IOPool started with {} workers", num_workers);
     }
+
 
     IOPool::IOPool(size_t num_workers, const IoWorkerConfig& config,
                 const std::function<void(IOWorker&)>& worker_init)
@@ -337,31 +329,19 @@ namespace kio {
        init_latch_(std::make_shared<std::latch>(num_workers)),
        shutdown_latch_(std::make_shared<std::latch>(num_workers))
     {
+        workers_.reserve(num_workers);
         for (size_t i = 0; i < num_workers; ++i) {
-            worker_threads_.emplace_back([this, i, worker_init](const std::stop_token& stoken) {
-                try {
-                    // Construct worker on THIS thread
-                    IOWorker worker(i, config_, init_latch_, shutdown_latch_, stoken);
-
-                    worker.signal_init_complete();
-
-                    // Call user's initialization callback
-                    // This is where the user starts their coroutines (accept_loop, etc.)
-                    worker_init(worker);
-
-                    // Run event loop
-                    worker.event_loop();
-
-                } catch (const std::exception& e) {
-                    spdlog::error("Worker {} failed: {}", i, e.what());
-                    init_latch_->count_down();
-                    shutdown_latch_->count_down();
-                }
-            });
+            // pass the worker_init callback to be executed inside the worker thread
+            workers_.emplace_back(std::make_unique<IOWorker>(i, config_, init_latch_, shutdown_latch_, worker_init));
         }
 
-        // Wait for all workers to initialize
         init_latch_->wait();
         spdlog::info("IOPool started with {} workers", num_workers);
     }
+
+    size_t IOPool::get_io_worker_id_by_key(std::string_view string)
+    {
+        return std::hash<std::string_view>{}(string) % workers_.size();
+    }
+
 }

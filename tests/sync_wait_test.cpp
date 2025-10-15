@@ -9,7 +9,12 @@
 using namespace kio;
 // Test coroutines
 Task<int> get_answer() { co_return 42; }
-Task<void> do_nothing() { co_return; }
+Task<void> do_nothing()
+{
+    //sleep
+     std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    co_return;
+}
 Task<int> throw_error() {
     throw std::runtime_error("Test error");
     co_return 0;
