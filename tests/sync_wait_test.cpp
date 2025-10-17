@@ -1,10 +1,12 @@
 //
 // Created by Yao ACHI on 05/10/2025.
 //
+#include "core/include/sync_wait.h"
+
 #include <gtest/gtest.h>
-#include "coro/include/sync_wait.h"
-#include "coro/include/coro.h"
 #include <stdexcept>
+
+#include "core/include/coro.h"
 
 using namespace kio;
 // Test coroutines

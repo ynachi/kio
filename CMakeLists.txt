@@ -27,7 +27,7 @@ include(cmake/FindGtest.cmake)
 # Includes
 #----------------------------------------------
 include_directories(${CMAKE_SOURCE_DIR})
-add_subdirectory(coro)
+add_subdirectory(core)
 add_subdirectory(demo)
 
 include(CTest)
