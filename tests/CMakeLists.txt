@@ -3,7 +3,7 @@ add_executable(sync_wait_test sync_wait_test.cpp)
 
 target_link_libraries(sync_wait_test
         PRIVATE
-        coro_lib
+        core_lib
         GTest::gtest
         GTest::gtest_main
 )
