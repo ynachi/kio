@@ -91,8 +91,7 @@ namespace kio::io
         }
     }
 
-    Worker::Worker(const size_t id, const WorkerConfig& config, std::shared_ptr<std::latch> init_latch, std::shared_ptr<std::latch> shutdown_latch, std::function<void(Worker&)> worker_init_callback) :
-        config_(config), id_(id), init_latch_(std::move(init_latch)), shutdown_latch_(std::move(shutdown_latch)), worker_init_callback_(std::move(worker_init_callback))
+    Worker::Worker(const size_t id, const WorkerConfig& config, std::function<void(Worker&)> worker_init_callback) : config_(config), id_(id), worker_init_callback_(std::move(worker_init_callback))
     {
         config_.check();
 
@@ -103,18 +102,15 @@ namespace kio::io
         {
             free_op_ids.push_back(i);
         }
-
-        // spawn the worker thread; run() will perform io_uring init and event loop
-        thread_ = std::jthread([this](const std::stop_token& stoken) { this->run(stoken); });
     }
 
     // The main per-thread body that used to be inside the thread lambda.
-    void Worker::run(const std::stop_token& stoken)
+    void Worker::loop_forever()
     {
-        stoken_ = stoken;
-
         // the calling thread sets the id
         thread_id_ = std::this_thread::get_id();
+        // save the stop token
+        stop_token_ = this->get_stop_token();
 
         try
         {
@@ -154,9 +150,6 @@ namespace kio::io
                 spdlog::info("Worker {}: io-wq threads pinned to CPU {}", id_, cpu);
             }
 
-            // signal that initialization (including io_uring init) is complete
-            signal_init_complete();
-
             // Init callback to run inside the worker, respect io_uring single issuer
             if (worker_init_callback_)
             {
@@ -166,7 +159,7 @@ namespace kio::io
             spdlog::info("Worker {} starting event loop", id_);
 
             // event loop (split out to reuse the same logic as before)
-            while (!stoken.stop_requested())
+            while (!stop_token_.stop_requested())
             {
                 if (auto sqe_num = submit_sqes_wait(); sqe_num > 0)
                 {
@@ -178,16 +171,13 @@ namespace kio::io
             spdlog::info("Worker {} exiting event loop", id_);
 
             drain_completions();
-
-            // signal shutdown complete
-            signal_shutdown_complete();
         }
         catch (const std::exception& e)
         {
             spdlog::error("Worker {} failed during run(): {}", id_, e.what());
             // ensure latches are released so the pool doesn't wait forever
-            init_latch_->count_down();
-            shutdown_latch_->count_down();
+            this->wait_ready();
+            this->wait_shutdown();
         }
     }
 
@@ -224,10 +214,6 @@ namespace kio::io
     {
         spdlog::debug("Worker {} destructor called", id_);
         // request stop if not already requested
-        if (thread_.joinable())
-        {
-            thread_.request_stop();
-        }
 
         if (this->ring_.ring_fd >= 0)
         {

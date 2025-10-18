@@ -78,7 +78,7 @@ kio::DetachedTask accept_loop(kio::IOWorker& worker, int listen_fd) {
 
 // Main function - user's entry point
 using namespace kio;
-int main_work() {
+int main() {
     // ignore
     signal(SIGPIPE, SIG_IGN);
     // Setup logging

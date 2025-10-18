@@ -20,7 +20,8 @@ using namespace kio::net;
 DetachedTask HandleClient(Worker& worker, const int client_fd)
 {
     char buffer[8192];
-    const auto st = worker.get_stop_token();
+    // const auto st = worker.get_stop_token();
+    const auto st = std::stop_token{};
 
     while (!st.stop_requested())
     {
@@ -60,7 +61,7 @@ DetachedTask HandleClient(Worker& worker, const int client_fd)
 DetachedTask accept_loop(Worker& worker, int listen_fd)
 {
     spdlog::info("Worker accepting connections");
-    const auto st = worker.get_stop_token();
+    const auto st = std::stop_token{};
 
     while (!st.stop_requested())
     {
@@ -85,7 +86,7 @@ DetachedTask accept_loop(Worker& worker, int listen_fd)
     spdlog::info("Worker {} stop accepting connexions", worker.get_id());
 }
 
-int main_work()
+int main()
 {
     // ignore signals
     signal(SIGPIPE, SIG_IGN);
@@ -108,26 +109,36 @@ int main_work()
     config.uring_queue_depth = 2048;
     config.default_op_slots = 4096;
 
-    auto init_latch = std::make_shared<std::latch>(1);
-    auto shutdown_latch = std::make_shared<std::latch>(1);
+    std::stop_source stop_source;
 
-    Worker worker(0, config, init_latch, shutdown_latch, [server_fd](Worker& worker) { accept_loop(worker, server_fd.value()).detach(); });
+    Worker worker(0, config, [server_fd](Worker& worker) { accept_loop(worker, server_fd.value()).detach(); });
 
     spdlog::info("Main thread: Waiting for worker to initialize...");
-    init_latch->wait();
+
+    // 6. Start the worker in a thread to be able to stop it
+    std::jthread t([&]() { worker.loop_forever(); });
+
+    // OK Now my server blocks here. I have seen some meta Folly code and they do the same.
+    // but how do I stop the server?
     spdlog::info("Main thread: Worker is ready.");
 
     // 7. The worker is now running the echo_server coroutine.
     //    The main thread can do other things or just wait.
-    std::cout << "Server listening on 127.0.0.1:8080. Press Enter to stop...\n";
+    spdlog::info("Server listening on 127.0.0.1:8080. Press Enter to stop...");
     std::cin.get();
 
     // 8. Request the worker to stop
     spdlog::info("Main thread: Requesting worker stop...");
-    worker.request_stop();  // This signals the jthread and drains completions
+    if (auto ret = worker.request_stop(); !ret)
+    {
+        spdlog::error("failed to request the event loop to stop");
+        ::close(server_fd.value());
+        std::exit(1);
+    }
+    // This signals the jthread and drains completions
 
     // 9. Wait for the worker to fully shut down
-    shutdown_latch->wait();
+    ::close(server_fd.value());
     spdlog::info("Main thread: Worker has shut down. Exiting.");
 
     return 0;

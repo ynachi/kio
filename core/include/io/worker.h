@@ -62,14 +62,13 @@ namespace kio::io
         // max uint64 is reserved and should not be used as free op id
         std::vector<uint64_t> free_op_ids;
 
-        std::shared_ptr<std::latch> init_latch_;
-        std::shared_ptr<std::latch> shutdown_latch_;
-        std::jthread thread_;
-        // reading the stoken directly from the thread has been creating data races, so store a copy here
-        std::stop_token stoken_;
+        std::latch init_latch_{1};
+        std::latch shutdown_latch_{1};
+        std::stop_source stop_source_;
+        // updated by all run method
+        std::stop_token stop_token_;
 
         std::function<void(Worker&)> worker_init_callback_;
-        void run(const std::stop_token& stoken);
 
         static void check_kernel_version();
         static void check_syscall_return(int ret);
@@ -101,36 +100,33 @@ namespace kio::io
             return op_data_pool_[op_id].result;
         }
         void set_op_result(const uint64_t op_id, const int result) { op_data_pool_[op_id].result = result; }
-        void signal_init_complete() const { init_latch_->count_down(); }
-        void signal_shutdown_complete() const { shutdown_latch_->count_down(); }
+        void signal_init_complete() { init_latch_.count_down(); }
+        void signal_shutdown_complete() { shutdown_latch_.count_down(); }
         void resume_coro_by_id(const uint64_t op_id) const { op_data_pool_[op_id].handle_.resume(); }
-        // sends a stop request signal
-        void request_stop()
-        {
-            if (thread_.joinable())
-            {
-                // drain the completion queue
-                drain_completions();
-                // request stop if not already requested
-                thread_.request_stop();
-                // jthread joins on destruction automatically; but we ensure io_uring exit after thread finishes
-            }
-        };
         [[nodiscard]]
-        std::stop_token get_stop_token() const noexcept
+        std::stop_token get_stop_token() const
         {
-            return stoken_;
+            return stop_source_.get_token();
         }
+        // sends a stop request signal
         [[nodiscard]]
         size_t get_id() const noexcept
         {
             return id_;
         }
+        void loop_forever();
+        void wait_ready() const { init_latch_.wait(); }
+        void wait_shutdown() const { shutdown_latch_.wait(); }
+        [[nodiscard]]
+        bool request_stop() const
+        {
+            return stop_source_.request_stop();
+        }
         Worker(const Worker&) = delete;
         Worker& operator=(const Worker&) = delete;
         Worker(Worker&&) = delete;
         Worker& operator=(Worker&&) = delete;
-        Worker(size_t id, const WorkerConfig& config, std::shared_ptr<std::latch> init_latch, std::shared_ptr<std::latch> shutdown_latch, std::function<void(Worker&)> worker_init_callback = {});
+        Worker(size_t id, const WorkerConfig& config, std::function<void(Worker&)> worker_init_callback = {});
         ~Worker();
 
         // Io methods

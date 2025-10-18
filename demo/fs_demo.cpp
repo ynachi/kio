@@ -38,7 +38,7 @@ Task<void> main_coro()
     co_return;
 }
 
-int main_work()
+int main()
 {
     spdlog::set_level(spdlog::level::info);
     sync_wait(main_coro());
