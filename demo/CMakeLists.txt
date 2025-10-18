@@ -1,5 +1,11 @@
 add_executable(tcp_demo tcp.cpp)
-target_link_libraries(tcp_demo PRIVATE coro_lib)
+target_link_libraries(tcp_demo PRIVATE core_lib)
 
-add_executable(fs_demo fs.cpp)
-target_link_libraries(fs_demo PRIVATE coro_lib)
+add_executable(tcp_worker_callback tcp_worker_callback.cpp)
+target_link_libraries(tcp_worker_callback core_lib)
+
+add_executable(tcp_worker_no_callback tcp_worker_no_callback.cpp)
+target_link_libraries(tcp_worker_no_callback core_lib)
+
+add_executable(fs_demo fs_demo.cpp)
+target_link_libraries(fs_demo PRIVATE core_lib)

@@ -5,7 +5,7 @@
 #include <iostream>
 #include <netinet/in.h>
 
-#include "coro/include/io_pool.h"
+#include "core/include/io_pool.h"
 
 // User defines their application logic as coroutines
 kio::DetachedTask handle_client(kio::IOWorker& worker, const int client_fd) {
@@ -118,21 +118,21 @@ int main() {
 
     // Create pool with 4 workers
     // Each worker will run accept_loop independently
-    IOPool pool(4, config, [server_fd](IOWorker& worker) {
+    IOPool pool(2, config, [server_fd](IOWorker& worker) {
         accept_loop(worker, server_fd).detach();
     });
 
     spdlog::info("Server running with 4 workers. Press Ctrl+C to stop.");
 
     // Main thread waits (or handles signals)
-    std::cout << "Server running. Press Enter to stop..." << std::endl;
-    std::cin.get();  // Blocks until user presses Enter
-    pool.stop();
-
-    spdlog::info("Server stopped from main");
-
-    // std::this_thread::sleep_until(std::chrono::steady_clock::time_point::max());
-
-    // Pool destructor stops all workers gracefully
-    return 0;
+    // std::cout << "Server running. Press Enter to stop..." << std::endl;
+    // std::cin.get();  // Blocks until user presses Enter
+    // pool.stop();
+    //
+    // spdlog::info("Server stopped from main");
+    //
+    // // std::this_thread::sleep_until(std::chrono::steady_clock::time_point::max());
+    //
+    // // Pool destructor stops all workers gracefully
+    // return 0;
 }

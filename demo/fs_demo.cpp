@@ -1,6 +1,6 @@
-#include "coro/include/fs.h"
+#include "core/include/fs_demo.h"
 
-#include "coro/include/sync_wait.h"
+#include "core/include/sync_wait.h"
 #include "spdlog/spdlog.h"
 
 using namespace kio;
@@ -18,7 +18,7 @@ Task<void> main_coro()
 
     if (!file.has_value())
     {
-        spdlog::error("failed to create file: {}" ,kio_error_to_string(file.error()));
+        spdlog::error("failed to create file: {}" ,IoErrorToString(file.error()));
         co_return;
     }
 
