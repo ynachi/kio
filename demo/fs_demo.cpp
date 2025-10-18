@@ -18,7 +18,7 @@ Task<void> main_coro()
 
     if (!file.has_value())
     {
-        spdlog::error("failed to create file: {}" ,kio_error_to_string(file.error()));
+        spdlog::error("failed to create file: {}" ,IoErrorToString(file.error()));
         co_return;
     }
 
@@ -38,7 +38,7 @@ Task<void> main_coro()
     co_return;
 }
 
-int main()
+int main_work()
 {
     spdlog::set_level(spdlog::level::info);
     sync_wait(main_coro());
