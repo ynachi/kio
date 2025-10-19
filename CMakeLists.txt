@@ -22,6 +22,8 @@ include(cmake/FindSPlog.cmake)
 # gtest
 include(cmake/FindGtest.cmake)
 
+# benchmark
+include(${CMAKE_SOURCE_DIR}/cmake/FindBenchmark.cmake)
 
 #-----------------------------------------------
 # Includes
@@ -33,6 +35,8 @@ add_subdirectory(demo)
 include(CTest)
 enable_testing()
 add_subdirectory(tests)
+
+add_subdirectory(benchmarks)
 
 #------------------------------
 # Targets
