@@ -4,17 +4,17 @@ set(CORE_HEADER_FILES
         include/coro.h
         include/io/uring_awaitable.h
         include/io/worker.h
-        include/io_pool.h
+        include/io/worker_pool.h
         include/ds/mpsc_queue.h
         include/sync_wait.h
         include/errors.h
-        include/fs_demo.h
+        include/fs.h
 )
 
 set(CORE_SRC_FILES
         src/coro.cpp
         src/io/worker.cpp
-        src/io_pool.cpp
+        src/io/worker_pool.cpp
         include/net.h
         src/net.cpp
         src/fs.cpp

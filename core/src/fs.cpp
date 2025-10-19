@@ -1,9 +1,10 @@
 //
 // Created by Yao ACHI on 06/10/2025.
 //
+#include "core/include/fs.h"
+
 #include <filesystem>
 
-#include "core/include/fs_demo.h"
 #include "spdlog/spdlog.h"
 
 namespace kio
@@ -21,25 +22,21 @@ namespace kio
         }
     }
 
-     FileManager::FileManager(const size_t io_worker_count, const IoWorkerConfig& config):
-         pool_(io_worker_count, config)
-    {
-         spdlog::info("started file manager with {} workers", io_worker_count);
-     }
+    FileManager::FileManager(const size_t io_worker_count, const io::WorkerConfig& config) : pool_(io_worker_count, config) { spdlog::info("started file manager with {} workers", io_worker_count); }
 
     Task<std::expected<File, IoError>> FileManager::async_open(std::string_view path, const int flags, const mode_t mode) noexcept
-     {
-        auto worker_id = pool_.get_io_worker_id_by_key(absolute_path(path));
+    {
+        auto worker_id = pool_.get_worker_id_by_key(absolute_path(path));
 
-         const int maybe_fd = co_await pool_.get_worker(worker_id)->async_openat(path, flags, mode);
+        const int maybe_fd = co_await pool_.get_worker(worker_id)->async_openat(path, flags, mode);
 
-         if (maybe_fd < 0)
-         {
-             co_return std::unexpected(IOErrorFromErno(-maybe_fd));
-         }
+        if (maybe_fd < 0)
+        {
+            co_return std::unexpected(IOErrorFromErno(-maybe_fd));
+        }
 
-         co_return std::expected<File, IoError>(std::in_place, maybe_fd, pool(), worker_id);
-     }
+        co_return std::expected<File, IoError>(std::in_place, maybe_fd, pool(), worker_id);
+    }
 
     Task<std::expected<size_t, IoError>> File::async_read(std::span<char> buf, const uint64_t offset) const
     {
@@ -61,4 +58,4 @@ namespace kio
         co_return res;
     }
 
-}
+}  // namespace kio
