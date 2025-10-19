@@ -173,6 +173,7 @@ namespace kio::io
         Worker& operator=(Worker&&) = delete;
         Worker(size_t id, const WorkerConfig& config, std::function<void(Worker&)> worker_init_callback = {});
         void initialize();
+        void loop();
         ~Worker();
 
         // Io methods

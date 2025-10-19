@@ -154,6 +154,36 @@ namespace kio::io
         submit_wakeup_read();
     }
 
+    // TODO: manage submission errors
+    void Worker::loop()
+    {
+        while (!stop_token_.stop_requested())
+        {
+            // 1. Submit everything we have queued up so far. This is non-blocking.
+            // It's crucial for workloads that queue multiple operations before awaiting.
+            io_uring_submit(&ring_);
+
+            // 2. Process any completions that are already available.
+            process_completions();
+
+            // 3. Now, we decide whether to wait.
+            io_uring_cqe* cqe = nullptr;
+            // We check the completion queue one more time before deciding to wait.
+            int ret = io_uring_peek_cqe(&ring_, &cqe);
+
+            if (ret == 0)
+            {  // No completions are immediately available, so we must wait.
+                // This is a blocking wait. It will be interrupted by new I/O
+                // completions or by our eventfd being written to.
+                // We use a simple wait here instead of submit_and_wait to have finer control.
+                __kernel_timespec timeout = {.tv_sec = 0, .tv_nsec = config_.uring_submit_timeout_ms * 1000000};
+                io_uring_wait_cqe_timeout(&ring_, &cqe, &timeout);
+            }
+
+            // Process any completions we found either via peek or wait.
+            process_completions();
+        }
+    }
     // The main per-thread body that used to be inside the thread lambda.
     void Worker::loop_forever()
     {
@@ -180,17 +210,7 @@ namespace kio::io
 
             spdlog::info("Worker {} starting event loop", id_);
 
-            // event loop (split out to reuse the same logic as before)
-            while (!stop_token_.stop_requested())
-            {
-                // TODO: Now use a blocking call because of the eventfd
-                // if (auto sqe_num = io_uring_submit_and_wait(&ring_, 1); sqe_num > 0)
-                if (auto sqe_num = submit_sqes_wait(); sqe_num > 0)
-                {
-                    spdlog::trace("Worker {} submitted {} operations", id_, sqe_num);
-                }
-                process_completions();
-            }
+            loop();
 
             spdlog::info("Worker {} exiting event loop", id_);
 
