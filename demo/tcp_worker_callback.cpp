@@ -91,7 +91,7 @@ int main()
     // ignore signals
     signal(SIGPIPE, SIG_IGN);
     // Setup logging
-    spdlog::set_level(spdlog::level::info);
+    spdlog::set_level(spdlog::level::trace);
 
     // create a server socket
     const std::string ip_address = "127.0.0.1";

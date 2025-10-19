@@ -26,6 +26,9 @@ using namespace kio;
 using namespace kio::io;
 using namespace kio::net;
 
+// :NOTE: this usage does not work, it violates the single issuer principle and
+// creates race conditions and deadsignal on the io_uring instance
+
 //
 // 1. HandleClient remains a DetachedTask.
 // The accept loop should not wait for it.
@@ -119,28 +122,30 @@ Task<int> main_work()
     config.uring_queue_depth = 2048;
     config.default_op_slots = 4096;
 
-    auto init_latch = std::make_shared<std::latch>(1);
-    auto shutdown_latch = std::make_shared<std::latch>(1);
 
-    Worker worker(0, config, init_latch, shutdown_latch);
+    Worker worker(0, config);
 
     spdlog::info("Main thread: Waiting for worker to initialize...");
-    init_latch->wait();
 
     co_await accept_loop(worker, server_fd.value());
     spdlog::info("Main thread: Worker is ready.");
+
+    worker.loop_forever();
 
     std::cout << "Server listening on 127.0.0.1:8080. Press Enter to stop...\n";
     std::cin.get();
 
     spdlog::info("Main thread: Requesting worker stop...");
-    worker.request_stop();
+    if (const auto res = worker.request_stop(); !res)
+    {
+        spdlog::error("failed to request the event loop to stop");
+        co_return 1;
+    }
 
-    shutdown_latch->wait();
     spdlog::info("Main thread: Worker has shut down. Exiting.");
 
 
     co_return 0;
 }
 
-int main() { sync_wait(main_work()); }
+int main() { SyncWait(main_work()); }

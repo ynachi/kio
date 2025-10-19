@@ -13,6 +13,7 @@
 #include <thread>
 
 #include "core/include/coro.h"
+#include "core/include/ds/mpsc_queue.h"
 
 namespace kio::io
 {
@@ -27,12 +28,32 @@ namespace kio::io
         float op_slots_growth_factor{1.5};
         size_t max_op_slots{1024 * 1024};
 
+        // Task queue capacity (must be power of 2)
+        // The queue will automatically round up to the next power of 2 if needed
+        size_t task_queue_capacity{1024};
+
         constexpr WorkerConfig() = default;
         void check() const
         {
             if (uring_queue_depth == 0 || uring_submit_batch_size == 0 || tcp_backlog == 0 || op_slots_growth_factor <= 1.0f)
             {
-                throw std::invalid_argument("Invalid worker config, some fields cannot be zero, or op_slots_growth_factor must be greater than 1.0f");
+                throw std::invalid_argument(
+                        "Invalid worker config, some fields cannot be zero,"
+                        " or op_slots_growth_factor must be greater than 1.0f");
+            }
+
+            if (task_queue_capacity == 0)
+            {
+                throw std::invalid_argument("task_queue_capacity must be > 0");
+            }
+
+            // Note: MPSCQueue constructor will assert if not power of 2,
+            // but we can also check here for a better error message
+            if ((task_queue_capacity & (task_queue_capacity - 1)) != 0)
+            {
+                throw std::invalid_argument(
+                        "task_queue_capacity must be a power of 2. "
+                        "Use next_power_of_2() helper if needed.");
             }
         }
     };
@@ -47,10 +68,16 @@ namespace kio::io
      */
     class Worker
     {
+        // Special op IDs for internal operations, starting from a high range
+        // to avoid collision with user op_ids from the pool.
+        static constexpr size_t kWakeupOpID = ~uint64_t{0};
+
         io_uring ring_{};
         WorkerConfig config_;
         size_t id_{0};
-        std::thread::id thread_id_{};
+        // this is initialized when calling the loop, which can happen on
+        // any thread.
+        std::atomic<std::thread::id> thread_id_{};
 
         struct io_op_data
         {
@@ -59,8 +86,14 @@ namespace kio::io
         };
 
         std::vector<io_op_data> op_data_pool_;
+        // Lock-free queue for coroutines posted from other threads
+        MPSCQueue<std::coroutine_handle<>> task_queue_;
+
         // max uint64 is reserved and should not be used as free op id
         std::vector<uint64_t> free_op_ids;
+        // To immediately wake up the worker loop
+        int wakeup_fd_{-1};
+        uint64_t wakeup_buffer_{0};
 
         std::latch init_latch_{1};
         std::latch shutdown_latch_{1};
@@ -87,8 +120,14 @@ namespace kio::io
         void process_completions();
         // typically used during shutdown. Drain the completion queue
         void drain_completions();
+        // used to wake the io uring processing loop up
+        void submit_wakeup_read();
+        void wakeup_write();
 
     public:
+        void post(std::coroutine_handle<> h);
+        [[nodiscard]] bool is_on_worker_thread() const;
+
         io_uring& get_ring() noexcept { return ring_; }
         [[nodiscard]]
         uint64_t get_op_id();
@@ -100,6 +139,7 @@ namespace kio::io
             return op_data_pool_[op_id].result;
         }
         void set_op_result(const uint64_t op_id, const int result) { op_data_pool_[op_id].result = result; }
+
         void signal_init_complete() { init_latch_.count_down(); }
         void signal_shutdown_complete() { shutdown_latch_.count_down(); }
         void resume_coro_by_id(const uint64_t op_id) const { op_data_pool_[op_id].handle_.resume(); }
@@ -115,18 +155,24 @@ namespace kio::io
             return id_;
         }
         void loop_forever();
+
         void wait_ready() const { init_latch_.wait(); }
         void wait_shutdown() const { shutdown_latch_.wait(); }
         [[nodiscard]]
-        bool request_stop() const
+        bool request_stop()
         {
-            return stop_source_.request_stop();
+            const auto stop = stop_source_.request_stop();
+            // submit a wakeup write to wake up the io uring ring
+            wakeup_write();
+            return stop;
         }
+
         Worker(const Worker&) = delete;
         Worker& operator=(const Worker&) = delete;
         Worker(Worker&&) = delete;
         Worker& operator=(Worker&&) = delete;
         Worker(size_t id, const WorkerConfig& config, std::function<void(Worker&)> worker_init_callback = {});
+        void initialize();
         ~Worker();
 
         // Io methods
@@ -139,6 +185,21 @@ namespace kio::io
         Task<int> async_connect(int client_fd, const sockaddr* addr, socklen_t addrlen);
         Task<int> async_fallocate(int fd, int mode, off_t size);
         Task<int> async_close(int fd);
+    };
+
+    /**
+     * @brief An awaitable that switches the execution of a coroutine
+     * to the thread of the specified IOWorker.
+     */
+    struct SwitchToWorker
+    {
+        Worker& worker_;
+
+        explicit SwitchToWorker(Worker& worker) : worker_(worker) {}
+
+        bool await_ready() const noexcept { return worker_.is_on_worker_thread(); }
+        void await_suspend(std::coroutine_handle<> h) const { worker_.post(h); }
+        void await_resume() const noexcept {}
     };
 }  // namespace kio::io
 
