@@ -276,9 +276,12 @@ namespace kio
             assert(t.data == "obj" + std::to_string(i));
         }
 
-        // Now the queue should be empty
-        Tracker tmp("z");
-        assert(!queue.try_pop(tmp));
+        // Now the queue should be empty.
+        // We create a new scope so `tmp` is destroyed before our final check.
+        {
+            Tracker tmp("z");
+            assert(!queue.try_pop(tmp));
+        } // tmp's destructor is called here.
 
         // Validate no live instances remain (no leaks)
         assert(Tracker::alive.load() == 0);
