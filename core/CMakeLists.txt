@@ -5,6 +5,7 @@ set(CORE_HEADER_FILES
         include/io/uring_awaitable.h
         include/io/worker.h
         include/io_pool.h
+        include/ds/mpsc_queue.h
         include/sync_wait.h
         include/errors.h
         include/fs_demo.h

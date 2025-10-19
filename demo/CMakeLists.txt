@@ -9,3 +9,6 @@ target_link_libraries(tcp_worker_no_callback core_lib)
 
 add_executable(fs_demo fs_demo.cpp)
 target_link_libraries(fs_demo PRIVATE core_lib)
+
+add_executable(file_demo file_demo.cpp)
+target_link_libraries(file_demo PRIVATE core_lib)
