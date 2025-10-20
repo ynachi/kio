@@ -5,10 +5,10 @@
 #ifndef KIO_FS_H
 #define KIO_FS_H
 #include <expected>
-#include <functional>
+
 #include "coro.h"
 #include "errors.h"
-#include "io_pool.h"
+#include "io/worker_pool.h"
 #include "spdlog/spdlog.h"
 
 namespace kio
@@ -16,21 +16,20 @@ namespace kio
     class File
     {
         int fd_{-1};
-        IOPool& pool_;
+        io::IOPool& pool_;
         size_t worker_id_{0};
 
     public:
-        File(const int fd, IOPool& pool, size_t worker_id) : fd_(fd), pool_(pool), worker_id_(worker_id) { assert(fd_ >= 0); }
+        File(const int fd, io::IOPool& pool, size_t worker_id) : fd_(fd), pool_(pool), worker_id_(worker_id) { assert(fd_ >= 0); }
         // File is not copyable
         File(const File&) = delete;
         File& operator=(const File&) = delete;
-        File(File&& other) noexcept
-            : fd_(other.fd_), pool_(other.pool_), worker_id_(other.worker_id_)
-        {
-            other.fd_ = -1;
-        }
+        File(File&& other) noexcept : fd_(other.fd_), pool_(other.pool_), worker_id_(other.worker_id_) { other.fd_ = -1; }
         [[nodiscard]]
-        int fd() const noexcept { return fd_; }
+        int fd() const noexcept
+        {
+            return fd_;
+        }
 
         File& operator=(File&& other) noexcept
         {
@@ -45,7 +44,10 @@ namespace kio
             return *this;
         }
 
-        ~File() { if (fd_ != -1) ::close(fd_); }
+        ~File()
+        {
+            if (fd_ != -1) ::close(fd_);
+        }
 
         void close()
         {
@@ -82,16 +84,16 @@ namespace kio
      */
     class FileManager
     {
-        IOPool pool_;
+        io::IOPool pool_;
 
     public:
-        FileManager(size_t io_worker_count, const IoWorkerConfig& config);
+        FileManager(size_t io_worker_count, const io::WorkerConfig& config);
         FileManager(const FileManager&) = delete;
         FileManager& operator=(const FileManager&) = delete;
         // FileManager is not movable
         FileManager(FileManager&&) = delete;
         FileManager& operator=(FileManager&&) = delete;
-        IOPool& pool() { return pool_; }
+        io::IOPool& pool() { return pool_; }
 
         ~FileManager() { pool_.stop(); }
 
@@ -106,6 +108,6 @@ namespace kio
         [[nodiscard]]
         Task<std::expected<File, IoError>> async_open(std::string_view path, int flags, mode_t mode) noexcept;
     };
-}
+}  // namespace kio
 
 #endif  // KIO_FS_H

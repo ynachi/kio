@@ -1,9 +1,10 @@
 //
 // Created by Yao ACHI on 06/10/2025.
 //
+#include "core/include/fs.h"
+
 #include <filesystem>
 
-#include "core/include/fs_demo.h"
 #include "spdlog/spdlog.h"
 
 namespace kio
@@ -21,29 +22,43 @@ namespace kio
         }
     }
 
-     FileManager::FileManager(const size_t io_worker_count, const IoWorkerConfig& config):
-         pool_(io_worker_count, config)
-    {
-         spdlog::info("started file manager with {} workers", io_worker_count);
-     }
+    FileManager::FileManager(const size_t io_worker_count, const io::WorkerConfig& config) : pool_(io_worker_count, config) { spdlog::info("started file manager with {} workers", io_worker_count); }
 
     Task<std::expected<File, IoError>> FileManager::async_open(std::string_view path, const int flags, const mode_t mode) noexcept
-     {
-        auto worker_id = pool_.get_io_worker_id_by_key(absolute_path(path));
+    {
+        auto worker_id = pool_.get_worker_id_by_key(absolute_path(path));
+        auto* worker = pool_.get_worker(worker_id);
+        if (!worker)
+        {
+            // This should ideally not happen if pool is constructed correctly
+            co_return std::unexpected(IOErrorFromErno(EINVAL));
+        }
 
-         const int maybe_fd = co_await pool_.get_worker(worker_id)->async_openat(path, flags, mode);
+        // Ensure we are on the correct worker thread before touching its ring.
+        co_await io::SwitchToWorker(*worker);
 
-         if (maybe_fd < 0)
-         {
-             co_return std::unexpected(IOErrorFromErno(-maybe_fd));
-         }
+        const int maybe_fd = co_await worker->async_openat(path, flags, mode);
 
-         co_return std::expected<File, IoError>(std::in_place, maybe_fd, pool(), worker_id);
-     }
+        if (maybe_fd < 0)
+        {
+            co_return std::unexpected(IOErrorFromErno(-maybe_fd));
+        }
+
+        co_return std::expected<File, IoError>(std::in_place, maybe_fd, pool_, worker_id);
+    }
 
     Task<std::expected<size_t, IoError>> File::async_read(std::span<char> buf, const uint64_t offset) const
     {
-        auto res = co_await pool_.get_worker(worker_id_)->async_read(fd_, buf, offset);
+        auto* worker = pool_.get_worker(worker_id_);
+        if (!worker)
+        {
+            co_return std::unexpected(IOErrorFromErno(EINVAL));
+        }
+
+        // Switch to the assigned worker for this file descriptor.
+        co_await io::SwitchToWorker(*worker);
+
+        auto res = co_await worker->async_read(fd_, buf, offset);
         if (res < 0)
         {
             co_return std::unexpected(IOErrorFromErno(-res));
@@ -53,7 +68,16 @@ namespace kio
 
     Task<std::expected<size_t, IoError>> File::async_write(std::span<const char> buf, const uint64_t offset) const
     {
-        auto res = co_await pool_.get_worker(worker_id_)->async_write(fd_, buf, offset);
+        auto* worker = pool_.get_worker(worker_id_);
+        if (!worker)
+        {
+            co_return std::unexpected(IOErrorFromErno(EINVAL));
+        }
+
+        // Switch to the assigned worker for this file descriptor.
+        co_await io::SwitchToWorker(*worker);
+
+        auto res = co_await worker->async_write(fd_, buf, offset);
         if (res < 0)
         {
             co_return std::unexpected(IOErrorFromErno(-res));
@@ -61,4 +85,4 @@ namespace kio
         co_return res;
     }
 
-}
+}  // namespace kio

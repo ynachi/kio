@@ -1,13 +1,13 @@
-#include "core/include/fs_demo.h"
-
+#include "core/include/fs.h"
 #include "core/include/sync_wait.h"
 #include "spdlog/spdlog.h"
 
 using namespace kio;
+using namespace kio::io;
 
 Task<void> main_coro()
 {
-    IoWorkerConfig config{};
+    WorkerConfig config{};
     config.uring_queue_depth = 2048;
     config.default_op_slots = 4096;
 
