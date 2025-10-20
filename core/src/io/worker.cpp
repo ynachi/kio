@@ -104,10 +104,9 @@ namespace kio::io
             throw std::system_error(errno, std::system_category(), "failed to create eventfd");
         }
 
-        // pre-allocate op pool metadata on the constructing thread to avoid allocation races
+        // pre-allocate
         op_data_pool_.resize(config_.default_op_slots);
         free_op_ids.reserve(config_.default_op_slots);
-
         for (size_t i = 0; i < config_.default_op_slots; ++i)
         {
             free_op_ids.push_back(i);
@@ -126,7 +125,6 @@ namespace kio::io
 
         spdlog::info("IO uring initialized with queue size of {}", config_.uring_queue_depth);
 
-        // After io_uring init, we can set CPU affinity and iowq affinity and then signal init complete
         cpu_set_t cpuset;
         CPU_ZERO(&cpuset);
         const uint cpu = id_ % std::thread::hardware_concurrency();
@@ -183,7 +181,12 @@ namespace kio::io
             // Process any completions we found either via peek or wait.
             process_completions();
         }
+        spdlog::info("Worker {} loop shut down completed", this->id_);
+
+        // signal shutdown for anyone waiting
+        signal_shutdown_complete();
     }
+
     // The main per-thread body that used to be inside the thread lambda.
     void Worker::loop_forever()
     {
@@ -212,7 +215,7 @@ namespace kio::io
 
             loop();
 
-            spdlog::info("Worker {} exiting event loop", id_);
+            spdlog::info("Worker {} exited event loop", id_);
 
             drain_completions();
         }
@@ -267,6 +270,21 @@ namespace kio::io
     }
 
     void Worker::drain_completions() { process_completions(); }
+
+    bool Worker::request_stop()
+    {
+        // stop is idempotent
+        if (stopped_.exchange(true))
+        {
+            spdlog::debug("IOPool::stop() called but pool is already stopped");
+            return true;
+        }
+
+        const auto stop = stop_source_.request_stop();
+        // submit a wakeup write to wake up the io uring ring
+        wakeup_write();
+        return stop;
+    }
 
     Worker::~Worker()
     {

@@ -4,7 +4,6 @@
 
 #ifndef KIO_IO_WORKER_POOL_H
 #define KIO_IO_WORKER_POOL_H
-#include <liburing.h>
 #include <memory>
 #include <vector>
 
@@ -29,6 +28,7 @@ namespace kio::io
     {
         std::vector<std::unique_ptr<Worker>> workers_;
         std::vector<std::jthread> worker_threads_;
+        std::atomic<bool> stopped_{false};
 
     public:
         /**
