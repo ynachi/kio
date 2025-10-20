@@ -27,20 +27,38 @@ namespace kio
     Task<std::expected<File, IoError>> FileManager::async_open(std::string_view path, const int flags, const mode_t mode) noexcept
     {
         auto worker_id = pool_.get_worker_id_by_key(absolute_path(path));
+        auto* worker = pool_.get_worker(worker_id);
+        if (!worker)
+        {
+            // This should ideally not happen if pool is constructed correctly
+            co_return std::unexpected(IOErrorFromErno(EINVAL));
+        }
 
-        const int maybe_fd = co_await pool_.get_worker(worker_id)->async_openat(path, flags, mode);
+        // Ensure we are on the correct worker thread before touching its ring.
+        co_await io::SwitchToWorker(*worker);
+
+        const int maybe_fd = co_await worker->async_openat(path, flags, mode);
 
         if (maybe_fd < 0)
         {
             co_return std::unexpected(IOErrorFromErno(-maybe_fd));
         }
 
-        co_return std::expected<File, IoError>(std::in_place, maybe_fd, pool(), worker_id);
+        co_return std::expected<File, IoError>(std::in_place, maybe_fd, pool_, worker_id);
     }
 
     Task<std::expected<size_t, IoError>> File::async_read(std::span<char> buf, const uint64_t offset) const
     {
-        auto res = co_await pool_.get_worker(worker_id_)->async_read(fd_, buf, offset);
+        auto* worker = pool_.get_worker(worker_id_);
+        if (!worker)
+        {
+            co_return std::unexpected(IOErrorFromErno(EINVAL));
+        }
+
+        // Switch to the assigned worker for this file descriptor.
+        co_await io::SwitchToWorker(*worker);
+
+        auto res = co_await worker->async_read(fd_, buf, offset);
         if (res < 0)
         {
             co_return std::unexpected(IOErrorFromErno(-res));
@@ -50,7 +68,16 @@ namespace kio
 
     Task<std::expected<size_t, IoError>> File::async_write(std::span<const char> buf, const uint64_t offset) const
     {
-        auto res = co_await pool_.get_worker(worker_id_)->async_write(fd_, buf, offset);
+        auto* worker = pool_.get_worker(worker_id_);
+        if (!worker)
+        {
+            co_return std::unexpected(IOErrorFromErno(EINVAL));
+        }
+
+        // Switch to the assigned worker for this file descriptor.
+        co_await io::SwitchToWorker(*worker);
+
+        auto res = co_await worker->async_write(fd_, buf, offset);
         if (res < 0)
         {
             co_return std::unexpected(IOErrorFromErno(-res));

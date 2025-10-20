@@ -82,7 +82,7 @@ int main()
     // ignore
     signal(SIGPIPE, SIG_IGN);
     // Setup logging
-    spdlog::set_level(spdlog::level::off);
+    spdlog::set_level(spdlog::level::info);
 
     // Create a listening socket
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);

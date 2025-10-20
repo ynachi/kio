@@ -71,9 +71,6 @@ namespace kio::io
             }
         }
 
-        // The jthread destructors will automatically join, waiting for each thread to finish.
-        // We clear the threads here to make that process explicit.
-        worker_threads_.clear();
 
         // Wait for all workers to confirm shutdown
         for (const auto& worker: workers_)
@@ -81,5 +78,9 @@ namespace kio::io
             if (worker) worker->wait_shutdown();
         }
         spdlog::info("IOPool has stopped.");
+
+        // The jthread destructors will automatically join, waiting for each thread to finish.
+        // We clear the threads here to make that process explicit.
+        worker_threads_.clear();
     }
 }  // namespace kio::io
