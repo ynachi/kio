@@ -55,6 +55,13 @@ namespace kio::io
 
     void IOPool::stop()
     {
+        // stop() is idempotent
+        if (stopped_.exchange(true))
+        {
+            spdlog::debug("IOPool::stop() called but pool is already stopped");
+            return;
+        }
+
         // Request all workers to stop in parallel
         for (const auto& worker: workers_)
         {
@@ -75,7 +82,9 @@ namespace kio::io
         // Wait for all workers to confirm shutdown
         for (const auto& worker: workers_)
         {
+            spdlog::debug("WAITING for worker {} to shutdown", worker->get_id());
             if (worker) worker->wait_shutdown();
+            spdlog::debug("WAITING shutdown has been completed", worker->get_id());
         }
         spdlog::info("IOPool has stopped.");
 

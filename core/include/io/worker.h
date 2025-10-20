@@ -100,6 +100,8 @@ namespace kio::io
         std::stop_source stop_source_;
         // updated by all run method
         std::stop_token stop_token_;
+        // to avoid double shutdown
+        std::atomic<bool> stopped_{false};
 
         std::function<void(Worker&)> worker_init_callback_;
 
@@ -159,13 +161,7 @@ namespace kio::io
         void wait_ready() const { init_latch_.wait(); }
         void wait_shutdown() const { shutdown_latch_.wait(); }
         [[nodiscard]]
-        bool request_stop()
-        {
-            const auto stop = stop_source_.request_stop();
-            // submit a wakeup write to wake up the io uring ring
-            wakeup_write();
-            return stop;
-        }
+        bool request_stop();
 
         Worker(const Worker&) = delete;
         Worker& operator=(const Worker&) = delete;
