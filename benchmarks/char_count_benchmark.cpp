@@ -2,15 +2,14 @@
 // Created by Yao ACHI on 19/10/2025.
 //
 
-#include <benchmark/benchmark.h>
-#include <fcntl.h>
-#include <spdlog/spdlog.h>
-
 #include <algorithm>
 #include <atomic>
+#include <benchmark/benchmark.h>
 #include <cstdio>
+#include <fcntl.h>
 #include <fstream>
 #include <latch>
+#include <spdlog/spdlog.h>
 #include <string>
 #include <thread>
 #include <vector>
@@ -38,9 +37,9 @@ public:
         std::ofstream test_file(test_filename);
         const std::string line = "keep_on_rocking_in_the_free_world_and_making_kio_kick_ass.";
 
-        // Calculate expected count for one line
+        // Calculate the expected count for one line
         size_t count_per_line = 0;
-        for (const char c : line)
+        for (const char c: line)
         {
             if (c == char_to_find)
             {
@@ -49,7 +48,7 @@ public:
         }
 
         // Write enough lines to make the file about 1MB
-        const size_t target_size_bytes = 1024 * 1024;  // 1 MB
+        constexpr size_t target_size_bytes = 1024 * 1024;  // 1 MB
         const size_t num_lines = target_size_bytes / (line.length() + 1);
 
         for (size_t i = 0; i < num_lines; ++i)
@@ -101,20 +100,20 @@ Task<size_t> count_chars_switch_task(Worker& worker, std::string_view filename, 
 BENCHMARK_F(CharCountFixture, BM_CharCount_SwitchToWorker)(benchmark::State& state)
 {
     spdlog::set_level(spdlog::level::off);
-    for (auto _ : state)
+    for (auto _: state)
     {
-        state.PauseTiming(); // Don't measure setup
+        state.PauseTiming();  // Don't measure setup
         WorkerConfig config{};
         // config.uring_submit_timeout_ms = 0;
         Worker worker(0, config);
         std::jthread worker_thread([&worker] { worker.loop_forever(); });
         worker.wait_ready();
-        state.ResumeTiming(); // Start measuring now
+        state.ResumeTiming();  // Start measuring now
 
         // This is the only part being measured
         const size_t final_count = SyncWait(count_chars_switch_task(worker, test_filename, char_to_find));
 
-        state.PauseTiming(); // Stop measuring for cleanup
+        state.PauseTiming();  // Stop measuring for cleanup
         worker.request_stop();
         if (final_count != expected_count) state.SkipWithError("Incorrect count!");
     }
@@ -125,8 +124,7 @@ BENCHMARK_F(CharCountFixture, BM_CharCount_SwitchToWorker)(benchmark::State& sta
 /**
  * @brief Detached coroutine that is started by the worker's init callback.
  */
-DetachedTask count_chars_callback_task(Worker& worker, std::string_view filename, char target_char, std::latch& completion_latch,
-                                       std::atomic<size_t>& result_count)
+DetachedTask count_chars_callback_task(Worker& worker, std::string_view filename, char target_char, std::latch& completion_latch, std::atomic<size_t>& result_count)
 {
     // Already on the worker thread, no need to switch
     const int fd = co_await worker.async_openat(filename, O_RDONLY, 0);
@@ -158,27 +156,24 @@ DetachedTask count_chars_callback_task(Worker& worker, std::string_view filename
 BENCHMARK_F(CharCountFixture, BM_CharCount_Callback)(benchmark::State& state)
 {
     spdlog::set_level(spdlog::level::off);
-    for (auto _ : state)
+    for (auto _: state)
     {
-        state.PauseTiming(); // Don't measure setup
+        state.PauseTiming();  // Don't measure setup
         std::latch completion_latch{1};
         std::atomic<size_t> final_count{0};
-        auto init_callback = [&](Worker& worker) {
-            count_chars_callback_task(worker, test_filename, char_to_find, completion_latch, final_count).detach();
-        };
+        auto init_callback = [&](Worker& worker) { count_chars_callback_task(worker, test_filename, char_to_find, completion_latch, final_count).detach(); };
         WorkerConfig config{};
         // config.uring_submit_timeout_ms = 0;
         Worker worker(0, config, init_callback);
         std::jthread worker_thread([&worker] { worker.loop_forever(); });
-        worker.wait_ready(); // Wait for the worker to be ready before we start the clock
-        state.ResumeTiming(); // Start measuring now
+        worker.wait_ready();  // Wait for the worker to be ready before we start the clock
+        state.ResumeTiming();  // Start measuring now
 
         // The only thing we measure is waiting for the pre-scheduled task to finish.
         completion_latch.wait();
 
-        state.PauseTiming(); // Stop measuring for cleanup
+        state.PauseTiming();  // Stop measuring for cleanup
         worker.request_stop();
         if (final_count.load() != expected_count) state.SkipWithError("Incorrect count!");
     }
 }
-

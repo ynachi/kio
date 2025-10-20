@@ -7,6 +7,9 @@ target_link_libraries(tcp_worker_callback core_lib)
 add_executable(tcp_worker_no_callback tcp_worker_no_callback.cpp)
 target_link_libraries(tcp_worker_no_callback core_lib)
 
+add_executable(tcp_worker_no_callback_v2 tcp_worker_no_callback_v2.cpp)
+target_link_libraries(tcp_worker_no_callback_v2 core_lib)
+
 add_executable(fs_demo fs_demo.cpp)
 target_link_libraries(fs_demo PRIVATE core_lib)
 

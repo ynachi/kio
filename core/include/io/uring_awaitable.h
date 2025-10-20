@@ -32,6 +32,13 @@ namespace kio::io
 
         bool await_suspend(std::coroutine_handle<> h)  // NOLINT
         {
+            // All async operations have to begin on the correct thread.
+            // So in case the async operations are not registered as a callback in the worker,
+            // the developer has to explicitly switch context (co_await SwitchToWorker(worker);).
+            assert(worker_.is_on_worker_thread() &&
+                   "kio::async_* operation was called from the wrong thread. "
+                   "You must co_await SwitchToWorker(worker) at the start of your task.");
+
             sqe_ = io_uring_get_sqe(&worker_.get_ring());
             if (sqe_ == nullptr)
             {

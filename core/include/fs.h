@@ -81,6 +81,7 @@ namespace kio
      * FileManager own an io pool which each coroutine refers to via a non-owning reference.
      * So, the developer must make sure the instance of a FileManager outlives each file and coroutine object.
      * It's a tradeoff we made to avoid paying the cost of shared pointers.
+     * A rule of thumbs is to not let a coroutine own the file manager instance.
      */
     class FileManager
     {

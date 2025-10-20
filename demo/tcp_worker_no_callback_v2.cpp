@@ -55,21 +55,21 @@ DetachedTask HandleClient(Worker& worker, const int client_fd)
 }
 
 
-// 2. accept_loop is an awaitable Task<void>.
-Task<void> accept_loop(Worker& worker, int listen_fd)
+// 2. accept_loop is an awaitable DetachedTask
+DetachedTask accept_loop(Worker& worker, int listen_fd)
 {
     spdlog::info("Worker accepting connections");
     const auto st = worker.get_stop_token();
+
+    // Before we do anything that touches the worker's io_uring ring,
+    // we must switch execution to the worker's thread. Running in debug mode
+    // would verify this behavior and crash
+    co_await SwitchToWorker(worker);
 
     while (!st.stop_requested())
     {
         sockaddr_storage client_addr{};
         socklen_t addr_len = sizeof(client_addr);
-
-        // Before we do anything that touches the worker's io_uring ring,
-        // we must switch execution to the worker's thread. Running in debug mode
-        // would verify this behavior and crash
-        co_await SwitchToWorker(worker);
 
         int client_fd = co_await worker.async_accept(listen_fd, reinterpret_cast<sockaddr*>(&client_addr), &addr_len);
 
@@ -129,10 +129,9 @@ int main()
     spdlog::info("Main thread: Worker is ready.");
 
     // now start listening to clients
-    // The code blocks here so the lines after will not run.
-    // Look at the V2 code to see how to "solve" that issue.
-    // Spoiler: Just use a detached coroutine.
-    SyncWait(accept_loop(worker, server_fd.value()));
+    // Unlike the other version, this code does not block.
+    // So the rest of the code can run.
+    accept_loop(worker, server_fd.value()).detach();
 
     std::cout << "Server listening on 127.0.0.1:8080. Press Enter to stop...\n";
     std::cin.get();

@@ -14,7 +14,6 @@
 #include "core/include/sync_wait.h"
 #include "spdlog/spdlog.h"
 
-// Use the new namespace from your library
 using namespace kio;
 using namespace kio::io;
 
@@ -31,12 +30,8 @@ using namespace kio::io;
  */
 Task<size_t> count_chars_in_file(Worker& worker, std::string_view filename, char target_char)
 {
-    // This part of the code remains identical, which is a testament
-    // to the power of the SwitchToWorker abstraction. The calling code
-    // doesn't need to know the details of the thread management.
     spdlog::info("[main coro] Starting on thread ID: {}", std::hash<std::thread::id>{}(std::this_thread::get_id()));
 
-    // --- The Key Test ---
     // Switch execution from the calling thread (main) to the worker's thread.
     co_await SwitchToWorker(worker);
 
