@@ -4,6 +4,7 @@
 
 #ifndef KIO_ERRORS_H
 #define KIO_ERRORS_H
+#include <string>
 #include <string_view>
 #include <sys/errno.h>
 
@@ -273,6 +274,41 @@ namespace kio
         }
         return "Unknown error";
     }
+
+    /**
+     * @brief A rich error type that holds both a kio-specific error category
+     * and the original system errno value for detailed debugging.
+     */
+    class Error
+    {
+    public:
+        IoError category;
+        int errno_value;
+
+        static Error from_errno(const int err) { return {IOErrorFromErno(err), err}; }
+
+        // Helper to get a full, descriptive error message.
+        [[nodiscard]] std::string message() const { return std::string(IoErrorToString(category)) + " (errno: " + std::to_string(errno_value) + ")"; }
+    };
+
+    /**
+     * @brief A helper macro to reduce error-handling boilerplate.
+     *
+     * This works like Rust's `?` operator. It evaluates an expression that
+     * returns a std::expected. If the expected contains an error, the macro
+     * immediately propagates the error by co_returning it from the current
+     * coroutine. If it has a value, the macro unwraps and returns the value.
+     */
+#define KIO_TRY(expr)                                  \
+    ({                                                 \
+        auto&& result = (expr);                        \
+        if (!result.has_value())                       \
+        {                                              \
+            co_return std::unexpected(result.error()); \
+        }                                              \
+        std::move(result.value());                     \
+    })
+
 
 }  // namespace kio
 #endif  // KIO_ERRORS_H

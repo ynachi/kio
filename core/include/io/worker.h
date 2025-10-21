@@ -5,6 +5,7 @@
 #ifndef KIO_WORKER_H
 #define KIO_WORKER_H
 
+#include <expected>
 #include <latch>
 #include <liburing.h>
 #include <memory>
@@ -14,6 +15,7 @@
 
 #include "core/include/coro.h"
 #include "core/include/ds/mpsc_queue.h"
+#include "core/include/errors.h"
 
 namespace kio::io
 {
@@ -182,6 +184,12 @@ namespace kio::io
         Task<int> async_connect(int client_fd, const sockaddr* addr, socklen_t addrlen);
         Task<int> async_fallocate(int fd, int mode, off_t size);
         Task<int> async_close(int fd);
+        /**
+         * Asynchronously sleep for `duration`. This is a non-bloaking sleep.
+         * @param duration
+         * @return
+         */
+        Task<std::expected<void, Error>> async_sleep(std::chrono::nanoseconds duration);
     };
 
     /**

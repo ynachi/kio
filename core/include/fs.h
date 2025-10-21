@@ -9,7 +9,6 @@
 #include "coro.h"
 #include "errors.h"
 #include "io/worker_pool.h"
-#include "spdlog/spdlog.h"
 
 namespace kio
 {
@@ -64,7 +63,7 @@ namespace kio
          * @return The number of bytes read or an error.
          * */
         [[nodiscard]]
-        Task<std::expected<size_t, IoError>> async_read(std::span<char> buf, uint64_t offset) const;
+        Task<std::expected<size_t, Error>> async_read(std::span<char> buf, uint64_t offset) const;
 
         /**
          *  This method makes a single write() call to the underlined IO. It may or may not write the total of the data.
@@ -74,7 +73,7 @@ namespace kio
          * @return The number of bytes written or an error
          */
         [[nodiscard]]
-        Task<std::expected<size_t, IoError>> async_write(std::span<const char> buf, uint64_t offset) const;
+        Task<std::expected<size_t, Error>> async_write(std::span<const char> buf, uint64_t offset) const;
     };
 
     /**
@@ -107,7 +106,7 @@ namespace kio
          * @return The file created or an Io error.
          */
         [[nodiscard]]
-        Task<std::expected<File, IoError>> async_open(std::string_view path, int flags, mode_t mode) noexcept;
+        Task<std::expected<File, Error>> async_open(std::string_view path, int flags, mode_t mode) noexcept;
     };
 }  // namespace kio
 

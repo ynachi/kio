@@ -391,4 +391,23 @@ namespace kio::io
         co_return co_await make_uring_awaitable(*this, prep, fd);
     }
 
+    Task<std::expected<void, Error>> Worker::async_sleep(const std::chrono::nanoseconds duration)
+    {
+        // duration "converted" to a local variable -> stored in the coroutine frame
+        __kernel_timespec ts{};
+        ts.tv_sec = std::chrono::duration_cast<std::chrono::seconds>(duration).count();
+        ts.tv_nsec = (duration % std::chrono::seconds(1)).count();
+
+        auto prep = [](io_uring_sqe* sqe, __kernel_timespec* t, const unsigned flags) { io_uring_prep_timeout(sqe, t, 0, flags); };
+
+        // Await the timeout operation.
+        // The timeout operation returns -ECANCELED if canceled, or 0 on success.
+        if (const int res = co_await make_uring_awaitable(*this, prep, &ts, 0); res < 0)
+        {
+            co_return std::unexpected(Error::from_errno(-res));
+        }
+
+        co_return {};
+    }
+
 }  // namespace kio::io

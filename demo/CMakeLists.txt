@@ -15,3 +15,7 @@ target_link_libraries(fs_demo PRIVATE core_lib)
 
 add_executable(file_demo file_demo.cpp)
 target_link_libraries(file_demo PRIVATE core_lib)
+
+# Timer demo
+add_executable(timer_demo timer.cpp)
+target_link_libraries(timer_demo PRIVATE core_lib)
