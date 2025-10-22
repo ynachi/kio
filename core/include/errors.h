@@ -7,6 +7,8 @@
 #include <string>
 #include <string_view>
 #include <sys/errno.h>
+#include <type_traits>
+#include <utility>
 
 namespace kio
 {
@@ -19,11 +21,14 @@ namespace kio
     enum class IoError : int32_t
     {
         Success = 0,
+
+        // Network errors
         WouldBlock,
         SocketNotListening,
         InvalidFileDescriptor,
         ConnectionAborted,
         ConnectionReset,
+        ConnectionRefused,
         BrokenPipe,
         InvalidAddress,
         InvalidArgument,
@@ -35,6 +40,22 @@ namespace kio
         OperationRefused,
         AddressInUse,
         AddressNotAvailable,
+        NetworkDown,
+        NetworkUnreachable,
+        NetworkReset,
+        ConnectionInProgress,
+        AlreadyConnected,
+        NotConnected,
+        NotASocket,
+        DestinationAddressRequired,
+        MessageTooLong,
+        ProtocolNotSupported,
+        SocketTypeNotSupported,
+        OperationNotSupported,
+        ProtocolFamilyNotSupported,
+        AddressFamilyNotSupported,
+        HostDown,
+        HostUnreachable,
 
         // File operation errors
         FileNotFound,
@@ -57,6 +78,37 @@ namespace kio
         ValueTooLarge,
         FileTooLarge,
         DirectoryNotEmpty,
+        CrossDeviceLink,
+        NotBlockDevice,
+        IsNamedTypeFile,
+
+        // System resource errors
+        ResourceDeadlockWouldOccur,
+        TooManyLinks,
+        InvalidExecutableFormat,
+        IllegalByteSequence,
+        FunctionNotImplemented,
+        OperationCancelled,
+        OwnerDied,
+        StateNotRecoverable,
+
+        // Device/Media errors
+        NoSuchDevice,
+        WrongMediumType,
+        NoMediumFound,
+        RemoteIOError,
+
+        // Miscellaneous errors
+        ArgumentListTooLong,
+        BadMessage,
+        IdentifierRemoved,
+        NoDataAvailable,
+        NoMessageAvailable,
+        OutOfStreamsResources,
+        NotStreamDevice,
+        ResultTooLarge,
+        TextFileBusy,
+        TooManyUsers,
 
         // io_uring specific
         IOUringSQFull,
@@ -64,6 +116,7 @@ namespace kio
         IOUringSQETooEarly,
         IOUringCancelled,
 
+        // Custom application errors
         EmptyBuffer,
         Unknown
     };
@@ -76,6 +129,8 @@ namespace kio
             case IoError::NotEnoughMemory:
             case IoError::ConnectionAborted:
             case IoError::SocketNotListening:
+            case IoError::NetworkDown:
+            case IoError::IOError:
                 return true;
             default:
                 return false;
@@ -88,7 +143,12 @@ namespace kio
         {
             case 0:
                 return IoError::Success;
+
+            // Network errors
             case EAGAIN:
+#if EAGAIN != EWOULDBLOCK
+            case EWOULDBLOCK:
+#endif
                 return IoError::WouldBlock;
             case EBADF:
                 return IoError::InvalidFileDescriptor;
@@ -96,6 +156,8 @@ namespace kio
                 return IoError::ConnectionAborted;
             case ECONNRESET:
                 return IoError::ConnectionReset;
+            case ECONNREFUSED:
+                return IoError::ConnectionRefused;
             case EPIPE:
                 return IoError::BrokenPipe;
             case EFAULT:
@@ -110,7 +172,7 @@ namespace kio
             case ENOBUFS:
                 return IoError::NotEnoughMemory;
             case EOPNOTSUPP:
-                return IoError::InvalidProtocol;
+                return IoError::OperationNotSupported;
             case EPROTO:
                 return IoError::ProtocolFailure;
             case EPERM:
@@ -119,8 +181,38 @@ namespace kio
                 return IoError::AddressInUse;
             case EADDRNOTAVAIL:
                 return IoError::AddressNotAvailable;
+            case ENETDOWN:
+                return IoError::NetworkDown;
+            case ENETUNREACH:
+                return IoError::NetworkUnreachable;
+            case ENETRESET:
+                return IoError::NetworkReset;
+            case EINPROGRESS:
+                return IoError::ConnectionInProgress;
+            case EISCONN:
+                return IoError::AlreadyConnected;
+            case ENOTCONN:
+                return IoError::NotConnected;
+            case ENOTSOCK:
+                return IoError::NotASocket;
+            case EDESTADDRREQ:
+                return IoError::DestinationAddressRequired;
+            case EMSGSIZE:
+                return IoError::MessageTooLong;
+            case EPROTONOSUPPORT:
+                return IoError::ProtocolNotSupported;
+            case ESOCKTNOSUPPORT:
+                return IoError::SocketTypeNotSupported;
+            case EAFNOSUPPORT:
+                return IoError::AddressFamilyNotSupported;
+            case EPFNOSUPPORT:
+                return IoError::ProtocolFamilyNotSupported;
+            case EHOSTDOWN:
+                return IoError::HostDown;
+            case EHOSTUNREACH:
+                return IoError::HostUnreachable;
 
-            // File operation specific errors
+            // File operation errors
             case ENOENT:
                 return IoError::FileNotFound;
             case EACCES:
@@ -141,6 +233,9 @@ namespace kio
                 return IoError::ReadOnlyFileSystem;
             case EBUSY:
                 return IoError::DeviceBusy;
+#ifdef ETIME
+            case ETIME:
+#endif
             case ETIMEDOUT:
                 return IoError::TimedOut;
             case EINTR:
@@ -161,6 +256,72 @@ namespace kio
                 return IoError::FileTooLarge;
             case ENOTEMPTY:
                 return IoError::DirectoryNotEmpty;
+            case EXDEV:
+                return IoError::CrossDeviceLink;
+            case ENOTBLK:
+                return IoError::NotBlockDevice;
+
+            // System resource errors
+            case EDEADLK:
+                return IoError::ResourceDeadlockWouldOccur;
+            case EMLINK:
+                return IoError::TooManyLinks;
+            case ENOEXEC:
+                return IoError::InvalidExecutableFormat;
+            case EILSEQ:
+                return IoError::IllegalByteSequence;
+            case ENOSYS:
+                return IoError::FunctionNotImplemented;
+            case ECANCELED:
+                return IoError::OperationCancelled;
+            case EOWNERDEAD:
+                return IoError::OwnerDied;
+            case ENOTRECOVERABLE:
+                return IoError::StateNotRecoverable;
+
+                // Device/Media errors
+#ifdef ENOMEDIUM
+            case ENOMEDIUM:
+                return IoError::NoMediumFound;
+#endif
+#ifdef EMEDIUMTYPE
+            case EMEDIUMTYPE:
+                return IoError::WrongMediumType;
+#endif
+#ifdef EREMOTEIO
+            case EREMOTEIO:
+                return IoError::RemoteIOError;
+#endif
+
+            // Miscellaneous
+            case E2BIG:
+                return IoError::ArgumentListTooLong;
+            case EBADMSG:
+                return IoError::BadMessage;
+            case EIDRM:
+                return IoError::IdentifierRemoved;
+#ifdef ENODATA
+            case ENODATA:
+                return IoError::NoDataAvailable;
+#endif
+#ifdef ENOSR
+            case ENOSR:
+                return IoError::OutOfStreamsResources;
+#endif
+#ifdef ENOSTR
+            case ENOSTR:
+                return IoError::NotStreamDevice;
+#endif
+#ifdef ENOMSG
+            case ENOMSG:
+                return IoError::NoMessageAvailable;
+#endif
+            case ERANGE:
+                return IoError::ResultTooLarge;
+            case ETXTBSY:
+                return IoError::TextFileBusy;
+            case EUSERS:
+                return IoError::TooManyUsers;
 
             // io_uring specific pseudo-errors
             case IOURING_SQ_FULL:
@@ -183,49 +344,86 @@ namespace kio
         {
             case IoError::Success:
                 return "Success";
+
+            // Network errors
             case IoError::WouldBlock:
                 return "Operation would block on a non-blocking socket or file descriptor";
             case IoError::SocketNotListening:
                 return "Socket is not in listening state";
             case IoError::InvalidFileDescriptor:
-                return "This file descriptor is not valid, maybe it was closed or not opened";
+                return "Invalid file descriptor - may be closed or not opened";
             case IoError::ConnectionAborted:
-                return "Connection was aborted by the peer";
+                return "Connection aborted by peer";
             case IoError::ConnectionReset:
                 return "Connection reset by peer";
+            case IoError::ConnectionRefused:
+                return "Connection refused by peer";
             case IoError::BrokenPipe:
-                return "Broken pipe - write to a pipe with no readers";
+                return "Broken pipe - write to pipe with no readers";
             case IoError::InvalidAddress:
-                return "The addr argument is not in a writable part of the user address space";
+                return "Invalid address - not in writable user address space";
             case IoError::InvalidArgument:
                 return "Invalid argument provided";
             case IoError::TooManyOpenFDs:
-                return "Limit on the number of open file descriptors has been reached, per process or system-wide";
+                return "Too many open file descriptors (per-process limit)";
             case IoError::TooManyOpenFilesInSystem:
-                return "System-wide limit on total open files reached";
+                return "Too many open files (system-wide limit)";
             case IoError::NotEnoughMemory:
-                return "Not enough system memory available or buffer limit reached";
+                return "Not enough memory available";
             case IoError::InvalidProtocol:
-                return "Operation not supported by the protocol, example accept on a non-SOCK_STREAM socket";
+                return "Invalid protocol";
             case IoError::ProtocolFailure:
                 return "Protocol error";
             case IoError::OperationRefused:
-                return "Operation refused probably due to a firewall rule";
+                return "Operation refused (possibly by firewall)";
             case IoError::AddressInUse:
                 return "Address already in use";
             case IoError::AddressNotAvailable:
                 return "Cannot assign requested address";
-                // File operation specific errors
+            case IoError::NetworkDown:
+                return "Network is down";
+            case IoError::NetworkUnreachable:
+                return "Network is unreachable";
+            case IoError::NetworkReset:
+                return "Network connection reset";
+            case IoError::ConnectionInProgress:
+                return "Connection already in progress";
+            case IoError::AlreadyConnected:
+                return "Socket is already connected";
+            case IoError::NotConnected:
+                return "Socket is not connected";
+            case IoError::NotASocket:
+                return "File descriptor is not a socket";
+            case IoError::DestinationAddressRequired:
+                return "Destination address required";
+            case IoError::MessageTooLong:
+                return "Message too long";
+            case IoError::ProtocolNotSupported:
+                return "Protocol not supported";
+            case IoError::SocketTypeNotSupported:
+                return "Socket type not supported";
+            case IoError::OperationNotSupported:
+                return "Operation not supported";
+            case IoError::ProtocolFamilyNotSupported:
+                return "Protocol family not supported";
+            case IoError::AddressFamilyNotSupported:
+                return "Address family not supported";
+            case IoError::HostDown:
+                return "Host is down";
+            case IoError::HostUnreachable:
+                return "Host is unreachable";
+
+            // File operation errors
             case IoError::FileNotFound:
                 return "File or directory does not exist";
             case IoError::PermissionDenied:
-                return "Permission denied for file operation";
+                return "Permission denied";
             case IoError::FileExists:
                 return "File already exists";
             case IoError::IsDirectory:
-                return "Expected file but found directory";
+                return "Is a directory (expected file)";
             case IoError::NotDirectory:
-                return "Expected directory but found file";
+                return "Not a directory (expected directory)";
             case IoError::TooManySymbolicLinks:
                 return "Too many levels of symbolic links";
             case IoError::FileNameTooLong:
@@ -233,7 +431,7 @@ namespace kio
             case IoError::NoSpaceLeft:
                 return "No space left on device";
             case IoError::ReadOnlyFileSystem:
-                return "File system is read-only";
+                return "Read-only file system";
             case IoError::DeviceBusy:
                 return "Device or resource busy";
             case IoError::TimedOut:
@@ -247,7 +445,7 @@ namespace kio
             case IoError::NoSuchDeviceOrAddress:
                 return "No such device or address";
             case IoError::InvalidSeek:
-                return "Invalid seek operation";
+                return "Illegal seek operation";
             case IoError::DiskQuotaExceeded:
                 return "Disk quota exceeded";
             case IoError::ValueTooLarge:
@@ -256,19 +454,76 @@ namespace kio
                 return "File too large";
             case IoError::DirectoryNotEmpty:
                 return "Directory not empty";
+            case IoError::CrossDeviceLink:
+                return "Cross-device link";
+            case IoError::NotBlockDevice:
+                return "Block device required";
+            case IoError::IsNamedTypeFile:
+                return "Is a named type file";
+
+            // System resource errors
+            case IoError::ResourceDeadlockWouldOccur:
+                return "Resource deadlock would occur";
+            case IoError::TooManyLinks:
+                return "Too many links";
+            case IoError::InvalidExecutableFormat:
+                return "Invalid executable format";
+            case IoError::IllegalByteSequence:
+                return "Illegal byte sequence";
+            case IoError::FunctionNotImplemented:
+                return "Function not implemented";
+            case IoError::OperationCancelled:
+                return "Operation cancelled";
+            case IoError::OwnerDied:
+                return "Owner died";
+            case IoError::StateNotRecoverable:
+                return "State not recoverable";
+
+            // Device/Media errors
+            case IoError::NoSuchDevice:
+                return "No such device";
+            case IoError::WrongMediumType:
+                return "Wrong medium type";
+            case IoError::NoMediumFound:
+                return "No medium found";
+            case IoError::RemoteIOError:
+                return "Remote I/O error";
+
+            // Miscellaneous
+            case IoError::ArgumentListTooLong:
+                return "Argument list too long";
+            case IoError::BadMessage:
+                return "Bad message";
+            case IoError::IdentifierRemoved:
+                return "Identifier removed";
+            case IoError::NoDataAvailable:
+                return "No data available";
+            case IoError::NoMessageAvailable:
+                return "No message of desired type";
+            case IoError::OutOfStreamsResources:
+                return "Out of streams resources";
+            case IoError::NotStreamDevice:
+                return "Device not a stream";
+            case IoError::ResultTooLarge:
+                return "Result too large";
+            case IoError::TextFileBusy:
+                return "Text file busy";
+            case IoError::TooManyUsers:
+                return "Too many users";
 
             // io_uring specific errors
             case IoError::IOUringSQFull:
-                return "IOUring submission queue is full";
+                return "io_uring submission queue is full";
             case IoError::IOUringCQFull:
-                return "IOUring completion queue is full";
+                return "io_uring completion queue is full";
             case IoError::IOUringSQETooEarly:
-                return "IOUring submission queue entry submitted too early";
+                return "io_uring submission queue entry submitted too early";
             case IoError::IOUringCancelled:
-                return "IOUring operation was cancelled";
+                return "io_uring operation was cancelled";
 
+            // Custom errors
             case IoError::EmptyBuffer:
-                return "EmptyBuffer";
+                return "Empty buffer";
             case IoError::Unknown:
                 return "Unknown error";
         }
@@ -285,30 +540,60 @@ namespace kio
         IoError category;
         int errno_value;
 
+        constexpr Error() : category(IoError::Success), errno_value(0) {}
+        constexpr Error(IoError cat, int err) : category(cat), errno_value(err) {}
+
         static Error from_errno(const int err) { return {IOErrorFromErno(err), err}; }
 
-        // Helper to get a full, descriptive error message.
+        static Error from_category(IoError cat) { return {cat, 0}; }
+
+        [[nodiscard]] constexpr bool is_success() const { return category == IoError::Success; }
+
+        [[nodiscard]] constexpr bool is_fatal() const { return FatalIoError(category); }
+
         [[nodiscard]] std::string message() const { return std::string(IoErrorToString(category)) + " (errno: " + std::to_string(errno_value) + ")"; }
+        [[nodiscard]] constexpr std::string_view category_string() const { return IoErrorToString(category); }
     };
 
-    /**
-     * @brief A helper macro to reduce error-handling boilerplate.
-     *
-     * This works like Rust's `?` operator. It evaluates an expression that
-     * returns a std::expected. If the expected contains an error, the macro
-     * immediately propagates the error by co_returning it from the current
-     * coroutine. If it has a value, the macro unwraps and returns the value.
-     */
-#define KIO_TRY(expr)                                  \
-    ({                                                 \
-        auto&& result = (expr);                        \
-        if (!result.has_value())                       \
-        {                                              \
-            co_return std::unexpected(result.error()); \
-        }                                              \
-        std::move(result.value());                     \
+}  // namespace kio
+
+namespace kio_try_internal
+{
+    // For non-void expected<T, E> -> unwrap and move out the value.
+    template<typename Exp, typename Decayed = std::decay_t<Exp>, typename ValueT = typename Decayed::value_type>
+    std::enable_if_t<!std::is_void_v<ValueT>, ValueT> kio_try_unwrap_impl(Exp&& exp)
+    {
+        return std::move(*exp);
+    }
+
+    // For expected<void, E> -> do nothing (returns void).
+    template<typename Exp, typename Decayed = std::decay_t<Exp>, typename ValueT = typename Decayed::value_type>
+    std::enable_if_t<std::is_void_v<ValueT>, void> kio_try_unwrap_impl(Exp&&)
+    {
+        // no-op for expected<void, E>
+    }
+
+}  // namespace kio_try_internal
+
+// Macro helpers
+#define KIO_TRY_CONCAT_IMPL(a, b) a##b
+#define KIO_TRY_CONCAT(a, b) KIO_TRY_CONCAT_IMPL(a, b)
+#define KIO_TRY_VAR(name) KIO_TRY_CONCAT(name, __LINE__)
+
+// KIO_TRY macro that works like Rust's ? operator
+// Usage:
+//   KIO_TRY(co_await task_returning_expected_void())     // For Task<std::expected<void, Error>>
+//   auto value = KIO_TRY(co_await task_returning_T());   // For Task<std::expected<T, Error>>
+//   KIO_TRY(function_returning_expected_void())          // For std::expected<void, Error>
+//   auto value = KIO_TRY(function_returning_expected())  // For std::expected<T, Error>
+#define KIO_TRY(expr)                                                       \
+    ({                                                                      \
+        auto KIO_TRY_VAR(__kio_result) = (expr);                            \
+        if (!KIO_TRY_VAR(__kio_result))                                     \
+        {                                                                   \
+            co_return std::unexpected(KIO_TRY_VAR(__kio_result).error());   \
+        }                                                                   \
+        ::kio_try_internal::kio_try_unwrap_impl(KIO_TRY_VAR(__kio_result)); \
     })
 
-
-}  // namespace kio
 #endif  // KIO_ERRORS_H
