@@ -181,7 +181,7 @@ namespace kio::io
         Task<int> async_write(int client_fd, std::span<const char> buf, uint64_t offset);
         Task<int> async_readv(int client_fd, const iovec* iov, int iovcnt, uint64_t offset);
         Task<int> async_writev(int client_fd, const iovec* iov, int iovcnt, uint64_t offset);
-        Task<int> async_connect(int client_fd, const sockaddr* addr, socklen_t addrlen);
+        Task<std::expected<int, Error>> async_connect(int client_fd, const sockaddr* addr, socklen_t addrlen);
         Task<int> async_fallocate(int fd, int mode, off_t size);
         Task<int> async_close(int fd);
         /**

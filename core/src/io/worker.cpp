@@ -362,10 +362,15 @@ namespace kio::io
         co_return co_await make_uring_awaitable(*this, prep, client_fd, iov, iovcnt, offset);
     }
 
-    Task<int> Worker::async_connect(const int client_fd, const sockaddr* addr, const socklen_t addrlen)
+    Task<std::expected<int, Error>> Worker::async_connect(const int client_fd, const sockaddr* addr, const socklen_t addrlen)
     {
         auto prep = [](io_uring_sqe* sqe, const int fd, const sockaddr* a, const socklen_t al) { io_uring_prep_connect(sqe, fd, a, al); };
-        co_return co_await make_uring_awaitable(*this, prep, client_fd, addr, addrlen);
+        auto ret = co_await make_uring_awaitable(*this, prep, client_fd, addr, addrlen);
+        if (ret < 0)
+        {
+            co_return std::unexpected(Error::from_errno(-ret));
+        }
+        co_return ret;
     }
 
     Task<int> Worker::async_openat(std::string_view path, const int flags, const mode_t mode)
@@ -391,23 +396,33 @@ namespace kio::io
         co_return co_await make_uring_awaitable(*this, prep, fd);
     }
 
-    Task<std::expected<void, Error>> Worker::async_sleep(const std::chrono::nanoseconds duration)
+    Task<std::expected<void, Error>> Worker::async_sleep(std::chrono::nanoseconds duration)
     {
-        // duration "converted" to a local variable -> stored in the coroutine frame
+        // We need a place to store the timespec for the duration of the operation.
+        // Storing it on the coroutine's frame by making it a local variable is perfect.
         __kernel_timespec ts{};
         ts.tv_sec = std::chrono::duration_cast<std::chrono::seconds>(duration).count();
         ts.tv_nsec = (duration % std::chrono::seconds(1)).count();
 
-        auto prep = [](io_uring_sqe* sqe, __kernel_timespec* t, const unsigned flags) { io_uring_prep_timeout(sqe, t, 0, flags); };
+        auto prep = [](io_uring_sqe* sqe, __kernel_timespec* t, unsigned flags)
+        {
+            // Prepare a timeout operation. This doesn't need a file descriptor.
+            io_uring_prep_timeout(sqe, t, 0, flags);
+        };
 
         // Await the timeout operation.
-        // The timeout operation returns -ECANCELED if canceled, or 0 on success.
-        if (const int res = co_await make_uring_awaitable(*this, prep, &ts, 0); res < 0)
+        const int res = co_await make_uring_awaitable(*this, prep, &ts, 0);
+
+        // The timeout operation returns -ECANCELED if cancelled.
+        // Crucially, a *successful* timer expiration completes with res = -ETIME.
+        // We must treat -ETIME as success, not an error.
+        if (res < 0 && res != -ETIME)
         {
+            // This is a real error (e.g., the operation was cancelled)
             co_return std::unexpected(Error::from_errno(-res));
         }
 
+        // Success (res was 0, or res was -ETIME)
         co_return {};
     }
-
 }  // namespace kio::io

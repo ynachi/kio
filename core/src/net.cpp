@@ -12,7 +12,7 @@
 
 namespace kio::net
 {
-    std::expected<SocketAddress, IoError> parse_address(std::string_view ip_address, const uint16_t port)
+    std::expected<SocketAddress, Error> parse_address(std::string_view ip_address, const uint16_t port)
     {
         SocketAddress result;
 
@@ -39,7 +39,7 @@ namespace kio::net
             else
             {
                 spdlog::error("invalid IP address: {}", ip_address);
-                return std::unexpected(IOErrorFromErno(EINVAL));
+                return std::unexpected(Error::from_errno(EINVAL));
             }
         }
 
@@ -47,19 +47,19 @@ namespace kio::net
         return result;
     }
 
-    std::expected<int, IoError> create_raw_socket(const int family)
+    std::expected<int, Error> create_raw_socket(const int family)
     {
         const int server_fd = ::socket(family, SOCK_STREAM, 0);
         if (server_fd < 0)
         {
             const int err = errno;
             spdlog::error("socket failed: {}", strerror(err));
-            return std::unexpected(IOErrorFromErno(err));
+            return std::unexpected(Error::from_errno(err));
         }
         return server_fd;
     }
 
-    std::expected<int, IoError> create_tcp_socket(std::string_view ip_address, const uint16_t port, const int backlog)
+    std::expected<int, Error> create_tcp_socket(std::string_view ip_address, const uint16_t port, const int backlog)
     {
         auto socket_addr = parse_address(ip_address, port);
         if (!socket_addr)
@@ -93,42 +93,42 @@ namespace kio::net
         return server_fd;
     }
 
-    std::expected<void, IoError> listen_on_sock(const int fd, const SocketAddress& addr, const int backlog)
+    std::expected<void, Error> listen_on_sock(const int fd, const SocketAddress& addr, const int backlog)
     {
         // Bind
         if (::bind(fd, reinterpret_cast<const sockaddr*>(&addr.addr), addr.addrlen))
         {
-            return std::unexpected(IOErrorFromErno(errno));
+            return std::unexpected(Error::from_errno(errno));
         }
 
         // Set non-blocking
         if (::fcntl(fd, F_SETFL, O_NONBLOCK) < 0)
         {
-            return std::unexpected(IOErrorFromErno(errno));
+            return std::unexpected(Error::from_errno(errno));
         }
 
         // now listen
         if (::listen(fd, backlog) < 0)
         {
-            return std::unexpected(IOErrorFromErno(errno));
+            return std::unexpected(Error::from_errno(errno));
         }
 
         return {};
     }
 
-    std::expected<void, IoError> set_fd_server_options(const int fd)
+    std::expected<void, Error> set_fd_server_options(const int fd)
     {
         constexpr int option = 1;
 
         if (::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &option, sizeof(option)) < 0)
         {
-            return std::unexpected(IOErrorFromErno(errno));
+            return std::unexpected(Error::from_errno(errno));
         }
 
 #ifdef SO_REUSEPORT
         if (::setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &option, sizeof(option)) < 0)
         {
-            return std::unexpected(IOErrorFromErno(errno));
+            return std::unexpected(Error::from_errno(errno));
         }
 #endif
 

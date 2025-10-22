@@ -19,3 +19,7 @@ target_link_libraries(file_demo PRIVATE core_lib)
 # Timer demo
 add_executable(timer_demo timer.cpp)
 target_link_libraries(timer_demo PRIVATE core_lib)
+
+# Retry demo
+add_executable(retry_demo retry01.cpp)
+target_link_libraries(retry_demo PRIVATE core_lib)

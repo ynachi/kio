@@ -1,8 +1,5 @@
-//
-// Created by Yao ACHI on 22/10/2025.
-//
-
 #include <chrono>
+#include <spdlog/fmt/chrono.h>
 
 #include "core/include/io/worker.h"
 #include "core/include/sync_wait.h"
@@ -16,17 +13,22 @@ Task<std::expected<void, Error>> timer_coroutine(Worker& worker)
     // We must switch to the worker thread before using its I/O capabilities.
     co_await SwitchToWorker(worker);
 
-    spdlog::info("Coroutine started. The current time is {:%H:%M:%S}.", std::chrono::system_clock::now());
+    // 2. Wrap the format string in fmt::runtime()
+    spdlog::info(fmt::runtime("Coroutine started. The current time is {:%H:%M:%S}."), std::chrono::system_clock::now());
 
-    spdlog::info("Now going to sleep for 2 seconds...");
+    spdlog::info("Now going to sleep for 5 seconds...");
 
-    // Use KIO_TRY to handle potential errors from the sleep operation.
-    KIO_TRY(co_await worker.async_sleep(std::chrono::seconds(2)));
+    // Use KIO_TRY for the void-returning function
+    KIO_TRY(co_await worker.async_sleep(std::chrono::seconds(5)));
 
-    spdlog::info("...Woke up! The current time is {:%H:%M:%S}.", std::chrono::system_clock::now());
+    // 2. Wrap the format string in fmt::runtime()
+    spdlog::info(fmt::runtime("...Woke up! The current time is {:%H:%M:%S}."), std::chrono::system_clock::now());
+
     spdlog::info("Now going to sleep for 500 milliseconds...");
+    // 2. Wrap the format string in fmt::runtime()
     KIO_TRY(co_await worker.async_sleep(std::chrono::milliseconds(500)));
-    spdlog::info("...Woke up again! The current time is {:%H:%M:%S}.", std::chrono::system_clock::now());
+
+    spdlog::info(fmt::runtime("...Woke up again! The current time is {:%H:%M:%S}."), std::chrono::system_clock::now());
 
 
     co_return {};
@@ -40,7 +42,7 @@ int main()
     Worker worker(0, config);
 
     // Start the worker in a background thread.
-    std::jthread worker_thread([&](std::stop_token st) { worker.loop_forever(st); });
+    std::jthread worker_thread([&](std::stop_token st) { worker.loop_forever(); });
     worker.wait_ready();
 
     spdlog::info("--- Running Timer Demo ---");
