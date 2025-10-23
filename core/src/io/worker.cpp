@@ -331,35 +331,59 @@ namespace kio::io
 
     bool Worker::is_on_worker_thread() const { return std::this_thread::get_id() == thread_id_; }
 
-    Task<int> Worker::async_accept(int server_fd, sockaddr* addr, socklen_t* addrlen)
+    Task<std::expected<int, Error>> Worker::async_accept(int server_fd, sockaddr* addr, socklen_t* addrlen)
     {
         auto prep = [](io_uring_sqe* sqe, const int fd, sockaddr* a, socklen_t* al, const int flags) { io_uring_prep_accept(sqe, fd, a, al, flags); };
-
-        co_return co_await make_uring_awaitable(*this, prep, server_fd, addr, addrlen, 0);
+        int ret = co_await make_uring_awaitable(*this, prep, server_fd, addr, addrlen, 0);
+        if (ret < 0)
+        {
+            co_return std::unexpected(Error::from_errno(-ret));
+        }
+        co_return ret;
     }
 
-    Task<int> Worker::async_read(const int client_fd, std::span<char> buf, const uint64_t offset)
+    Task<std::expected<int, Error>> Worker::async_read(const int client_fd, std::span<char> buf, const uint64_t offset)
     {
         auto prep = [](io_uring_sqe* sqe, const int fd, char* b, const size_t len, const uint64_t off) { io_uring_prep_read(sqe, fd, b, len, off); };
-        co_return co_await make_uring_awaitable(*this, prep, client_fd, buf.data(), buf.size(), offset);
+        int ret = co_await make_uring_awaitable(*this, prep, client_fd, buf.data(), buf.size(), offset);
+        if (ret < 0)
+        {
+            co_return std::unexpected(Error::from_errno(-ret));
+        }
+        co_return ret;
     }
 
-    Task<int> Worker::async_write(const int client_fd, std::span<const char> buf, const uint64_t offset)
+    Task<std::expected<int, Error>> Worker::async_write(const int client_fd, std::span<const char> buf, const uint64_t offset)
     {
         auto prep = [](io_uring_sqe* sqe, const int fd, const char* b, const size_t len, const uint64_t off) { io_uring_prep_write(sqe, fd, b, len, off); };
-        co_return co_await make_uring_awaitable(*this, prep, client_fd, buf.data(), buf.size(), offset);
+        int ret = co_await make_uring_awaitable(*this, prep, client_fd, buf.data(), buf.size(), offset);
+        if (ret < 0)
+        {
+            co_return std::unexpected(Error::from_errno(-ret));
+        }
+        co_return ret;
     }
 
-    Task<int> Worker::async_readv(const int client_fd, const iovec* iov, int iovcnt, const uint64_t offset)
+    Task<std::expected<int, Error>> Worker::async_readv(const int client_fd, const iovec* iov, int iovcnt, const uint64_t offset)
     {
         auto prep = [](io_uring_sqe* sqe, const int fd, const iovec* iov, const int iovcnt, const uint64_t off) { io_uring_prep_readv(sqe, fd, iov, iovcnt, off); };
-        co_return co_await make_uring_awaitable(*this, prep, client_fd, iov, iovcnt, offset);
+        int ret = co_await make_uring_awaitable(*this, prep, client_fd, iov, iovcnt, offset);
+        if (ret < 0)
+        {
+            co_return std::unexpected(Error::from_errno(-ret));
+        }
+        co_return ret;
     }
 
-    Task<int> Worker::async_writev(const int client_fd, const iovec* iov, int iovcnt, const uint64_t offset)
+    Task<std::expected<int, Error>> Worker::async_writev(const int client_fd, const iovec* iov, int iovcnt, const uint64_t offset)
     {
         auto prep = [](io_uring_sqe* sqe, const int fd, const iovec* iov, const int iovcnt, const uint64_t off) { io_uring_prep_writev(sqe, fd, iov, iovcnt, off); };
-        co_return co_await make_uring_awaitable(*this, prep, client_fd, iov, iovcnt, offset);
+        int ret = co_await make_uring_awaitable(*this, prep, client_fd, iov, iovcnt, offset);
+        if (ret < 0)
+        {
+            co_return std::unexpected(Error::from_errno(-ret));
+        }
+        co_return ret;
     }
 
     Task<std::expected<int, Error>> Worker::async_connect(const int client_fd, const sockaddr* addr, const socklen_t addrlen)
@@ -373,27 +397,40 @@ namespace kio::io
         co_return ret;
     }
 
-    Task<int> Worker::async_openat(std::string_view path, const int flags, const mode_t mode)
+    Task<std::expected<int, Error>> Worker::async_openat(std::string_view path, const int flags, const mode_t mode)
     {
         // make the coroutine own its own copy of the path in its frame
         const std::string path_str(path);
         auto prep = [](io_uring_sqe* sqe, const int dfd, const char* p, const int f, const mode_t m) { io_uring_prep_openat(sqe, dfd, p, f, m); };
-
-        co_return co_await make_uring_awaitable(*this, prep, AT_FDCWD, path_str.c_str(), flags, mode);
+        int ret = co_await make_uring_awaitable(*this, prep, AT_FDCWD, path_str.c_str(), flags, mode);
+        if (ret < 0)
+        {
+            co_return std::unexpected(Error::from_errno(-ret));
+        }
+        co_return ret;
     }
 
-    Task<int> Worker::async_fallocate(int fd, int mode, off_t size)
+    Task<std::expected<int, Error>> Worker::async_fallocate(int fd, int mode, off_t size)
     {
         auto prep = [](io_uring_sqe* sqe, int file_fd, int p_mode, off_t offset, off_t len) { io_uring_prep_fallocate(sqe, file_fd, p_mode, offset, len); };
-
         off_t offset = 0;
-        co_return co_await make_uring_awaitable(*this, prep, fd, mode, offset, size);
+        int ret = co_await make_uring_awaitable(*this, prep, fd, mode, offset, size);
+        if (ret < 0)
+        {
+            co_return std::unexpected(Error::from_errno(-ret));
+        }
+        co_return ret;
     }
 
-    Task<int> Worker::async_close(int fd)
+    Task<std::expected<int, Error>> Worker::async_close(int fd)
     {
         auto prep = [](io_uring_sqe* sqe, int file_fd) { io_uring_prep_close(sqe, file_fd); };
-        co_return co_await make_uring_awaitable(*this, prep, fd);
+        int ret = co_await make_uring_awaitable(*this, prep, fd);
+        if (ret < 0)
+        {
+            co_return std::unexpected(Error::from_errno(-ret));
+        }
+        co_return ret;
     }
 
     Task<std::expected<void, Error>> Worker::async_sleep(std::chrono::nanoseconds duration)
@@ -411,12 +448,10 @@ namespace kio::io
         };
 
         // Await the timeout operation.
-        const int res = co_await make_uring_awaitable(*this, prep, &ts, 0);
-
         // The timeout operation returns -ECANCELED if cancelled.
         // Crucially, a *successful* timer expiration completes with res = -ETIME.
-        // We must treat -ETIME as success, not an error.
-        if (res < 0 && res != -ETIME)
+        // We must treat -ETIME as a success, not an error.
+        if (const int res = co_await make_uring_awaitable(*this, prep, &ts, 0); res < 0 && res != -ETIME)
         {
             // This is a real error (e.g., the operation was cancelled)
             co_return std::unexpected(Error::from_errno(-res));

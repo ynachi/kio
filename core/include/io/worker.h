@@ -102,7 +102,7 @@ namespace kio::io
         std::stop_source stop_source_;
         // updated by all run method
         std::stop_token stop_token_;
-        // to avoid double shutdown
+        // to avoid a double shutdown
         std::atomic<bool> stopped_{false};
 
         std::function<void(Worker&)> worker_init_callback_;
@@ -175,17 +175,17 @@ namespace kio::io
         ~Worker();
 
         // Io methods
-        Task<int> async_accept(int server_fd, sockaddr* addr, socklen_t* addrlen);
-        Task<int> async_read(int client_fd, std::span<char> buf, uint64_t offset);
-        Task<int> async_openat(std::string_view path, int flags, mode_t mode);
-        Task<int> async_write(int client_fd, std::span<const char> buf, uint64_t offset);
-        Task<int> async_readv(int client_fd, const iovec* iov, int iovcnt, uint64_t offset);
-        Task<int> async_writev(int client_fd, const iovec* iov, int iovcnt, uint64_t offset);
+        Task<std::expected<int, Error>> async_accept(int server_fd, sockaddr* addr, socklen_t* addrlen);
+        Task<std::expected<int, Error>> async_read(int client_fd, std::span<char> buf, uint64_t offset);
+        Task<std::expected<int, Error>> async_openat(std::string_view path, int flags, mode_t mode);
+        Task<std::expected<int, Error>> async_write(int client_fd, std::span<const char> buf, uint64_t offset);
+        Task<std::expected<int, Error>> async_readv(int client_fd, const iovec* iov, int iovcnt, uint64_t offset);
+        Task<std::expected<int, Error>> async_writev(int client_fd, const iovec* iov, int iovcnt, uint64_t offset);
         Task<std::expected<int, Error>> async_connect(int client_fd, const sockaddr* addr, socklen_t addrlen);
-        Task<int> async_fallocate(int fd, int mode, off_t size);
-        Task<int> async_close(int fd);
+        Task<std::expected<int, Error>> async_fallocate(int fd, int mode, off_t size);
+        Task<std::expected<int, Error>> async_close(int fd);
         /**
-         * Asynchronously sleep for `duration`. This is a non-bloaking sleep.
+         * Asynchronously sleep for `duration`. This is a non-blocking sleep.
          * @param duration
          * @return
          */
@@ -202,9 +202,9 @@ namespace kio::io
 
         explicit SwitchToWorker(Worker& worker) : worker_(worker) {}
 
-        bool await_ready() const noexcept { return worker_.is_on_worker_thread(); }
+        bool await_ready() const noexcept { return worker_.is_on_worker_thread(); }  // NOLINT
         void await_suspend(std::coroutine_handle<> h) const { worker_.post(h); }
-        void await_resume() const noexcept {}
+        void await_resume() const noexcept {}  // NOLINT
     };
 }  // namespace kio::io
 

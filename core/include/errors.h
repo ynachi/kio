@@ -6,7 +6,7 @@
 #define KIO_ERRORS_H
 #include <string>
 #include <string_view>
-#include <sys/errno.h>
+#include <sys/errno.h>  // NOLINT
 #include <type_traits>
 #include <utility>
 
@@ -541,7 +541,7 @@ namespace kio
         int errno_value;
 
         constexpr Error() : category(IoError::Success), errno_value(0) {}
-        constexpr Error(IoError cat, int err) : category(cat), errno_value(err) {}
+        constexpr Error(const IoError cat, const int err) : category(cat), errno_value(err) {}
 
         static Error from_errno(const int err) { return {IOErrorFromErno(err), err}; }
 
@@ -560,14 +560,14 @@ namespace kio
 namespace kio_try_internal
 {
     // For non-void expected<T, E> -> unwrap and move out the value.
-    template<typename Exp, typename Decayed = std::decay_t<Exp>, typename ValueT = typename Decayed::value_type>
+    template<typename Exp, typename Decayed = std::decay_t<Exp>, typename ValueT = Decayed::value_type>
     std::enable_if_t<!std::is_void_v<ValueT>, ValueT> kio_try_unwrap_impl(Exp&& exp)
     {
         return std::move(*exp);
     }
 
     // For expected<void, E> -> do nothing (returns void).
-    template<typename Exp, typename Decayed = std::decay_t<Exp>, typename ValueT = typename Decayed::value_type>
+    template<typename Exp, typename Decayed = std::decay_t<Exp>, typename ValueT = Decayed::value_type>
     std::enable_if_t<std::is_void_v<ValueT>, void> kio_try_unwrap_impl(Exp&&)
     {
         // no-op for expected<void, E>

@@ -35,12 +35,7 @@ namespace kio::io
         spdlog::info("IOPool started with {} workers", num_workers);
     }
 
-    IOPool::~IOPool()
-    {
-        // The `stop()` method should be called explicitly for a clean shutdown,
-        // but the jthread destructor provides a safety net.
-        stop();
-    }
+    IOPool::~IOPool() { stop(); }
 
     Worker* IOPool::get_worker(const size_t id) const
     {
@@ -88,8 +83,7 @@ namespace kio::io
         }
         spdlog::info("IOPool has stopped.");
 
-        // The jthread destructors will automatically join, waiting for each thread to finish.
-        // We clear the threads here to make that process explicit.
+        // TODO: do we need to do that ?
         worker_threads_.clear();
     }
 }  // namespace kio::io

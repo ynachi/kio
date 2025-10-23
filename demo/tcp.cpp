@@ -18,10 +18,10 @@ kio::DetachedTask handle_client(Worker& worker, const int client_fd)
     while (!st.stop_requested())
     {
         // Read from the client - this co_await runs on the worker thread
-        int n = co_await worker.async_read(client_fd, std::span(buffer, sizeof(buffer)), -1);
-        if (n < 0)
+        auto n = co_await worker.async_read(client_fd, std::span(buffer, sizeof(buffer)), -1);
+        if (!n.has_value())
         {
-            spdlog::debug("Read failed {}", strerror(-n));
+            spdlog::debug("Read failed: {}", n.error().message());
             // in the io_uring world, most of the errors are fatal, so no need to specialize
             break;
         }
@@ -36,11 +36,11 @@ kio::DetachedTask handle_client(Worker& worker, const int client_fd)
         std::string response = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, World!";
 
         // Write response - this co_await also runs on the worker thread
-        int sent = co_await worker.async_write(client_fd, std::span(response.data(), response.size()), -1);
+        auto sent = co_await worker.async_write(client_fd, std::span(response.data(), response.size()), -1);
 
-        if (sent < 0)
+        if (!sent.has_value())
         {
-            spdlog::error("Write failed: {}", strerror(-sent));
+            spdlog::error("Write failed: {}", sent.error().message());
             break;
         }
     }
@@ -60,19 +60,19 @@ kio::DetachedTask accept_loop(Worker& worker, int listen_fd)
         socklen_t addr_len = sizeof(client_addr);
 
         // Accept connection - blocks this coroutine until client connects
-        int client_fd = co_await worker.async_accept(listen_fd, reinterpret_cast<sockaddr*>(&client_addr), &addr_len);
+        auto client_fd = co_await worker.async_accept(listen_fd, reinterpret_cast<sockaddr*>(&client_addr), &addr_len);
 
-        if (client_fd < 0)
+        if (!client_fd.has_value())
         {
-            spdlog::error("Accept failed: {}", strerror(-client_fd));
+            spdlog::error(client_fd.error().message());
             continue;
         }
 
-        spdlog::debug("Accepted connection on fd {}", client_fd);
+        spdlog::debug("Accepted connection on fd {}", client_fd.value());
 
         // Spawn coroutine to handle this client
         // Each connection runs independently on this worker
-        handle_client(worker, client_fd).detach();
+        handle_client(worker, client_fd.value()).detach();
     }
     spdlog::info("Worker {} stop accepting connexions", worker.get_id());
 }

@@ -37,14 +37,9 @@ namespace kio
         // Ensure we are on the correct worker thread before touching its ring.
         co_await io::SwitchToWorker(*worker);
 
-        const int maybe_fd = co_await worker->async_openat(path, flags, mode);
+        const int fd = KIO_TRY(co_await worker->async_openat(path, flags, mode));
 
-        if (maybe_fd < 0)
-        {
-            co_return std::unexpected(Error::from_errno(-maybe_fd));
-        }
-
-        co_return std::expected<File, Error>(std::in_place, maybe_fd, pool_, worker_id);
+        co_return std::expected<File, Error>(std::in_place, fd, pool_, worker_id);
     }
 
     Task<std::expected<size_t, Error>> File::async_read(std::span<char> buf, const uint64_t offset) const
@@ -58,11 +53,8 @@ namespace kio
         // Switch to the assigned worker for this file descriptor.
         co_await io::SwitchToWorker(*worker);
 
-        auto res = co_await worker->async_read(fd_, buf, offset);
-        if (res < 0)
-        {
-            co_return std::unexpected(Error::from_errno(-res));
-        }
+        auto res = KIO_TRY(co_await worker->async_read(fd_, buf, offset));
+
         co_return res;
     }
 
@@ -77,11 +69,8 @@ namespace kio
         // Switch to the assigned worker for this file descriptor.
         co_await io::SwitchToWorker(*worker);
 
-        auto res = co_await worker->async_write(fd_, buf, offset);
-        if (res < 0)
-        {
-            co_return std::unexpected(Error::from_errno(-res));
-        }
+        auto res = KIO_TRY(co_await worker->async_write(fd_, buf, offset));
+
         co_return res;
     }
 

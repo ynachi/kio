@@ -58,8 +58,7 @@ int main()
 {
     spdlog::set_level(spdlog::level::info);
     Worker worker(0, {});
-    // Pass the stop_token 'st' to loop_forever
-    std::jthread t([&](std::stop_token st) { worker.loop_forever(); });
+    std::jthread t([&] { worker.loop_forever(); });
     worker.wait_ready();
 
     auto result = SyncWait(connect_with_retries(worker));
