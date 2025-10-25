@@ -9,6 +9,7 @@ set(CORE_HEADER_FILES
         include/sync_wait.h
         include/errors.h
         include/fs.h
+        include/async_logger.h
 )
 
 set(CORE_SRC_FILES

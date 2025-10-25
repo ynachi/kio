@@ -2,7 +2,6 @@
 #define SYNC_WAIT_H
 
 #include <latch>
-#include <optional>
 
 #include "coro.h"
 
