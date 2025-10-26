@@ -8,11 +8,12 @@
 #include <latch>
 #include <numeric>
 #include <thread>
+#include <expected>
 
 #include "core/include/coro.h"
 #include "core/include/io/worker.h"
 #include "core/include/sync_wait.h"
-#include "spdlog/spdlog.h"
+#include "core/include/async_logger.h"
 
 using namespace kio;
 using namespace kio::io;
@@ -28,42 +29,31 @@ using namespace kio::io;
  * @param target_char The character to count.
  * @return A Task containing the final count.
  */
-Task<size_t> count_chars_in_file(Worker& worker, std::string_view filename, char target_char)
-{
-    spdlog::info("[main coro] Starting on thread ID: {}", std::hash<std::thread::id>{}(std::this_thread::get_id()));
+Task<std::expected<size_t, Error> > count_chars_in_file(Worker &worker, std::string_view filename, char target_char) {
+    ALOG_INFO("[main coro] Starting on thread ID: {}", std::hash<std::thread::id>{}(std::this_thread::get_id()));
 
     // Switch execution from the calling thread (main) to the worker's thread.
     co_await SwitchToWorker(worker);
 
-    spdlog::info("[main coro] Switched! Now running on worker thread ID: {}", std::hash<std::thread::id>{}(std::this_thread::get_id()));
+    ALOG_INFO("[main coro] Switched! Now running on worker thread ID: {}",
+              std::hash<std::thread::id>{}(std::this_thread::get_id()));
 
     // Now that we are on the correct thread, we can safely call async methods.
-    int fd = co_await worker.async_openat(filename, O_RDONLY, 0);
-    if (fd < 0)
-    {
-        spdlog::error("Failed to open file '{}': {}", filename, strerror(-fd));
-        co_return 0;
-    }
-    spdlog::info("Successfully opened file '{}', fd={}", filename, fd);
+    auto fd = KIO_TRY(co_await worker.async_openat(filename, O_RDONLY, 0));
+
+    ALOG_INFO("Successfully opened file '{}', fd={}", filename, fd);
 
     size_t total_count = 0;
     constexpr size_t buffer_size = 8192;
     std::vector<char> buffer(buffer_size);
     uint64_t offset = 0;
 
-    while (true)
-    {
-        int bytes_read = co_await worker.async_read(fd, std::span(buffer.data(), buffer.size()), offset);
+    while (true) {
+        auto bytes_read = KIO_TRY(co_await worker.async_read(fd, std::span(buffer.data(), buffer.size()), offset));
 
-        if (bytes_read == 0)
-        {
-            spdlog::info("Reached end of file.");
-            break;  // EOF
-        }
-        if (bytes_read < 0)
-        {
-            spdlog::error("Error reading file: {}", strerror(-bytes_read));
-            break;
+        if (bytes_read == 0) {
+            ALOG_INFO("Reached end of file.");
+            break; // EOF
         }
 
         total_count += std::count(buffer.data(), buffer.data() + bytes_read, target_char);
@@ -71,17 +61,16 @@ Task<size_t> count_chars_in_file(Worker& worker, std::string_view filename, char
     }
 
     co_await worker.async_close(fd);
-    spdlog::info("Closed file descriptor {}", fd);
+    ALOG_INFO("Closed file descriptor {}", fd);
 
     co_return total_count;
 }
 
-int main()
-{
-    spdlog::set_level(spdlog::level::info);
+int main() {
+    alog::configure(4096, LogLevel::Disabled);
 
     // Create a dummy file for the demo
-    const char* test_filename = "test_file.txt";
+    const char *test_filename = "test_file.txt";
     std::ofstream test_file(test_filename);
     test_file << "Hello world, this is a test file for our coroutine worker.\n";
     test_file << "Let's test switching threads and reading files asynchronously.\n";
@@ -95,31 +84,36 @@ int main()
 
     // Manually create a thread and assign the worker's event loop to it.
     std::jthread worker_thread(
-            [&worker]
-            {
-                spdlog::info("Worker thread starting with ID: {}", std::hash<std::thread::id>{}(std::this_thread::get_id()));
-                //  This thread will now block here, running the I/O event loop.
-                worker.loop_forever();
-                spdlog::info("Worker thread finished its loop.");
-            });
+        [&worker] {
+            ALOG_INFO("Worker thread starting with ID: {}",
+                      std::hash<std::thread::id>{}(std::this_thread::get_id()));
+            //  This thread will now block here, running the I/O event loop.
+            worker.loop_forever();
+            ALOG_INFO("Worker thread finished its loop.");
+        });
 
     // Wait for the worker to complete its initialization on the new thread.
     worker.wait_ready();
-    spdlog::info("Worker context has been initialized on its thread.");
+    ALOG_INFO("Worker context has been initialized on its thread.");
 
     // --- Run the Coroutine on the Main Thread ---
     // The coroutine will start here, then hop to the worker_thread via SwitchToWorker.
-    size_t final_count = SyncWait(count_chars_in_file(worker, test_filename, char_to_find));
+    auto final_count_res = SyncWait(count_chars_in_file(worker, test_filename, char_to_find));
+    if (!final_count_res.has_value()) {
+        ALOG_ERROR("Failed to read file '{}'", test_filename);
+    }
+    auto final_count = final_count_res.value();
 
     // --- Cleanup ---
-    spdlog::info("Main thread requesting worker to stop.");
-    worker.request_stop();  // Signals the stop_source and wakes up the loop.
+    ALOG_INFO("Main thread requesting worker to stop.");
+    worker.request_stop(); // Signals the stop_source and wakes up the loop.
 
     // The jthread's destructor will automatically call join(), ensuring
     // we wait for the worker thread to finish cleanly.
 
     std::cout << "\n--- Demo Complete ---\n";
-    std::cout << "Found the character '" << char_to_find << "' " << final_count << " times in " << test_filename << ".\n";
+    std::cout << "Found the character '" << char_to_find << "' " << final_count << " times in " << test_filename <<
+            ".\n";
 
     // Clean up the dummy file
     std::remove(test_filename);

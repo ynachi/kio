@@ -10,31 +10,34 @@
 #include "errors.h"
 #include "io/worker_pool.h"
 
-namespace kio
-{
-    class File
-    {
+namespace kio {
+    class File {
         int fd_{-1};
-        io::IOPool& pool_;
+        io::IOPool &pool_;
         size_t worker_id_{0};
 
     public:
-        File(const int fd, io::IOPool& pool, size_t worker_id) : fd_(fd), pool_(pool), worker_id_(worker_id) { assert(fd_ >= 0); }
+        File(const int fd, io::IOPool &pool, size_t worker_id) : fd_(fd), pool_(pool), worker_id_(worker_id) {
+            assert(fd_ >= 0);
+        }
+
         // File is not copyable
-        File(const File&) = delete;
-        File& operator=(const File&) = delete;
-        File(File&& other) noexcept : fd_(other.fd_), pool_(other.pool_), worker_id_(other.worker_id_) { other.fd_ = -1; }
+        File(const File &) = delete;
+
+        File &operator=(const File &) = delete;
+
+        File(File &&other) noexcept : fd_(other.fd_), pool_(other.pool_), worker_id_(other.worker_id_) {
+            other.fd_ = -1;
+        }
+
         [[nodiscard]]
-        int fd() const noexcept
-        {
+        int fd() const noexcept {
             return fd_;
         }
 
-        File& operator=(File&& other) noexcept
-        {
-            if (this != &other)
-            {
-                if (fd_ != -1) ::close(fd_);  // Close existing fd first
+        File &operator=(File &&other) noexcept {
+            if (this != &other) {
+                if (fd_ != -1) ::close(fd_); // Close existing fd first
                 fd_ = other.fd_;
                 // pool_ reference stays bound to the same pool (can't be rebound)
                 worker_id_ = other.worker_id_;
@@ -43,13 +46,11 @@ namespace kio
             return *this;
         }
 
-        ~File()
-        {
+        ~File() {
             if (fd_ != -1) ::close(fd_);
         }
 
-        void close()
-        {
+        void close() {
             if (fd_ != -1) ::close(fd_);
             fd_ = -1;
         }
@@ -63,7 +64,7 @@ namespace kio
          * @return The number of bytes read or an error.
          * */
         [[nodiscard]]
-        Task<std::expected<size_t, Error>> async_read(std::span<char> buf, uint64_t offset) const;
+        Task<std::expected<size_t, Error> > async_read(std::span<char> buf, uint64_t offset) const;
 
         /**
          *  This method makes a single write() call to the underlined IO. It may or may not write the total of the data.
@@ -73,7 +74,7 @@ namespace kio
          * @return The number of bytes written or an error
          */
         [[nodiscard]]
-        Task<std::expected<size_t, Error>> async_write(std::span<const char> buf, uint64_t offset) const;
+        Task<std::expected<size_t, Error> > async_write(std::span<const char> buf, uint64_t offset) const;
     };
 
     /**
@@ -82,18 +83,22 @@ namespace kio
      * It's a tradeoff we made to avoid paying the cost of shared pointers.
      * A rule of thumbs is to not let a coroutine own the file manager instance.
      */
-    class FileManager
-    {
+    class FileManager {
         io::IOPool pool_;
 
     public:
-        FileManager(size_t io_worker_count, const io::WorkerConfig& config);
-        FileManager(const FileManager&) = delete;
-        FileManager& operator=(const FileManager&) = delete;
+        FileManager(size_t io_worker_count, const io::WorkerConfig &config);
+
+        FileManager(const FileManager &) = delete;
+
+        FileManager &operator=(const FileManager &) = delete;
+
         // FileManager is not movable
-        FileManager(FileManager&&) = delete;
-        FileManager& operator=(FileManager&&) = delete;
-        io::IOPool& pool() { return pool_; }
+        FileManager(FileManager &&) = delete;
+
+        FileManager &operator=(FileManager &&) = delete;
+
+        io::IOPool &pool() { return pool_; }
 
         ~FileManager() { pool_.stop(); }
 
@@ -106,8 +111,8 @@ namespace kio
          * @return The file created or an Io error.
          */
         [[nodiscard]]
-        Task<std::expected<File, Error>> async_open(std::string_view path, int flags, mode_t mode) noexcept;
+        Task<std::expected<File, Error> > async_open(std::string_view path, int flags, mode_t mode);
     };
-}  // namespace kio
+} // namespace kio
 
 #endif  // KIO_FS_H

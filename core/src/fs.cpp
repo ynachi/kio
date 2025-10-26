@@ -5,31 +5,26 @@
 
 #include <filesystem>
 
-#include "spdlog/spdlog.h"
+#include "core/include/async_logger.h"
 
-namespace kio
-{
+namespace kio {
     // always return an absolute path for hashing
-    static std::string absolute_path(const std::string_view path)
-    {
-        try
-        {
+    static std::string absolute_path(const std::string_view path) {
+        try {
             return std::filesystem::canonical(path).string();
-        }
-        catch (const std::filesystem::filesystem_error& e)
-        {
+        } catch (const std::filesystem::filesystem_error &e) {
             return std::filesystem::absolute(path).string();
         }
     }
 
-    FileManager::FileManager(const size_t io_worker_count, const io::WorkerConfig& config) : pool_(io_worker_count, config) { spdlog::info("started file manager with {} workers", io_worker_count); }
+    FileManager::FileManager(const size_t io_worker_count, const io::WorkerConfig &config) : pool_(
+        io_worker_count, config) { ALOG_INFO("started file manager with {} workers", io_worker_count); }
 
-    Task<std::expected<File, Error>> FileManager::async_open(std::string_view path, const int flags, const mode_t mode) noexcept
-    {
+    Task<std::expected<File, Error> >
+    FileManager::async_open(std::string_view path, const int flags, const mode_t mode) {
         auto worker_id = pool_.get_worker_id_by_key(absolute_path(path));
-        auto* worker = pool_.get_worker(worker_id);
-        if (!worker)
-        {
+        auto *worker = pool_.get_worker(worker_id);
+        if (!worker) {
             // This should ideally not happen if pool is constructed correctly
             co_return std::unexpected(Error::from_errno(EINVAL));
         }
@@ -42,11 +37,9 @@ namespace kio
         co_return std::expected<File, Error>(std::in_place, fd, pool_, worker_id);
     }
 
-    Task<std::expected<size_t, Error>> File::async_read(std::span<char> buf, const uint64_t offset) const
-    {
-        auto* worker = pool_.get_worker(worker_id_);
-        if (!worker)
-        {
+    Task<std::expected<size_t, Error> > File::async_read(std::span<char> buf, const uint64_t offset) const {
+        auto *worker = pool_.get_worker(worker_id_);
+        if (!worker) {
             co_return std::unexpected(Error::from_errno(EINVAL));
         }
 
@@ -58,11 +51,9 @@ namespace kio
         co_return res;
     }
 
-    Task<std::expected<size_t, Error>> File::async_write(std::span<const char> buf, const uint64_t offset) const
-    {
-        auto* worker = pool_.get_worker(worker_id_);
-        if (!worker)
-        {
+    Task<std::expected<size_t, Error> > File::async_write(std::span<const char> buf, const uint64_t offset) const {
+        auto *worker = pool_.get_worker(worker_id_);
+        if (!worker) {
             co_return std::unexpected(Error::from_errno(EINVAL));
         }
 
@@ -73,5 +64,4 @@ namespace kio
 
         co_return res;
     }
-
-}  // namespace kio
+} // namespace kio
