@@ -5,7 +5,8 @@
 #include <exception>
 #include <utility>
 #include <variant>
-#include "spdlog/spdlog.h"
+#include <format>
+#include "async_logger.h"
 
 namespace kio {
     template<typename T>
@@ -14,10 +15,16 @@ namespace kio {
 
         std::coroutine_handle<promise_type> h_;
 
-        explicit Task(std::coroutine_handle<promise_type> h) : h_(h) {}
-        Task(Task &&other) noexcept : h_(std::exchange(other.h_, {})) {}
+        explicit Task(std::coroutine_handle<promise_type> h) : h_(h) {
+        }
+
+        Task(Task &&other) noexcept : h_(std::exchange(other.h_, {})) {
+        }
+
         Task(const Task &) = delete;
+
         Task &operator=(const Task &) = delete;
+
         Task &operator=(Task &&other) noexcept {
             if (this != &other) {
                 if (h_)
@@ -27,6 +34,7 @@ namespace kio {
             }
             return *this;
         }
+
         ~Task() {
             if (h_) {
                 h_.destroy();
@@ -52,13 +60,16 @@ namespace kio {
             // When this task completes, it resumes whoever was awaiting it.
             struct final_awaiter {
                 bool await_ready() noexcept { return false; }
+
                 std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_type> h) noexcept {
                     // Resume the continuation or return to the original caller if there is none.
                     if (auto continuation = h.promise().continuation_)
                         return continuation;
                     return std::noop_coroutine();
                 }
-                void await_resume() noexcept {}
+
+                void await_resume() noexcept {
+                }
             };
 
             final_awaiter final_suspend() noexcept { return {}; }
@@ -68,8 +79,7 @@ namespace kio {
             // Stores the final result in the promise so the awaiting coroutine can retrieve it
             // Conditionally provide return_value OR return_void, not both
             void return_value(T value)
-                requires (!std::is_void_v<T>)
-            {
+                requires (!std::is_void_v<T>) {
                 result_ = std::move(value);
             }
         };
@@ -96,17 +106,23 @@ namespace kio {
         }
     };
 
-        // Specialization for Task<void>
+    // Specialization for Task<void>
     template<>
     struct Task<void> {
         struct promise_type;
 
         std::coroutine_handle<promise_type> h_;
 
-        explicit Task(std::coroutine_handle<promise_type> h) : h_(h) {}
-        Task(Task &&other) noexcept : h_(std::exchange(other.h_, {})) {}
+        explicit Task(std::coroutine_handle<promise_type> h) : h_(h) {
+        }
+
+        Task(Task &&other) noexcept : h_(std::exchange(other.h_, {})) {
+        }
+
         Task(const Task &) = delete;
+
         Task &operator=(const Task &) = delete;
+
         Task &operator=(Task &&other) noexcept {
             if (this != &other) {
                 if (h_) h_.destroy();
@@ -115,6 +131,7 @@ namespace kio {
             }
             return *this;
         }
+
         ~Task() {
             if (h_) {
                 h_.destroy();
@@ -134,18 +151,22 @@ namespace kio {
 
             struct final_awaiter {
                 bool await_ready() noexcept { return false; }
+
                 std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_type> h) noexcept {
                     if (auto continuation = h.promise().continuation_)
                         return continuation;
                     return std::noop_coroutine();
                 }
-                void await_resume() noexcept {}
+
+                void await_resume() noexcept {
+                }
             };
 
             final_awaiter final_suspend() noexcept { return {}; }
             void unhandled_exception() { result_ = std::current_exception(); }
 
-            void return_void() {}
+            void return_void() {
+            }
         };
 
         [[nodiscard]]
@@ -172,17 +193,21 @@ namespace kio {
             DetachedTask get_return_object() noexcept {
                 return DetachedTask{std::coroutine_handle<promise_type>::from_promise(*this)};
             }
+
             std::suspend_never initial_suspend() noexcept { return {}; }
             std::suspend_never final_suspend() noexcept { return {}; }
-            void return_void() noexcept {}
+
+            void return_void() noexcept {
+            }
+
             void unhandled_exception() noexcept {
                 // TODO: better manage this exception
                 try {
                     throw;
                 } catch (const std::exception &e) {
-                    spdlog::error("DetachedTask exception: {}", e.what());
+                    ALOG_ERROR("DetachedTask exception: {}", e.what());
                 } catch (...) {
-                    spdlog::error("DetachedTask unknown exception");
+                    ALOG_ERROR("DetachedTask unknown exception");
                 }
             }
         };
@@ -190,8 +215,12 @@ namespace kio {
         using handle_t = std::coroutine_handle<promise_type>;
         handle_t coro;
 
-        explicit DetachedTask(handle_t h) : coro(h) {}
-        DetachedTask(DetachedTask &&o) noexcept : coro(std::exchange(o.coro, {})) {}
+        explicit DetachedTask(handle_t h) : coro(h) {
+        }
+
+        DetachedTask(DetachedTask &&o) noexcept : coro(std::exchange(o.coro, {})) {
+        }
+
         ~DetachedTask() {
             if (coro)
                 coro.destroy();
@@ -202,7 +231,6 @@ namespace kio {
             coro = {};
         }
     };
-
 } // namespace kio
 
 #endif // CORO_H

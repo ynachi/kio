@@ -18,35 +18,30 @@ using namespace kio::net;
 // Client processing code, which will run in the background on the same thread as the worker.
 // Thus, there is no need to context switch as we are already on the right thread.
 // The loop is sync to the worker's stop signal for a coordinated shutdown.
-DetachedTask HandleClient(Worker& worker, const int client_fd)
-{
+DetachedTask HandleClient(Worker &worker, const int client_fd) {
     char buffer[8192];
 
     // Critical! We want any client code to be stopped when the worker exits.
     // So the loop below will be synchronized on the worker's top token.
     const auto st = worker.get_stop_token();
 
-    while (!st.stop_requested())
-    {
-        const int n = co_await worker.async_read(client_fd, std::span(buffer, sizeof(buffer)), -1);
-        if (n < 0)
-        {
-            spdlog::debug("Read failed {}", strerror(-n));
+    while (!st.stop_requested()) {
+        auto n = co_await worker.async_read(client_fd, std::span(buffer, sizeof(buffer)), -1);
+        if (!n.has_value()) {
+            spdlog::debug("Read failed {}", n.error().message());
             break;
         }
 
-        if (n == 0)
-        {
+        if (n == 0) {
             spdlog::info("Client disconnected");
             break;
         }
 
         std::string response = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, World!";
-        int sent = co_await worker.async_write(client_fd, std::span(response.data(), response.size()), -1);
+        auto sent = co_await worker.async_write(client_fd, std::span(response.data(), response.size()), -1);
 
-        if (sent < 0)
-        {
-            spdlog::error("Write failed: {}", strerror(-sent));
+        if (!sent.has_value()) {
+            spdlog::error("Write failed: {}", sent.error().message());
             break;
         }
     }
@@ -56,8 +51,7 @@ DetachedTask HandleClient(Worker& worker, const int client_fd)
 
 
 // 2. accept_loop is an awaitable DetachedTask
-DetachedTask accept_loop(Worker& worker, int listen_fd)
-{
+DetachedTask accept_loop(Worker &worker, int listen_fd) {
     spdlog::info("Worker accepting connections");
     const auto st = worker.get_stop_token();
 
@@ -66,36 +60,32 @@ DetachedTask accept_loop(Worker& worker, int listen_fd)
     // would verify this behavior and crash
     co_await SwitchToWorker(worker);
 
-    while (!st.stop_requested())
-    {
+    while (!st.stop_requested()) {
         sockaddr_storage client_addr{};
         socklen_t addr_len = sizeof(client_addr);
 
-        int client_fd = co_await worker.async_accept(listen_fd, reinterpret_cast<sockaddr*>(&client_addr), &addr_len);
+        auto client_fd = co_await worker.async_accept(listen_fd, reinterpret_cast<sockaddr *>(&client_addr), &addr_len);
 
-        if (client_fd < 0)
-        {
+        if (!client_fd.has_value()) {
             // If a stop is requested, exit
-            if (st.stop_requested())
-            {
+            if (st.stop_requested()) {
                 break;
             }
-            spdlog::error("Accept failed: {}", strerror(-client_fd));
+            spdlog::error("Accept failed: {}", client_fd.error().message());
             continue;
         }
 
-        spdlog::debug("Accepted connection on fd {}", client_fd);
+        spdlog::debug("Accepted connection on fd {}", client_fd.value());
 
         // This is still "fire and forget"
-        HandleClient(worker, client_fd).detach();
+        HandleClient(worker, client_fd.value()).detach();
     }
 
     spdlog::info("Worker {} stop accepting connexions", worker.get_id());
     co_return;
 }
 
-int main()
-{
+int main() {
     // 1. Application configuration
     signal(SIGPIPE, SIG_IGN);
     spdlog::set_level(spdlog::level::info);
@@ -104,10 +94,9 @@ int main()
     constexpr int port = 8080;
 
     auto server_fd = create_tcp_socket(ip_address, port, 128);
-    if (!server_fd)
-    {
+    if (!server_fd) {
         // Assuming IoErrorToString exists
-        spdlog::error("Failed to create server socket: {}", IoErrorToString(server_fd.error()));
+        spdlog::error("Failed to create server socket: {}", server_fd.error().message());
         return 1;
     }
     spdlog::info("server listening on endpoint: {}:{}, FD:{}", ip_address, port, server_fd.value());
@@ -137,8 +126,7 @@ int main()
     std::cin.get();
 
     spdlog::info("Main thread: Requesting worker stop...");
-    if (const auto res = worker.request_stop(); !res)
-    {
+    if (const auto res = worker.request_stop(); !res) {
         spdlog::error("failed to request the event loop to stop");
         return 1;
     }

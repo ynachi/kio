@@ -22,4 +22,5 @@ set(CORE_SRC_FILES
 )
 
 add_library(core_lib ${CORE_HEADER_FILES} ${CORE_SRC_FILES})
-target_link_libraries(core_lib PUBLIC ${LIBURING_LIBRARIES} spdlog::spdlog)
+target_link_libraries(core_lib PUBLIC ${LIBURING_LIBRARIES})
+target_compile_options(core_lib PRIVATE -Wall)

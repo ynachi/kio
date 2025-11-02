@@ -1,18 +1,11 @@
-//
-// Created by Yao ACHI on 25/10/2025.
-//
-
 #include "core/include/async_logger.h"
-#include <thread>
-#include <pthread.h>
-#include <sys/syscall.h>
 #include <unistd.h>
 
 int main() {
-    kio::Logger logger(1024, kio::LogLevel::Trace);
+    kio::alog::configure(4096, kio::LogLevel::Info);
 
-    KIO_LOG_INFO(logger, "Starting app with PID={}", ::getpid());
-    LOGD(logger, "Debug info: {}", 42);
-    LOGW(logger, "Something might be wrong...");
-    KIO_LOG_ERROR(logger, "Oh lets test error");
+    ALOG_INFO("Starting app with PID={}", ::getpid());
+    ALOG_DEBUG("This is a debug message");
+    ALOG_WARN("Low memory warning");
+    ALOG_ERROR("Could not open file: {}", "config.json");
 }

@@ -13,17 +13,36 @@ target_include_directories(worker_startup_benchmark
         ${CMAKE_SOURCE_DIR}
 )
 
-add_executable(char_count_benchmark char_count_benchmark.cpp)
+# char count benchmark
+#add_executable(char_count_benchmark char_count_benchmark.cpp)
+#
+#target_link_libraries(char_count_benchmark
+#        PRIVATE
+#        core_lib
+#        spdlog::spdlog
+#        benchmark::benchmark
+#        benchmark::benchmark_main
+#)
+#
+#target_include_directories(char_count_benchmark
+#        PRIVATE
+#        ${CMAKE_SOURCE_DIR}
+#)
 
-target_link_libraries(char_count_benchmark
+# echo benchmark
+add_executable(net_echo_benchmark net_echo_benchmark.cpp)
+
+target_link_libraries(net_echo_benchmark
         PRIVATE
         core_lib
         spdlog::spdlog
         benchmark::benchmark
         benchmark::benchmark_main
+        GTest::gtest
+        GTest::gtest_main
 )
 
-target_include_directories(char_count_benchmark
+target_include_directories(net_echo_benchmark
         PRIVATE
         ${CMAKE_SOURCE_DIR}
 )

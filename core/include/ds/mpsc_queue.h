@@ -6,14 +6,12 @@
 
 #include <atomic>
 #include <cassert>
-#include <cstddef>
-#include <new>  // placement new
+#include <new>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
-namespace kio
-{
+namespace kio {
     /**
      * @brief A bounded, lock-free, multi-producer, single-consumer (MPSC) queue.
      *
@@ -23,27 +21,26 @@ namespace kio
      * inside per-cell uninitialized storage.
      */
     template<typename T>
-    class MPSCQueue
-    {
+    class MPSCQueue {
         static constexpr size_t CACHE_LINE_SIZE = 64;
 
-        struct Cell
-        {
+        struct Cell {
             std::atomic<size_t> sequence;
             // Uninitialized storage for T
-            alignas(alignof(T)) unsigned char storage[sizeof(T)];
+            alignas(alignof(T)) unsigned char storage[sizeof(T)]{};
 
-            Cell() noexcept { /* don't construct T */ }
+            Cell() noexcept {
+                /* don't construct T */
+            }
 
             // Access pointer to T in storage
-            T* data_ptr() noexcept { return reinterpret_cast<T*>(storage); }
-            const T* data_ptr() const noexcept { return reinterpret_cast<const T*>(storage); }
+            T *data_ptr() noexcept { return reinterpret_cast<T *>(storage); }
+            const T *data_ptr() const noexcept { return reinterpret_cast<const T *>(storage); }
 
             // Construct T in-place using forwarding args
             template<typename... Args>
-            void construct_in_place(Args&&... args) noexcept(std::is_nothrow_constructible_v<T, Args...>)
-            {
-                ::new (static_cast<void*>(storage)) T(std::forward<Args>(args)...);
+            void construct_in_place(Args &&... args) noexcept(std::is_nothrow_constructible_v<T, Args...>) {
+                ::new(static_cast<void *>(storage)) T(std::forward<Args>(args)...);
             }
 
             // Destroy the T in-place
@@ -54,14 +51,12 @@ namespace kio
         };
 
     public:
-        explicit MPSCQueue(size_t capacity) : buffer_(capacity), mask_(capacity - 1)
-        {
+        explicit MPSCQueue(size_t capacity) : buffer_(capacity), mask_(capacity - 1) {
             // Capacity must be power of 2
             assert(capacity > 0 && (capacity & (capacity - 1)) == 0 && "Capacity must be a power of 2");
 
             // Initialize sequence numbers for each slot (no T construction)
-            for (size_t i = 0; i < capacity; ++i)
-            {
+            for (size_t i = 0; i < capacity; ++i) {
                 buffer_[i].sequence.store(i, std::memory_order_relaxed);
             }
 
@@ -69,31 +64,24 @@ namespace kio
             dequeue_pos_.store(0, std::memory_order_relaxed);
         }
 
-        ~MPSCQueue()
-        {
+        ~MPSCQueue() {
             // Drain any remaining elements using the normal pop mechanism
-            if constexpr (std::is_default_constructible_v<T>)
-            {
+            if constexpr (std::is_default_constructible_v<T>) {
                 T item;
-                while (try_pop(item))
-                {
+                while (try_pop(item)) {
                     // Item is properly moved out and the in-place object is destroyed
                 }
-            }
-            else
-            {
+            } else {
                 // For non-default-constructible types, we need to manually destroy remaining objects
                 size_t head = dequeue_pos_.load(std::memory_order_relaxed);
                 size_t tail = enqueue_pos_.load(std::memory_order_relaxed);
 
-                for (size_t i = head; i < tail; ++i)
-                {
-                    Cell& cell = buffer_[i & mask_];
+                for (size_t i = head; i < tail; ++i) {
+                    Cell &cell = buffer_[i & mask_];
                     size_t seq = cell.sequence.load(std::memory_order_relaxed);
 
                     // Check if this cell contains a constructed object
-                    if (seq == i + 1)
-                    {
+                    if (seq == i + 1) {
                         cell.destroy_in_place();
                         // Mark as empty for safety
                         cell.sequence.store(i + mask_ + 1, std::memory_order_relaxed);
@@ -102,34 +90,28 @@ namespace kio
             }
         }
 
-        MPSCQueue(const MPSCQueue&) = delete;
-        MPSCQueue& operator=(const MPSCQueue&) = delete;
+        MPSCQueue(const MPSCQueue &) = delete;
+
+        MPSCQueue &operator=(const MPSCQueue &) = delete;
 
         template<typename U>
-        bool try_push(U&& u)
-        {
-            Cell* cell;
+        bool try_push(U &&u) {
+            Cell *cell;
             size_t pos = enqueue_pos_.load(std::memory_order_relaxed);
 
-            for (;;)
-            {
+            for (;;) {
                 cell = &buffer_[pos & mask_];
                 size_t seq = cell->sequence.load(std::memory_order_acquire);
                 intptr_t diff = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos);
 
-                if (diff == 0)
-                {
-                    if (enqueue_pos_.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed, std::memory_order_relaxed))
-                    {
+                if (diff == 0) {
+                    if (enqueue_pos_.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed,
+                                                           std::memory_order_relaxed)) {
                         break;
                     }
-                }
-                else if (diff < 0)
-                {
+                } else if (diff < 0) {
                     return false;
-                }
-                else
-                {
+                } else {
                     pos = enqueue_pos_.load(std::memory_order_relaxed);
                 }
             }
@@ -145,26 +127,22 @@ namespace kio
         /**
          * try_pop for single consumer. Moves the contained T into 'item' and destroys the in-place object.
          */
-        bool try_pop(T& item)
-        {
-            Cell* cell;
+        bool try_pop(T &item) {
+            Cell *cell;
             size_t pos = dequeue_pos_.load(std::memory_order_relaxed);
 
-            for (;;)
-            {
+            for (;;) {
                 cell = &buffer_[pos & mask_];
                 size_t seq = cell->sequence.load(std::memory_order_acquire);
                 intptr_t diff = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos + 1);
 
-                if (diff == 0)
-                {
+                if (diff == 0) {
                     // This slot has data ready to read
                     // Advance dequeue position (single consumer, relaxed ok)
                     dequeue_pos_.store(pos + 1, std::memory_order_relaxed);
                     break;
                 }
-                if (diff < 0)
-                {
+                if (diff < 0) {
                     // slot not yet written -> queue empty
                     return false;
                 }
@@ -184,12 +162,13 @@ namespace kio
             return true;
         }
 
+        [[nodiscard]]
         size_t capacity() const noexcept { return mask_ + 1; }
 
-        size_t size_approx() const noexcept
-        {
-            size_t head = dequeue_pos_.load(std::memory_order_relaxed);
-            size_t tail = enqueue_pos_.load(std::memory_order_relaxed);
+        [[nodiscard]]
+        size_t size_approx() const noexcept {
+            const size_t head = dequeue_pos_.load(std::memory_order_relaxed);
+            const size_t tail = enqueue_pos_.load(std::memory_order_relaxed);
             return tail - head;
         }
 
@@ -201,8 +180,7 @@ namespace kio
         alignas(CACHE_LINE_SIZE) std::atomic<size_t> enqueue_pos_;
     };
 
-    constexpr size_t next_power_of_2(size_t n)
-    {
+    constexpr size_t next_power_of_2(size_t n) {
         if (n == 0) return 1;
         n--;
         n |= n >> 1;
@@ -210,13 +188,11 @@ namespace kio
         n |= n >> 4;
         n |= n >> 8;
         n |= n >> 16;
-        if constexpr (sizeof(size_t) == 8)
-        {
+        if constexpr (sizeof(size_t) == 8) {
             n |= n >> 32;
         }
         return n + 1;
     }
-
-}  // namespace kio
+} // namespace kio
 
 #endif  // KIO_LOCK_FREE_QUEUE_H
