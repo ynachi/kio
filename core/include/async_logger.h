@@ -4,7 +4,7 @@
 #define KIO_ASYNC_LOGGER_H
 
 #include <chrono>
-#include <cstdint>
+#include <syncstream>
 #include <cstring>
 #include <array>
 #include <span>
@@ -124,7 +124,7 @@ namespace kio {
               use_color_(false) {
             wakeup_fd_ = eventfd(0, EFD_CLOEXEC);
             if (wakeup_fd_ < 0) {
-                std::cerr << "Failed to create logger eventfd: " << strerror(errno) << std::endl;
+                std::osyncstream(std::cerr) << "Failed to create logger eventfd: " << strerror(errno) << std::endl;
             }
 
             if (&output_stream_ == &std::cout) use_color_ = ::isatty(STDOUT_FILENO) != 0;
@@ -220,11 +220,12 @@ namespace kio {
                     if (wakeup_fd_ >= 0) {
                         constexpr uint64_t val = 1;
                         if (const ssize_t ret = ::write(wakeup_fd_, &val, sizeof(val)); ret < 0 && errno != EAGAIN) {
-                            std::cerr << "Logger wakeup write() error: " << strerror(errno) << std::endl;
+                            std::osyncstream(std::cerr) << "Logger wakeup write() error: " << strerror(errno) <<
+                                    std::endl;
                         }
                     }
                 } else {
-                    std::cerr << "Logger queue full. Dropping message.\n";
+                    std::osyncstream(std::cerr) << "Logger queue full. Dropping message.\n";
                 }
             } catch (const std::exception &e) {
                 std::string fallback = std::string("<log format error: ") + e.what() + ">";
@@ -252,7 +253,7 @@ namespace kio {
                 } else {
                     if (ssize_t ret = ::read(wakeup_fd_, &val, sizeof(val)); ret < 0) {
                         if (errno == EINTR) continue;
-                        std::cerr << "Logger wakeup read() error: " << strerror(errno) << std::endl;
+                        std::osyncstream(std::cerr) << "Logger wakeup read() error: " << strerror(errno) << std::endl;
                         break;
                     }
                 }
@@ -271,7 +272,7 @@ namespace kio {
                                     msg.timestamp.time_since_epoch()) % 1000;
                 time_str = std::format("{:%Y-%m-%d %H:%M:%S}.{:03d}", msg.timestamp, ms.count());
             } catch (...) {
-                time_str = "????-??-?? ??:??:??.???";
+                time_str = R"(????-??-?? ??:??:??.???)";
             }
 
             std::string_view filename = msg.file;
@@ -399,30 +400,30 @@ namespace kio::alog {
     }
 
     template<typename... Args>
-    inline void trace(const std::source_location &loc,
-                      std::format_string<Args...> fmt,
-                      Args &&... args) {
+    void trace(const std::source_location &loc,
+               std::format_string<Args...> fmt,
+               Args &&... args) {
         get().trace(loc, fmt, std::forward<Args>(args)...);
     }
 
     template<typename... Args>
-    inline void debug(const std::source_location &loc,
-                      std::format_string<Args...> fmt,
-                      Args &&... args) {
+    void debug(const std::source_location &loc,
+               std::format_string<Args...> fmt,
+               Args &&... args) {
         get().debug(loc, fmt, std::forward<Args>(args)...);
     }
 
     template<typename... Args>
-    inline void info(const std::source_location &loc,
-                     std::format_string<Args...> fmt,
-                     Args &&... args) {
+    void info(const std::source_location &loc,
+              std::format_string<Args...> fmt,
+              Args &&... args) {
         get().info(loc, fmt, std::forward<Args>(args)...);
     }
 
     template<typename... Args>
-    inline void warn(const std::source_location &loc,
-                     std::format_string<Args...> fmt,
-                     Args &&... args) {
+    void warn(const std::source_location &loc,
+              std::format_string<Args...> fmt,
+              Args &&... args) {
         get().warn(loc, fmt, std::forward<Args>(args)...);
     }
 

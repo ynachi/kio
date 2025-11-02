@@ -67,7 +67,7 @@ Task<std::expected<size_t, Error> > count_chars_in_file(Worker &worker, std::str
 }
 
 int main() {
-    alog::configure(4096, LogLevel::Disabled);
+    alog::configure(4096, LogLevel::Info);
 
     // Create a dummy file for the demo
     const char *test_filename = "test_file.txt";
