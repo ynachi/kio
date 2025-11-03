@@ -555,6 +555,10 @@ namespace kio
         [[nodiscard]] constexpr std::string_view category_string() const { return IoErrorToString(category); }
     };
 
+    //Kio Result. An alias for a type which can return kio Error
+    template<typename T>
+    using Result = std::expected<T, Error>;
+
 }  // namespace kio
 
 namespace kio_try_internal
@@ -570,6 +574,7 @@ namespace kio_try_internal
     template<typename Exp, typename Decayed = std::decay_t<Exp>, typename ValueT = Decayed::value_type>
     std::enable_if_t<std::is_void_v<ValueT>, void> kio_try_unwrap_impl(Exp&&)
     {
+        return;
         // no-op for expected<void, E>
     }
 

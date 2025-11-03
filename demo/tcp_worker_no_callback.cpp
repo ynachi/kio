@@ -28,12 +28,12 @@ DetachedTask HandleClient(Worker &worker, const int client_fd) {
     while (!st.stop_requested()) {
         auto n = co_await worker.async_read(client_fd, std::span(buffer, sizeof(buffer)), -1);
         if (!n.has_value()) {
-            spdlog::debug("Read failed {}", n.error().message());
+            ALOG_INFO("Read failed {}", n.error().message());
             break;
         }
 
         if (n == 0) {
-            spdlog::info("Client disconnected");
+            ALOG_INFO("Client disconnected");
             break;
         }
 
@@ -41,7 +41,7 @@ DetachedTask HandleClient(Worker &worker, const int client_fd) {
         auto sent = co_await worker.async_write(client_fd, std::span(response.data(), response.size()), -1);
 
         if (!sent.has_value()) {
-            spdlog::error("Write failed: {}", sent.error().message());
+            ALOG_ERROR("Write failed: {}", sent.error().message());
             break;
         }
     }
@@ -52,7 +52,7 @@ DetachedTask HandleClient(Worker &worker, const int client_fd) {
 
 // 2. accept_loop is an awaitable Task<void>.
 Task<void> accept_loop(Worker &worker, int listen_fd) {
-    spdlog::info("Worker accepting connections");
+    ALOG_INFO("Worker accepting connections");
     const auto st = worker.get_stop_token();
 
     while (!st.stop_requested()) {
@@ -71,24 +71,24 @@ Task<void> accept_loop(Worker &worker, int listen_fd) {
             if (st.stop_requested()) {
                 break;
             }
-            spdlog::error("Accept failed: {}", client_fd.error().message());
+            ALOG_ERROR("Accept failed: {}", client_fd.error().message());
             continue;
         }
 
-        spdlog::debug("Accepted connection on fd {}", client_fd.value());
+        ALOG_DEBUG("Accepted connection on fd {}", client_fd.value());
 
         // This is still "fire and forget"
         HandleClient(worker, client_fd.value()).detach();
     }
 
-    spdlog::info("Worker {} stop accepting connexions", worker.get_id());
+    ALOG_INFO("Worker {} stop accepting connexions", worker.get_id());
     co_return;
 }
 
 int main() {
     // 1. Application configuration
     signal(SIGPIPE, SIG_IGN);
-    spdlog::set_level(spdlog::level::info);
+    alog::configure(1024, LogLevel::Info);
 
     const std::string ip_address = "127.0.0.1";
     constexpr int port = 8080;
@@ -96,10 +96,10 @@ int main() {
     auto server_fd = create_tcp_socket(ip_address, port, 128);
     if (!server_fd) {
         // Assuming IoErrorToString exists
-        spdlog::error("Failed to create server socket: {}", server_fd.error().message());
+        ALOG_ERROR("Failed to create server socket: {}", server_fd.error().message());
         return 1;
     }
-    spdlog::info("server listening on endpoint: {}:{}, FD:{}", ip_address, port, server_fd.value());
+    ALOG_INFO("server listening on endpoint: {}:{}, FD:{}", ip_address, port, server_fd.value());
 
     // 2. Worker setup
     WorkerConfig config{};
@@ -111,11 +111,11 @@ int main() {
     // 3. Start the event loop in a background thread, so that
     // the main can run the rest of the code
     auto thread = std::jthread([&worker] { worker.loop_forever(); });
-    spdlog::info("Main thread: Waiting for worker to initialize...");
+    ALOG_INFO("Main thread: Waiting for worker to initialize...");
 
     // 4. Important! wait for the worker to fully start
     worker.wait_ready();
-    spdlog::info("Main thread: Worker is ready.");
+    ALOG_INFO("Main thread: Worker is ready.");
 
     // now start listening to clients
     // The code blocks here so the lines after will not run.
@@ -126,13 +126,13 @@ int main() {
     std::cout << "Server listening on 127.0.0.1:8080. Press Enter to stop...\n";
     std::cin.get();
 
-    spdlog::info("Main thread: Requesting worker stop...");
+    ALOG_INFO("Main thread: Requesting worker stop...");
     if (const auto res = worker.request_stop(); !res) {
-        spdlog::error("failed to request the event loop to stop");
+        ALOG_ERROR("failed to request the event loop to stop");
         return 1;
     }
 
-    spdlog::info("Main thread: Worker has shut down. Exiting.");
+    ALOG_INFO("Main thread: Worker has shut down. Exiting.");
 
     return 0;
 }

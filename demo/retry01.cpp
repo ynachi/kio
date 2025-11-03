@@ -3,7 +3,8 @@
 #include "core/include/io/worker.h"
 #include "core/include/net.h"
 #include "core/include/sync_wait.h"
-#include "spdlog/spdlog.h"
+#include "core/include/errors.h"
+#include "core/include/async_logger.h"
 
 using namespace kio;
 using namespace io;
@@ -12,7 +13,7 @@ using namespace net;
 /**
  * @brief Attempts to connect to a server, retrying with exponential backoff.
  */
-Task<std::expected<int, Error>> connect_with_retries(Worker& worker)
+Task<Result<int>> connect_with_retries(Worker& worker)
 {
     co_await SwitchToWorker(worker);
 
@@ -28,18 +29,18 @@ Task<std::expected<int, Error>> connect_with_retries(Worker& worker)
         // Use the 2-argument KIO_TRY for assignment
         int fd = KIO_TRY(create_raw_socket(addr.family));
 
-        spdlog::info("Attempt {}/{} to connect...", i + 1, max_retries);
+        ALOG_INFO("Attempt {}/{} to connect...", i + 1, max_retries);
         // Add reinterpret_cast to match const sockaddr*
         auto connect_result = co_await worker.async_connect(fd, reinterpret_cast<const sockaddr*>(&addr.addr), addr.addrlen);
 
         if (connect_result)
         {
-            spdlog::info("Connection successful on attempt {}!", i + 1);
+            ALOG_INFO("Connection successful on attempt {}!", i + 1);
             co_return fd;  // Success!
         }
 
         // Connection failed. Log it, close the failed fd, and wait.
-        spdlog::warn("Connect failed: {}. Retrying in {:.1f}s.", connect_result.error().message(), std::chrono::duration<double>(delay).count());
+        ALOG_WARN("Connect failed: {}. Retrying in {:.1f}s.", connect_result.error().message(), std::chrono::duration<double>(delay).count());
 
         close(fd);
 
@@ -50,21 +51,20 @@ Task<std::expected<int, Error>> connect_with_retries(Worker& worker)
         delay *= 2;
     }
 
-    spdlog::error("All {} connection attempts failed.", max_retries);
+    ALOG_ERROR("All {} connection attempts failed.", max_retries);
     co_return std::unexpected(Error::from_errno(ETIMEDOUT));
 }
 
 int main()
 {
-    spdlog::set_level(spdlog::level::info);
+    alog::configure(4096, LogLevel::Info);
     Worker worker(0, {});
     std::jthread t([&] { worker.loop_forever(); });
     worker.wait_ready();
 
-    auto result = SyncWait(connect_with_retries(worker));
-    if (!result)
+    if (auto result = SyncWait(connect_with_retries(worker)); !result)
     {
-        spdlog::error("connect_with_retries failed: {}", result.error().message());
+        ALOG_ERROR("connect_with_retries failed: {}", result.error().message());
     }
 
     // Cast to (void) to suppress the nodiscard warning

@@ -116,7 +116,7 @@ namespace kio {
 
     class Logger {
     public:
-        explicit Logger(size_t queue_size = 1024, LogLevel level = LogLevel::Info,
+        explicit Logger(const size_t queue_size = 1024, const LogLevel level = LogLevel::Info,
                         std::ostream &output_stream = std::cout)
             : queue_(queue_size),
               level_(level),
@@ -136,7 +136,7 @@ namespace kio {
             consumer_thread_.request_stop();
 
             if (wakeup_fd_ >= 0) {
-                uint64_t val = 1;
+                constexpr uint64_t val = 1;
                 (void) ::write(wakeup_fd_, &val, sizeof(val));
             }
 
@@ -152,8 +152,7 @@ namespace kio {
 
         [[nodiscard]]
         bool should_log(LogLevel lvl) const noexcept {
-            auto current_level = level_.load(std::memory_order_relaxed);
-            if (current_level == LogLevel::Disabled) return false;
+            if (const auto current_level = level_.load(std::memory_order_relaxed); current_level == LogLevel::Disabled) return false;
             return static_cast<int>(lvl) >= static_cast<int>(level_.load(std::memory_order_relaxed));
         }
 
@@ -251,7 +250,7 @@ namespace kio {
                 if (wakeup_fd_ < 0) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(50));
                 } else {
-                    if (ssize_t ret = ::read(wakeup_fd_, &val, sizeof(val)); ret < 0) {
+                    if (const ssize_t ret = ::read(wakeup_fd_, &val, sizeof(val)); ret < 0) {
                         if (errno == EINTR) continue;
                         std::osyncstream(std::cerr) << "Logger wakeup read() error: " << strerror(errno) << std::endl;
                         break;
@@ -302,7 +301,7 @@ namespace kio {
             }
         }
 
-        const char *level_color(LogLevel lvl) const noexcept {
+        const char *level_color(const LogLevel lvl) const noexcept {
             if (!use_color_) return "";
             switch (lvl) {
                 case LogLevel::Trace: return "\033[37m";
@@ -379,9 +378,7 @@ namespace kio::alog {
 
     inline Logger &get() {
         // Get the pointer set by configure()
-        auto &ptr = global_logger_ptr();
-
-        if (ptr) {
+        if (const auto &ptr = global_logger_ptr()) {
             // If configure() was called, return its logger
             return *ptr;
         }

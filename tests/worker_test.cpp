@@ -15,13 +15,6 @@
 using namespace kio;
 using namespace kio::io;
 
-/**
- * @brief A GTest Fixture to manage the lifecycle of a Worker for each test.
- *
- * This harness automatically creates a Worker, runs it on a background
- * thread, waits for it to be ready, and then cleanly shuts it down
- * after each test.
- */
 class WorkerTest : public ::testing::Test {
 protected:
     std::unique_ptr<Worker> worker;
@@ -47,7 +40,6 @@ protected:
 
     void TearDown() override {
         // Request the worker to stop and wait for its thread to join.
-        // The jthread destructor will join, but explicit stop is cleaner.
         (void) worker->request_stop();
         worker_thread.reset();
         worker.reset();
@@ -56,9 +48,6 @@ protected:
     // Helper coroutine to run a test on the worker thread
     template<typename Awaitable>
     auto RunOnWorker(Awaitable &&awaitable) {
-        // FIX: 'co_await' cannot be used in 'decltype'.
-        // We get the underlying awaitable type, remove references,
-        // and then use declval to get the return type of its await_resume().
         using AwaitableType = std::remove_reference_t<Awaitable>;
         auto task = [&]() -> Task<decltype(std::declval<AwaitableType>().await_resume())> {
             co_await SwitchToWorker(*worker);
@@ -75,9 +64,9 @@ TEST_F(WorkerTest, AsyncSleep) {
         // We must switch to the worker thread to use its io_uring features
         co_await SwitchToWorker(*worker);
 
-        auto start = std::chrono::steady_clock::now();
+        const auto start = std::chrono::steady_clock::now();
         auto result = co_await worker->async_sleep(std::chrono::milliseconds(20));
-        auto end = std::chrono::steady_clock::now();
+        const auto end = std::chrono::steady_clock::now();
 
         // Check 1: The operation must succeed
         EXPECT_TRUE(result.has_value()) << result.error().message();
@@ -94,7 +83,7 @@ TEST_F(WorkerTest, AsyncSleep) {
 TEST_F(WorkerTest, AsyncReadOnBadFdReturnsError) {
     auto test_coro = [&]() -> Task<void> {
         co_await SwitchToWorker(*worker);
-        int bad_fd = 999;
+        constexpr int bad_fd = 999;
         char buffer[10];
 
         // We expect this to fail
@@ -115,8 +104,8 @@ TEST_F(WorkerTest, AsyncReadWriteSocketPair) {
     int fds[2];
     // Create a connected pair: fds[0] <--> fds[1]
     ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
-    int read_fd = fds[0];
-    int write_fd = fds[1];
+    const int read_fd = fds[0];
+    const int write_fd = fds[1];
 
     auto test_coro = [&]() -> Task<void> {
         co_await SwitchToWorker(*worker);

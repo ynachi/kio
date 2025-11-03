@@ -64,8 +64,8 @@ TEST_F(FileManagerTest, FileAffinity) {
         auto &file2 = file2_exp.value();
 
         // Get the thread ID used to process each file handle
-        std::thread::id id1 = co_await get_thread_id(file1);
-        std::thread::id id2 = co_await get_thread_id(file2);
+        const std::thread::id id1 = co_await get_thread_id(file1);
+        const std::thread::id id2 = co_await get_thread_id(file2);
 
         // The thread IDs MUST be the same, proving affinity
         EXPECT_EQ(id1, id2);

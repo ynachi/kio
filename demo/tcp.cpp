@@ -5,9 +5,11 @@
 #include <iostream>
 #include <netinet/in.h>
 
-#include "../core/include/io/worker_pool.h"
+#include "core/include/io/worker_pool.h"
+#include "core/include/async_logger.h"
 
 using namespace kio::io;
+using namespace kio;
 
 // User defines their application logic as coroutines
 kio::DetachedTask handle_client(Worker& worker, const int client_fd)
@@ -21,14 +23,14 @@ kio::DetachedTask handle_client(Worker& worker, const int client_fd)
         auto n = co_await worker.async_read(client_fd, std::span(buffer, sizeof(buffer)), -1);
         if (!n.has_value())
         {
-            spdlog::debug("Read failed: {}", n.error().message());
+            ALOG_DEBUG("Read failed: {}", n.error().message());
             // in the io_uring world, most of the errors are fatal, so no need to specialize
             break;
         }
 
         if (n == 0)
         {
-            spdlog::info("Client disconnected");
+            ALOG_INFO("Client disconnected");
             break;
         }
 
@@ -40,7 +42,7 @@ kio::DetachedTask handle_client(Worker& worker, const int client_fd)
 
         if (!sent.has_value())
         {
-            spdlog::error("Write failed: {}", sent.error().message());
+            ALOG_ERROR("Write failed: {}", sent.error().message());
             break;
         }
     }
@@ -51,7 +53,7 @@ kio::DetachedTask handle_client(Worker& worker, const int client_fd)
 // Accept loop - runs on each worker independently
 kio::DetachedTask accept_loop(Worker& worker, int listen_fd)
 {
-    spdlog::info("Worker accepting connections");
+    ALOG_INFO("Worker accepting connections");
     const auto st = worker.get_stop_token();
 
     while (!st.stop_requested())
@@ -64,17 +66,17 @@ kio::DetachedTask accept_loop(Worker& worker, int listen_fd)
 
         if (!client_fd.has_value())
         {
-            spdlog::error(client_fd.error().message());
+            ALOG_ERROR("error: {}", client_fd.error().message());
             continue;
         }
 
-        spdlog::debug("Accepted connection on fd {}", client_fd.value());
+        ALOG_DEBUG("Accepted connection on fd {}", client_fd.value());
 
         // Spawn coroutine to handle this client
         // Each connection runs independently on this worker
         handle_client(worker, client_fd.value()).detach();
     }
-    spdlog::info("Worker {} stop accepting connexions", worker.get_id());
+    ALOG_INFO("Worker {} stop accepting connexions", worker.get_id());
 }
 
 int main()
@@ -82,7 +84,7 @@ int main()
     // ignore
     signal(SIGPIPE, SIG_IGN);
     // Setup logging
-    spdlog::set_level(spdlog::level::info);
+    alog::configure(4096, LogLevel::Info);
 
     // Create a listening socket
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -108,7 +110,7 @@ int main()
         throw std::system_error(errno, std::system_category(), "listen failed");
     }
 
-    spdlog::info("Listening on port 8080");
+    ALOG_INFO("Listening on port 8080");
 
     // Configure workers
     WorkerConfig config{};
@@ -120,14 +122,14 @@ int main()
     // Each worker will run accept_loop independently
     IOPool pool(4, config, [server_fd](Worker& worker) { accept_loop(worker, server_fd).detach(); });
 
-    spdlog::info("Server running with 4 workers. Press Ctrl+C to stop.");
+    ALOG_INFO("Server running with 4 workers. Press Ctrl+C to stop.");
 
     // Main thread waits (or handles signals)
     std::cout << "Server running. Press Enter to stop..." << std::endl;
     std::cin.get();  // Blocks until user presses Enter
     pool.stop();
 
-    spdlog::info("Server stopped from main");
+    ALOG_INFO("Server stopped from main");
 
     // std::this_thread::sleep_until(std::chrono::steady_clock::time_point::max());
 

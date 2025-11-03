@@ -11,7 +11,7 @@
 
 
 namespace kio::net {
-    std::expected<SocketAddress, Error> parse_address(std::string_view ip_address, const uint16_t port) {
+    Result<SocketAddress> parse_address(std::string_view ip_address, const uint16_t port) {
         SocketAddress result;
 
         // Try IPv4 first
@@ -40,7 +40,7 @@ namespace kio::net {
         return result;
     }
 
-    std::expected<int, Error> create_raw_socket(const int family) {
+    Result<int> create_raw_socket(const int family) {
         const int server_fd = ::socket(family, SOCK_STREAM, 0);
         if (server_fd < 0) {
             const int err = errno;
@@ -50,7 +50,7 @@ namespace kio::net {
         return server_fd;
     }
 
-    std::expected<int, Error> create_tcp_socket(std::string_view ip_address, const uint16_t port, const int backlog) {
+    Result<int> create_tcp_socket(std::string_view ip_address, const uint16_t port, const int backlog) {
         auto socket_addr = parse_address(ip_address, port);
         if (!socket_addr) {
             return std::unexpected(socket_addr.error());
@@ -79,7 +79,7 @@ namespace kio::net {
         return server_fd;
     }
 
-    std::expected<void, Error> listen_on_sock(const int fd, const SocketAddress &addr, const int backlog) {
+    Result<void> listen_on_sock(const int fd, const SocketAddress &addr, const int backlog) {
         // Bind
         if (::bind(fd, reinterpret_cast<const sockaddr *>(&addr.addr), addr.addrlen)) {
             return std::unexpected(Error::from_errno(errno));
@@ -98,7 +98,7 @@ namespace kio::net {
         return {};
     }
 
-    std::expected<void, Error> set_fd_server_options(const int fd) {
+    Result<void> set_fd_server_options(const int fd) {
         constexpr int option = 1;
 
         if (::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &option, sizeof(option)) < 0) {

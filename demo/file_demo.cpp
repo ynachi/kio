@@ -14,6 +14,7 @@
 #include "core/include/io/worker.h"
 #include "core/include/sync_wait.h"
 #include "core/include/async_logger.h"
+#include "core/include/errors.h"
 
 using namespace kio;
 using namespace kio::io;
@@ -29,7 +30,7 @@ using namespace kio::io;
  * @param target_char The character to count.
  * @return A Task containing the final count.
  */
-Task<std::expected<size_t, Error> > count_chars_in_file(Worker &worker, std::string_view filename, char target_char) {
+Task<Result<size_t> > count_chars_in_file(Worker &worker, std::string_view filename, char target_char) {
     ALOG_INFO("[main coro] Starting on thread ID: {}", std::hash<std::thread::id>{}(std::this_thread::get_id()));
 
     // Switch execution from the calling thread (main) to the worker's thread.

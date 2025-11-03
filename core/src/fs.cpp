@@ -20,8 +20,7 @@ namespace kio {
     FileManager::FileManager(const size_t io_worker_count, const io::WorkerConfig &config) : pool_(
         io_worker_count, config) { ALOG_INFO("started file manager with {} workers", io_worker_count); }
 
-    Task<std::expected<File, Error> >
-    FileManager::async_open(std::string_view path, const int flags, const mode_t mode) {
+    Task<Result<File> > FileManager::async_open(std::string_view path, const int flags, const mode_t mode) {
         auto worker_id = pool_.get_worker_id_by_key(absolute_path(path));
         auto *worker = pool_.get_worker(worker_id);
         if (!worker) {
@@ -37,7 +36,7 @@ namespace kio {
         co_return std::expected<File, Error>(std::in_place, fd, pool_, worker_id);
     }
 
-    Task<std::expected<size_t, Error> > File::async_read(std::span<char> buf, const uint64_t offset) const {
+    Task<Result<size_t> > File::async_read(std::span<char> buf, const uint64_t offset) const {
         auto *worker = pool_.get_worker(worker_id_);
         if (!worker) {
             co_return std::unexpected(Error::from_errno(EINVAL));
@@ -51,7 +50,7 @@ namespace kio {
         co_return res;
     }
 
-    Task<std::expected<size_t, Error> > File::async_write(std::span<const char> buf, const uint64_t offset) const {
+    Task<Result<size_t> > File::async_write(std::span<const char> buf, const uint64_t offset) const {
         auto *worker = pool_.get_worker(worker_id_);
         if (!worker) {
             co_return std::unexpected(Error::from_errno(EINVAL));

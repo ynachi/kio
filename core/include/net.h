@@ -27,22 +27,22 @@ namespace kio::net
      * @param backlog
      * @return
      */
-    std::expected<int, Error> create_tcp_socket(std::string_view ip_address, std::uint16_t port, int backlog);
-    std::expected<void, Error> listen_on_sock(int fd, const SocketAddress& addr, int backlog);
+    Result<int> create_tcp_socket(std::string_view ip_address, std::uint16_t port, int backlog);
+    Result<void> listen_on_sock(int fd, const SocketAddress& addr, int backlog);
     // set so_reuse on sockets
-    std::expected<void, Error> set_fd_server_options(int fd);
+    Result<void> set_fd_server_options(int fd);
     /**
      * @brief Creates a raw socket file descriptor.
      * @return A socket FD on success, or an IoError.
      */
-    std::expected<int, Error> create_raw_socket(int family);
+    Result<int> create_raw_socket(int family);
     /**
      * Turns an ip/hostname port into a socket address
      * @param ip_address ip or hostname
      * @param port port
      * @return
      */
-    std::expected<SocketAddress, Error> parse_address(std::string_view ip_address, uint16_t port);
+    Result<SocketAddress> parse_address(std::string_view ip_address, uint16_t port);
 }  // namespace kio::net
 
 #endif  // KIO_NET_H

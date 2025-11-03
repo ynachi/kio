@@ -64,7 +64,7 @@ namespace kio {
          * @return The number of bytes read or an error.
          * */
         [[nodiscard]]
-        Task<std::expected<size_t, Error> > async_read(std::span<char> buf, uint64_t offset) const;
+        Task<Result<size_t>> async_read(std::span<char> buf, uint64_t offset) const;
 
         /**
          *  This method makes a single write() call to the underlined IO. It may or may not write the total of the data.
@@ -74,7 +74,7 @@ namespace kio {
          * @return The number of bytes written or an error
          */
         [[nodiscard]]
-        Task<std::expected<size_t, Error> > async_write(std::span<const char> buf, uint64_t offset) const;
+        Task<Result<size_t>> async_write(std::span<const char> buf, uint64_t offset) const;
     };
 
     /**
@@ -111,7 +111,7 @@ namespace kio {
          * @return The file created or an Io error.
          */
         [[nodiscard]]
-        Task<std::expected<File, Error> > async_open(std::string_view path, int flags, mode_t mode);
+        Task<Result<File>> async_open(std::string_view path, int flags, mode_t mode);
     };
 } // namespace kio
 
