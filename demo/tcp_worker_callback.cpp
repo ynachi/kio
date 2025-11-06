@@ -102,23 +102,26 @@ int main() {
 
     std::stop_source stop_source;
 
+    // Here we create the worker and assign the accept_loop coroutine to it. This is one way to run
+    // our io operations in the worker thread. Because that function runs directly in the worker, we don't need to use
+    // the SwitchToWorker mechanism. Also notes that workers are lazy. Here the worker is created, but the event loop
+    // is not started yet.
     Worker worker(0, config, [server_fd](Worker &worker) { accept_loop(worker, server_fd.value()).detach(); });
 
     ALOG_INFO("Main thread: Waiting for worker to initialize...");
 
-    // 6. Start the worker in a thread to be able to stop it
+    // Start the worker in a thread. This is useful because loop_forever is a blocking method.
+    // If we want to execute the rest of this code, whose purpose is to control how we stop
+    // the worker, we need to do that.
     std::jthread t([&]() { worker.loop_forever(); });
 
-    // OK Now my server blocks here. I have seen some meta Folly code and they do the same.
-    // but how do I stop the server?
     ALOG_INFO("Main thread: Worker is ready.");
 
-    // 7. The worker is now running the echo_server coroutine.
-    //    The main thread can do other things or just wait.
+    // Block here, wait for the user input to progress.
     ALOG_INFO("Server listening on 127.0.0.1:8080. Press Enter to stop...");
     std::cin.get();
 
-    // 8. Request the worker to stop
+    // Request the worker to stop.
     ALOG_INFO("Main thread: Requesting worker stop...");
     if (const auto ret = worker.request_stop(); !ret) {
         ALOG_ERROR("failed to request the event loop to stop");

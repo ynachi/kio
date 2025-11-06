@@ -19,7 +19,7 @@ Task<Result<int>> connect_with_retries(Worker& worker)
 
     // This is an address we know will refuse connection.
     // Use the 2-argument KIO_TRY for assignment
-    SocketAddress addr = KIO_TRY(parse_address("127.0.0.1", 8080));
+    const SocketAddress addr = KIO_TRY(parse_address("127.0.0.1", 8080));
 
     int max_retries = 5;
     auto delay = std::chrono::milliseconds(200);
@@ -31,7 +31,7 @@ Task<Result<int>> connect_with_retries(Worker& worker)
 
         ALOG_INFO("Attempt {}/{} to connect...", i + 1, max_retries);
         // Add reinterpret_cast to match const sockaddr*
-        auto connect_result = co_await worker.async_connect(fd, reinterpret_cast<const sockaddr*>(&addr.addr), addr.addrlen);
+        auto connect_result = co_await worker.async_connect(fd, reinterpret_cast<const sockaddr*>(&addr), addr.addrlen);
 
         if (connect_result)
         {
