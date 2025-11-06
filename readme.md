@@ -37,7 +37,7 @@ from a different thread will result in data races and undefined behaviors. We pr
 avoid this issue. We provide some demos to show how to use the `SwitchToWorker` mechanism.  A worker can be initialized 
 with a callback coroutine which will be called upon start. Its useful for cases like network servers where your entry point 
 is a single, well-defined function.  I heard you cry when you saw the word `callback`. Rest assured, this is not a 
-callback asynchronous model. Keep reading.
+callback asynchronous model. Keep reading.  
 You can refer to the [io-trace](./docs/io_traces.md) document to see the flow of an I/O operation within a worker.  
 Look at the following demos to see some examples of how to use `Worker`.  
 - [Worker with callback](./demo/tcp_worker_callback.cpp)
@@ -72,13 +72,13 @@ TEST(SyncWaitTest, NestedTasks)
 
 ## DetachedTask
 A `DetachedTask` is a coroutine that can be fired and forgotten. Its eagerly started. It can contain lazy coroutines. 
-A `DetachedTask` is useful for background tasks. It does not need to be awaited and does not return a value. 
+A `DetachedTask` is useful for background tasks. It does not need to be awaited and does not return a value.   
 See [Worker without callback, use SwitchToWorker](./demo/tcp_worker_no_callback_v2.cpp) for an example of how to use 
 `DetachedTask`.  
 
 ## SwitchToWorker
 A `SwitchToWorker` is a coroutine that can be used to switch to another worker.  As stated above, all the I/O operations 
 MUST be issued from the worker thread. Submitting an I/O operation from a different thread will result in data races and 
-undefined behaviors. `SwitchToWorker` post any io operation that happens after it to run on the specified worker.
+undefined behaviors. `SwitchToWorker` post any io operation that happens after it to run on the specified worker.  
 See [Worker without callback, use SwitchToWorker](./demo/tcp_worker_no_callback_v2.cpp) for an example of how to use
 `SwitchToWorker`.  
