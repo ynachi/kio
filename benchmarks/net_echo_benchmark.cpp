@@ -7,12 +7,12 @@
 #include <thread>
 #include <netinet/in.h>
 #include <sys/socket.h>
-#include <arpa/inet.h>
 #include <unistd.h>
 
 #include "core/include/io/worker.h"
 #include "core/include/net.h"
 #include "core/include/sync_wait.h"
+#include "core/include/async_logger.h"
 
 using namespace kio;
 using namespace kio::io;
@@ -23,7 +23,6 @@ using namespace kio::net;
 DetachedTask echo_server(Worker &worker, int listen_fd) {
     auto client_fd_exp = co_await worker.async_accept(listen_fd, nullptr, nullptr);
     if (!client_fd_exp) {
-        spdlog::error("Benchmark server accept failed");
         co_return;
     }
     int client_fd = *client_fd_exp;
@@ -55,7 +54,7 @@ public:
     std::unique_ptr<std::jthread> server_thread;
 
     void SetUp(const ::benchmark::State &state) override {
-        spdlog::set_level(spdlog::level::off);
+        alog::configure(1024, LogLevel::Disabled);
 
         // 1. Create a server socket on a random port
         auto server_fd_exp = create_tcp_socket("127.0.0.1", 0, 1);

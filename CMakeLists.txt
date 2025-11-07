@@ -4,6 +4,13 @@ project(kio)
 set(CMAKE_CXX_STANDARD 23)
 set(GTEST_GIT_TAG v1.17.0)
 
+# -----------------------------------------
+# Optional Components
+#------------------------------------------
+option(KIO_BUILD_TESTS "Build the kio test suite" ON)
+option(KIO_BUILD_DEMOS "Build the kio demo executables" ON)
+option(KIO_BUILD_BENCHMARKS "Build the kio benchmark executables" ON)
+
 # Enable Thread Sanitizer for debug builds
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
     set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fsanitize=thread -g")
@@ -16,29 +23,32 @@ endif ()
 #----------------------------------------
 find_package(PkgConfig REQUIRED)
 
-# spdlog
-include(cmake/FindSPlog.cmake)
-
 # gtest
-include(cmake/FindGtest.cmake)
+if(KIO_BUILD_TESTS)
+    include(cmake/FindGtest.cmake)
+endif()
 
 # benchmark
-include(${CMAKE_SOURCE_DIR}/cmake/FindBenchmark.cmake)
+if(KIO_BUILD_BENCHMARKS)
+    include(cmake/FindBenchmark.cmake)
+endif()
 
 #-----------------------------------------------
 # Includes
 #----------------------------------------------
 include_directories(${CMAKE_SOURCE_DIR})
 add_subdirectory(core)
-add_subdirectory(demo)
 
-include(CTest)
-enable_testing()
-add_subdirectory(tests)
+if(KIO_BUILD_DEMOS)
+    add_subdirectory(demo)
+endif()
 
-add_subdirectory(benchmarks)
+if(KIO_BUILD_TESTS)
+    include(CTest)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
 
-#------------------------------
-# Targets
-#-----------------------------
-add_executable(kio main.cpp)
+if(KIO_BUILD_BENCHMARKS)
+    add_subdirectory(benchmarks)
+endif()

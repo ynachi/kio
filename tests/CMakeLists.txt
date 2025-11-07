@@ -4,14 +4,14 @@ add_executable(lock_free_free_queue ds/mpsc_queue_test.cpp)
 
 target_link_libraries(sync_wait_test
         PRIVATE
-        core_lib
+        kio_lib
         GTest::gtest
         GTest::gtest_main
 )
 
 target_link_libraries(lock_free_free_queue
         PRIVATE
-        core_lib
+        kio_lib
         GTest::gtest
         GTest::gtest_main
 )
@@ -31,7 +31,7 @@ add_executable(kio_worker_test worker_test.cpp)
 
 target_link_libraries(kio_worker_test
         PRIVATE
-        core_lib
+        kio_lib
         GTest::gtest
         GTest::gtest_main
 )
@@ -51,7 +51,7 @@ add_executable(filemanager_test filemanager_test.cpp)
 
 target_link_libraries(filemanager_test
         PRIVATE
-        core_lib
+        kio_lib
         GTest::gtest
         GTest::gtest_main
 )
@@ -72,7 +72,7 @@ add_executable(kio_logger_test kio_logger_test.cpp)
 
 target_link_libraries(kio_logger_test
         PRIVATE
-        core_lib
+        kio_lib
         GTest::gtest
         GTest::gtest_main
 )
@@ -87,5 +87,3 @@ target_include_directories(kio_logger_test
         ${CMAKE_SOURCE_DIR}/src
 )
 
-# Discover and register tests
-gtest_discover_tests(sync_wait_test lock_free_free_queue)

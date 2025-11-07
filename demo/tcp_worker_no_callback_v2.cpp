@@ -16,7 +16,7 @@ using namespace kio::net;
 
 // Client processing code, which will run in the background on the same thread as the worker.
 // Thus, there is no need to context switch as we are already on the right thread.
-// The loop is sync to the worker's stop signal for a coordinated shutdown.
+// The loop is synced to the worker's stop signal for a coordinated shutdown.
 DetachedTask HandleClient(Worker &worker, const int client_fd) {
     char buffer[8192];
 

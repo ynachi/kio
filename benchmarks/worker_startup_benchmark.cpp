@@ -9,7 +9,9 @@
 #include "core/include/coro.h"
 #include "core/include/io/worker.h"
 #include "core/include/sync_wait.h"
-#include "spdlog/spdlog.h"
+#include "core/include/async_logger.h"
+
+using namespace kio;
 
 // --- Benchmark 1: Callback-based Startup ---
 // This pattern is used in tcp_worker_callback.cpp
@@ -17,7 +19,7 @@
 /**
  * @brief The task to be run by the worker's init callback.
  */
-static kio::DetachedTask CallbackTask(std::latch& latch)
+static DetachedTask CallbackTask(std::latch& latch)
 {
     // This code runs on the worker thread
     latch.count_down();
@@ -31,7 +33,7 @@ static kio::DetachedTask CallbackTask(std::latch& latch)
 static void BM_Worker_CallbackStart(benchmark::State& state)
 {
     // Suppress logging during benchmark
-    spdlog::set_level(spdlog::level::off);
+    alog::configure(1024, LogLevel::Disabled);
 
     for (auto _ : state)
     {
@@ -69,7 +71,7 @@ BENCHMARK(BM_Worker_CallbackStart);
 /**
  * @brief The task to be run from an external thread.
  */
-static kio::Task<void> SwitchToWorkerTask(kio::io::Worker& worker, std::latch& latch)
+static Task<void> SwitchToWorkerTask(kio::io::Worker& worker, std::latch& latch)
 {
     // This code starts on the external (main) thread
     co_await kio::io::SwitchToWorker(worker);
@@ -86,7 +88,7 @@ static kio::Task<void> SwitchToWorkerTask(kio::io::Worker& worker, std::latch& l
 static void BM_Worker_SwitchToWorkerStart(benchmark::State& state)
 {
     // Suppress logging during benchmark
-    spdlog::set_level(spdlog::level::off);
+    alog::configure(1024, LogLevel::Disabled);
 
     for (auto _ : state)
     {

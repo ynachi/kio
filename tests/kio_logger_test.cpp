@@ -36,10 +36,12 @@ TEST(KioLoggerTest, MacroFastPathZeroCost) {
     std::stringstream ss;
     std::atomic function_called = false;
 
-    auto get_expensive_data = [&]() -> std::string {
-        function_called.store(true);
-        return "This is expensive";
-    }; {
+    {
+        auto get_expensive_data = [&]() -> std::string
+        {
+            function_called.store(true);
+            return "This is expensive";
+        };
         Logger logger(1024, LogLevel::Info, ss);
         // This log should be compiled out by the macro
         KIO_LOG_DEBUG(logger, "Data: {}", get_expensive_data());
@@ -132,7 +134,7 @@ TEST(LoggerTests, DisabledLevelProducesNoOutput) {
 
 TEST(LoggerTests, QueueOverflowDropsMessages) {
     std::ostringstream oss;
-    std::string out; {
+    {
         // Very small queue to force overflow
         Logger logger(4, LogLevel::Info, oss);
 
@@ -146,10 +148,10 @@ TEST(LoggerTests, QueueOverflowDropsMessages) {
     }
 
     // NOW it's safe to read - consumer thread has been joined
-    out = oss.str();
+    std::string out = oss.str();
 
     // Not all 100 should appear (some must drop)
-    int count = std::count(out.begin(), out.end(), '\n');
+    const int count = std::count(out.begin(), out.end(), '\n');
     EXPECT_LT(count, 100);
     EXPECT_GT(count, 0);
 }
