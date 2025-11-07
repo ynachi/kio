@@ -5,8 +5,9 @@
 #include <iostream>
 #include <netinet/in.h>
 
-#include "core/include/io/worker_pool.h"
 #include "core/include/async_logger.h"
+#include "core/include/io/worker_pool.h"
+#include "core/include/net.h"
 
 using namespace kio::io;
 using namespace kio;
@@ -87,25 +88,14 @@ int main()
     alog::configure(4096, LogLevel::Disabled);
 
     // Create a listening socket
-    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    int opt = 1;
-    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    setsockopt(server_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
-
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(8080);
-    addr.sin_addr.s_addr = INADDR_ANY;
-
-    if (bind(server_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0)
+    auto server_fd_exp = net::create_tcp_socket("0.0.0.0", 8080, 4096);
+    if (!server_fd_exp)
     {
-        throw std::system_error(errno, std::system_category(), "bind failed");
+        ALOG_ERROR("Failed to create server socket: {}", server_fd_exp.error().message());
+        return 1;
     }
 
-    if (listen(server_fd, 4096) < 0)
-    {
-        throw std::system_error(errno, std::system_category(), "listen failed");
-    }
+    auto server_fd = *server_fd_exp;
 
     ALOG_INFO("Listening on port 8080");
 
@@ -113,7 +103,6 @@ int main()
     WorkerConfig config{};
     config.uring_queue_depth = 16800;
     config.default_op_slots = 8096;
-    socklen_t addrlen = sizeof(addr);
 
     // Create pool with 4 workers
     // Each worker will run accept_loop independently
