@@ -90,7 +90,7 @@ Task<size_t> count_chars_switch_task(Worker &worker, std::string_view filename, 
 }
 
 BENCHMARK_F(CharCountFixture, BM_CharCount_SwitchToWorker)(benchmark::State &state) {
-    spdlog::set_level(spdlog::level::off);
+    alog::configure(1024, LogLevel::Disabled);
     for (auto _: state) {
         state.PauseTiming(); // Don't measure setup
         WorkerConfig config{};
@@ -142,7 +142,7 @@ DetachedTask count_chars_callback_task(Worker &worker, std::string_view filename
 }
 
 BENCHMARK_F(CharCountFixture, BM_CharCount_Callback)(benchmark::State &state) {
-    spdlog::set_level(spdlog::level::off);
+    alog::configure(1024, LogLevel::Disabled);
     for (auto _: state) {
         state.PauseTiming(); // Don't measure setup
         std::latch completion_latch{1};

@@ -21,6 +21,6 @@ set(CORE_SRC_FILES
         src/fs.cpp
 )
 
-add_library(core_lib ${CORE_HEADER_FILES} ${CORE_SRC_FILES})
-target_link_libraries(core_lib PUBLIC ${LIBURING_LIBRARIES})
-target_compile_options(core_lib PRIVATE -Wall)
+add_library(kio_lib ${CORE_HEADER_FILES} ${CORE_SRC_FILES})
+target_link_libraries(kio_lib PUBLIC ${LIBURING_LIBRARIES})
+target_compile_options(kio_lib PRIVATE -Wall)

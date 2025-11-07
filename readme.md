@@ -82,3 +82,7 @@ MUST be issued from the worker thread. Submitting an I/O operation from a differ
 undefined behaviors. `SwitchToWorker` post any io operation that happens after it to run on the specified worker.  
 See [Worker without callback, use SwitchToWorker](./demo/tcp_worker_no_callback_v2.cpp) for an example of how to use
 `SwitchToWorker`.  
+
+## How to build Kio
+
+See [build.md](./docs/build.md) for instructions on how to build Kio.

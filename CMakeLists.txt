@@ -23,9 +23,6 @@ endif ()
 #----------------------------------------
 find_package(PkgConfig REQUIRED)
 
-# spdlog
-include(cmake/FindSPlog.cmake)
-
 # gtest
 if(KIO_BUILD_TESTS)
     include(cmake/FindGtest.cmake)
