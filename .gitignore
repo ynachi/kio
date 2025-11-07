@@ -112,6 +112,7 @@ tests/file*.txt
 compile_commands.json
 
 # Rust
+*/*/target/
 Cargo.lock
 /target
 dump.rdb
