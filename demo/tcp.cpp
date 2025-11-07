@@ -12,7 +12,7 @@ using namespace kio::io;
 using namespace kio;
 
 // User defines their application logic as coroutines
-kio::DetachedTask handle_client(Worker& worker, const int client_fd)
+DetachedTask handle_client(Worker& worker, const int client_fd)
 {
     char buffer[8192];
     const auto st = worker.get_stop_token();
@@ -51,7 +51,7 @@ kio::DetachedTask handle_client(Worker& worker, const int client_fd)
 }
 
 // Accept loop - runs on each worker independently
-kio::DetachedTask accept_loop(Worker& worker, int listen_fd)
+DetachedTask accept_loop(Worker& worker, int listen_fd)
 {
     ALOG_INFO("Worker accepting connections");
     const auto st = worker.get_stop_token();

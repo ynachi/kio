@@ -87,3 +87,10 @@ target_include_directories(kio_logger_test
         ${CMAKE_SOURCE_DIR}/src
 )
 
+gtest_discover_tests(sync_wait_test)
+gtest_discover_tests(lock_free_free_queue)
+gtest_discover_tests(kio_worker_test)
+gtest_discover_tests(filemanager_test)
+gtest_discover_tests(kio_logger_test)
+
+
