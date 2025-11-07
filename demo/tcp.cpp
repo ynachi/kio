@@ -102,7 +102,7 @@ int main()
         throw std::system_error(errno, std::system_category(), "bind failed");
     }
 
-    if (listen(server_fd, 1024) < 0)
+    if (listen(server_fd, 4096) < 0)
     {
         throw std::system_error(errno, std::system_category(), "listen failed");
     }
@@ -117,8 +117,7 @@ int main()
 
     // Create pool with 4 workers
     // Each worker will run accept_loop independently
-    const auto th_count = std::thread::hardware_concurrency();
-    IOPool pool(th_count, config, [server_fd](Worker& worker) { accept_loop(worker, server_fd).detach(); });
+    IOPool pool(4, config, [server_fd](Worker& worker) { accept_loop(worker, server_fd).detach(); });
 
     ALOG_INFO("Server running with 4 workers. Press Ctrl+C to stop.");
 
