@@ -84,7 +84,7 @@ int main()
     // ignore
     signal(SIGPIPE, SIG_IGN);
     // Setup logging
-    alog::configure(4096, LogLevel::Info);
+    alog::configure(4096, LogLevel::Disabled);
 
     // Create a listening socket
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -99,14 +99,11 @@ int main()
 
     if (bind(server_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0)
     {
-        // spdlog::error("failed to bind socket: {}", strerror(-errno));
         throw std::system_error(errno, std::system_category(), "bind failed");
     }
-    // spdlog::debug("bound socket to {}:{}", ip_address, port);
 
     if (listen(server_fd, 1024) < 0)
     {
-        // spdlog::error("failed to listen on socket: {}", strerror(-errno));
         throw std::system_error(errno, std::system_category(), "listen failed");
     }
 
@@ -114,13 +111,14 @@ int main()
 
     // Configure workers
     WorkerConfig config{};
-    config.uring_queue_depth = 2048;
-    config.default_op_slots = 4096;
+    config.uring_queue_depth = 16800;
+    config.default_op_slots = 8096;
     socklen_t addrlen = sizeof(addr);
 
     // Create pool with 4 workers
     // Each worker will run accept_loop independently
-    IOPool pool(4, config, [server_fd](Worker& worker) { accept_loop(worker, server_fd).detach(); });
+    const auto th_count = std::thread::hardware_concurrency();
+    IOPool pool(th_count, config, [server_fd](Worker& worker) { accept_loop(worker, server_fd).detach(); });
 
     ALOG_INFO("Server running with 4 workers. Press Ctrl+C to stop.");
 
