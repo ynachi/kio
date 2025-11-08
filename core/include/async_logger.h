@@ -18,7 +18,6 @@
 #include <thread>
 #include <source_location>
 #include <sys/eventfd.h>
-#include <functional>
 
 #include "core/include/ds/mpsc_queue.h"
 
@@ -208,7 +207,7 @@ namespace kio {
                 entry.line = loc.line();
                 entry.thread_id = get_thread_id();
 
-                if (result >=0 && static_cast<size_t>(result.size) <= LogMessage::MSG_CAPACITY) {
+                if (result.size >= 0 && static_cast<size_t>(result.size) <= LogMessage::MSG_CAPACITY) {
                     entry.set_small_message(std::span<const char>(stack_buf.data(), written));
                 } else {
                     std::string large = std::format(fmt, std::forward<Args>(args)...);
