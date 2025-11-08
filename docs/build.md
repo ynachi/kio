@@ -14,6 +14,9 @@ sudo dnf install liburing-devel
 
 ## Build
 
+:warning: **Note:** `gcc` is not working, we get a "compiler error (ICE) in GCC". Use `clang` instead.
+`clang 20 and 22` are working fine.
+
 1. Building as a Standalone Project
 
 Optional Build Flags

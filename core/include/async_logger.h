@@ -18,6 +18,7 @@
 #include <thread>
 #include <source_location>
 #include <sys/eventfd.h>
+#include <functional>
 
 #include "core/include/ds/mpsc_queue.h"
 
@@ -136,7 +137,7 @@ namespace kio {
 
             if (wakeup_fd_ >= 0) {
                 constexpr uint64_t val = 1;
-                (void) ::write(wakeup_fd_, &val, sizeof(val));
+                [[maybe_unused]] const auto ret = ::write(wakeup_fd_, &val, sizeof(val));
             }
 
             if (consumer_thread_.joinable()) consumer_thread_.join();
