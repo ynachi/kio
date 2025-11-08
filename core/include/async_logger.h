@@ -208,7 +208,7 @@ namespace kio {
                 entry.line = loc.line();
                 entry.thread_id = get_thread_id();
 
-                if (result.size <= LogMessage::MSG_CAPACITY) {
+                if (result >=0 && static_cast<size_t>(result.size) <= LogMessage::MSG_CAPACITY) {
                     entry.set_small_message(std::span<const char>(stack_buf.data(), written));
                 } else {
                     std::string large = std::format(fmt, std::forward<Args>(args)...);
