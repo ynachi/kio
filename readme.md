@@ -83,6 +83,10 @@ undefined behaviors. `SwitchToWorker` post any io operation that happens after i
 See [Worker without callback, use SwitchToWorker](./demo/tcp_worker_no_callback_v2.cpp) for an example of how to use
 `SwitchToWorker`.  
 
+## FileManager and File 
+`FileManager` is an abstraction to create perform file operations. `FileManager` creates files and assign them to 
+workers based on the path. This affinity is useful for maximum performance. Check the file related demos for more details. 
+
 ## How to build Kio
 
 See [build.md](./docs/build.md) for instructions on how to build Kio.
