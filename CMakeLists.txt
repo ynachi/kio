@@ -33,11 +33,18 @@ if(KIO_BUILD_BENCHMARKS)
     include(cmake/FindBenchmark.cmake)
 endif()
 
+# ylt alibaba yalantislib
+include(cmake/FindYLT.cmake)
+
+# crc32
+include(cmake/FindCRC32C.cmake)
+
 #-----------------------------------------------
 # Includes
 #----------------------------------------------
 include_directories(${CMAKE_SOURCE_DIR})
 add_subdirectory(core)
+add_subdirectory(bitcask)
 
 if(KIO_BUILD_DEMOS)
     add_subdirectory(demo)
