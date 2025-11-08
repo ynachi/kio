@@ -89,5 +89,5 @@ See [build.md](./docs/build.md) for instructions on how to build Kio.
 
 ## Benchmarks against Tokio
 
-see [benchmarks](./docs/benchmarks.md) for benchmarks against Tokio.
+see [benchmarks](./docs/benchmark.md) for benchmarks against Tokio.
 
