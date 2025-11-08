@@ -86,3 +86,8 @@ See [Worker without callback, use SwitchToWorker](./demo/tcp_worker_no_callback_
 ## How to build Kio
 
 See [build.md](./docs/build.md) for instructions on how to build Kio.
+
+## Benchmarks against Tokio
+
+see [benchmarks](./docs/benchmarks.md) for benchmarks against Tokio.
+
