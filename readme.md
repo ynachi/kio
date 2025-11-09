@@ -95,3 +95,8 @@ See [build.md](./docs/build.md) for instructions on how to build Kio.
 
 see [benchmarks](./docs/benchmark.md) for benchmarks against Tokio.
 
+## WIP
+- KTLS
+- BitCask - log structured kv storage - https://riak.com/assets/bitcask-intro.pdf
+
+
