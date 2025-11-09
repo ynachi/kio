@@ -5,34 +5,56 @@
 #include <cstdint>
 #include <iostream>
 #include <string>
-#include <vector>
 #include <typeinfo>
+#include <vector>
 #include <ylt/struct_pack.hpp>
-#include "crc32c/crc32c.h"
 
-struct PersonHeader {
+#include "crc32c/crc32c.h"
+#include "ylt/struct_pack/type_calculate.hpp"
+
+struct PersonHeader
+{
     std::int64_t id;
     std::string name;
+    std::vector<char> data;
 };
 
-struct Person {
+struct Person
+{
     PersonHeader header;
     int age;
     double salary;
 };
 
+struct Entry
+{
+    std::uint64_t timestamp_ns;
+    uint8_t flag = 0;
+    std::string key;
+    std::vector<char> value;
+
+    size_t disk_size() const { return struct_pack::get_needed_size(*this); }
+};
 
 int main()
 {
-    PersonHeader header{.id = 1, .name = "hello struct pack"};
-    Person person1{.header = header, .age = 20, .salary = 1024.42};
+    const PersonHeader header{.id = 1, .name = "key\0with\nnull\tand\rspecial", .data = {1, 2, 3, 4}};
+    const Person person1{.header = header, .age = 20, .salary = 1024.42};
+
+    Entry entry{.timestamp_ns = 1234567890, .key = "hello", .value = {1, 2, 3, 4}};
+
+    std::cout << struct_pack::get_needed_size(entry);
 
     // serialization in one line
     const std::vector<char> result = struct_pack::serialize(person1);
-    std::cout << result.size() << std::endl;
+    auto sz = struct_pack::get_needed_size(person1);
+    std::cout << result.size() << ":" << sz << std::endl;
 
     auto resp = struct_pack::deserialize<Person>(result);
-    std::cout << typeid(resp.value<>()).name() << std::endl;
+    if (resp.value<>().header.data == std::vector<char>{1, 2, 3, 4})
+    {
+        std::cout << "ok" << std::endl;
+    }
 
     std::cout << resp.value().header.name << std::endl;
 

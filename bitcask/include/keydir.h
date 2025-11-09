@@ -38,10 +38,43 @@ namespace bitcask
         /// Used by the load_index process.
         void put_if_newer(std::string&& key, ValueLocation loc) { shard(key).put_if_newer(std::move(key), loc); }
 
-        // Snapshot for hint file generation
-        // TODO: not sure needed
+        /**
+         * @brief Creates a complete, point-in-time copy of the entire key directory.
+         *
+         * This method is the primary way to safely iterate over the index
+         * without holding locks for an extended period. It works by
+         * briefly taking a shared lock on each shard, copying its internal
+         * map, and then releasing the lock.
+         *
+         * The returned map is a deep copy and is completely disconnected
+         * from the live KeyDir. This allows the caller to perform long-running
+         * operations (like merging, compaction, or hint file generation) without
+         * blocking new 'put' or 'get' requests.
+         *
+         * @return A std::unordered_map containing a snapshot of all keys
+         * and their locations at the time the call was made. It could be expensive to use
+         * that method. See for_each_unlocked_shard.
+         */
         [[nodiscard]]
         std::unordered_map<std::string, ValueLocation> snapshot() const;
+
+        /**
+         * @brief Iterates over a snapshot of each shard, one shard at a time.
+         *
+         * This is the recommended way to perform long-running, read-only
+         * operations like compaction or hint file generation.
+         *
+         * It avoids the high memory overhead of a full 'snapshot()' and the
+         * high lock contention of a simple 'for_each()'.
+         *
+         * The provided callback 'fn' is called 'shard_count_' times.
+         * Each time, it is given a 'std::unordered_map' containing a copy
+         * of a single shard's data. The shard's lock is *released*
+         * before your function is called.
+         *
+         * @param fn A function to be called for each shard's data.
+         */
+        void for_each_unlocked_shard(std::function<void(const std::unordered_map<std::string, ValueLocation>&)> fn) const;
 
     private:
         struct Shard

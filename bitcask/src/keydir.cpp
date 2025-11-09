@@ -43,6 +43,20 @@ namespace bitcask
         return full_snapshot;
     }
 
+    void KeyDir::for_each_unlocked_shard(std::function<void(const std::unordered_map<std::string, ValueLocation>&)> fn) const
+    {
+        for (size_t i = 0; i < shard_count_; ++i)
+        {
+            std::unordered_map<std::string, ValueLocation> shard_copy;
+            {
+                std::shared_lock lock(shards_[i]->mu);
+                shard_copy = shards_[i]->index_;
+            }
+
+            fn(shard_copy);
+        }
+    }
+
     [[nodiscard]]
     KeyDir::Shard& KeyDir::shard(std::string_view key) const
     {

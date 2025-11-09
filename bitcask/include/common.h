@@ -15,6 +15,16 @@ namespace bitcask
     constexpr size_t MIN_ON_DISK_SIZE = 12;  // at least CRC + PAYLOAD SIZE
 
     /**
+     * @brief Gets the current time as a 64-bit integer.
+     * @return The number of nanoseconds since the UNIX epoch.
+     */
+    inline std::uint64_t get_current_timestamp_ns()
+    {
+        const auto now = std::chrono::system_clock::now();
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+    }
+
+    /**
      * @brief Reads a Little-Endian integer from a raw buffer.
      *
      * This function safely reads a value of type T (e.g., uint32_t, uint64_t)
