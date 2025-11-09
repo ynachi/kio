@@ -18,6 +18,10 @@ namespace kio
     constexpr int IOURING_SQE_TOO_EARLY = 1002;
     constexpr int IOURING_CANCELLED = 1003;
 
+    // io serialization/deserialization errors
+    constexpr int IO_DESERIALIZATION = 2004;
+    constexpr int IO_DATA_CORRUPTED = 2005;
+
     enum class IoError : int32_t
     {
         Success = 0,
@@ -115,6 +119,10 @@ namespace kio
         IOUringCQFull,
         IOUringSQETooEarly,
         IOUringCancelled,
+
+        // io serialization/deserialization errors
+        IODeserialization,
+        IODataCorrupted,
 
         // Custom application errors
         EmptyBuffer,
@@ -333,6 +341,12 @@ namespace kio
             case IOURING_CANCELLED:
                 return IoError::IOUringCancelled;
 
+            // io serialization and des
+            case IO_DESERIALIZATION:
+                return IoError::IODeserialization;
+            case IO_DATA_CORRUPTED:
+                return IoError::IODataCorrupted;
+
             default:
                 return IoError::Unknown;
         }
@@ -521,6 +535,12 @@ namespace kio
             case IoError::IOUringCancelled:
                 return "io_uring operation was cancelled";
 
+            // io deserialization
+            case IoError::IODataCorrupted:
+                return "IO Data Corrupted error, checksum mismatch";
+            case IoError::IODeserialization:
+                return "IO Deserialization error";
+
             // Custom errors
             case IoError::EmptyBuffer:
                 return "Empty buffer";
@@ -553,9 +573,14 @@ namespace kio
 
         [[nodiscard]] std::string message() const { return std::string(IoErrorToString(category)) + " (errno: " + std::to_string(errno_value) + ")"; }
         [[nodiscard]] constexpr std::string_view category_string() const { return IoErrorToString(category); }
+
+        // Comparison operators
+        constexpr bool operator==(const Error& other) const { return category == other.category && errno_value == other.errno_value; }
+
+        constexpr bool operator!=(const Error& other) const { return !(*this == other); }
     };
 
-    //Kio Result. An alias for a type which can return kio Error
+    // Kio Result. An alias for a type which can return kio Error
     template<typename T>
     using Result = std::expected<T, Error>;
 
