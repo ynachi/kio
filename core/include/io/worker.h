@@ -183,9 +183,7 @@ namespace kio::io
          *
          * @param client_fd The file descriptor to read from.
          * @param buf A span of memory to read data into.
-         * @return A Task that resumes with a Result<int>.
-         * On success: The number of bytes read.
-         * On failure: An Error.
+         * @return An IO result with the client FD or an error
          */
         Task<Result<int>> async_read(int client_fd, std::span<char> buf);
         /**
@@ -198,9 +196,7 @@ namespace kio::io
          * @param client_fd The file descriptor to read from.
          * @param buf A span of memory to read data into.
          * @param offset The file offset to read from.
-         * @return A Task that resumes with a Result<int>.
-         * On success: The number of bytes read.
-         * On failure: An Error.
+         * @return An IO Result embedding the number of bytes read or an error.
          */
         Task<Result<int>> async_read_at(int client_fd, std::span<char> buf, uint64_t offset);
         /**
@@ -209,23 +205,26 @@ namespace kio::io
          * @note This function guarantees that it will not return successfully unless
          * `buf.size()` bytes have been read. It does this by repeatedly calling
          * the underlying `async_read` operation internally until the buffer is
-         * completely filled, automatically handling "short reads".
+         * filled, automatically handling "short reads". This variant is for non-positional FDs
+         * i.e., streaming like networks, pipes, ...
          *
          * @param client_fd The file descriptor to read from.
-         * @param buf A span of memory to be completely filled with data.
-         * @param offset The file offset to read from.
-         * @return A Task that resumes with a Result<void>.
-         * @return On success: An `std::expected` with `has_value() == true`. This
-         * signifies that the entire `buf` span has been filled.
-         * @return On failure: An `Error`.
-         * - This includes any standard I/O error (e.g., `IoError::InvalidFileDescriptor`).
-         * - **Crucially**, if the end-of-file (EOF) is reached (i.e., the underlying
-         * `async_read` returns 0) *before* the buffer is full, this function
-         * will return an `Error` (e.g., `IoError::BrokenPipe` or
-         * `IoError::ConnectionReset`),
-         * as the "exact" read contract was violated.
+         * @param buf A span of memory to be filled with data.
+         * @return An IO Result embedding the number of bytes read or an error.
          */
         Task<Result<void>> async_read_exact(int client_fd, std::span<char> buf);
+        /**
+         * @brief Read the exact data size to fill the provided buffer. This method requires
+         * the FD to be seekable.
+         *
+         * @note Reaching EOF before filling the buffer is considered an error.
+         * In this case, a IoError::IoEoF will be returned.
+         *
+         * @param fd the FD to read from
+         * @param buf a writable std span
+         * @param offset the offset from which to read from
+         * @return A void IO result or an error
+         */
         Task<Result<void>> async_read_exact_at(int fd, std::span<char> buf, uint64_t offset);
         /**
          * @brief Asynchronously opens or creates a file.
@@ -237,9 +236,7 @@ namespace kio::io
          * @param path The path to the file.
          * @param flags The file access flags (e.g., O_RDONLY, O_WRONLY, O_CREAT).
          * @param mode The file permissions mode (e.g., 0644) used only if O_CREAT is specified.
-         * @return A Task that resumes with a Result<int>.
-         * On success: The new file descriptor.
-         * On failure: An Error.
+         * @return An IO Result which is void or an error.
          */
         Task<Result<int>> async_openat(std::string_view path, int flags, mode_t mode);
         /**
@@ -249,9 +246,7 @@ namespace kio::io
          *
          * @param client_fd The file descriptor to write to.
          * @param buf A span of constant memory to write.
-         * @return A Task that resumes with a Result<int>.
-         * On success: The number of bytes written.
-         * On failure: An Error.
+         * @return An IO result containing number of bytes writen FD or an error.
          */
         Task<Result<int>> async_write(int client_fd, std::span<const char> buf);
         /**
@@ -262,9 +257,7 @@ namespace kio::io
          *
          * @param client_fd The file descriptor to write to.
          * @param buf A span of constant memory to write.
-         * @return A Task that resumes with a Result<int>.
-         * On success: The number of bytes written.
-         * On failure: An Error.
+         * @return A void IO result or an error
          */
         Task<Result<int>> async_write_at(int client_fd, std::span<const char> buf, uint64_t offset);
         /**
@@ -277,17 +270,7 @@ namespace kio::io
          *
          * @param client_fd The file descriptor to write to.
          * @param buf A span of constant memory to be written in its entirety.
-         * @return A Task that resumes with a Result<void>.
-         * @return On success: An `std::expected` with `has_value() == true`. This
-         * signifies that the entire `buf` span has been written.
-         * @return On failure: An `Error`.
-         * - This includes any standard I/O error (e.g., `IoError::NoSpaceLeft`
-         * if the disk is full).
-         * - If the underlying `async_write` operation returns 0 (e.g., writing to a
-         * closed pipe) before the entire buffer is sent, this function will
-         * return an `Error` (e.g., `IoError::BrokenPipe`)
-         *,
-         * as the "exact" write contract was violated.
+         * @return A void IO result or an error
          */
         Task<Result<void>> async_write_exact(int client_fd, std::span<const char> buf);
         /**
@@ -300,12 +283,10 @@ namespace kio::io
          * @param iov A pointer to an array of iovec structures.
          * @param iovcnt The number of iovec structures in the array.
          * @param offset The file offset to read from.
-         * @return A Task that resumes with a Result<int>.
-         * On success: The total number of bytes read across all buffers.
-         * On failure: An Error.
+         * @return An IO result of the number of bytes read or an error.
          */
-        Task<Result<void>> async_write_exact_at(int client_fd, std::span<const char> buf, uint64_t offset);
         Task<Result<int>> async_readv(int client_fd, const iovec* iov, int iovcnt, uint64_t offset);
+        Task<Result<void>> async_write_exact_at(int client_fd, std::span<const char> buf, uint64_t offset);
         /**
          * @brief Asynchronously writes data from a "gather" array of buffers.
          *
