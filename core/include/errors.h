@@ -21,6 +21,7 @@ namespace kio
     // io serialization/deserialization errors
     constexpr int IO_DESERIALIZATION = 2004;
     constexpr int IO_DATA_CORRUPTED = 2005;
+    constexpr int IO_EOF = 2006;
 
     enum class IoError : int32_t
     {
@@ -123,6 +124,7 @@ namespace kio
         // io serialization/deserialization errors
         IODeserialization,
         IODataCorrupted,
+        IoEoF,
 
         // Custom application errors
         EmptyBuffer,
@@ -346,6 +348,8 @@ namespace kio
                 return IoError::IODeserialization;
             case IO_DATA_CORRUPTED:
                 return IoError::IODataCorrupted;
+            case IO_EOF:
+                return IoError::IoEoF;
 
             default:
                 return IoError::Unknown;
@@ -540,6 +544,8 @@ namespace kio
                 return "IO Data Corrupted error, checksum mismatch";
             case IoError::IODeserialization:
                 return "IO Deserialization error";
+            case IoError::IoEoF:
+                return "IO End of File error";
 
             // Custom errors
             case IoError::EmptyBuffer:
