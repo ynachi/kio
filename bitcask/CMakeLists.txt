@@ -3,12 +3,15 @@ SET(BITCASK_H
         include/common.h
         include/keydir.h
         include/entry.h
+        include/datafile.h
+        include/config.h
 )
 
 SET(BITCASK_SRC
         src/bitcask.cpp
         src/keydir.cpp
         src/entry.cpp
+        src/datafile.cpp
 )
 
 add_library(kio_bitcask ${BITCASK_H} ${BITCASK_SRC})

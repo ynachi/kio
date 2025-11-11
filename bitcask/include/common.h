@@ -20,7 +20,7 @@ namespace bitcask
      */
     inline std::uint64_t get_current_timestamp_ns()
     {
-        const auto now = std::chrono::system_clock::now();
+        const auto now = std::chrono::steady_clock::now();
         return std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
     }
 

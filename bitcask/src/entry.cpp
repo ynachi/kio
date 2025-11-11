@@ -47,7 +47,7 @@ namespace bitcask
         return buffer;
     }
 
-    std::expected<std::pair<Entry, size_t>, kio::Error> Entry::deserialize(std::span<const char> buffer)
+    kio::Result<std::pair<Entry, size_t>> Entry::deserialize(std::span<const char> buffer)
     {
         // MIN_ON_DISK_SIZE == CRC SZ + PAYLOAD SZ
         if (buffer.size() < MIN_ON_DISK_SIZE)
@@ -69,7 +69,6 @@ namespace bitcask
         const auto payload_span = buffer.subspan(MIN_ON_DISK_SIZE, size);
         if (crc32c::Crc32c(payload_span.data(), payload_span.size()) != crc)
         {
-            ALOG_ERROR("CRC mismatch");
             return std::unexpected(kio::Error::from_category(kio::IoError::IODataCorrupted));
         }
 

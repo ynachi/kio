@@ -13,12 +13,23 @@
 
 namespace bitcask
 {
+    // KeyDir entry (in-memory index):
+    // +-----------+-------------+-------------+--------------+
+    // | file_id(4)| offset(8)   | total_sz(8) | timestamp(8)*|
+    // +-----------+-------------+-------------+--------------+
+    // *timestamp optional (used for conflict resolution / merge)
+    //
+    // Maps: key → KeyDirEntry
+    // file_id: Which data file the entry resides in
+    // offset: Where [CRC|SIZE|PAYLOAD] starts in that file
+    // total_sz: 4 + 8 + payload_size (total entry bytes on disk)
+
     /// Value location in data file
     struct ValueLocation
     {
         std::uint32_t file_id;
         uint64_t offset;
-        uint32_t value_size;
+        uint32_t total_size;
         uint64_t timestamp;
     };
 

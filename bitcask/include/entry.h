@@ -34,17 +34,6 @@ namespace bitcask
     // - key: std::string (length-prefixed by struct_pack)
     // - value: std::vector<char> (length-prefixed by struct_pack)
 
-    // KeyDir entry (in-memory index):
-    // +-----------+-------------+-------------+--------------+
-    // | file_id(4)| offset(8)   | total_sz(8) | timestamp(8)*|
-    // +-----------+-------------+-------------+--------------+
-    // *timestamp optional (used for conflict resolution / merge)
-    //
-    // Maps: key → KeyDirEntry
-    // file_id: Which data file the entry resides in
-    // offset: Where [CRC|SIZE|PAYLOAD] starts in that file
-    // total_sz: 4 + 8 + payload_size (total entry bytes on disk)
-
     // Bitcask storage layout:
     // +-----------+       +-----------+       +-----------+
     // | Data File | ----> | Hint File | ----> |  KeyDir   |
@@ -78,7 +67,7 @@ namespace bitcask
         std::vector<char> serialize() const;
 
         // Deserialize from buffer, returns the cursor position upon successful deserialization
-        static std::expected<std::pair<Entry, size_t>, kio::Error> deserialize(std::span<const char> buffer);
+        static kio::Result<std::pair<Entry, size_t>> deserialize(std::span<const char> buffer);
     };
     // for struct_pack
     YLT_REFL(Entry, timestamp_ns, flag, key, value);
