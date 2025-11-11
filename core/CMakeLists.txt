@@ -10,6 +10,7 @@ set(CORE_HEADER_FILES
         include/errors.h
         include/fs.h
         include/async_logger.h
+        include/ds/buffer_pool.h
 )
 
 set(CORE_SRC_FILES
@@ -19,6 +20,7 @@ set(CORE_SRC_FILES
         include/net.h
         src/net.cpp
         src/fs.cpp
+        src/ds/buffer_pool.cpp
 )
 
 add_library(kio_lib ${CORE_HEADER_FILES} ${CORE_SRC_FILES})

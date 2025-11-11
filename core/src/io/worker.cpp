@@ -514,15 +514,14 @@ namespace kio::io
         co_return ret;
     }
 
-    Task<Result<int>> Worker::async_close(int fd)
+    Task<Result<void>> Worker::async_close(int fd)
     {
-        auto prep = [](io_uring_sqe *sqe, int file_fd) { io_uring_prep_close(sqe, file_fd); };
-        int ret = co_await make_uring_awaitable(*this, prep, fd);
-        if (ret < 0)
+        auto prep = [](io_uring_sqe *sqe, const int file_fd) { io_uring_prep_close(sqe, file_fd); };
+        if (const int ret = co_await make_uring_awaitable(*this, prep, fd); ret < 0)
         {
             co_return std::unexpected(Error::from_errno(-ret));
         }
-        co_return ret;
+        co_return {};
     }
 
     Task<Result<void>> Worker::async_sleep(std::chrono::nanoseconds duration)

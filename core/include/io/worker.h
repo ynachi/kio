@@ -336,11 +336,9 @@ namespace kio::io
          * considered invalid, regardless of the operation's success.
          *
          * @param fd The file descriptor to close.
-         * @return A Task that resumes with a Result<int>.
-         * On success: 0.
-         * On failure: An Error.
+         * @return A void Result or an error.
          */
-        Task<Result<int>> async_close(int fd);
+        Task<Result<void>> async_close(int fd);
         /**
          * Asynchronously sleep for `duration`. This is a non-blocking sleep.
          * @param duration

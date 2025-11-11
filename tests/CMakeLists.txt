@@ -87,10 +87,27 @@ target_include_directories(kio_logger_test
         ${CMAKE_SOURCE_DIR}/src
 )
 
+# buffer pool tests
+add_executable(buffer_pool_test ds/buffer_pool_test.cpp)
+
+target_link_libraries(buffer_pool_test
+        PRIVATE
+        kio_lib
+        GTest::gtest
+        GTest::gtest_main
+)
+
+target_include_directories(buffer_pool_test
+        PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+)
+
+
 gtest_discover_tests(sync_wait_test)
 gtest_discover_tests(lock_free_free_queue)
 gtest_discover_tests(kio_worker_test)
 gtest_discover_tests(filemanager_test)
 gtest_discover_tests(kio_logger_test)
+gtest_discover_tests(buffer_pool_test)
 
 
