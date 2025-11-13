@@ -61,7 +61,7 @@ namespace bitcask
 
         if (buffer.size() < MIN_ON_DISK_SIZE + size)
         {
-            // Return an error indicating incomplete data / short read
+            // add an additional log because the error is not very specialized
             ALOG_ERROR("Data shorter than full entry");
             return std::unexpected(kio::Error::from_errno(EINVAL));
         }

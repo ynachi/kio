@@ -138,32 +138,52 @@ TEST_F(BufferPoolTest, BufferReuseFromPool)
 
 TEST_F(BufferPoolTest, MultipleBuffersInPool)
 {
-    // Acquire and release 5 buffers
+    std::vector<PooledBuffer> buffers;
+    buffers.reserve(5);
+
+    // Acquire 5 buffers and keep them alive
     for (int i = 0; i < 5; ++i)
     {
-        auto buffer = pool_.acquire(1024);
+        buffers.push_back(pool_.acquire(1024));
     }
 
-    const auto& stats = pool_.stats();
-    EXPECT_EQ(stats.bucket_sizes[0], 5);
-    EXPECT_EQ(stats.releases_pooled, 5);
+    // Now, release them all by clearing the vector
+    buffers.clear();
+
+    // Check stats AFTER release
+    {
+        const auto& stats = pool_.stats();
+        EXPECT_EQ(stats.bucket_sizes[0], 5);
+        EXPECT_EQ(stats.releases_pooled, 5);
+        EXPECT_EQ(stats.cache_misses, 5);  // All 5 should have been misses
+    }
 
     // All subsequent acquires should be cache hits
     for (int i = 0; i < 5; ++i)
     {
-        auto buffer = pool_.acquire(1024);
+        buffers.push_back(pool_.acquire(1024));
     }
 
-    EXPECT_EQ(stats.cache_hits, 5);
+    // Check stats AFTER re-acquiring
+    const auto& stats_after_reacquire = pool_.stats();
+    EXPECT_EQ(stats_after_reacquire.cache_hits, 5);
+    EXPECT_EQ(stats_after_reacquire.bucket_sizes[0], 0);  // The pool is empty again
 }
 
 TEST_F(BufferPoolTest, PoolCapacityLimit)
 {
-    // Acquire and release more than kMaxBuffersPerBucket
-    for (size_t i = 0; i < BufferPool::kMaxBuffersPerBucket + 5; ++i)
+    std::vector<PooledBuffer> buffers;
+    constexpr size_t count = BufferPool::kMaxBuffersPerBucket + 5;
+    buffers.reserve(count);
+
+    // Acquire and keep alive
+    for (size_t i = 0; i < count; ++i)
     {
-        auto buffer = pool_.acquire(1024);
+        buffers.push_back(pool_.acquire(1024));
     }
+
+    // Release all
+    buffers.clear();
 
     const auto& stats = pool_.stats();
 
@@ -188,8 +208,8 @@ TEST_F(BufferPoolTest, SmallBucketBoundary)
 
     const auto& stats = pool_.stats();
 
-    // First should be in small bucket (idx 0)
-    // Second should be in medium bucket (idx 1)
+    // First should be in a small bucket (idx 0)
+    // Second should be in a medium bucket (idx 1)
     EXPECT_EQ(stats.bucket_releases[0], 1);
     EXPECT_EQ(stats.bucket_releases[1], 1);
 }

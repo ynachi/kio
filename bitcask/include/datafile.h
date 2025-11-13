@@ -14,6 +14,7 @@
 
 namespace bitcask
 {
+    // TODO, use fallocate to create the datafile
     class DataFile
     {
     public:
@@ -41,11 +42,10 @@ namespace bitcask
         // Write entry and return offset
         kio::Task<kio::Result<uint64_t>> async_write(const Entry& entry);
 
-        // Read entry at offset. size is total entry size as it is known in advance
-        kio::Task<kio::Result<Entry>> async_read(uint64_t offset, uint32_t size);
+        // Read the entry at offset. size is total entry size as it is known in advance
+        [[nodiscard]]
+        kio::Task<kio::Result<Entry>> async_read(uint64_t offset, uint32_t size) const;
 
-        // Sync to disk
-        kio::Task<void> async_sync();
         // Close file
         kio::Task<kio::Result<void>> async_close();
 
@@ -58,7 +58,7 @@ namespace bitcask
         [[nodiscard]]
         uint64_t size() const
         {
-            return write_offset_;
+            return size_;
         }
         [[nodiscard]]
         const std::filesystem::path& path() const
@@ -75,8 +75,7 @@ namespace bitcask
         // timestamp based id
         uint64_t file_id_{0};
         int fd_{-1};
-        // write offset is also the actual size
-        uint64_t write_offset_{0};
+        uint64_t size_{0};
         kio::io::Worker& io_worker_;
         kio::BufferPool& buffer_pool_;
         //

@@ -35,7 +35,8 @@ namespace bitcask
 
         // Compaction
         bool auto_compact = true;
-        double fragmentation_threshold = 0.5;  // 50% dead data triggers compaction
+        // 50% dead data triggers compaction
+        double fragmentation_threshold = 0.5;
 
         // Performance
         size_t read_buffer_size = 4096;

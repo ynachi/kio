@@ -22,11 +22,12 @@ target_link_libraries(bitcast_demo PRIVATE yalantinglibs::yalantinglibs crc32c)
 
 
 ## tests
-add_executable(bitcask_test tests/keydir_test.cpp tests/entry_test.cpp)
+add_executable(bitcask_test tests/keydir_test.cpp tests/entry_test.cpp tests/datafile_test.cpp)
 
 target_link_libraries(bitcask_test
         PRIVATE
         kio_bitcask
+        kio_lib
         GTest::gtest
         GTest::gtest_main
 )

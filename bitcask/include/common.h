@@ -12,7 +12,7 @@ namespace bitcask
 {
     constexpr std::uint8_t FLAG_NONE = 0x00;
     constexpr uint8_t FLAG_TOMBSTONE = 0x01;
-    constexpr size_t MIN_ON_DISK_SIZE = 12;  // at least CRC + PAYLOAD SIZE
+    constexpr std::size_t MIN_ON_DISK_SIZE = 12;  // at least CRC + PAYLOAD SIZE
 
     /**
      * @brief Gets the current time as a 64-bit integer.
