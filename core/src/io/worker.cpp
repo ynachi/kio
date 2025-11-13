@@ -526,6 +526,30 @@ namespace kio::io
         co_return {};
     }
 
+    Task<Result<void>> Worker::async_fsync(int fd)
+    {
+        auto prep = [](io_uring_sqe *sqe, const int file_fd) { io_uring_prep_fsync(sqe, file_fd, 0); };
+        if (const int ret = co_await make_uring_awaitable(*this, prep, fd); ret < 0)
+        {
+            co_return std::unexpected(Error::from_errno(-ret));
+        }
+        co_return {};
+    }
+
+    Task<Result<void>> Worker::async_fdatasync(int fd)
+    {
+        auto prep = [](io_uring_sqe *sqe, const int file_fd)
+        {
+            // Use the IORING_FSYNC_DATASYNC flag
+            io_uring_prep_fsync(sqe, file_fd, IORING_FSYNC_DATASYNC);
+        };
+        if (const int ret = co_await make_uring_awaitable(*this, prep, fd); ret < 0)
+        {
+            co_return std::unexpected(Error::from_errno(-ret));
+        }
+        co_return {};
+    }
+
     Task<Result<void>> Worker::async_sleep(std::chrono::nanoseconds duration)
     {
         // We need a place to store the timespec for the duration of the operation.

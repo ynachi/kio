@@ -372,6 +372,22 @@ namespace kio::io
          * @return void or an error
          */
         Task<std::expected<void, Error>> async_sleep(std::chrono::nanoseconds duration);
+
+        /**
+         * @brief Asynchronously flushes all modified data and metadata to disk.
+         * Equivalent to fsync(2).
+         * @param fd The file descriptor to sync.
+         * @return A void Result or an error.
+         */
+        Task<Result<void>> async_fsync(int fd);
+
+        /**
+         * @brief Asynchronously flushes all modified data to disk.
+         * Equivalent to fdatasync(2). May not update metadata (like mtime).
+         * @param fd The file descriptor to sync.
+         * @return A void Result or an error.
+         */
+        Task<Result<void>> async_fdatasync(int fd);
     };
 
     /**
