@@ -6,6 +6,7 @@
 #define KIO_WORKER_H
 
 #include <expected>
+#include <filesystem>
 #include <latch>
 #include <liburing.h>
 #include <memory>
@@ -265,7 +266,7 @@ namespace kio::io
          * @param mode The file permissions mode (e.g., 0644) used only if O_CREAT is specified.
          * @return An IO Result which is void or an error.
          */
-        Task<Result<int>> async_openat(std::string_view path, int flags, mode_t mode);
+        Task<Result<int>> async_openat(std::filesystem::path path, int flags, mode_t mode);
         /**
          * @brief Asynchronously writes data to a streaming file descriptor (e.g., socket, pipe).
          *

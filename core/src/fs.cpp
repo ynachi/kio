@@ -24,9 +24,9 @@ namespace kio
 
     FileManager::FileManager(const size_t io_worker_count, const io::WorkerConfig &config) : pool_(io_worker_count, config) { ALOG_INFO("started file manager with {} workers", io_worker_count); }
 
-    Task<Result<File> > FileManager::async_open(std::string_view path, const int flags, const mode_t mode)
+    Task<Result<File> > FileManager::async_open(std::filesystem::path path, const int flags, const mode_t mode)
     {
-        auto worker_id = pool_.get_worker_id_by_key(absolute_path(path));
+        auto worker_id = pool_.get_worker_id_by_key(absolute_path(path.string()));
         auto *worker = pool_.get_worker(worker_id);
         if (!worker)
         {

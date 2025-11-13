@@ -491,12 +491,10 @@ namespace kio::io
         co_return ret;
     }
 
-    Task<Result<int>> Worker::async_openat(std::string_view path, const int flags, const mode_t mode)
+    Task<Result<int>> Worker::async_openat(const std::filesystem::path path, const int flags, const mode_t mode)  // NOLINT on path, we need a copy in the coroutine frame, so a reference won't cut it
     {
-        // make the coroutine own its own copy of the path in its frame
-        const std::string path_str(path);
         auto prep = [](io_uring_sqe *sqe, const int dfd, const char *p, const int f, const mode_t m) { io_uring_prep_openat(sqe, dfd, p, f, m); };
-        int ret = co_await make_uring_awaitable(*this, prep, AT_FDCWD, path_str.c_str(), flags, mode);
+        int ret = co_await make_uring_awaitable(*this, prep, AT_FDCWD, path.c_str(), flags, mode);
         if (ret < 0)
         {
             co_return std::unexpected(Error::from_errno(-ret));
