@@ -28,7 +28,7 @@ protected:
 TEST_F(EntryTest, ConstructorSetsTimestamp)
 {
     auto before = get_current_timestamp_ns();
-    // Small sleep to ensure clock moves if resolution is low
+    // Small sleep to ensure a clock moves if resolution is low
     std::this_thread::sleep_for(std::chrono::nanoseconds(1));
     Entry entry("key", {});
     std::this_thread::sleep_for(std::chrono::nanoseconds(1));
@@ -95,12 +95,7 @@ TEST_F(EntryTest, SerializeDeserializeRoundTrip)
     auto result = Entry::deserialize(buffer);
     ASSERT_TRUE(result.has_value());
 
-    const auto& [deserialized, bytes_read] = result.value();
-
-    // Ensure we read exactly what the header claimed was the entry size,
-    // even if the input buffer was larger.
-    const auto stored_size = read_le<uint64_t>(buffer.data() + 4);
-    EXPECT_EQ(bytes_read, MIN_ON_DISK_SIZE + stored_size);
+    const auto& deserialized = result.value();
 
     EXPECT_EQ(original.timestamp_ns, deserialized.timestamp_ns);
     EXPECT_EQ(original.flag, deserialized.flag);
@@ -116,8 +111,8 @@ TEST_F(EntryTest, TombstoneRoundTrip)
     const auto result = Entry::deserialize(buffer);
 
     ASSERT_TRUE(result.has_value());
-    EXPECT_TRUE(result.value().first.is_tombstone());
-    EXPECT_EQ(result.value().first.key, "deleted_key");
+    EXPECT_TRUE(result.value().is_tombstone());
+    EXPECT_EQ(result.value().key, "deleted_key");
 }
 
 TEST_F(EntryTest, TimestampPreservation)
@@ -130,7 +125,7 @@ TEST_F(EntryTest, TimestampPreservation)
     const auto result = Entry::deserialize(buffer);
 
     ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(result.value().first.timestamp_ns, expected_ts);
+    EXPECT_EQ(result.value().timestamp_ns, expected_ts);
 }
 
 // --- Edge Case Data ---
@@ -143,8 +138,8 @@ TEST_F(EntryTest, EmptyKeyAndValue)
     const auto result = Entry::deserialize(buffer);
 
     ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(result.value().first.key, "");
-    EXPECT_TRUE(result.value().first.value.empty());
+    EXPECT_EQ(result.value().key, "");
+    EXPECT_TRUE(result.value().value.empty());
 }
 
 TEST_F(EntryTest, LargeValue)
@@ -156,8 +151,8 @@ TEST_F(EntryTest, LargeValue)
     const auto result = Entry::deserialize(buffer);
 
     ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(result.value().first.key, "large_key");
-    EXPECT_EQ(result.value().first.value.size(), 10000);
+    EXPECT_EQ(result.value().key, "large_key");
+    EXPECT_EQ(result.value().value.size(), 10000);
 }
 
 TEST_F(EntryTest, SpecialCharactersAndBinaryData)
@@ -183,7 +178,7 @@ TEST_F(EntryTest, SpecialCharactersAndBinaryData)
     auto result = Entry::deserialize(buffer);
 
     ASSERT_TRUE(result.has_value());
-    const auto& deserialized = result.value().first;
+    const auto& deserialized = result.value();
 
     // Compare against the copy we saved
     EXPECT_EQ(deserialized.key, expected_key);
@@ -207,15 +202,13 @@ TEST_F(EntryTest, MultipleEntriesInBuffer)
     // Read first
     auto result1 = Entry::deserialize(combined);
     ASSERT_TRUE(result1.has_value());
-    EXPECT_EQ(result1->first.key, "key1");
-    EXPECT_EQ(result1->second, buffer1.size());
+    EXPECT_EQ(result1->key, "key1");
 
     // Read second using offset
-    std::span<const char> remaining(combined.data() + result1->second, combined.size() - result1->second);
+    std::span<const char> remaining(combined.data() + buffer1.size(), combined.size() - buffer1.size());
     auto result2 = Entry::deserialize(remaining);
     ASSERT_TRUE(result2.has_value());
-    EXPECT_EQ(result2->first.key, "key2");
-    EXPECT_EQ(result2->second, buffer2.size());
+    EXPECT_EQ(result2->key, "key2");
 }
 
 TEST_F(EntryTest, DeserializeBufferWithExtraBytes)
@@ -230,9 +223,7 @@ TEST_F(EntryTest, DeserializeBufferWithExtraBytes)
 
     const auto result = Entry::deserialize(buffer);
     ASSERT_TRUE(result.has_value());
-    // Should only have 'read' the exact size needed
-    EXPECT_EQ(result->second, true_size);
-    EXPECT_EQ(result->first.key, "test");
+    EXPECT_EQ(result->key, "test");
 }
 
 // --- Error Handling & Security ---

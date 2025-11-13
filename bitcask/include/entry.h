@@ -67,7 +67,7 @@ namespace bitcask
         std::vector<char> serialize() const;
 
         // Deserialize from buffer, returns the cursor position upon successful deserialization
-        static kio::Result<std::pair<Entry, size_t>> deserialize(std::span<const char> buffer);
+        static kio::Result<Entry> deserialize(std::span<const char> buffer);
     };
     // for struct_pack
     YLT_REFL(Entry, timestamp_ns, flag, key, value);

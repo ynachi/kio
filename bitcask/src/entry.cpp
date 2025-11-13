@@ -23,7 +23,7 @@ namespace bitcask
         // Reserve the total capacity to avoid reallocation
         buffer.reserve(total_size);
 
-        // Claim the 12 bytes space for the header
+        // Claim the 12-byte space for the header
         buffer.resize(MIN_ON_DISK_SIZE);
 
         // Append serialized data after the 12 bytes, reserved for CRC and payload size
@@ -47,7 +47,7 @@ namespace bitcask
         return buffer;
     }
 
-    kio::Result<std::pair<Entry, size_t>> Entry::deserialize(std::span<const char> buffer)
+    kio::Result<Entry> Entry::deserialize(std::span<const char> buffer)
     {
         // MIN_ON_DISK_SIZE == CRC SZ + PAYLOAD SZ
         if (buffer.size() < MIN_ON_DISK_SIZE)
@@ -79,6 +79,6 @@ namespace bitcask
             return std::unexpected(kio::Error::from_category(kio::IoError::IODeserialization));
         }
 
-        return std::pair{std::move(entry.value()), size + MIN_ON_DISK_SIZE};
+        return entry.value();
     }
 }  // namespace bitcask
