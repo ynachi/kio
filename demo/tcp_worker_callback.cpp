@@ -8,9 +8,11 @@
 
 #include <iostream>
 
-#include "core/include/io/worker.h"
-#include "core/include/net.h"
 #include "core/include/async_logger.h"
+#include "core/include/io/metrics.h"
+#include "core/include/io/worker.h"
+#include "core/include/metrics/registry.h"
+#include "core/include/net.h"
 
 
 using namespace kio;
@@ -18,21 +20,25 @@ using namespace kio::io;
 using namespace kio::net;
 
 // User defines their application logic as coroutines
-DetachedTask HandleClient(Worker &worker, const int client_fd) {
+DetachedTask HandleClient(Worker &worker, const int client_fd)
+{
     char buffer[8192];
     // const auto st = worker.get_stop_token();
     const auto st = std::stop_token{};
 
-    while (!st.stop_requested()) {
+    while (!st.stop_requested())
+    {
         // Read from the client - this co_await runs on the worker thread
-        auto n = co_await worker.async_read(client_fd, std::span(buffer, sizeof(buffer)), -1);
-        if (!n.has_value()) {
+        auto n = co_await worker.async_read(client_fd, std::span(buffer, sizeof(buffer)));
+        if (!n.has_value())
+        {
             ALOG_DEBUG("Read failed {}", n.error().message());
             // in the io_uring world, most of the errors are fatal, so no need to specialize
             break;
         }
 
-        if (n.value() == 0) {
+        if (n.value() == 0)
+        {
             ALOG_INFO("Client disconnected");
             break;
         }
@@ -41,9 +47,10 @@ DetachedTask HandleClient(Worker &worker, const int client_fd) {
         std::string response = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, World!";
 
         // Write response - this co_await also runs on the worker thread
-        auto sent = co_await worker.async_write(client_fd, std::span(response.data(), response.size()), -1);
+        auto sent = co_await worker.async_write(client_fd, std::span(response.data(), response.size()));
 
-        if (!sent.has_value()) {
+        if (!sent.has_value())
+        {
             ALOG_ERROR("Write failed: {}", sent.error().message());
             break;
         }
@@ -54,18 +61,21 @@ DetachedTask HandleClient(Worker &worker, const int client_fd) {
 
 
 // Accept loop - runs on each worker independently
-DetachedTask accept_loop(Worker &worker, int listen_fd) {
+DetachedTask accept_loop(Worker &worker, int listen_fd)
+{
     ALOG_INFO("Worker accepting connections");
     const auto st = std::stop_token{};
 
-    while (!st.stop_requested()) {
+    while (!st.stop_requested())
+    {
         sockaddr_storage client_addr{};
         socklen_t addr_len = sizeof(client_addr);
 
         // Accept connection - blocks this coroutine until client connects
         auto client_fd = co_await worker.async_accept(listen_fd, reinterpret_cast<sockaddr *>(&client_addr), &addr_len);
 
-        if (!client_fd.has_value()) {
+        if (!client_fd.has_value())
+        {
             ALOG_ERROR("Accept failed: {}", client_fd.error().message());
             continue;
         }
@@ -79,7 +89,8 @@ DetachedTask accept_loop(Worker &worker, int listen_fd) {
     ALOG_INFO("Worker {} stop accepting connexions", worker.get_id());
 }
 
-int main() {
+int main()
+{
     // ignore signals
     signal(SIGPIPE, SIG_IGN);
     // Setup logging
@@ -90,7 +101,8 @@ int main() {
     constexpr int port = 8080;
 
     auto server_fd = create_tcp_socket(ip_address, port, 128);
-    if (!server_fd) {
+    if (!server_fd)
+    {
         ALOG_ERROR("Failed to create server socket: {}", server_fd.error().message());
         return 1;
     }
@@ -108,6 +120,11 @@ int main() {
     // is not started yet.
     Worker worker(0, config, [server_fd](Worker &worker) { accept_loop(worker, server_fd.value()).detach(); });
 
+    // register metrics collector
+    auto &registry = MetricsRegistry<>::Instance();
+    const auto worker_collector = std::make_shared<WorkerMetricsCollector>(worker);
+    registry.Register(worker_collector);
+
     ALOG_INFO("Main thread: Waiting for worker to initialize...");
 
     // Start the worker in a thread. This is useful because loop_forever is a blocking method.
@@ -121,14 +138,17 @@ int main() {
     ALOG_INFO("Server listening on 127.0.0.1:8080. Press Enter to stop...");
     std::cin.get();
 
+    // print metrics
+    std::cout << std::format("worker metrics: {}", registry.Scrape());
     // Request the worker to stop.
     ALOG_INFO("Main thread: Requesting worker stop...");
-    if (const auto ret = worker.request_stop(); !ret) {
+    if (const auto ret = worker.request_stop(); !ret)
+    {
         ALOG_ERROR("failed to request the event loop to stop");
         ::close(server_fd.value());
         std::exit(1);
     }
-    // This signals the jthread and drains completions
+    // This signals the thread and drains completions
 
     // 9. Wait for the worker to fully shut down
     ::close(server_fd.value());

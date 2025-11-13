@@ -21,7 +21,7 @@ DetachedTask handle_client(Worker& worker, const int client_fd)
     while (!st.stop_requested())
     {
         // Read from the client - this co_await runs on the worker thread
-        auto n = co_await worker.async_read(client_fd, std::span(buffer, sizeof(buffer)), -1);
+        auto n = co_await worker.async_read(client_fd, std::span(buffer, sizeof(buffer)));
         if (!n.has_value())
         {
             ALOG_DEBUG("Read failed: {}", n.error().message());
@@ -39,7 +39,7 @@ DetachedTask handle_client(Worker& worker, const int client_fd)
         std::string response = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, World!";
 
         // Write response - this co_await also runs on the worker thread
-        auto sent = co_await worker.async_write(client_fd, std::span(response.data(), response.size()), -1);
+        auto sent = co_await worker.async_write(client_fd, std::span(response.data(), response.size()));
 
         if (!sent.has_value())
         {
@@ -104,7 +104,7 @@ int main()
     config.uring_queue_depth = 16800;
     config.default_op_slots = 8096;
 
-    // Create pool with 4 workers
+    // Create a pool with 4 workers
     // Each worker will run accept_loop independently
     IOPool pool(8, config, [server_fd](Worker& worker) { accept_loop(worker, server_fd).detach(); });
 

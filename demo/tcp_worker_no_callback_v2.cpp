@@ -17,29 +17,34 @@ using namespace kio::net;
 // Client processing code, which will run in the background on the same thread as the worker.
 // Thus, there is no need to context switch as we are already on the right thread.
 // The loop is synced to the worker's stop signal for a coordinated shutdown.
-DetachedTask HandleClient(Worker &worker, const int client_fd) {
+DetachedTask HandleClient(Worker &worker, const int client_fd)
+{
     char buffer[8192];
 
     // Critical! We want any client code to be stopped when the worker exits.
     // So the loop below will be synchronized on the worker's top token.
     const auto st = worker.get_stop_token();
 
-    while (!st.stop_requested()) {
-        auto n = co_await worker.async_read(client_fd, std::span(buffer, sizeof(buffer)), -1);
-        if (!n.has_value()) {
+    while (!st.stop_requested())
+    {
+        auto n = co_await worker.async_read(client_fd, std::span(buffer, sizeof(buffer)));
+        if (!n.has_value())
+        {
             ALOG_DEBUG("Read failed {}", n.error().message());
             break;
         }
 
-        if (n == 0) {
+        if (n == 0)
+        {
             ALOG_INFO("Client disconnected");
             break;
         }
 
         std::string response = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, World!";
-        auto sent = co_await worker.async_write(client_fd, std::span(response.data(), response.size()), -1);
+        auto sent = co_await worker.async_write(client_fd, std::span(response.data(), response.size()));
 
-        if (!sent.has_value()) {
+        if (!sent.has_value())
+        {
             ALOG_DEBUG("Write failed: {}", sent.error().message());
             break;
         }
@@ -50,7 +55,8 @@ DetachedTask HandleClient(Worker &worker, const int client_fd) {
 
 
 // 2. accept_loop is an awaitable DetachedTask
-DetachedTask accept_loop(Worker &worker, int listen_fd) {
+DetachedTask accept_loop(Worker &worker, int listen_fd)
+{
     ALOG_INFO("Worker accepting connections");
     const auto st = worker.get_stop_token();
 
@@ -59,15 +65,18 @@ DetachedTask accept_loop(Worker &worker, int listen_fd) {
     // would verify this behavior and crash
     co_await SwitchToWorker(worker);
 
-    while (!st.stop_requested()) {
+    while (!st.stop_requested())
+    {
         sockaddr_storage client_addr{};
         socklen_t addr_len = sizeof(client_addr);
 
         auto client_fd = co_await worker.async_accept(listen_fd, reinterpret_cast<sockaddr *>(&client_addr), &addr_len);
 
-        if (!client_fd.has_value()) {
+        if (!client_fd.has_value())
+        {
             // If a stop is requested, exit
-            if (st.stop_requested()) {
+            if (st.stop_requested())
+            {
                 break;
             }
             ALOG_ERROR("Accept failed: {}", client_fd.error().message());
@@ -84,7 +93,8 @@ DetachedTask accept_loop(Worker &worker, int listen_fd) {
     co_return;
 }
 
-int main() {
+int main()
+{
     // 1. Application configuration
     signal(SIGPIPE, SIG_IGN);
     alog::configure(1024, LogLevel::Info);
@@ -93,7 +103,8 @@ int main() {
     constexpr int port = 8080;
 
     auto server_fd = create_tcp_socket(ip_address, port, 128);
-    if (!server_fd) {
+    if (!server_fd)
+    {
         // Assuming IoErrorToString exists
         ALOG_ERROR("Failed to create server socket: {}", server_fd.error().message());
         return 1;
@@ -125,7 +136,8 @@ int main() {
     std::cin.get();
 
     ALOG_INFO("Main thread: Requesting worker stop...");
-    if (const auto res = worker.request_stop(); !res) {
+    if (const auto res = worker.request_stop(); !res)
+    {
         ALOG_ERROR("failed to request the event loop to stop");
         return 1;
     }
