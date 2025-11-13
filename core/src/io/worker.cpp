@@ -322,9 +322,8 @@ namespace kio::io
         }
 
         // Signal the worker to wake up
-        uint64_t val = 1;
-        ssize_t ret = ::write(wakeup_fd_, &val, sizeof(val));
-        if (ret < 0 && errno != EAGAIN)
+        constexpr uint64_t val = 1;
+        if (const ssize_t ret = ::write(wakeup_fd_, &val, sizeof(val)); ret < 0 && errno != EAGAIN)
         {
             ALOG_WARN("Worker {}: Failed to write to eventfd: {}", id_, strerror(errno));
         }
@@ -353,6 +352,9 @@ namespace kio::io
         {
             co_return std::unexpected(Error::from_errno(-ret));
         }
+
+        stats_.bytes_read_total += static_cast<uint64_t>(ret);
+
         co_return ret;
     }
 

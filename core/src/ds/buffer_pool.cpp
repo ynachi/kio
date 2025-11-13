@@ -126,7 +126,6 @@ namespace kio
             stats_.cache_misses++;
         }
     }
-
     void BufferPool::update_stats_after_release(const size_t bucket_idx, const bool pooled)
     {
         stats_.total_releases++;

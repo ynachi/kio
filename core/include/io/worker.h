@@ -19,6 +19,21 @@
 
 namespace kio::io
 {
+    struct alignas(64) WorkerStats
+    {
+        uint64_t bytes_read_total = 0;
+        uint64_t bytes_written_total = 0;
+        uint64_t read_ops_total = 0;
+        uint64_t write_ops_total = 0;
+        uint64_t connections_accepted_total = 0;
+        uint64_t open_ops_total = 0;
+        uint64_t connect_ops_total = 0;
+        uint64_t coroutines_pool_resize_total = 0;
+        // This is also the amount of op id used from the pool
+        uint64_t active_coroutines = 0;
+    };
+
+
     struct WorkerConfig
     {
         size_t uring_queue_depth{1024};
@@ -104,6 +119,7 @@ namespace kio::io
         std::stop_token stop_token_;
         // to avoid a double shutdown
         std::atomic<bool> stopped_{false};
+        WorkerStats stats_{};
 
         std::function<void(Worker&)> worker_init_callback_;
 
@@ -174,6 +190,17 @@ namespace kio::io
         void loop();
         ~Worker();
 
+        // stats
+        /**
+         * @brief Gets this worker's non-atomic stats.
+         * MUST only be called from this worker's thread.
+         * (Or safely via the IOPoolCollector)
+         */
+        [[nodiscard]] const WorkerStats& get_stats()
+        {
+            stats_.active_coroutines = op_data_pool_.size() - free_op_ids.size();
+            return stats_;
+        }
         // Io methods
         Task<Result<int>> async_accept(int server_fd, sockaddr* addr, socklen_t* addrlen);
         /**
