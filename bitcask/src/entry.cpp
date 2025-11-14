@@ -11,9 +11,9 @@
 
 namespace bitcask
 {
-    Entry::Entry(std::string&& key, std::vector<char>&& value, const uint8_t flag) : timestamp_ns(get_current_timestamp_ns()), flag(flag), key(std::move(key)), value(std::move(value)) {}
+    DataEntry::DataEntry(std::string&& key, std::vector<char>&& value, const uint8_t flag) : timestamp_ns(get_current_timestamp_ns()), flag(flag), key(std::move(key)), value(std::move(value)) {}
 
-    std::vector<char> Entry::serialize() const
+    std::vector<char> DataEntry::serialize() const
     {
         // Calculate the exact sizes needed ahead of time to avoid reallocations.
         const auto payload_size = struct_pack::get_needed_size(*this);
@@ -47,7 +47,7 @@ namespace bitcask
         return buffer;
     }
 
-    kio::Result<Entry> Entry::deserialize(std::span<const char> buffer)
+    kio::Result<DataEntry> DataEntry::deserialize(std::span<const char> buffer)
     {
         // MIN_ON_DISK_SIZE == CRC SZ + PAYLOAD SZ
         if (buffer.size() < MIN_ON_DISK_SIZE)
@@ -72,7 +72,7 @@ namespace bitcask
             return std::unexpected(kio::Error::from_category(kio::IoError::IODataCorrupted));
         }
 
-        auto entry = struct_pack::deserialize<Entry>(payload_span);
+        auto entry = struct_pack::deserialize<DataEntry>(payload_span);
         if (!entry.has_value())
         {
             ALOG_ERROR("Failed to deserialize entry");

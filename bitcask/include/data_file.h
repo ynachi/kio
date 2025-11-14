@@ -40,11 +40,11 @@ namespace bitcask
         }
 
         // Write entry and return offset
-        kio::Task<kio::Result<uint64_t>> async_write(const Entry& entry);
+        kio::Task<kio::Result<uint64_t>> async_write(const DataEntry& entry);
 
         // Read the entry at offset. size is total entry size as it is known in advance
         [[nodiscard]]
-        kio::Task<kio::Result<Entry>> async_read(uint64_t offset, uint32_t size) const;
+        kio::Task<kio::Result<DataEntry>> async_read(uint64_t offset, uint32_t size) const;
 
         // Close file
         kio::Task<kio::Result<void>> async_close();

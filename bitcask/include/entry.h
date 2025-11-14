@@ -43,7 +43,7 @@ namespace bitcask
     // - Hint files: lightweight summaries for quick startup
     // - KeyDir: fast in-memory lookup for the latest key location
 
-    struct Entry
+    struct DataEntry
     {
         std::uint64_t timestamp_ns{};
         uint8_t flag = FLAG_NONE;
@@ -51,9 +51,9 @@ namespace bitcask
         std::vector<char> value;
 
         // struct_pack need this
-        Entry() = default;
+        DataEntry() = default;
 
-        Entry(std::string&& key, std::vector<char>&& value, uint8_t flag = FLAG_NONE);
+        DataEntry(std::string&& key, std::vector<char>&& value, uint8_t flag = FLAG_NONE);
 
         // Tombstone marker (for deletions)
         [[nodiscard]]
@@ -67,10 +67,10 @@ namespace bitcask
         std::vector<char> serialize() const;
 
         // Deserialize from buffer, returns the cursor position upon successful deserialization
-        static kio::Result<Entry> deserialize(std::span<const char> buffer);
+        static kio::Result<DataEntry> deserialize(std::span<const char> buffer);
     };
     // for struct_pack
-    YLT_REFL(Entry, timestamp_ns, flag, key, value);
+    YLT_REFL(DataEntry, timestamp_ns, flag, key, value);
 }  // namespace bitcask
 
 #endif  // KIO_ENTRY_H

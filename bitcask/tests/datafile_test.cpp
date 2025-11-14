@@ -70,7 +70,7 @@ protected:
     }
 
     // Helper to create a simple test entry
-    static Entry create_test_entry(const std::string& key, const std::string& value) { return {std::string(key), {value.begin(), value.end()}}; }
+    static DataEntry create_test_entry(const std::string& key, const std::string& value) { return {std::string(key), {value.begin(), value.end()}}; }
 };
 
 
@@ -101,8 +101,8 @@ TEST_F(DataFileTest, WriteAndReadRoundtrip)
     DataFile df(test_fd_, TEST_FILE_ID, *worker_, buffer_pool_, config_);
     test_fd_ = -1;
 
-    const Entry entry1 = create_test_entry("key1", "value1");
-    const Entry entry2 = create_test_entry("key2", "value_two");
+    const DataEntry entry1 = create_test_entry("key1", "value1");
+    const DataEntry entry2 = create_test_entry("key2", "value_two");
 
     const auto ser1 = entry1.serialize();
     const auto ser2 = entry2.serialize();
@@ -166,7 +166,7 @@ TEST_F(DataFileTest, ShouldRotate)
         // File size is 0
         EXPECT_FALSE(df.should_rotate(config_.max_file_size));
 
-        Entry entry1 = create_test_entry("key", "value");  // size > 12
+        DataEntry entry1 = create_test_entry("key", "value");  // size > 12
         auto write_res1 = co_await df.async_write(entry1);
         EXPECT_TRUE(write_res1.has_value());
         EXPECT_GT(df.size(), 0);
@@ -175,7 +175,7 @@ TEST_F(DataFileTest, ShouldRotate)
 
         // Write a large entry
         std::string large_val(100, 'x');
-        Entry entry2 = create_test_entry("large", large_val);
+        DataEntry entry2 = create_test_entry("large", large_val);
         auto write_res2 = co_await df.async_write(entry2);
         EXPECT_TRUE(write_res2.has_value());
 
