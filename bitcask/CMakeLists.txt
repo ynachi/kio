@@ -3,7 +3,7 @@ SET(BITCASK_H
         include/common.h
         include/keydir.h
         include/entry.h
-        include/datafile.h
+        include/data_file.h
         include/config.h
 )
 

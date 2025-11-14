@@ -2,14 +2,13 @@
 // Created by Yao ACHI on 13/11/2025.
 //
 
-#include "bitcask/include/datafile.h"
-
 #include <fcntl.h>
 #include <filesystem>
 #include <gtest/gtest.h>
 #include <thread>
 #include <unistd.h>
 
+#include "bitcask/include/data_file.h"
 #include "bitcask/include/entry.h"
 #include "core/include/coro.h"
 #include "core/include/ds/buffer_pool.h"
@@ -180,7 +179,7 @@ TEST_F(DataFileTest, ShouldRotate)
         auto write_res2 = co_await df.async_write(entry2);
         EXPECT_TRUE(write_res2.has_value());
 
-        // Now size should be > 100
+        // Now the size should be > 100
         EXPECT_GT(df.size(), config_.max_file_size);
         EXPECT_TRUE(df.should_rotate(config_.max_file_size));
 

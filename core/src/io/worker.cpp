@@ -383,15 +383,15 @@ namespace kio::io
 
         while (total_bytes_read < total_to_read)
         {
-            // We always pass an offset and we always increment it.
+            // We always pass an offset, and we always increment it.
             const uint64_t current_offset = offset + total_bytes_read;
             std::span<char> remaining_buf = buf.subspan(total_bytes_read);
 
-            int bytes_read = KIO_TRY(co_await this->async_read_at(fd, remaining_buf, current_offset));
+            const int bytes_read = KIO_TRY(co_await this->async_read_at(fd, remaining_buf, current_offset));
 
             if (bytes_read == 0)
             {
-                co_return std::unexpected(Error::from_errno(EPIPE));  // EOF
+                co_return std::unexpected(Error::from_category(IoError::IoEoF));
             }
             total_bytes_read += static_cast<size_t>(bytes_read);
         }
