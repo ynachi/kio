@@ -11,7 +11,7 @@ SET(BITCASK_SRC
         src/bitcask.cpp
         src/keydir.cpp
         src/entry.cpp
-        src/datafile.cpp
+        src/data_file.cpp
 )
 
 add_library(kio_bitcask ${BITCASK_H} ${BITCASK_SRC})
