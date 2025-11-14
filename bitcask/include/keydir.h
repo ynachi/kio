@@ -27,7 +27,7 @@ namespace bitcask
     /// Value location in data file
     struct ValueLocation
     {
-        std::uint32_t file_id;
+        uint64_t file_id;
         uint64_t offset;
         uint32_t total_size;
         uint64_t timestamp;

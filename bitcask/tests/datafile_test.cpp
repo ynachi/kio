@@ -21,7 +21,7 @@ using namespace kio;
 class DataFileTest : public ::testing::Test
 {
 protected:
-    Config config_;
+    BitcaskConfig config_;
     BufferPool buffer_pool_;
     io::WorkerConfig worker_config_;
     std::unique_ptr<io::Worker> worker_;

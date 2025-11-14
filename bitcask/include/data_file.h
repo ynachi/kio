@@ -19,7 +19,7 @@ namespace bitcask
     {
     public:
         // The fd will be created by the worker thread (the caller) and passed to the constructor
-        DataFile(int fd, uint64_t file_id, kio::io::Worker& io_worker, kio::BufferPool& bp, Config& config);
+        DataFile(int fd, uint64_t file_id, kio::io::Worker& io_worker, kio::BufferPool& bp, BitcaskConfig& config);
 
         // File is not copyable and cannot be assigned
         DataFile(const DataFile&) = delete;
@@ -32,7 +32,7 @@ namespace bitcask
         {
             if (fd_ >= 0)
             {
-                ALOG_WARN("DataFile {} is being destroyed without being closed", path_.string());
+                ALOG_WARN("DataFile {} is being destroyed without being closed", file_id_);
                 close(fd_);
             };
             // avoid double close
@@ -51,7 +51,7 @@ namespace bitcask
 
         // Getters
         [[nodiscard]]
-        uint32_t file_id() const
+        uint64_t file_id() const
         {
             return file_id_;
         }
@@ -60,26 +60,21 @@ namespace bitcask
         {
             return size_;
         }
-        [[nodiscard]]
-        const std::filesystem::path& path() const
-        {
-            return path_;
-        }
 
         // Check if a file should be rotated
         [[nodiscard]]
         bool should_rotate(size_t max_file_size) const;
 
     private:
-        std::filesystem::path path_;
-        // timestamp based id
+        // timestamp_s based id
+        // data_1741971205.db
         uint64_t file_id_{0};
         int fd_{-1};
         uint64_t size_{0};
         kio::io::Worker& io_worker_;
         kio::BufferPool& buffer_pool_;
         //
-        Config& config_;
+        BitcaskConfig& config_;
     };
 }  // namespace bitcask
 

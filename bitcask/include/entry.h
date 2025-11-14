@@ -25,6 +25,15 @@ namespace bitcask
     // SIZE: Length of PAYLOAD in bytes (does NOT include CRC or SIZE)
     // Total entry size = 4 + 8 + SIZE
 
+    // Hint Entry, fully serialize/deserialize by struct_pack:
+    // +----------------+--------+-----------+----------------+
+    // | timestamp_ns(8)| entry_pos | total_sz  | key(string) |
+    // +----------------+--------+-----------+----------------+
+    // - timestamp_ns : uint64_t nanosecond timestamp
+    // - entry_pos: position of the serialized data entry in the datafile
+    // - total_sz: Total size of the serialized data entry in the datafile
+    // - key:
+
     // PAYLOAD (struct_pack serialization of Entry):
     // +----------------+--------+-----------+-------------+
     // | timestamp_ns(8)| flag(1)| key(var)  | value(var)  |
@@ -66,11 +75,35 @@ namespace bitcask
         [[nodiscard]]
         std::vector<char> serialize() const;
 
-        // Deserialize from buffer, returns the cursor position upon successful deserialization
+        // Deserialize from buffer
         static kio::Result<DataEntry> deserialize(std::span<const char> buffer);
     };
+
+    struct HintEntry
+    {
+        uint64_t timestamp_ns{};
+        uint64_t entry_pos{};
+        uint32_t total_sz{};
+        std::string key;
+
+        HintEntry() = default;
+
+        HintEntry(const uint64_t timestamp_ns, const uint64_t entry_pos, const uint64_t total_sz, std::string&& key) :
+            timestamp_ns(timestamp_ns), entry_pos(entry_pos), total_sz(total_sz), key(std::move(key))
+        {
+        }
+
+        // Serialize to buffer
+        [[nodiscard]]
+        std::vector<char> serialize() const;
+
+        // Deserialize from buffer
+        static kio::Result<HintEntry> deserialize(std::span<const char> buffer);
+    };
+
     // for struct_pack
     YLT_REFL(DataEntry, timestamp_ns, flag, key, value);
+    YLT_REFL(HintEntry, timestamp_ns, entry_pos, total_sz, key)
 }  // namespace bitcask
 
 #endif  // KIO_ENTRY_H

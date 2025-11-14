@@ -5,6 +5,7 @@ SET(BITCASK_H
         include/entry.h
         include/data_file.h
         include/config.h
+        include/hint_file.h
 )
 
 SET(BITCASK_SRC
@@ -12,6 +13,7 @@ SET(BITCASK_SRC
         src/keydir.cpp
         src/entry.cpp
         src/data_file.cpp
+        src/hint_file.cpp
 )
 
 add_library(kio_bitcask ${BITCASK_H} ${BITCASK_SRC})
@@ -22,7 +24,12 @@ target_link_libraries(bitcast_demo PRIVATE yalantinglibs::yalantinglibs crc32c)
 
 
 ## tests
-add_executable(bitcask_test tests/keydir_test.cpp tests/entry_test.cpp tests/datafile_test.cpp)
+add_executable(bitcask_test
+        tests/keydir_test.cpp
+        tests/entry_test.cpp
+        tests/datafile_test.cpp
+        tests/hint_file_test.cpp
+)
 
 target_link_libraries(bitcask_test
         PRIVATE

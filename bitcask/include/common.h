@@ -7,21 +7,29 @@
 #ifndef KIO_CONST_H
 #define KIO_CONST_H
 #include <cstdint>
+#include <sys/stat.h>
+
+#include "core/include/coro.h"
+#include "core/include/errors.h"
+#include "core/include/io/worker.h"
 
 namespace bitcask
 {
     constexpr std::uint8_t FLAG_NONE = 0x00;
     constexpr uint8_t FLAG_TOMBSTONE = 0x01;
     constexpr std::size_t MIN_ON_DISK_SIZE = 12;  // at least CRC + PAYLOAD SIZE
+    constexpr std::size_t HINT_ENTRY_HEADER_SIZE = 24;
+    constexpr std::size_t HINT_READ_CHUNK_SIZE = 32 * 1024;
 
     /**
      * @brief Gets the current time as a 64-bit integer.
-     * @return The number of nanoseconds since the UNIX epoch.
+     * @return The number of T since the UNIX epoch.
      */
-    inline std::uint64_t get_current_timestamp_ns()
+    template<typename T = std::chrono::nanoseconds>
+    std::uint64_t get_current_timestamp()
     {
         const auto now = std::chrono::steady_clock::now();
-        return std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+        return std::chrono::duration_cast<T>(now.time_since_epoch()).count();
     }
 
     /**
@@ -58,6 +66,51 @@ namespace bitcask
             return val;
         }
     }
+
+    /// Read from the worker until EOF, for hint files as they are small
+    inline kio::Task<kio::Result<std::vector<char>>> read_all(kio::io::Worker& w, const int fd)
+    {
+        std::vector<char> buf;
+        buf.reserve(HINT_READ_CHUNK_SIZE * 8);
+
+        char chunk[HINT_READ_CHUNK_SIZE];
+        for (;;)
+        {
+            const auto n = KIO_TRY(co_await w.async_read(fd, chunk));
+
+            if (n == 0)
+            {
+                co_return buf;
+            }
+
+            buf.insert(buf.end(), chunk, chunk + n);
+        }
+    }
+
+    // Read the hint file entirely
+    static kio::Task<kio::Result<std::vector<char>>> read_file_content(kio::io::Worker& io_worker, const int fd)
+    {
+        struct stat st{};
+        // this is a blocking system call but it's ok. We call this method only during database init.
+        // Otherwise, do not use it anywhere else as it would block the whole event loop
+        if (::fstat(fd, &st) < 0)
+        {
+            co_return std::unexpected(kio::Error::from_errno(errno));
+        }
+
+        if (st.st_size == 0)
+        {
+            co_return std::vector<char>{};
+        }
+
+        std::vector<char> buffer(st.st_size);
+        const std::span buf_span(buffer);
+
+        KIO_TRY(co_await io_worker.async_read_exact_at(fd, buf_span, 0));
+
+        co_return buffer;
+    }
+
 }  // namespace bitcask
 
 #endif  // KIO_CONST_H

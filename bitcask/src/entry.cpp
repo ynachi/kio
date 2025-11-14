@@ -11,7 +11,10 @@
 
 namespace bitcask
 {
-    DataEntry::DataEntry(std::string&& key, std::vector<char>&& value, const uint8_t flag) : timestamp_ns(get_current_timestamp_ns()), flag(flag), key(std::move(key)), value(std::move(value)) {}
+    DataEntry::DataEntry(std::string&& key, std::vector<char>&& value, const uint8_t flag) :
+        timestamp_ns(get_current_timestamp<std::chrono::nanoseconds>()), flag(flag), key(std::move(key)), value(std::move(value))
+    {
+    }
 
     std::vector<char> DataEntry::serialize() const
     {
@@ -61,7 +64,7 @@ namespace bitcask
 
         if (buffer.size() < MIN_ON_DISK_SIZE + size)
         {
-            // add an additional log because the error is not very specialized
+            // add a log because the error is not very specialized
             ALOG_ERROR("Data shorter than full entry");
             return std::unexpected(kio::Error::from_errno(EINVAL));
         }
@@ -75,10 +78,26 @@ namespace bitcask
         auto entry = struct_pack::deserialize<DataEntry>(payload_span);
         if (!entry.has_value())
         {
-            ALOG_ERROR("Failed to deserialize entry");
+            ALOG_ERROR("Failed to deserialize entry: {}", entry.error().message());
             return std::unexpected(kio::Error::from_category(kio::IoError::IODeserialization));
         }
 
         return entry.value();
     }
+
+    std::vector<char> HintEntry::serialize() const { return struct_pack::serialize(*this); }
+
+    kio::Result<HintEntry> HintEntry::deserialize(std::span<const char> buffer)
+    {
+        // let struct_pack manage the error
+        auto entry = struct_pack::deserialize<HintEntry>(buffer);
+        if (!entry.has_value())
+        {
+            ALOG_ERROR("Failed to deserialize entry: {}", entry.error().message());
+            return std::unexpected(kio::Error::from_category(kio::IoError::IODeserialization));
+        }
+        return entry.value();
+    }
+
+
 }  // namespace bitcask

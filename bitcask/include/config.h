@@ -13,7 +13,7 @@ namespace bitcask
 {
     using namespace std::literals;
 
-    struct Config
+    struct BitcaskConfig
     {
         std::filesystem::path directory;
 

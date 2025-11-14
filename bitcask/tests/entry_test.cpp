@@ -27,12 +27,12 @@ protected:
 
 TEST_F(EntryTest, ConstructorSetsTimestamp)
 {
-    auto before = get_current_timestamp_ns();
+    auto before = get_current_timestamp();
     // Small sleep to ensure a clock moves if resolution is low
     std::this_thread::sleep_for(std::chrono::nanoseconds(1));
     DataEntry entry("key", {});
     std::this_thread::sleep_for(std::chrono::nanoseconds(1));
-    auto after = get_current_timestamp_ns();
+    auto after = get_current_timestamp();
 
     EXPECT_GE(entry.timestamp_ns, before);
     EXPECT_LE(entry.timestamp_ns, after);
@@ -274,4 +274,128 @@ TEST_F(EntryTest, DeserializeSafelyHandlesIncompletePayload)
     ASSERT_FALSE(result.has_value());
     // Should fail because it knows it needs more data than is available
     EXPECT_EQ(result.error().errno_value, EINVAL);
+}
+
+TEST_F(EntryTest, HintEntrySerializeDeserializeRoundTrip)
+{
+    // Create a hint entry with typical values
+    constexpr uint64_t timestamp_ns = 1234567890000000000ULL;
+    constexpr uint64_t entry_pos = 1024;
+    constexpr uint64_t total_sz = 256;
+    const std::string key = "test_key";
+
+    HintEntry original(timestamp_ns, entry_pos, total_sz, std::string(key));  // Copy key to avoid moving from const
+
+    // Serialize
+    auto buffer = original.serialize();
+    ASSERT_FALSE(buffer.empty());
+
+    // Deserialize
+    auto result = HintEntry::deserialize(buffer);
+    ASSERT_TRUE(result.has_value()) << "Deserialization failed";
+
+    const auto& deserialized = result.value();
+
+    // Verify all fields match
+    EXPECT_EQ(deserialized.timestamp_ns, timestamp_ns);
+    EXPECT_EQ(deserialized.entry_pos, entry_pos);
+    EXPECT_EQ(deserialized.total_sz, total_sz);
+    EXPECT_EQ(deserialized.key, key);
+}
+
+TEST_F(EntryTest, HintEntryEmptyKey)
+{
+    constexpr uint64_t timestamp_ns = 987654321ULL;
+    constexpr uint64_t entry_pos = 512;
+    constexpr uint64_t total_sz = 128;
+
+    HintEntry original(timestamp_ns, entry_pos, total_sz, std::string(""));  // Empty key
+
+    auto buffer = original.serialize();
+    auto result = HintEntry::deserialize(buffer);
+
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result.value().key, "");
+    EXPECT_EQ(result.value().timestamp_ns, timestamp_ns);
+    EXPECT_EQ(result.value().entry_pos, entry_pos);
+    EXPECT_EQ(result.value().total_sz, total_sz);
+}
+
+TEST_F(EntryTest, HintEntryDeserializeFailsOnInvalidData)
+{
+    // Create invalid buffer data
+    std::vector<char> invalid_buffer = {0x00, 0x01, 0x02, 0x03};  // Too small and malformed
+
+    auto result = HintEntry::deserialize(invalid_buffer);
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), kio::Error::from_category(kio::IoError::IODeserialization));
+}
+
+TEST_F(EntryTest, HintEntryWithLongKey)
+{
+    const std::string long_key(1000, 'x');  // 1000 character key
+    HintEntry original(1, 2, 3, std::string(long_key));
+
+    auto buffer = original.serialize();
+    auto result = HintEntry::deserialize(buffer);
+
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result.value().key, long_key);
+    EXPECT_EQ(result.value().key.size(), 1000);
+}
+
+TEST_F(EntryTest, DeserializeMultipleHintEntriesFromBuffer)
+{
+    // Create multiple hint entries with different data
+    HintEntry entry1(1000, 1024, 128, std::string("key1"));
+    HintEntry entry2(2000, 2048, 256, std::string("key2"));
+    HintEntry entry3(3000, 4096, 512, std::string("key3_with_longer_name"));
+
+    // Serialize each entry
+    auto buffer1 = entry1.serialize();
+    auto buffer2 = entry2.serialize();
+    auto buffer3 = entry3.serialize();
+
+    // Combine all serialized data into one continuous buffer
+    std::vector<char> combined_buffer;
+    combined_buffer.insert(combined_buffer.end(), buffer1.begin(), buffer1.end());
+    combined_buffer.insert(combined_buffer.end(), buffer2.begin(), buffer2.end());
+    combined_buffer.insert(combined_buffer.end(), buffer3.begin(), buffer3.end());
+
+    // Deserialize entries one by one from the combined buffer
+    size_t offset = 0;
+
+    // First entry
+    std::span<const char> span1(combined_buffer.data() + offset, buffer1.size());
+    auto result1 = HintEntry::deserialize(span1);
+    ASSERT_TRUE(result1.has_value()) << "Failed to deserialize first hint entry";
+    EXPECT_EQ(result1->timestamp_ns, 1000);
+    EXPECT_EQ(result1->entry_pos, 1024);
+    EXPECT_EQ(result1->total_sz, 128);
+    EXPECT_EQ(result1->key, "key1");
+    offset += buffer1.size();
+
+    // Second entry
+    std::span<const char> span2(combined_buffer.data() + offset, buffer2.size());
+    auto result2 = HintEntry::deserialize(span2);
+    ASSERT_TRUE(result2.has_value()) << "Failed to deserialize second hint entry";
+    EXPECT_EQ(result2->timestamp_ns, 2000);
+    EXPECT_EQ(result2->entry_pos, 2048);
+    EXPECT_EQ(result2->total_sz, 256);
+    EXPECT_EQ(result2->key, "key2");
+    offset += buffer2.size();
+
+    // Third entry
+    std::span<const char> span3(combined_buffer.data() + offset, buffer3.size());
+    auto result3 = HintEntry::deserialize(span3);
+    ASSERT_TRUE(result3.has_value()) << "Failed to deserialize third hint entry";
+    EXPECT_EQ(result3->timestamp_ns, 3000);
+    EXPECT_EQ(result3->entry_pos, 4096);
+    EXPECT_EQ(result3->total_sz, 512);
+    EXPECT_EQ(result3->key, "key3_with_longer_name");
+    offset += buffer3.size();
+
+    // Verify we consumed the entire buffer
+    EXPECT_EQ(offset, combined_buffer.size());
 }

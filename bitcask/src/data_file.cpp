@@ -8,7 +8,7 @@
 using namespace kio;
 namespace bitcask
 {
-    DataFile::DataFile(const int fd, const uint64_t file_id, io::Worker& io_worker, BufferPool& bp, Config& config) :
+    DataFile::DataFile(const int fd, const uint64_t file_id, io::Worker& io_worker, BufferPool& bp, BitcaskConfig& config) :
         file_id_(file_id), fd_(fd), io_worker_(io_worker), buffer_pool_(bp), config_(config)
     {
         if (fd_ < 0)
