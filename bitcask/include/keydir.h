@@ -12,6 +12,8 @@
 #include <string>
 #include <unordered_map>
 
+#include "stats.h"
+
 namespace bitcask
 {
     struct ValueLocation;
@@ -40,15 +42,22 @@ namespace bitcask
     class KeyDir
     {
     public:
-        // Keydir "sees" everything related to files, so it is the best place to collect the stats
         struct Stats
         {
-            /// the size of the datafile in size, this info is already available in the Datafile class
-            uint64_t size{0};
-            /// bytes actually referenced by the keydir
-            uint64_t live_bytes{0};
-            uint64_t records_count{0};
-            uint64_t tombstones_count{0};
+            struct FileStats
+            {
+                /// total bytes currently referenced by KeyDir
+                uint64_t live_bytes{0};
+                // number of live entries
+                uint64_t live_records_count{0};
+                // number of removed entries
+                uint64_t tombstones_count{0};
+            };
+
+            // Map of file_id → FileStats
+            std::unordered_map<uint64_t, FileStats> data_files;
+
+            uint64_t data_files_count{0};  // optional, total number of files tracked
         };
         explicit KeyDir(size_t shard_count = 4);
         /// Thread-safe put operations, replace it if exist
@@ -59,9 +68,10 @@ namespace bitcask
             return shard(key).get(key);
         }
 
-        void remove(const std::string& key) { shard_mut(key).index_.erase(key); }  // NOLINT on const
+        /// returns file_id and live bytes for compaction decision
+        std::optional<std::pair<uint64_t, uint64_t>> remove(const std::string& key) { return shard_mut(key).remove(key); }
 
-        /// Thread-safe put, only if timestamp is newer.
+        /// Thread-safe put, only if the timestamp is newer.
         /// Used by the load_index process.
         void put_if_newer(std::string&& key, const ValueLocation& loc) { shard_mut(key).put_if_newer(std::move(key), loc); }  // NOLINT on const
 
@@ -120,13 +130,24 @@ namespace bitcask
     private:
         struct Shard
         {
+            // Keydir "sees" everything related to files, so it is the best place to collect the stats
+            struct FileStats
+            {
+                /// bytes actually referenced by the keydir
+                uint64_t live_bytes{0};
+                uint64_t live_records_count{0};
+                uint64_t tombstones_count{0};
+            };
+
+            std::unordered_map<uint64_t, FileStats> per_files_stats;
             mutable std::shared_mutex mu;
             std::unordered_map<std::string, ValueLocation, std::hash<std::string_view>, std::equal_to<>> index_;  // NOSONAR
 
-            void put(std::string&& key, ValueLocation loc);
+            void put(std::string&& key, const ValueLocation& loc);
             [[nodiscard]]
             std::optional<ValueLocation> get(const std::string& key) const;
-            void put_if_newer(std::string&& key, ValueLocation loc);
+            void put_if_newer(std::string&& key, const ValueLocation& loc);
+            std::optional<std::pair<uint64_t, uint64_t>> remove(const std::string& key);
         };
 
         std::vector<std::unique_ptr<Shard>> shards_;
@@ -136,6 +157,9 @@ namespace bitcask
         const Shard& shard(std::string_view key) const;
 
         Shard& shard_mut(std::string_view key);
+
+        [[nodiscard]]
+        Stats snapshot_stats() const;
     };
 }  // namespace bitcask
 

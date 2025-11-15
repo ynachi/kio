@@ -31,7 +31,16 @@ namespace bitcask
 
     ValueLocationUnorderedMap KeyDir::snapshot() const
     {
+        size_t total_keys = 0;
+        for (const auto& shard: shards_)
+        {
+            std::shared_lock lock(shard->mu);
+            total_keys += shard->index_.size();
+        }
+
         ValueLocationUnorderedMap full_snapshot;
+        // avoid repeated rehash
+        full_snapshot.reserve(total_keys);
 
         for (const auto& shard_ptr: shards_)
         {
@@ -58,10 +67,19 @@ namespace bitcask
     }
 
 
-    void KeyDir::Shard::put(std::string&& key, ValueLocation loc)
+    void KeyDir::Shard::put(std::string&& key, const ValueLocation& loc)
     {
         std::lock_guard lock(mu);
-        index_.insert_or_assign(std::move(key), loc);
+        if (const auto it = index_.find(key); it != index_.end())
+        {
+            auto& old_stats = per_files_stats[it->second.file_id];
+            old_stats.live_bytes -= it->second.total_size;
+
+            it->second = loc;
+        }
+
+        per_files_stats[loc.file_id].live_bytes += loc.total_size;
+        index_[std::move(key)] = loc;
     }
 
     std::optional<ValueLocation> KeyDir::Shard::get(const std::string& key) const
@@ -75,21 +93,61 @@ namespace bitcask
         return it->second;
     }
 
-    void KeyDir::Shard::put_if_newer(std::string&& key, ValueLocation loc)
+    void KeyDir::Shard::put_if_newer(std::string&& key, const ValueLocation& loc)
     {
         std::lock_guard lock(mu);
 
-        // 1. Key doesn't exist? Add it.
         if (const auto it = index_.find(key); it == index_.end())
         {
             index_.try_emplace(std::move(key), loc);
+            per_files_stats[loc.file_id].live_bytes += loc.total_size;
         }
-        // 2. Key exists? Only replace it if the new timestamp is newer.
         else if (loc.timestamp > it->second.timestamp)
         {
+            const auto old = it->second;  // remember old value
             it->second = loc;
+
+            per_files_stats[old.file_id].live_bytes -= old.total_size;
+            per_files_stats[loc.file_id].live_bytes += loc.total_size;
         }
-        // 3. Otherwise, do nothing (the on-disk entry is old).
+        // else: do nothing (old on-disk entry is newer)
     }
+
+    std::optional<std::pair<uint64_t, uint64_t>> KeyDir::Shard::remove(const std::string& key)
+    {
+        std::lock_guard lock(mu);
+        if (const auto it = index_.find(key); it != index_.end())
+        {
+            auto& stats = per_files_stats[it->second.file_id];
+            stats.live_bytes -= it->second.total_size;
+            stats.tombstones_count++;
+            auto file_id = it->second.file_id;
+            index_.erase(it);
+            return std::pair{file_id, stats.live_bytes};
+        }
+        return std::nullopt;
+    }
+
+    KeyDir::Stats KeyDir::snapshot_stats() const
+    {
+        Stats s;
+
+        for (const auto& shard: shards_)
+        {
+            std::shared_lock lock(shard->mu);
+            // shared/read lock
+            for (const auto& [file_id, fs]: shard->per_files_stats)
+            {
+                auto& total = s.data_files[file_id];
+                total.live_bytes += fs.live_bytes;
+                total.live_records_count += shard->index_.size();
+                total.tombstones_count += fs.tombstones_count;
+            }
+        }
+
+        s.data_files_count = s.data_files.size();
+        return s;
+    }
+
 
 }  // namespace bitcask
