@@ -6,14 +6,18 @@ SET(BITCASK_H
         include/data_file.h
         include/config.h
         include/hint_file.h
+        include/compactor.h
+        include/stats.h
 )
 
 SET(BITCASK_SRC
+        src/common.cpp
         src/bitcask.cpp
         src/keydir.cpp
         src/entry.cpp
         src/data_file.cpp
         src/hint_file.cpp
+        src/compactor.cpp
 )
 
 add_library(kio_bitcask ${BITCASK_H} ${BITCASK_SRC})

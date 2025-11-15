@@ -16,8 +16,7 @@ namespace bitcask
             throw std::invalid_argument("shard_count cannot be zero");
         }
 
-        // n and n - 1 are complements in bit repr when power of two
-        if ((shard_count & shard_count - 1) != 0)
+        if (!std::has_single_bit(shard_count))
         {
             throw std::invalid_argument("shard_count must be a power of two");
         }
@@ -30,9 +29,9 @@ namespace bitcask
         }
     }
 
-    std::unordered_map<std::string, ValueLocation> KeyDir::snapshot() const
+    ValueLocationUnorderedMap KeyDir::snapshot() const
     {
-        std::unordered_map<std::string, ValueLocation> full_snapshot;
+        ValueLocationUnorderedMap full_snapshot;
 
         for (const auto& shard_ptr: shards_)
         {
@@ -43,27 +42,21 @@ namespace bitcask
         return full_snapshot;
     }
 
-    void KeyDir::for_each_unlocked_shard(std::function<void(const std::unordered_map<std::string, ValueLocation>&)> fn) const
-    {
-        for (size_t i = 0; i < shard_count_; ++i)
-        {
-            std::unordered_map<std::string, ValueLocation> shard_copy;
-            {
-                std::shared_lock lock(shards_[i]->mu);
-                shard_copy = shards_[i]->index_;
-            }
-
-            fn(shard_copy);
-        }
-    }
-
     [[nodiscard]]
-    KeyDir::Shard& KeyDir::shard(std::string_view key) const
+    const KeyDir::Shard& KeyDir::shard(std::string_view key) const
     {
         const auto hash = std::hash<std::string_view>{}(key);
         const auto shard_id = hash & (shard_count_ - 1);
         return *shards_.at(shard_id);
     }
+
+    KeyDir::Shard& KeyDir::shard_mut(std::string_view key)  // NOLINT on const-correctness
+    {
+        const auto hash = std::hash<std::string_view>{}(key);
+        const auto shard_id = hash & (shard_count_ - 1);
+        return *shards_.at(shard_id);
+    }
+
 
     void KeyDir::Shard::put(std::string&& key, ValueLocation loc)
     {
@@ -71,7 +64,7 @@ namespace bitcask
         index_.insert_or_assign(std::move(key), loc);
     }
 
-    std::optional<ValueLocation> KeyDir::Shard::get(const std::string& key)
+    std::optional<ValueLocation> KeyDir::Shard::get(const std::string& key) const
     {
         std::shared_lock lock(mu);
         const auto it = index_.find(key);
@@ -89,7 +82,7 @@ namespace bitcask
         // 1. Key doesn't exist? Add it.
         if (const auto it = index_.find(key); it == index_.end())
         {
-            index_.emplace(std::move(key), loc);
+            index_.try_emplace(std::move(key), loc);
         }
         // 2. Key exists? Only replace it if the new timestamp is newer.
         else if (loc.timestamp > it->second.timestamp)

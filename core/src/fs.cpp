@@ -58,6 +58,7 @@ namespace kio
         co_return res;
     }
 
+    // NOSONAR: buffer lifetime is controlled by caller, safe across suspend
     Task<Result<size_t> > File::async_write(std::span<const char> buf, const uint64_t offset) const
     {
         auto *worker = pool_.get_worker(worker_id_);

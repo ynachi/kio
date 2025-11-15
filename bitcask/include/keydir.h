@@ -4,6 +4,7 @@
 
 #ifndef KIO_KEYDIR_H
 #define KIO_KEYDIR_H
+#include <concepts>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -13,6 +14,9 @@
 
 namespace bitcask
 {
+    struct ValueLocation;
+
+    using ValueLocationUnorderedMap = std::unordered_map<std::string, ValueLocation, std::hash<std::string_view>, std::equal_to<>>;  // NOSONAR
     // KeyDir entry (in-memory index):
     // +-----------+-------------+-------------+--------------+
     // | file_id(4)| offset(8)   | total_sz(8) | timestamp(8)*|
@@ -36,18 +40,30 @@ namespace bitcask
     class KeyDir
     {
     public:
+        // Keydir "sees" everything related to files, so it is the best place to collect the stats
+        struct Stats
+        {
+            /// the size of the datafile in size, this info is already available in the Datafile class
+            uint64_t size{0};
+            /// bytes actually referenced by the keydir
+            uint64_t live_bytes{0};
+            uint64_t records_count{0};
+            uint64_t tombstones_count{0};
+        };
         explicit KeyDir(size_t shard_count = 4);
         /// Thread-safe put operations, replace it if exist
-        void put(std::string&& key, ValueLocation loc) { shard(key).put(std::move(key), loc); }
+        void put(std::string&& key, const ValueLocation& loc) { shard_mut(key).put(std::move(key), loc); }
         [[nodiscard]]
         std::optional<ValueLocation> get(const std::string& key) const
         {
             return shard(key).get(key);
         }
 
+        void remove(const std::string& key) { shard_mut(key).index_.erase(key); }  // NOLINT on const
+
         /// Thread-safe put, only if timestamp is newer.
         /// Used by the load_index process.
-        void put_if_newer(std::string&& key, ValueLocation loc) { shard(key).put_if_newer(std::move(key), loc); }
+        void put_if_newer(std::string&& key, const ValueLocation& loc) { shard_mut(key).put_if_newer(std::move(key), loc); }  // NOLINT on const
 
         /**
          * @brief Creates a complete, point-in-time copy of the entire key directory.
@@ -67,7 +83,7 @@ namespace bitcask
          * that method. See for_each_unlocked_shard.
          */
         [[nodiscard]]
-        std::unordered_map<std::string, ValueLocation> snapshot() const;
+        ValueLocationUnorderedMap snapshot() const;  // NOSONAR
 
         /**
          * @brief Iterates over a snapshot of each shard, one shard at a time.
@@ -85,25 +101,41 @@ namespace bitcask
          *
          * @param fn A function to be called for each shard's data.
          */
-        void for_each_unlocked_shard(std::function<void(const std::unordered_map<std::string, ValueLocation>&)> fn) const;
+        template<typename Fn>
+            requires std::invocable<Fn&, const ValueLocationUnorderedMap&>
+        void for_each_unlocked_shard(Fn&& fn) const
+        {
+            for (size_t i = 0; i < shard_count_; ++i)
+            {
+                ValueLocationUnorderedMap shard_copy;
+                {
+                    std::shared_lock lock(shards_[i]->mu);
+                    shard_copy = shards_[i]->index_;
+                }
+
+                std::forward<Fn>(fn)(shard_copy);
+            }
+        }
 
     private:
         struct Shard
         {
-            std::shared_mutex mu;
-            std::unordered_map<std::string, ValueLocation> index_;
+            mutable std::shared_mutex mu;
+            std::unordered_map<std::string, ValueLocation, std::hash<std::string_view>, std::equal_to<>> index_;  // NOSONAR
 
             void put(std::string&& key, ValueLocation loc);
             [[nodiscard]]
-            std::optional<ValueLocation> get(const std::string& key);
+            std::optional<ValueLocation> get(const std::string& key) const;
             void put_if_newer(std::string&& key, ValueLocation loc);
         };
 
         std::vector<std::unique_ptr<Shard>> shards_;
         // power of two
-        std::uint32_t shard_count_{4};
+        std::size_t shard_count_{4};
         [[nodiscard]]
-        Shard& shard(std::string_view key) const;
+        const Shard& shard(std::string_view key) const;
+
+        Shard& shard_mut(std::string_view key);
     };
 }  // namespace bitcask
 

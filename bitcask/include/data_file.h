@@ -71,6 +71,10 @@ namespace bitcask
         uint64_t file_id_{0};
         int fd_{-1};
         uint64_t size_{0};
+        // useful to perform compaction of files older than X
+        // on seal, file metadata is also written to disk
+        // data_id_.metadata, or we can rely on fstats
+        std::chrono::steady_clock::time_point created_at_{std::chrono::steady_clock::now()};
         kio::io::Worker& io_worker_;
         kio::BufferPool& buffer_pool_;
         //

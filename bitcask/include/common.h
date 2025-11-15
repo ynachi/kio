@@ -67,49 +67,8 @@ namespace bitcask
         }
     }
 
-    /// Read from the worker until EOF, for hint files as they are small
-    inline kio::Task<kio::Result<std::vector<char>>> read_all(kio::io::Worker& w, const int fd)
-    {
-        std::vector<char> buf;
-        buf.reserve(HINT_READ_CHUNK_SIZE * 8);
-
-        char chunk[HINT_READ_CHUNK_SIZE];
-        for (;;)
-        {
-            const auto n = KIO_TRY(co_await w.async_read(fd, chunk));
-
-            if (n == 0)
-            {
-                co_return buf;
-            }
-
-            buf.insert(buf.end(), chunk, chunk + n);
-        }
-    }
-
-    // Read the hint file entirely
-    static kio::Task<kio::Result<std::vector<char>>> read_file_content(kio::io::Worker& io_worker, const int fd)
-    {
-        struct stat st{};
-        // this is a blocking system call but it's ok. We call this method only during database init.
-        // Otherwise, do not use it anywhere else as it would block the whole event loop
-        if (::fstat(fd, &st) < 0)
-        {
-            co_return std::unexpected(kio::Error::from_errno(errno));
-        }
-
-        if (st.st_size == 0)
-        {
-            co_return std::vector<char>{};
-        }
-
-        std::vector<char> buffer(st.st_size);
-        const std::span buf_span(buffer);
-
-        KIO_TRY(co_await io_worker.async_read_exact_at(fd, buf_span, 0));
-
-        co_return buffer;
-    }
+    /// Read the hint file entirely, they are small
+    kio::Task<kio::Result<std::vector<char>>> read_file_content(kio::io::Worker& io_worker, int fd);
 
 }  // namespace bitcask
 

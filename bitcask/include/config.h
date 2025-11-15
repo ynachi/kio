@@ -35,8 +35,10 @@ namespace bitcask
 
         // Compaction
         bool auto_compact = true;
-        // 50% dead data triggers compaction
+        /// 50% dead data triggers compaction, checked on entry deletion and background scan
         double fragmentation_threshold = 0.5;
+        /// Fallback compaction interval
+        std::chrono::milliseconds compaction_interval_s{120s};
 
         // Performance
         size_t read_buffer_size = 4096;

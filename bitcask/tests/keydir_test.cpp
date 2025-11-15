@@ -65,11 +65,11 @@ TEST_F(KeyDirTest, PutIfNewerLogic)
     keydir.put_if_newer("keyA", loc_old);
     EXPECT_EQ(keydir.get("keyA")->timestamp, 100);
 
-    // Case B: Newer timestamp replaces older
+    // Case B: Newer timestamp replaces it older
     keydir.put_if_newer("keyA", loc_new);
     EXPECT_EQ(keydir.get("keyA")->timestamp, 200);
 
-    // Case C: Older timestamp DOES NOT replace newer
+    // Case C: Older timestamp DOES NOT replace it newer
     keydir.put_if_newer("keyA", loc_old);
     EXPECT_EQ(keydir.get("keyA")->timestamp, 200);
 }
@@ -80,13 +80,13 @@ TEST_F(KeyDirTest, KeysGoToDifferentShards)
     // But we can verify that many keys can be stored and retrieved.
     for (int i = 0; i < 1000; ++i)
     {
-        std::string key = "key_" + std::to_string(i);
+        std::string key = std::format("key_{}", i);
         keydir.put(std::move(key), make_loc(1, i));
     }
 
     for (int i = 0; i < 1000; ++i)
     {
-        std::string key = "key_" + std::to_string(i);
+        std::string key = std::format("key_{}", i);
         auto res = keydir.get(key);
         ASSERT_TRUE(res.has_value()) << "Missing key: " << key;
         EXPECT_EQ(res->timestamp, static_cast<uint64_t>(i));
@@ -116,7 +116,7 @@ TEST_F(KeyDirTest, ConcurrentAccessCorrectness)
     constexpr int num_threads = 8;
     constexpr int ops_per_thread = 1000;
 
-    std::vector<std::thread> threads;
+    std::vector<std::jthread> threads;
     threads.reserve(num_threads);
 
     // Phase 1: Concurrent writes to different keys
@@ -127,7 +127,7 @@ TEST_F(KeyDirTest, ConcurrentAccessCorrectness)
                 {
                     for (int i = 0; i < ops_per_thread; ++i)
                     {
-                        std::string key = "thread_" + std::to_string(t) + "_key_" + std::to_string(i);
+                        std::string key = std::format("thread_{}_key_{}", t, i);
                         keydir.put(std::move(key), make_loc(t, i));
                     }
                 });
@@ -144,7 +144,7 @@ TEST_F(KeyDirTest, ConcurrentAccessCorrectness)
     {
         for (int i = 0; i < ops_per_thread; ++i)
         {
-            std::string key = "thread_" + std::to_string(t) + "_key_" + std::to_string(i);
+            std::string key = std::format("thread_{}_key_{}", t, i);
             auto res = keydir.get(key);
             ASSERT_TRUE(res.has_value()) << "Missing key: " << key;
             EXPECT_EQ(res->file_id, static_cast<uint32_t>(t));
@@ -156,7 +156,7 @@ TEST_F(KeyDirTest, ConcurrentAccessCorrectness)
     constexpr int shared_keys = 100;
     for (int i = 0; i < shared_keys; ++i)
     {
-        std::string key = "shared_" + std::to_string(i);
+        std::string key = std::format("shared_{}", i);
         keydir.put(std::move(key), make_loc(0, 0));
     }
 
@@ -167,7 +167,7 @@ TEST_F(KeyDirTest, ConcurrentAccessCorrectness)
                 {
                     for (int i = 0; i < shared_keys; ++i)
                     {
-                        std::string key = "shared_" + std::to_string(i);
+                        std::string key = std::format("shared_{}", i);
                         keydir.put(std::move(key), make_loc(t, t * 1000 + i));
                     }
                 });
@@ -182,7 +182,7 @@ TEST_F(KeyDirTest, ConcurrentAccessCorrectness)
     // Verify all shared keys have valid values (some thread's write succeeded)
     for (int i = 0; i < shared_keys; ++i)
     {
-        std::string key = "shared_" + std::to_string(i);
+        std::string key = std::format("shared_{}", i);
         auto res = keydir.get(key);
         ASSERT_TRUE(res.has_value()) << "Missing shared key: " << key;
         EXPECT_LT(res->file_id, static_cast<uint32_t>(num_threads));
@@ -194,7 +194,7 @@ TEST_F(KeyDirTest, ConcurrentAccessCorrectness)
     // Initialize with timestamp 5000
     for (int i = 0; i < timestamp_test_keys; ++i)
     {
-        std::string key = "ts_" + std::to_string(i);
+        std::string key = std::format("ts_{}", i);
         keydir.put(std::move(key), make_loc(99, 5000));
     }
 
@@ -209,7 +209,7 @@ TEST_F(KeyDirTest, ConcurrentAccessCorrectness)
 
                     for (int i = 0; i < timestamp_test_keys; ++i)
                     {
-                        std::string key = "ts_" + std::to_string(i);
+                        std::string key = std::format("ts_{}", i);
                         uint64_t timestamp = dist(rng);
                         keydir.put_if_newer(std::move(key), make_loc(t, timestamp));
                     }
@@ -225,7 +225,7 @@ TEST_F(KeyDirTest, ConcurrentAccessCorrectness)
     // Verify final timestamps are >= 5000 (monotonically increasing via put_if_newer)
     for (int i = 0; i < timestamp_test_keys; ++i)
     {
-        std::string key = "ts_" + std::to_string(i);
+        std::string key = std::format("ts_{}", i);
         auto res = keydir.get(key);
         ASSERT_TRUE(res.has_value()) << "Missing timestamp key: " << key;
         EXPECT_GE(res->timestamp, 5000ULL) << "Timestamp went backwards for key: " << key;
@@ -244,7 +244,7 @@ TEST_F(KeyDirTest, ConcurrentAccessCorrectness)
                     int counter = 0;
                     while (keep_running)
                     {
-                        std::string key = "rw_" + std::to_string(t % 10);
+                        std::string key = std::format("rw_{}", t % 10);
                         keydir.put(std::move(key), make_loc(t, counter++));
                     }
                 });
@@ -260,10 +260,9 @@ TEST_F(KeyDirTest, ConcurrentAccessCorrectness)
                     {
                         for (int i = 0; i < 10; ++i)
                         {
-                            std::string key = "rw_" + std::to_string(i);
-                            auto res = keydir.get(key);
+                            std::string key = std::format("rw_{}", i);
                             // Key might not exist yet, but if it does, it should be valid
-                            if (res.has_value() && res->file_id >= num_threads / 2)
+                            if (auto res = keydir.get(key); res.has_value() && res->file_id >= num_threads / 2)
                             {
                                 read_errors.fetch_add(1);
                             }
