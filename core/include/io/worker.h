@@ -352,11 +352,9 @@ namespace kio::io
          * @param fd The file descriptor.
          * @param mode The operation mode (e.g., 0 for falloc, FALLOC_FL_PUNCH_HOLE).
          * @param size The number of bytes to allocate (length).
-         * @return A Task that resumes with a Result<int>.
-         * On success: 0.
-         * On failure: An Error.
+         *  @return A void Result or an error.
          */
-        Task<Result<int>> async_fallocate(int fd, int mode, off_t size);
+        Task<Result<void>> async_fallocate(int fd, int mode, off_t size);
         /**
          * @brief Asynchronously closes a file descriptor.
          *

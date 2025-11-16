@@ -18,7 +18,7 @@ namespace bitcask
     class HintFile
     {
         // timestamp-based id
-        // hint_1741971205.hint
+        // hint_1741971205.ht
         uint64_t file_id_{0};
         // the file should be opened with an O_APPEND flag
         int fd_{-1};

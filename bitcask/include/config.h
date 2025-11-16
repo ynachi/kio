@@ -9,6 +9,8 @@
 #include <fcntl.h>
 #include <filesystem>
 
+#include "common.h"
+
 namespace bitcask
 {
     using namespace std::literals;
@@ -41,7 +43,7 @@ namespace bitcask
         std::chrono::milliseconds compaction_interval_s{120s};
 
         // Performance
-        size_t read_buffer_size = 4096;
+        size_t read_buffer_size = FS_READ_CHUNK_SIZE;
         size_t write_buffer_size = 4096;
     };
 

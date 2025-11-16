@@ -16,7 +16,7 @@ namespace bitcask
         // Otherwise, do not use it anywhere else as it would block the whole event loop
         if (::fstat(fd, &st) < 0)
         {
-            co_return std::unexpected(kio::Error::from_errno(errno));
+            co_return std::unexpected(Error::from_errno(errno));
         }
 
         if (st.st_size == 0)

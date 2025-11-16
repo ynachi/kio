@@ -12,6 +12,7 @@
 #include <string>
 #include <unordered_map>
 
+#include "common.h"
 #include "stats.h"
 
 namespace bitcask
@@ -42,6 +43,8 @@ namespace bitcask
     class KeyDir
     {
     public:
+        // the keydir is the source of truth for the storage engine.
+        // so it makes sens to let it hold the stats related to entries and datafiles
         struct Stats
         {
             struct FileStats
@@ -59,7 +62,7 @@ namespace bitcask
 
             uint64_t data_files_count{0};  // optional, total number of files tracked
         };
-        explicit KeyDir(size_t shard_count = 4);
+        explicit KeyDir(size_t shard_count = KEYDIR_DEFAULT_SHARDS_COUNT);
         /// Thread-safe put operations, replace it if exist
         void put(std::string&& key, const ValueLocation& loc) { shard_mut(key).put(std::move(key), loc); }
         [[nodiscard]]

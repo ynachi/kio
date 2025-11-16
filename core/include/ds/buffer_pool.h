@@ -140,7 +140,7 @@ namespace kio
         std::array<std::vector<std::vector<char>>, 4> buckets_;
         BufferPoolStats stats_;
 
-        static size_t get_bucket_index(size_t size)
+        static size_t get_bucket_index(const size_t size)
         {
             if (size <= kSmallSize) return 0;
             if (size <= kMediumSize) return 1;

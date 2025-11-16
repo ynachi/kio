@@ -6,24 +6,35 @@
 #define KIO_COMPACTION_H
 #include "config.h"
 #include "core/include/io/worker.h"
+#include "data_file.h"
+#include "hint_file.h"
+#include "keydir.h"
 
-using namespace kio;
-using namespace kio::io;
-
+/**
+ * on disk, entries are like this [CRC(4B) | PAYLOAD_SIZE(8B) | PAYLOAD(variable)], repeated
+ * Payload == Serialized(DataEntry)
+ */
 namespace bitcask
 {
     class Compactor
     {
         // compactor has a dedicated worker
-        Worker io_worker_;
+        kio::io::Worker io_worker_;
         BitcaskConfig& config_;
+        KeyDir& indexes_;
+        // need a dedicated buffer pool as they are not thread safe
+        kio::BufferPool bp;
+
+        // create a new data and hint file
+        kio::Task<kio::Result<std::pair<DataFile, HintFile>>> prep_compaction(uint64_t new_files_id);
 
     public:
-        Compactor(BitcaskConfig& config);
+        explicit Compactor(BitcaskConfig& config);
         ~Compactor();
 
         /// Compacts a single file
-        Task<Result<void>> compact(uint64_t file_id);
+        // TODO: returns stat about the compaction
+        kio::Task<kio::Result<void>> compact(uint64_t file_id);
     };
 }  // namespace bitcask
 
