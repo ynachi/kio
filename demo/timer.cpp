@@ -1,8 +1,8 @@
 #include <chrono>
 
+#include "core/include/async_logger.h"
 #include "core/include/io/worker.h"
 #include "core/include/sync_wait.h"
-#include "core/include/async_logger.h"
 
 using namespace kio;
 using namespace io;
@@ -41,15 +41,14 @@ int main()
     Worker worker(0, config);
 
     // Start the worker in a background thread.
-    std::jthread worker_thread([&](std::stop_token st) { worker.loop_forever(); });
+    std::jthread worker_thread([&](const std::stop_token& st) { worker.loop_forever(); });
     worker.wait_ready();
 
     ALOG_INFO("--- Running Timer Demo ---");
-    auto result = SyncWait(timer_coroutine(worker));
 
-    if (!result)
+    if (auto result = SyncWait(timer_coroutine(worker)); !result.has_value())
     {
-        ALOG_ERROR("Timer demo failed: {}", result.error().message());
+        ALOG_ERROR("Timer demo failed: {}", result.error());
     }
     else
     {
@@ -57,7 +56,7 @@ int main()
     }
 
     // Request stop and wait for the worker thread to finish.
-    worker.request_stop();
+    (void) worker.request_stop();
 
     return 0;
 }

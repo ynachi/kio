@@ -111,7 +111,7 @@ int main()
 
     // --- Cleanup ---
     ALOG_INFO("Main thread requesting worker to stop.");
-    worker.request_stop();  // Signals the stop_source and wakes up the loop.
+    (void) worker.request_stop();  // Signals the stop_source and wakes up the loop.
 
     // The jthread's destructor will automatically call join(), ensuring
     // we wait for the worker thread to finish cleanly.

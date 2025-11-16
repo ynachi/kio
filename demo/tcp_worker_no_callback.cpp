@@ -31,7 +31,7 @@ DetachedTask HandleClient(Worker &worker, const int client_fd)
         auto n = co_await worker.async_read(client_fd, std::span(buffer, sizeof(buffer)));
         if (!n.has_value())
         {
-            ALOG_INFO("Read failed {}", n.error().message());
+            ALOG_INFO("Read failed {}", n.error());
             break;
         }
 
@@ -46,7 +46,7 @@ DetachedTask HandleClient(Worker &worker, const int client_fd)
 
         if (!sent.has_value())
         {
-            ALOG_ERROR("Write failed: {}", sent.error().message());
+            ALOG_ERROR("Write failed: {}", sent.error());
             break;
         }
     }
@@ -80,7 +80,7 @@ Task<void> accept_loop(Worker &worker, int listen_fd)
             {
                 break;
             }
-            ALOG_ERROR("Accept failed: {}", client_fd.error().message());
+            ALOG_ERROR("Accept failed: {}", client_fd.error());
             continue;
         }
 
@@ -107,7 +107,7 @@ int main()
     if (!server_fd)
     {
         // Assuming IoErrorToString exists
-        ALOG_ERROR("Failed to create server socket: {}", server_fd.error().message());
+        ALOG_ERROR("Failed to create server socket: {}", server_fd.error());
         return 1;
     }
     ALOG_INFO("server listening on endpoint: {}:{}, FD:{}", ip_address, port, server_fd.value());

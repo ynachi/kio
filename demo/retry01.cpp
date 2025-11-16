@@ -1,10 +1,10 @@
 #include <chrono>
 
+#include "core/include/async_logger.h"
+#include "core/include/errors.h"
 #include "core/include/io/worker.h"
 #include "core/include/net.h"
 #include "core/include/sync_wait.h"
-#include "core/include/errors.h"
-#include "core/include/async_logger.h"
 
 using namespace kio;
 using namespace io;
@@ -40,7 +40,7 @@ Task<Result<int>> connect_with_retries(Worker& worker)
         }
 
         // Connection failed. Log it, close the failed fd, and wait.
-        ALOG_WARN("Connect failed: {}. Retrying in {:.1f}s.", connect_result.error().message(), std::chrono::duration<double>(delay).count());
+        ALOG_WARN("Connect failed: {}. Retrying in {:.1f}s.", connect_result.error(), std::chrono::duration<double>(delay).count());
 
         close(fd);
 
@@ -62,9 +62,9 @@ int main()
     std::jthread t([&] { worker.loop_forever(); });
     worker.wait_ready();
 
-    if (auto result = SyncWait(connect_with_retries(worker)); !result)
+    if (auto result = SyncWait(connect_with_retries(worker)); !result.has_value())
     {
-        ALOG_ERROR("connect_with_retries failed: {}", result.error().message());
+        ALOG_ERROR("connect_with_retries failed: {}", result.error());
     }
 
     // Cast to (void) to suppress the nodiscard warning

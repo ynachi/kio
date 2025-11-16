@@ -23,7 +23,6 @@ using namespace kio::net;
 DetachedTask HandleClient(Worker &worker, const int client_fd)
 {
     char buffer[8192];
-    // const auto st = worker.get_stop_token();
     const auto st = std::stop_token{};
 
     while (!st.stop_requested())
@@ -32,7 +31,7 @@ DetachedTask HandleClient(Worker &worker, const int client_fd)
         auto n = co_await worker.async_read(client_fd, std::span(buffer, sizeof(buffer)));
         if (!n.has_value())
         {
-            ALOG_DEBUG("Read failed {}", n.error().message());
+            ALOG_DEBUG("Read failed {}", n.error());
             // in the io_uring world, most of the errors are fatal, so no need to specialize
             break;
         }
@@ -51,7 +50,7 @@ DetachedTask HandleClient(Worker &worker, const int client_fd)
 
         if (!sent.has_value())
         {
-            ALOG_ERROR("Write failed: {}", sent.error().message());
+            ALOG_ERROR("Write failed: {}", sent.error());
             break;
         }
     }
@@ -76,7 +75,7 @@ DetachedTask accept_loop(Worker &worker, int listen_fd)
 
         if (!client_fd.has_value())
         {
-            ALOG_ERROR("Accept failed: {}", client_fd.error().message());
+            ALOG_ERROR("Accept failed: {}", client_fd.error());
             continue;
         }
 
@@ -103,7 +102,7 @@ int main()
     auto server_fd = create_tcp_socket(ip_address, port, 128);
     if (!server_fd)
     {
-        ALOG_ERROR("Failed to create server socket: {}", server_fd.error().message());
+        ALOG_ERROR("Failed to create server socket: {}", server_fd.error());
         return 1;
     }
     ALOG_INFO("server listening on endpoint: {}:{}, FD:{}", ip_address, port, server_fd.value());

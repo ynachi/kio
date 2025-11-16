@@ -24,7 +24,7 @@ DetachedTask handle_client(Worker& worker, const int client_fd)
         auto n = co_await worker.async_read(client_fd, std::span(buffer, sizeof(buffer)));
         if (!n.has_value())
         {
-            ALOG_DEBUG("Read failed: {}", n.error().message());
+            ALOG_DEBUG("Read failed: {}", n.error());
             // in the io_uring world, most of the errors are fatal, so no need to specialize
             break;
         }
@@ -43,7 +43,7 @@ DetachedTask handle_client(Worker& worker, const int client_fd)
 
         if (!sent.has_value())
         {
-            ALOG_ERROR("Write failed: {}", sent.error().message());
+            ALOG_ERROR("Write failed: {}", sent.error());
             break;
         }
     }
@@ -67,7 +67,7 @@ DetachedTask accept_loop(Worker& worker, int listen_fd)
 
         if (!client_fd.has_value())
         {
-            ALOG_ERROR("error: {}", client_fd.error().message());
+            ALOG_ERROR("error: {}", client_fd.error());
             continue;
         }
 
@@ -85,13 +85,13 @@ int main()
     // ignore
     signal(SIGPIPE, SIG_IGN);
     // Setup logging
-    alog::configure(4096, LogLevel::Disabled);
+    alog::configure(4096, LogLevel::Info);
 
     // Create a listening socket
     auto server_fd_exp = net::create_tcp_socket("0.0.0.0", 8080, 4096);
-    if (!server_fd_exp)
+    if (!server_fd_exp.has_value())
     {
-        ALOG_ERROR("Failed to create server socket: {}", server_fd_exp.error().message());
+        ALOG_ERROR("Failed to create server socket: {}", server_fd_exp.error());
         return 1;
     }
 
@@ -116,8 +116,6 @@ int main()
     pool.stop();
 
     ALOG_INFO("Server stopped from main");
-
-    // std::this_thread::sleep_until(std::chrono::steady_clock::time_point::max());
 
     // Pool destructor stops all workers gracefully
     return 0;

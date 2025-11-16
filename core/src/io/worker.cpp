@@ -119,7 +119,7 @@ namespace kio::io
         io_uring_params params{};
         params.flags |= IORING_SETUP_COOP_TASKRUN | IORING_SETUP_SINGLE_ISSUER;
 
-        if (const int ret = io_uring_queue_init_params(config_.uring_queue_depth, &ring_, &params); ret < 0)
+        if (const int ret = io_uring_queue_init_params(static_cast<int>(config_.uring_queue_depth), &ring_, &params); ret < 0)
         {
             throw std::system_error(-ret, std::system_category(), "io_uring_queue_init failed");
         }
@@ -346,7 +346,7 @@ namespace kio::io
 
     Task<Result<int>> Worker::async_read_at(const int client_fd, std::span<char> buf, const uint64_t offset)
     {
-        auto prep = [](io_uring_sqe *sqe, const int fd, char *b, const size_t len, const uint64_t off) { io_uring_prep_read(sqe, fd, b, len, off); };
+        auto prep = [](io_uring_sqe *sqe, const int fd, char *b, const size_t len, const uint64_t off) { io_uring_prep_read(sqe, fd, b, static_cast<int>(len), off); };
         int ret = co_await make_uring_awaitable(*this, prep, client_fd, buf.data(), buf.size(), offset);
         if (ret < 0)
         {
@@ -369,7 +369,7 @@ namespace kio::io
 
             if (bytes_read == 0)
             {
-                co_return std::unexpected(Error::from_category(IoError::IoEoF));
+                co_return std::unexpected(Error{ErrorCategory::File, kIoEof});
             }
             total_bytes_read += static_cast<size_t>(bytes_read);
         }
@@ -391,7 +391,7 @@ namespace kio::io
 
             if (bytes_read == 0)
             {
-                co_return std::unexpected(Error::from_category(IoError::IoEoF));
+                co_return std::unexpected(Error{ErrorCategory::File, kIoEof});
             }
             total_bytes_read += static_cast<size_t>(bytes_read);
         }
@@ -402,7 +402,7 @@ namespace kio::io
 
     Task<Result<int>> Worker::async_write_at(const int client_fd, std::span<const char> buf, const uint64_t offset)
     {
-        auto prep = [](io_uring_sqe *sqe, const int fd, const char *b, const size_t len, const uint64_t off) { io_uring_prep_write(sqe, fd, b, len, off); };
+        auto prep = [](io_uring_sqe *sqe, const int fd, const char *b, const size_t len, const uint64_t off) { io_uring_prep_write(sqe, fd, b, static_cast<int>(len), off); };
         int ret = co_await make_uring_awaitable(*this, prep, client_fd, buf.data(), buf.size(), offset);
         if (ret < 0)
         {
@@ -424,7 +424,7 @@ namespace kio::io
 
             if (bytes_written == 0)
             {
-                co_return std::unexpected(Error::from_category(IoError::IoEoF));
+                co_return std::unexpected(Error{ErrorCategory::File, kIoEof});
             }
 
             total_bytes_written += static_cast<size_t>(bytes_written);
@@ -449,7 +449,7 @@ namespace kio::io
             if (bytes_written == 0)
             {
                 // EOF
-                co_return std::unexpected(Error::from_category(IoError::IoEoF));
+                co_return std::unexpected(Error{ErrorCategory::File, kIoEof});
             }
 
             total_bytes_written += static_cast<size_t>(bytes_written);
@@ -460,7 +460,7 @@ namespace kio::io
 
     Task<Result<int>> Worker::async_readv(const int client_fd, const iovec *iov, int iovcnt, const uint64_t offset)
     {
-        auto prep = [](io_uring_sqe *sqe, const int fd, const iovec *iov, const int iovcnt, const uint64_t off) { io_uring_prep_readv(sqe, fd, iov, iovcnt, off); };
+        auto prep = [](io_uring_sqe *sqe, const int fd, const iovec *iov_, const int iovcnt_, const uint64_t off) { io_uring_prep_readv(sqe, fd, iov_, iovcnt_, off); };
         int ret = co_await make_uring_awaitable(*this, prep, client_fd, iov, iovcnt, offset);
         if (ret < 0)
         {
@@ -471,7 +471,7 @@ namespace kio::io
 
     Task<Result<int>> Worker::async_writev(const int client_fd, const iovec *iov, int iovcnt, const uint64_t offset)
     {
-        auto prep = [](io_uring_sqe *sqe, const int fd, const iovec *iov, const int iovcnt, const uint64_t off) { io_uring_prep_writev(sqe, fd, iov, iovcnt, off); };
+        auto prep = [](io_uring_sqe *sqe, const int fd, const iovec *iov_, const int iovcnt_, const uint64_t off) { io_uring_prep_writev(sqe, fd, iov_, iovcnt_, off); };
         int ret = co_await make_uring_awaitable(*this, prep, client_fd, iov, iovcnt, offset);
         if (ret < 0)
         {

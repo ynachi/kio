@@ -74,7 +74,7 @@ TEST_F(WorkerTest, AsyncSleep)
         const auto end = std::chrono::steady_clock::now();
 
         // Check 1: The operation must succeed
-        EXPECT_TRUE(result.has_value()) << result.error().message();
+        EXPECT_TRUE(result.has_value());
 
         // Check 2: At least 20ms must have passed
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
@@ -99,7 +99,7 @@ TEST_F(WorkerTest, AsyncReadOnBadFdReturnsError)
         EXPECT_FALSE(result.has_value());
 
         // Check 2: The error must be 'InvalidFileDescriptor' (EBADF)
-        EXPECT_EQ(result.error().category, IoError::InvalidFileDescriptor);
+        EXPECT_EQ(result.error().value, EBADF);
     };
 
     SyncWait(test_coro());
@@ -156,14 +156,14 @@ TEST_F(WorkerTest, AsyncReadWriteExactSocketPair)
         auto write_res = co_await worker->async_write_exact(write_fd, std::span(write_buf.data(), write_buf.size()));
 
         // Check 1: The write_exact operation must succeed
-        EXPECT_TRUE(write_res.has_value()) << write_res.error().message();
+        EXPECT_TRUE(write_res.has_value());
 
         // 2. Asynchronously read the *exact* buffer
         std::vector<char> read_buf(write_buf.size());
         auto read_res = co_await worker->async_read_exact(read_fd, std::span(read_buf.data(), read_buf.size()));
 
         // Check 2: The read_exact operation must succeed
-        EXPECT_TRUE(read_res.has_value()) << read_res.error().message();
+        EXPECT_TRUE(read_res.has_value());
 
         // 3. Verify the data
         EXPECT_EQ(std::string(read_buf.data(), read_buf.size()), "hello world");
@@ -208,7 +208,7 @@ TEST_F(WorkerTest, AsyncReadExactEOF)
 
         // Check 2: The error must be due to the broken pipe / EOF
         // This is the correct error our implementation returns (from EPIPE)
-        EXPECT_EQ(read_res.error().category, IoError::IoEoF);
+        EXPECT_EQ(read_res.error().value, kIoEof);
     };
 
     SyncWait(test_coro());
