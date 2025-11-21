@@ -11,6 +11,8 @@
 
 namespace bitcask
 {
+    using namespace kio;
+
     DataEntry::DataEntry(std::string&& key, std::vector<char>&& value, const uint8_t flag) :
         timestamp_ns(get_current_timestamp<std::chrono::nanoseconds>()), flag(flag), key(std::move(key)), value(std::move(value))
     {
@@ -20,19 +22,19 @@ namespace bitcask
     {
         // Calculate the exact sizes needed ahead of time to avoid reallocations.
         const auto payload_size = struct_pack::get_needed_size(*this);
-        const auto total_size = MIN_ON_DISK_SIZE + payload_size;
+        const auto total_size = kEntryFixedHeaderSize + payload_size;
 
         std::vector<char> buffer;
         // Reserve the total capacity to avoid reallocation
         buffer.reserve(total_size);
 
         // Claim the 12-byte space for the header
-        buffer.resize(MIN_ON_DISK_SIZE);
+        buffer.resize(kEntryFixedHeaderSize);
 
         // Append serialized data after the 12 bytes, reserved for CRC and payload size
         struct_pack::serialize_to(buffer, *this);
 
-        const auto payload_span = std::span(buffer.data() + MIN_ON_DISK_SIZE, payload_size);
+        const auto payload_span = std::span(buffer.data() + kEntryFixedHeaderSize, payload_size);
         const uint32_t crc = crc32c::Crc32c(payload_span.data(), payload_span.size());
 
         // Now fill CRC and size.
@@ -50,51 +52,48 @@ namespace bitcask
         return buffer;
     }
 
-    kio::Result<DataEntry> DataEntry::deserialize(std::span<const char> buffer)
+    Result<std::pair<DataEntry, uint64_t>> DataEntry::deserialize(std::span<const char> buffer)
     {
         // MIN_ON_DISK_SIZE == CRC SZ + PAYLOAD SZ
-        if (buffer.size() < MIN_ON_DISK_SIZE)
+        if (buffer.size() <= kEntryFixedHeaderSize)
         {
-            ALOG_ERROR("Data shorter than CRC and SIZE sizes");
-            return std::unexpected(kio::Error::from_errno(EINVAL));
+            return std::unexpected(Error{ErrorCategory::Serialization, kIoNeedMoreData});
         }
 
         const auto crc = read_le<uint32_t>(buffer.data());
         const auto size = read_le<uint64_t>(buffer.data() + 4);
 
-        if (buffer.size() < MIN_ON_DISK_SIZE + size)
+        if (buffer.size() < kEntryFixedHeaderSize + size)
         {
-            // add a log because the error is not very specialized
-            ALOG_ERROR("Data shorter than full entry");
-            return std::unexpected(kio::Error::from_errno(EINVAL));
+            return std::unexpected(Error{ErrorCategory::Serialization, kIoNeedMoreData});
         }
 
-        const auto payload_span = buffer.subspan(MIN_ON_DISK_SIZE, size);
+        const auto payload_span = buffer.subspan(kEntryFixedHeaderSize, size);
         if (crc32c::Crc32c(payload_span.data(), payload_span.size()) != crc)
         {
-            return std::unexpected(kio::Error::from_category(kio::IoError::IODataCorrupted));
+            return std::unexpected(Error{ErrorCategory::Serialization, kIoDataCorrupted});
         }
 
         auto entry = struct_pack::deserialize<DataEntry>(payload_span);
         if (!entry.has_value())
         {
-            ALOG_ERROR("Failed to deserialize entry: {}", entry.error().message());
-            return std::unexpected(kio::Error::from_category(kio::IoError::IODeserialization));
+            return std::unexpected(Error{ErrorCategory::Serialization, kIoDeserialization});
         }
 
-        return entry.value();
+        const auto entry_packed_size = struct_pack::get_needed_size(entry.value());
+        return std::make_pair(std::move(entry.value()), kEntryFixedHeaderSize + entry_packed_size);
     }
 
     std::vector<char> HintEntry::serialize() const { return struct_pack::serialize(*this); }
 
-    kio::Result<HintEntry> HintEntry::deserialize(std::span<const char> buffer)
+    Result<HintEntry> HintEntry::deserialize(const std::span<const char> buffer)
     {
         // let struct_pack manage the error
         auto entry = struct_pack::deserialize<HintEntry>(buffer);
         if (!entry.has_value())
         {
             ALOG_ERROR("Failed to deserialize entry: {}", entry.error().message());
-            return std::unexpected(kio::Error::from_category(kio::IoError::IODeserialization));
+            return std::unexpected(Error{ErrorCategory::Serialization, kIoDeserialization});
         }
         return entry.value();
     }

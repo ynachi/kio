@@ -217,9 +217,7 @@ namespace kio::io
         /**
          * @brief Asynchronously reads data from a file descriptor at a specific offset.
          *
-        _
-         * @note This is for positional I/O. The file descriptor's
-         * current offset is not used and is not changed.
+         * @note This is for positional I/O.
          *
          * @param client_fd The file descriptor to read from.
          * @param buf A span of memory to read data into.
@@ -387,6 +385,18 @@ namespace kio::io
          * @return A void Result or an error.
          */
         Task<Result<void>> async_fdatasync(int fd);
+        /**
+         * @brief Asynchronously unlink (remove) a file or directory.
+         *
+         * @param dirfd The directory file descriptor (use AT_FDCWD for the current working directory).
+         * @param path The filesystem path to remove.
+         * @param flags Removal behavior flags:
+         *             - 0: Remove regular files
+         *             - AT_REMOVEDIR: Remove empty directories
+         *             - AT_SYMLINK_NOFOLLOW: Remove symlinks without following
+         * @return An IO Result which is void or an error.
+         */
+        Task<Result<void>> async_unlink_at(int dirfd, std::filesystem::path path, int flags);
     };
 
     /**

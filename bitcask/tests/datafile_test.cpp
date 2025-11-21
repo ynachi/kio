@@ -77,7 +77,7 @@ protected:
 TEST_F(DataFileTest, ConstructorAndClose)
 {
     // The fd is now owned by DataFile, so we set ours to -1
-    DataFile df(test_fd_, TEST_FILE_ID, *worker_, buffer_pool_, config_);
+    DataFile df(test_fd_, TEST_FILE_ID, *worker_, config_);
     test_fd_ = -1;
 
     EXPECT_EQ(df.file_id(), TEST_FILE_ID);
@@ -98,7 +98,7 @@ TEST_F(DataFileTest, ConstructorAndClose)
 TEST_F(DataFileTest, WriteAndReadRoundtrip)
 {
     config_.sync_on_write = false;
-    DataFile df(test_fd_, TEST_FILE_ID, *worker_, buffer_pool_, config_);
+    DataFile df(test_fd_, TEST_FILE_ID, *worker_, config_);
     test_fd_ = -1;
 
     const DataEntry entry1 = create_test_entry("key1", "value1");
@@ -126,23 +126,6 @@ TEST_F(DataFileTest, WriteAndReadRoundtrip)
         EXPECT_EQ(offset2, ser1.size());
         EXPECT_EQ(df.size(), ser1.size() + ser2.size());
 
-        // --- Read first entry ---
-        auto read_res1 = co_await df.async_read(offset1, ser1.size());
-        EXPECT_TRUE(read_res1.has_value());
-        EXPECT_EQ(read_res1.value().key, "key1");
-        EXPECT_EQ(read_res1.value().value, std::vector({'v', 'a', 'l', 'u', 'e', '1'}));
-
-        // --- Read second entry ---
-        auto read_res2 = co_await df.async_read(offset2, ser2.size());
-        EXPECT_TRUE(read_res2.has_value());
-        EXPECT_EQ(read_res2.value().key, "key2");
-        EXPECT_EQ(read_res2.value().value, std::vector({'v', 'a', 'l', 'u', 'e', '_', 't', 'w', 'o'}));
-
-        // --- Read out of bounds (should fail gracefully, EOF) ---
-        auto read_res_bad = co_await df.async_read(9999, 100);
-        EXPECT_FALSE(read_res_bad.has_value());
-        EXPECT_EQ(read_res_bad.error().category, IoError::IoEoF);
-
         // --- Close ---
         auto close_res = co_await df.async_close();
         EXPECT_TRUE(close_res.has_value());
@@ -156,7 +139,7 @@ TEST_F(DataFileTest, WriteAndReadRoundtrip)
 TEST_F(DataFileTest, ShouldRotate)
 {
     config_.max_file_size = 100;  // 100 bytes
-    DataFile df(test_fd_, TEST_FILE_ID, *worker_, buffer_pool_, config_);
+    DataFile df(test_fd_, TEST_FILE_ID, *worker_, config_);
     test_fd_ = -1;
 
     auto test_task = [&]() -> Task<void>

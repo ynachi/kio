@@ -8,6 +8,8 @@ SET(BITCASK_H
         include/hint_file.h
         include/compactor.h
         include/stats.h
+        include/file_handle.h
+        include/bitcask.h
 )
 
 SET(BITCASK_SRC
@@ -18,6 +20,7 @@ SET(BITCASK_SRC
         src/data_file.cpp
         src/hint_file.cpp
         src/compactor.cpp
+        src/bitcask.cpp
 )
 
 add_library(kio_bitcask ${BITCASK_H} ${BITCASK_SRC})
@@ -33,6 +36,7 @@ add_executable(bitcask_test
         tests/entry_test.cpp
         tests/datafile_test.cpp
         tests/hint_file_test.cpp
+        tests/compactor_test.cpp
 )
 
 target_link_libraries(bitcask_test

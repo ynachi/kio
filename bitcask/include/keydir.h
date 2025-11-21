@@ -37,7 +37,7 @@ namespace bitcask
         uint64_t file_id;
         uint64_t offset;
         uint32_t total_size;
-        uint64_t timestamp;
+        uint64_t timestamp_ns = get_current_timestamp();
     };
 
     class KeyDir
@@ -59,24 +59,32 @@ namespace bitcask
 
             // Map of file_id → FileStats
             std::unordered_map<uint64_t, FileStats> data_files;
-
             uint64_t data_files_count{0};  // optional, total number of files tracked
         };
-        explicit KeyDir(size_t shard_count = KEYDIR_DEFAULT_SHARDS_COUNT);
+        explicit KeyDir(size_t shard_count = kKeydirDefaultShardCount);
+
         /// Thread-safe put operations, replace it if exist
         void put(std::string&& key, const ValueLocation& loc) { shard_mut(key).put(std::move(key), loc); }
-        [[nodiscard]]
-        std::optional<ValueLocation> get(const std::string& key) const
-        {
-            return shard(key).get(key);
-        }
+
+        [[nodiscard]] std::optional<ValueLocation> get(const std::string& key) const { return shard(key).get(key); }
 
         /// returns file_id and live bytes for compaction decision
         std::optional<std::pair<uint64_t, uint64_t>> remove(const std::string& key) { return shard_mut(key).remove(key); }
 
         /// Thread-safe put, only if the timestamp is newer.
         /// Used by the load_index process.
-        void put_if_newer(std::string&& key, const ValueLocation& loc) { shard_mut(key).put_if_newer(std::move(key), loc); }  // NOLINT on const
+        void put_if_newer(std::string&& key, const ValueLocation& loc) { shard_mut(key).put_if_newer(std::move(key), loc); }
+
+        /**
+         * @brief Atomic Compare-And-Swap update for Compaction.
+         * * Updates the entry for 'key' to 'new_loc' ONLY IF the current entry matches
+         * 'expected_file_id' and 'expected_offset'.
+         * * @return true if updated, false if the key was modified by someone else.
+         */
+        bool update_if_matches(const std::string& key, const ValueLocation& new_loc, uint64_t expected_file_id, uint64_t expected_offset)
+        {
+            return shard_mut(key).update_if_matches(key, new_loc, expected_file_id, expected_offset);
+        }
 
         /**
          * @brief Creates a complete, point-in-time copy of the entire key directory.
@@ -147,22 +155,19 @@ namespace bitcask
             std::unordered_map<std::string, ValueLocation, std::hash<std::string_view>, std::equal_to<>> index_;  // NOSONAR
 
             void put(std::string&& key, const ValueLocation& loc);
-            [[nodiscard]]
-            std::optional<ValueLocation> get(const std::string& key) const;
+            [[nodiscard]] std::optional<ValueLocation> get(const std::string& key) const;
             void put_if_newer(std::string&& key, const ValueLocation& loc);
             std::optional<std::pair<uint64_t, uint64_t>> remove(const std::string& key);
+            // CAS method
+            bool update_if_matches(const std::string& key, const ValueLocation& new_loc, uint64_t expected_file_id, uint64_t expected_offset);
         };
 
         std::vector<std::unique_ptr<Shard>> shards_;
         // power of two
-        std::size_t shard_count_{4};
-        [[nodiscard]]
-        const Shard& shard(std::string_view key) const;
-
-        Shard& shard_mut(std::string_view key);
-
-        [[nodiscard]]
-        Stats snapshot_stats() const;
+        std::size_t shard_count_{std::thread::hardware_concurrency()};
+        [[nodiscard]] const Shard& shard(std::string_view key) const;
+        Shard& shard_mut(std::string_view key) const;
+        [[nodiscard]] Stats snapshot_stats() const;
     };
 }  // namespace bitcask
 

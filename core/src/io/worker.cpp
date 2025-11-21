@@ -547,6 +547,16 @@ namespace kio::io
         co_return {};
     }
 
+    Task<Result<void>> Worker::async_unlink_at(const int dirfd, const std::filesystem::path path, const int flags)  // NOLINT path should be passed as value
+    {
+        auto prep = [](io_uring_sqe *sqe, const int dfd, const char *p, const int f) { io_uring_prep_unlinkat(sqe, dfd, p, f); };
+        if (const int ret = co_await make_uring_awaitable(*this, prep, dirfd, path.c_str(), flags); ret < 0)
+        {
+            co_return std::unexpected(Error::from_errno(-ret));
+        }
+        co_return {};
+    }
+
     Task<Result<void>> Worker::async_sleep(std::chrono::nanoseconds duration)
     {
         // We need a place to store the timespec for the duration of the operation.

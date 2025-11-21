@@ -55,28 +55,28 @@ namespace bitcask
     struct DataEntry
     {
         std::uint64_t timestamp_ns{};
-        uint8_t flag = FLAG_NONE;
+        uint8_t flag = kFlagNone;
         std::string key;
         std::vector<char> value;
 
         // struct_pack need this
         DataEntry() = default;
 
-        DataEntry(std::string&& key, std::vector<char>&& value, uint8_t flag = FLAG_NONE);
+        DataEntry(std::string&& key, std::vector<char>&& value, uint8_t flag = kFlagNone);
 
         // Tombstone marker (for deletions)
         [[nodiscard]]
         bool is_tombstone() const
         {
-            return flag & FLAG_TOMBSTONE;
+            return flag & kFlagTombstone;
         }
 
         // Serialize to buffer
         [[nodiscard]]
         std::vector<char> serialize() const;
 
-        // Deserialize from buffer
-        static kio::Result<DataEntry> deserialize(std::span<const char> buffer);
+        // Deserialize from the buffer, also return the next position in the buffer to deserialize another entry
+        static kio::Result<std::pair<DataEntry, uint64_t>> deserialize(std::span<const char> buffer);
     };
 
     struct HintEntry
@@ -88,7 +88,7 @@ namespace bitcask
 
         HintEntry() = default;
 
-        HintEntry(const uint64_t timestamp_ns, const uint64_t entry_pos, const uint64_t total_sz, std::string&& key) :
+        HintEntry(const uint64_t timestamp_ns, const uint64_t entry_pos, const uint32_t total_sz, std::string&& key) :
             timestamp_ns(timestamp_ns), entry_pos(entry_pos), total_sz(total_sz), key(std::move(key))
         {
         }

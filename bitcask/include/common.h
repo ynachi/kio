@@ -15,12 +15,12 @@
 
 namespace bitcask
 {
-    constexpr std::uint8_t FLAG_NONE = 0x00;
-    constexpr uint8_t FLAG_TOMBSTONE = 0x01;
-    constexpr std::size_t MIN_ON_DISK_SIZE = 12;  // at least CRC + PAYLOAD SIZE
-    constexpr std::size_t HINT_ENTRY_HEADER_SIZE = 24;
-    constexpr std::size_t FS_READ_CHUNK_SIZE = 32 * 1024;
-    constexpr std::size_t KEYDIR_DEFAULT_SHARDS_COUNT = 2;
+    constexpr std::uint8_t kFlagNone = 0x00;
+    constexpr uint8_t kFlagTombstone = 0x01;
+    constexpr std::size_t kEntryFixedHeaderSize = 12;  // at least CRC + PAYLOAD SIZE
+    constexpr std::size_t kHintHeaderSize = 24;
+    constexpr std::size_t kFSReadChunkSize = 32 * 1024;
+    constexpr std::size_t kKeydirDefaultShardCount = 2;
 
     /**
      * @brief Gets the current time as a 64-bit integer.

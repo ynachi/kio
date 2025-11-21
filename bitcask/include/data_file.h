@@ -11,6 +11,7 @@
 #include "core/include/ds/buffer_pool.h"
 #include "core/include/io/worker.h"
 #include "entry.h"
+#include "file_handle.h"
 
 namespace bitcask
 {
@@ -19,64 +20,39 @@ namespace bitcask
     {
     public:
         // The fd will be created by the worker thread (the caller) and passed to the constructor
-        DataFile(int fd, uint64_t file_id, kio::io::Worker& io_worker, kio::BufferPool& bp, BitcaskConfig& config);
+        DataFile(int fd, uint64_t file_id, kio::io::Worker& io_worker, BitcaskConfig& config);
 
-        // File is not copyable and cannot be assigned
+        // not copyable
         DataFile(const DataFile&) = delete;
         DataFile& operator=(const DataFile&) = delete;
+
+        // No move assignable too
         DataFile& operator=(DataFile&& other) noexcept = delete;
 
-        DataFile(DataFile&& other) noexcept : file_id_(other.file_id_), fd_(other.fd_), io_worker_(other.io_worker_), buffer_pool_(other.buffer_pool_), config_(other.config_) { other.fd_ = -1; }
+        DataFile(DataFile&& other) noexcept = default;
 
-        ~DataFile()
-        {
-            if (fd_ >= 0)
-            {
-                ALOG_WARN("DataFile {} is being destroyed without being closed", file_id_);
-                close(fd_);
-            };
-            // avoid double close
-            fd_ = -1;
-        }
+        ~DataFile() = default;
 
         // Write entry and return offset
         kio::Task<kio::Result<uint64_t>> async_write(const DataEntry& entry);
-
-        // Read the entry at offset. size is total entry size as it is known in advance
-        [[nodiscard]]
-        kio::Task<kio::Result<DataEntry>> async_read(uint64_t offset, uint32_t size) const;
-
-        // Close file
         kio::Task<kio::Result<void>> async_close();
 
         // Getters
-        [[nodiscard]]
-        uint64_t file_id() const
-        {
-            return file_id_;
-        }
-        [[nodiscard]]
-        uint64_t size() const
-        {
-            return size_;
-        }
-
-        // Check if a file should be rotated
-        [[nodiscard]]
-        bool should_rotate(size_t max_file_size) const;
+        [[nodiscard]] uint64_t file_id() const { return file_id_; }
+        [[nodiscard]] uint64_t size() const { return size_; }
+        [[nodiscard]] bool should_rotate(size_t max_file_size) const;
 
     private:
         // timestamp_s based id
         // data_1741971205.db
         uint64_t file_id_{0};
-        int fd_{-1};
+        FileHandle handle_;
         uint64_t size_{0};
         // useful to perform compaction of files older than X
         // on seal, file metadata is also written to disk
         // data_id_.metadata, or we can rely on fstats
         std::chrono::steady_clock::time_point created_at_{std::chrono::steady_clock::now()};
         kio::io::Worker& io_worker_;
-        kio::BufferPool& buffer_pool_;
         //
         BitcaskConfig& config_;
     };

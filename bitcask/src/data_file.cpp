@@ -9,10 +9,9 @@
 using namespace kio;
 namespace bitcask
 {
-    DataFile::DataFile(const int fd, const uint64_t file_id, io::Worker& io_worker, BufferPool& bp, BitcaskConfig& config) :
-        file_id_(file_id), fd_(fd), io_worker_(io_worker), buffer_pool_(bp), config_(config)
+    DataFile::DataFile(const int fd, const uint64_t file_id, io::Worker& io_worker, BitcaskConfig& config) : file_id_(file_id), handle_(fd), io_worker_(io_worker), config_(config)
     {
-        if (fd_ < 0)
+        if (fd < 0)
         {
             // this is a bug from the developer, so just throw
             throw std::invalid_argument("fd cannot be negative");
@@ -21,17 +20,15 @@ namespace bitcask
 
     Task<Result<void>> DataFile::async_close()
     {
-        KIO_TRY(co_await io_worker_.async_close(fd_));
-        fd_ = -1;
+        if (handle_.is_valid())
+        {
+            // We can use async_close from worker if we release ownership from handle first
+            // to avoid double close, or just rely on handle destructor (sync close).
+            // Given the requirement for async_close, we release the FD.
+            const int fd = handle_.release();
+            KIO_TRY(co_await io_worker_.async_close(fd));
+        }
         co_return {};
-    }
-
-    Task<Result<DataEntry>> DataFile::async_read(const uint64_t offset, const uint32_t size) const
-    {
-        auto buf = buffer_pool_.acquire(size);
-        const auto span = buf.span(size);
-        KIO_TRY(co_await io_worker_.async_read_exact_at(fd_, span, offset));
-        co_return DataEntry::deserialize(span);
     }
 
     Task<Result<uint64_t>> DataFile::async_write(const DataEntry& entry)
@@ -39,13 +36,13 @@ namespace bitcask
         auto serialized_entry = entry.serialize();
         // O_APPEND mode: physical positioning handled by kernel
         // writing at the end of the file.
-        KIO_TRY(co_await io_worker_.async_write_exact(fd_, serialized_entry));
+        KIO_TRY(co_await io_worker_.async_write_exact(handle_.get(), serialized_entry));
 
         if (config_.sync_on_write)
         {
             // After the writing completes, force it to disk.
             // We use fdatasync for better performance.
-            KIO_TRY(co_await io_worker_.async_fdatasync(fd_));
+            KIO_TRY(co_await io_worker_.async_fdatasync(handle_.get()));
         }
 
         auto entry_offset = size_;

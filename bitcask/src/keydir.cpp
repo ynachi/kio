@@ -5,6 +5,7 @@
 #include "bitcask/include/keydir.h"
 
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 
 namespace bitcask
@@ -27,6 +28,107 @@ namespace bitcask
         {
             shards_.push_back(std::make_unique<Shard>());
         }
+    }
+
+    KeyDir::Shard& KeyDir::shard_mut(std::string_view key) const
+    {
+        const auto hash = std::hash<std::string_view>{}(key);
+        const auto shard_id = hash & (shard_count_ - 1);
+        return *shards_.at(shard_id);
+    }
+
+    void KeyDir::Shard::put(std::string&& key, const ValueLocation& loc)
+    {
+        std::lock_guard lock(mu);
+        if (const auto it = index_.find(key); it != index_.end())
+        {
+            auto& old_stats = per_files_stats[it->second.file_id];
+            old_stats.live_bytes -= it->second.total_size;
+
+            it->second = loc;
+        }
+
+        per_files_stats[loc.file_id].live_bytes += loc.total_size;
+        index_[std::move(key)] = loc;
+    }
+
+    std::optional<ValueLocation> KeyDir::Shard::get(const std::string& key) const
+    {
+        std::shared_lock lock(mu);
+        const auto it = index_.find(key);
+        if (it == index_.end())
+        {
+            return std::nullopt;
+        }
+        return it->second;
+    }
+
+    std::optional<std::pair<uint64_t, uint64_t>> KeyDir::Shard::remove(const std::string& key)
+    {
+        std::lock_guard lock(mu);
+        if (const auto it = index_.find(key); it != index_.end())
+        {
+            auto& stats = per_files_stats[it->second.file_id];
+            stats.live_bytes -= it->second.total_size;
+            stats.tombstones_count++;
+            auto file_id = it->second.file_id;
+            index_.erase(it);
+            return std::pair{file_id, stats.live_bytes};
+        }
+        return std::nullopt;
+    }
+
+    void KeyDir::Shard::put_if_newer(std::string&& key, const ValueLocation& loc)
+    {
+        std::lock_guard lock(mu);
+
+        if (const auto it = index_.find(key); it == index_.end())
+        {
+            index_.try_emplace(std::move(key), loc);
+            per_files_stats[loc.file_id].live_bytes += loc.total_size;
+        }
+        else if (loc.timestamp_ns > it->second.timestamp_ns)
+        {
+            const auto old = it->second;  // remember old value
+            it->second = loc;
+
+            per_files_stats[old.file_id].live_bytes -= old.total_size;
+            per_files_stats[loc.file_id].live_bytes += loc.total_size;
+        }
+        // else: do nothing (old on-disk entry is newer)
+    }
+
+    bool KeyDir::Shard::update_if_matches(const std::string& key, const ValueLocation& new_loc, uint64_t expected_file_id, uint64_t expected_offset)
+    {
+        std::unique_lock lock(mu);
+        const auto it = index_.find(key);
+
+        // If key doesn't exist, or points to something else, fail.
+        if (it == index_.end())
+        {
+            return false;
+        }
+
+        if (it->second.file_id != expected_file_id || it->second.offset != expected_offset)
+        {
+            return false;
+        }
+
+        // Match confirmed. Perform update and stats maintenance.
+
+        // 1. Decrement old stats
+        auto& old_stats = per_files_stats[it->second.file_id];
+        old_stats.live_bytes -= it->second.total_size;
+        old_stats.tombstones_count++;
+
+        // 2. Increment new stats
+        auto& new_stats = per_files_stats[new_loc.file_id];
+        new_stats.live_bytes += new_loc.total_size;
+        new_stats.live_records_count++;
+
+        // 3. Update index
+        it->second = new_loc;
+        return true;
     }
 
     ValueLocationUnorderedMap KeyDir::snapshot() const
@@ -57,75 +159,6 @@ namespace bitcask
         const auto hash = std::hash<std::string_view>{}(key);
         const auto shard_id = hash & (shard_count_ - 1);
         return *shards_.at(shard_id);
-    }
-
-    KeyDir::Shard& KeyDir::shard_mut(std::string_view key)  // NOLINT on const-correctness
-    {
-        const auto hash = std::hash<std::string_view>{}(key);
-        const auto shard_id = hash & (shard_count_ - 1);
-        return *shards_.at(shard_id);
-    }
-
-
-    void KeyDir::Shard::put(std::string&& key, const ValueLocation& loc)
-    {
-        std::lock_guard lock(mu);
-        if (const auto it = index_.find(key); it != index_.end())
-        {
-            auto& old_stats = per_files_stats[it->second.file_id];
-            old_stats.live_bytes -= it->second.total_size;
-
-            it->second = loc;
-        }
-
-        per_files_stats[loc.file_id].live_bytes += loc.total_size;
-        index_[std::move(key)] = loc;
-    }
-
-    std::optional<ValueLocation> KeyDir::Shard::get(const std::string& key) const
-    {
-        std::shared_lock lock(mu);
-        const auto it = index_.find(key);
-        if (it == index_.end())
-        {
-            return std::nullopt;
-        }
-        return it->second;
-    }
-
-    void KeyDir::Shard::put_if_newer(std::string&& key, const ValueLocation& loc)
-    {
-        std::lock_guard lock(mu);
-
-        if (const auto it = index_.find(key); it == index_.end())
-        {
-            index_.try_emplace(std::move(key), loc);
-            per_files_stats[loc.file_id].live_bytes += loc.total_size;
-        }
-        else if (loc.timestamp > it->second.timestamp)
-        {
-            const auto old = it->second;  // remember old value
-            it->second = loc;
-
-            per_files_stats[old.file_id].live_bytes -= old.total_size;
-            per_files_stats[loc.file_id].live_bytes += loc.total_size;
-        }
-        // else: do nothing (old on-disk entry is newer)
-    }
-
-    std::optional<std::pair<uint64_t, uint64_t>> KeyDir::Shard::remove(const std::string& key)
-    {
-        std::lock_guard lock(mu);
-        if (const auto it = index_.find(key); it != index_.end())
-        {
-            auto& stats = per_files_stats[it->second.file_id];
-            stats.live_bytes -= it->second.total_size;
-            stats.tombstones_count++;
-            auto file_id = it->second.file_id;
-            index_.erase(it);
-            return std::pair{file_id, stats.live_bytes};
-        }
-        return std::nullopt;
     }
 
     KeyDir::Stats KeyDir::snapshot_stats() const

@@ -29,7 +29,7 @@ TEST_F(KeyDirTest, BasicPutGet)
     const auto res = keydir.get("key1");
     ASSERT_TRUE(res.has_value());
     EXPECT_EQ(res->file_id, loc1.file_id);
-    EXPECT_EQ(res->timestamp, loc1.timestamp);
+    EXPECT_EQ(res->timestamp_ns, loc1.timestamp_ns);
 
     const auto res_missing = keydir.get("missing_key");
     EXPECT_FALSE(res_missing.has_value());
@@ -42,18 +42,18 @@ TEST_F(KeyDirTest, PutOverwritesExisting)
 
     keydir.put("key1", loc1);
     const auto res1 = keydir.get("key1");
-    EXPECT_EQ(res1->timestamp, 100);
+    EXPECT_EQ(res1->timestamp_ns, 100);
 
     // Overwrite with newer
     keydir.put("key1", loc2);
     const auto res2 = keydir.get("key1");
-    EXPECT_EQ(res2->timestamp, 200);
+    EXPECT_EQ(res2->timestamp_ns, 200);
 
     // Overwrite with OLDER (should still overwrite for a normal put!)
     const auto loc3 = make_loc(1, 50);
     keydir.put("key1", loc3);
     const auto res3 = keydir.get("key1");
-    EXPECT_EQ(res3->timestamp, 50);
+    EXPECT_EQ(res3->timestamp_ns, 50);
 }
 
 TEST_F(KeyDirTest, PutIfNewerLogic)
@@ -63,15 +63,15 @@ TEST_F(KeyDirTest, PutIfNewerLogic)
 
     // Case A: New key
     keydir.put_if_newer("keyA", loc_old);
-    EXPECT_EQ(keydir.get("keyA")->timestamp, 100);
+    EXPECT_EQ(keydir.get("keyA")->timestamp_ns, 100);
 
     // Case B: Newer timestamp replaces it older
     keydir.put_if_newer("keyA", loc_new);
-    EXPECT_EQ(keydir.get("keyA")->timestamp, 200);
+    EXPECT_EQ(keydir.get("keyA")->timestamp_ns, 200);
 
     // Case C: Older timestamp DOES NOT replace it newer
     keydir.put_if_newer("keyA", loc_old);
-    EXPECT_EQ(keydir.get("keyA")->timestamp, 200);
+    EXPECT_EQ(keydir.get("keyA")->timestamp_ns, 200);
 }
 
 TEST_F(KeyDirTest, KeysGoToDifferentShards)
@@ -89,7 +89,7 @@ TEST_F(KeyDirTest, KeysGoToDifferentShards)
         std::string key = std::format("key_{}", i);
         auto res = keydir.get(key);
         ASSERT_TRUE(res.has_value()) << "Missing key: " << key;
-        EXPECT_EQ(res->timestamp, static_cast<uint64_t>(i));
+        EXPECT_EQ(res->timestamp_ns, static_cast<uint64_t>(i));
     }
 }
 
@@ -101,9 +101,9 @@ TEST_F(KeyDirTest, SnapshotProvidesConsistentCopy)
 
     const auto snap = keydir.snapshot();
     EXPECT_EQ(snap.size(), 3);
-    EXPECT_EQ(snap.at("a").timestamp, 10);
-    EXPECT_EQ(snap.at("b").timestamp, 20);
-    EXPECT_EQ(snap.at("c").timestamp, 30);
+    EXPECT_EQ(snap.at("a").timestamp_ns, 10);
+    EXPECT_EQ(snap.at("b").timestamp_ns, 20);
+    EXPECT_EQ(snap.at("c").timestamp_ns, 30);
 
     // Modifying KeyDir after a snapshot doesn't affect the snapshot
     keydir.put("d", make_loc(1, 40));
@@ -148,7 +148,7 @@ TEST_F(KeyDirTest, ConcurrentAccessCorrectness)
             auto res = keydir.get(key);
             ASSERT_TRUE(res.has_value()) << "Missing key: " << key;
             EXPECT_EQ(res->file_id, static_cast<uint32_t>(t));
-            EXPECT_EQ(res->timestamp, static_cast<uint64_t>(i));
+            EXPECT_EQ(res->timestamp_ns, static_cast<uint64_t>(i));
         }
     }
 
@@ -228,7 +228,7 @@ TEST_F(KeyDirTest, ConcurrentAccessCorrectness)
         std::string key = std::format("ts_{}", i);
         auto res = keydir.get(key);
         ASSERT_TRUE(res.has_value()) << "Missing timestamp key: " << key;
-        EXPECT_GE(res->timestamp, 5000ULL) << "Timestamp went backwards for key: " << key;
+        EXPECT_GE(res->timestamp_ns, 5000ULL) << "Timestamp went backwards for key: " << key;
     }
 
     // Phase 4: Concurrent reads and writes

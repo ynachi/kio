@@ -11,6 +11,7 @@
 #include "core/include/ds/buffer_pool.h"
 #include "core/include/io/worker.h"
 #include "entry.h"
+#include "file_handle.h"
 #include "keydir.h"
 
 namespace bitcask
@@ -21,50 +22,29 @@ namespace bitcask
         // hint_1741971205.ht
         uint64_t file_id_{0};
         // the file should be opened with an O_APPEND flag
-        int fd_{-1};
+        FileHandle handle_;
         kio::io::Worker& io_worker_;
-        kio::BufferPool& buffer_pool_;
 
         BitcaskConfig& config_;
 
 
     public:
-        HintFile(int fd, uint64_t file_id, kio::io::Worker& io_worker, kio::BufferPool& bp, BitcaskConfig& config);
+        HintFile(int fd, uint64_t file_id, kio::io::Worker& io_worker, BitcaskConfig& config);
 
-        HintFile(HintFile&& other) noexcept : file_id_(other.file_id_), fd_(other.fd_), io_worker_(other.io_worker_), buffer_pool_(other.buffer_pool_), config_(other.config_) { other.fd_ = -1; }
-
+        HintFile(HintFile&& other) noexcept = default;
         // File is not copyable and cannot be assigned
         HintFile(const HintFile&) = delete;
         HintFile& operator=(const HintFile&) = delete;
         HintFile& operator=(HintFile&& other) noexcept = delete;
 
-        ~HintFile()
-        {
-            if (fd_ >= 0)
-            {
-                ALOG_WARN("Hint file {} is being destroyed without being closed", file_id_);
-                close(fd_);
-            };
-            // avoid double close
-            fd_ = -1;
-        }
+        ~HintFile() = default;
 
-        [[nodiscard]]
-        uint64_t file_id() const
-        {
-            return file_id_;
-        }
-
+        [[nodiscard]] uint64_t file_id() const { return file_id_; }
         // Add this getter so tests can access the fd
-        [[nodiscard]]
-        int fd() const
-        {
-            return fd_;
-        }
+        [[nodiscard]] int fd() const { return handle_.get(); }
 
         kio::Task<kio::Result<void>> async_write(const HintEntry&& entry) const;  // NOLINT on [[no_discard]]
-
-        // Read hint file and populate KeyDir
+        // Read a hint file and populate KeyDir
         kio::Task<kio::Result<void>> async_read(KeyDir& keydir) const;
     };
 
