@@ -13,32 +13,12 @@
 #include <unordered_map>
 
 #include "common.h"
+#include "entry.h"
 #include "stats.h"
 
 namespace bitcask
 {
     struct ValueLocation;
-
-    using ValueLocationUnorderedMap = std::unordered_map<std::string, ValueLocation, std::hash<std::string_view>, std::equal_to<>>;  // NOSONAR
-    // KeyDir entry (in-memory index):
-    // +-----------+-------------+-------------+--------------+
-    // | file_id(4)| offset(8)   | total_sz(8) | timestamp(8)*|
-    // +-----------+-------------+-------------+--------------+
-    // *timestamp optional (used for conflict resolution / merge)
-    //
-    // Maps: key → KeyDirEntry
-    // file_id: Which data file the entry resides in
-    // offset: Where [CRC|SIZE|PAYLOAD] starts in that file
-    // total_sz: 4 + 8 + payload_size (total entry bytes on disk)
-
-    /// Value location in data file
-    struct ValueLocation
-    {
-        uint64_t file_id;
-        uint64_t offset;
-        uint32_t total_size;
-        uint64_t timestamp_ns = get_current_timestamp();
-    };
 
     class KeyDir
     {
@@ -104,7 +84,7 @@ namespace bitcask
          * that method. See for_each_unlocked_shard.
          */
         [[nodiscard]]
-        ValueLocationUnorderedMap snapshot() const;  // NOSONAR
+        SimpleKeydir snapshot() const;  // NOSONAR
 
         /**
          * @brief Iterates over a snapshot of each shard, one shard at a time.
@@ -123,12 +103,12 @@ namespace bitcask
          * @param fn A function to be called for each shard's data.
          */
         template<typename Fn>
-            requires std::invocable<Fn&, const ValueLocationUnorderedMap&>
+            requires std::invocable<Fn&, const SimpleKeydir&>
         void for_each_unlocked_shard(Fn&& fn) const
         {
             for (size_t i = 0; i < shard_count_; ++i)
             {
-                ValueLocationUnorderedMap shard_copy;
+                SimpleKeydir shard_copy;
                 {
                     std::shared_lock lock(shards_[i]->mu);
                     shard_copy = shards_[i]->index_;

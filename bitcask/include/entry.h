@@ -77,6 +77,8 @@ namespace bitcask
 
         // Deserialize from the buffer, also return the next position in the buffer to deserialize another entry
         static kio::Result<std::pair<DataEntry, uint64_t>> deserialize(std::span<const char> buffer);
+
+        [[nodiscard]] std::string& get_key() { return key; }
     };
 
     struct HintEntry
@@ -100,6 +102,30 @@ namespace bitcask
         // Deserialize from buffer
         static kio::Result<HintEntry> deserialize(std::span<const char> buffer);
     };
+
+    // KeyDir entry (in-memory index):
+    // +-----------+-------------+-------------+--------------+
+    // | file_id(4)| offset(8)   | total_sz(8) | timestamp(8)*|
+    // +-----------+-------------+-------------+--------------+
+    // *timestamp optional (used for conflict resolution / merge)
+    //
+    // Maps: key → KeyDirEntry
+    // file_id: Which data file the entry resides in
+    // offset: Where [CRC|SIZE|PAYLOAD] starts in that file
+    // total_sz: 4 + 8 + payload_size (total entry bytes on disk)
+
+    /// Value location in data file
+    struct ValueLocation
+    {
+        uint64_t file_id{};
+        uint64_t offset{};
+        uint32_t total_size{};
+        uint64_t timestamp_ns = get_current_timestamp();
+    };
+
+    // TODO: rename me later
+    using SimpleKeydir = std::unordered_map<std::string, ValueLocation, std::hash<std::string_view>, std::equal_to<>>;  // NOSONAR
+
 
     // for struct_pack
     YLT_REFL(DataEntry, timestamp_ns, flag, key, value);

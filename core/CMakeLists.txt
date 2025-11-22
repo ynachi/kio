@@ -12,6 +12,8 @@ set(CORE_HEADER_FILES
         include/fs.h
         include/async_logger.h
         include/ds/buffer_pool.h
+        include/sync/baton.h
+        include/sync/event.h
 
         # metrics
         include/metrics/model.h

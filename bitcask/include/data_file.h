@@ -26,19 +26,20 @@ namespace bitcask
         DataFile(const DataFile&) = delete;
         DataFile& operator=(const DataFile&) = delete;
 
-        // No move assignable too
+        // No move assignable either
         DataFile& operator=(DataFile&& other) noexcept = delete;
 
         DataFile(DataFile&& other) noexcept = default;
 
         ~DataFile() = default;
 
-        // Write entry and return offset
-        kio::Task<kio::Result<uint64_t>> async_write(const DataEntry& entry);
+        // Write entry and return the offset and size of the total bytes written (as serialized by the serializer lib)
+        kio::Task<kio::Result<std::pair<uint64_t, uint32_t>>> async_write(const DataEntry& entry);
         kio::Task<kio::Result<void>> async_close();
 
         // Getters
         [[nodiscard]] uint64_t file_id() const { return file_id_; }
+        [[nodiscard]] FileHandle& handle() { return handle_; }
         [[nodiscard]] uint64_t size() const { return size_; }
         [[nodiscard]] bool should_rotate(size_t max_file_size) const;
 

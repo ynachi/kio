@@ -131,7 +131,7 @@ namespace bitcask
         return true;
     }
 
-    ValueLocationUnorderedMap KeyDir::snapshot() const
+    SimpleKeydir KeyDir::snapshot() const
     {
         size_t total_keys = 0;
         for (const auto& shard: shards_)
@@ -140,7 +140,7 @@ namespace bitcask
             total_keys += shard->index_.size();
         }
 
-        ValueLocationUnorderedMap full_snapshot;
+        SimpleKeydir full_snapshot;
         // avoid repeated rehash
         full_snapshot.reserve(total_keys);
 

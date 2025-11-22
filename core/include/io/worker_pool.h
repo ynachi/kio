@@ -20,7 +20,7 @@ namespace kio::io
      * collection of Worker threads. It provides a simple mechanism for distributing
      * work across the pool.
      *
-     * LIFETIME: The IOPool instance MUST outlive any coroutines that interact
+     * @note LIFETIME: The IOPool instance MUST outlive any coroutines that interact
      * with its workers. This is a deliberate design choice to avoid the runtime
      * overhead of shared pointers in the hot path.
      */
@@ -32,7 +32,7 @@ namespace kio::io
 
     public:
         /**
-         * @brief Construct and start an IOPool.
+         * @brief Construct and start an IOPool. It internally waits for workers to fully start.
          * @param num_workers The number of worker threads to create.
          * @param config Configuration for each worker.
          * @param worker_init An optional callback to run on each worker thread after initialization.

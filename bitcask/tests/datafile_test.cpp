@@ -115,15 +115,15 @@ TEST_F(DataFileTest, WriteAndReadRoundtrip)
         // --- Write first entry ---
         auto write_res1 = co_await df.async_write(entry1);
         EXPECT_TRUE(write_res1.has_value());
-        uint64_t offset1 = write_res1.value();
-        EXPECT_EQ(offset1, 0);
+        auto res1 = write_res1.value();
+        EXPECT_EQ(res1.first, 0);
         EXPECT_EQ(df.size(), ser1.size());
 
         // --- Write second entry ---
         auto write_res2 = co_await df.async_write(entry2);
         EXPECT_TRUE(write_res2.has_value());
-        uint64_t offset2 = write_res2.value();
-        EXPECT_EQ(offset2, ser1.size());
+        auto res2 = write_res2.value();
+        EXPECT_EQ(res2.first, ser1.size());
         EXPECT_EQ(df.size(), ser1.size() + ser2.size());
 
         // --- Close ---

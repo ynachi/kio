@@ -13,7 +13,7 @@ using namespace kio::io;
 
 namespace bitcask
 {
-    Compactor::Compactor(Worker& io_worker, BitcaskConfig& config, KeyDir& keydir, const CompactionLimits& limits) :
+    Compactor::Compactor(Worker& io_worker, const BitcaskConfig& config, SimpleKeydir& keydir, const CompactionLimits& limits) :
         io_worker_(io_worker), config_(config), keydir_(keydir), limits_(limits), current_data_offset_(0), current_hint_offset_(0)
     {
         ALOG_INFO("Compactor initialized for N-to-1 merge compaction");
@@ -108,7 +108,7 @@ namespace bitcask
         // Update KeyDir with CAS
         for (const auto& update: keydir_batch_)
         {
-            if (const bool success = keydir_.update_if_matches(update.key, update.new_loc, update.expected_file_id, update.expected_offset); !success)
+            if (const bool success = update_keydir_if_matches(update.key, update.new_loc, update.expected_file_id, update.expected_offset); !success)
             {
                 // This entry was optimistically counted as "kept"
                 // Now we know it's actually stale, so fix the counts
@@ -292,11 +292,33 @@ namespace bitcask
     }
 
 
-    bool Compactor::is_live_entry(const DataEntry& entry, uint64_t old_offset, uint64_t old_file_id) const
+    bool Compactor::is_live_entry(const DataEntry& entry, const uint64_t old_offset, const uint64_t old_file_id) const
     {
-        const auto entry_from_keydir = keydir_.get(entry.key);
-        if (!entry_from_keydir) return false;
-        return entry_from_keydir->timestamp_ns == entry.timestamp_ns && entry_from_keydir->offset == old_offset && entry_from_keydir->file_id == old_file_id;
+        if (const auto it = keydir_.find(entry.key); it != keydir_.end())
+        {
+            return it->second.timestamp_ns == entry.timestamp_ns && it->second.offset == old_offset && it->second.file_id == old_file_id;
+        };
+        return false;
+    }
+
+    bool Compactor::update_keydir_if_matches(const std::string& key, const ValueLocation& new_loc, uint64_t expected_file_id, uint64_t expected_offset) const
+    {
+        const auto it = keydir_.find(key);
+
+        // If the key doesn't exist, or points to something else, fail.
+        if (it == keydir_.end())
+        {
+            return false;
+        }
+
+        if (it->second.file_id != expected_file_id || it->second.offset != expected_offset)
+        {
+            return false;
+        }
+
+        // Match confirmed. Perform update and stats maintenance.
+        it->second = new_loc;
+        return true;
     }
 
 }  // namespace bitcask

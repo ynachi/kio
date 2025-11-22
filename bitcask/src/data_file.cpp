@@ -31,7 +31,7 @@ namespace bitcask
         co_return {};
     }
 
-    Task<Result<uint64_t>> DataFile::async_write(const DataEntry& entry)
+    Task<Result<std::pair<uint64_t, uint32_t>>> DataFile::async_write(const DataEntry& entry)
     {
         auto serialized_entry = entry.serialize();
         // O_APPEND mode: physical positioning handled by kernel
@@ -46,9 +46,11 @@ namespace bitcask
         }
 
         auto entry_offset = size_;
+        auto writen_len = static_cast<uint32_t>(serialized_entry.size());
         size_ += serialized_entry.size();
-        co_return entry_offset;
+        co_return std::pair{entry_offset, writen_len};
     }
+
 
     bool DataFile::should_rotate(const size_t max_file_size) const { return size_ >= max_file_size; }
 

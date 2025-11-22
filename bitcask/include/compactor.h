@@ -84,7 +84,7 @@ namespace bitcask
          * @param keydir The shared in-memory index
          * @param limits Optional compaction limits
          */
-        Compactor(kio::io::Worker& io_worker, BitcaskConfig& config, KeyDir& keydir, const CompactionLimits& limits = {});
+        Compactor(kio::io::Worker& io_worker, const BitcaskConfig& config, SimpleKeydir& keydir, const CompactionLimits& limits = {});
         ~Compactor();
 
         // not movable, not copyable
@@ -104,10 +104,10 @@ namespace bitcask
          *
          * Process per source file:
          * 1. Opens source file for reading
-         * 2. Streams through source, filtering live entries
+         * 2. Streams through a source, filtering live entries
          * 3. Appends live entries to destination files (via O_APPEND)
          * 4. Updates KeyDir with new locations
-         * 5. Closes source file and deletes it
+         * 5. Closes a source file and deletes it
          *
          * NOTE: This function does NOT sync or close destination files.
          * The caller is responsible for fsync() and close() after all
@@ -127,7 +127,7 @@ namespace bitcask
         [[nodiscard]] bool is_live_entry(const DataEntry& entry, uint64_t old_offset, uint64_t old_file_id) const;
 
         /**
-         * @brief Gets the current write position for the destination file.
+         * @brief Gets the current writing position for the destination file.
          *
          * Useful for the caller to track progress across multiple compactions.
          */
@@ -150,8 +150,8 @@ namespace bitcask
         };
 
         kio::io::Worker& io_worker_;
-        BitcaskConfig& config_;
-        KeyDir& keydir_;
+        BitcaskConfig config_;
+        SimpleKeydir& keydir_;
         CompactionLimits limits_;
 
         // Buffers (reused across compactions)
@@ -164,7 +164,9 @@ namespace bitcask
         uint64_t current_data_offset_;
         uint64_t current_hint_offset_;
 
-        kio::Task<kio::Result<std::pair<int, uint64_t>>> open_source_file(uint64_t src_file_id) const;
+        bool update_keydir_if_matches(const std::string& key, const ValueLocation& new_loc, uint64_t expected_file_id, uint64_t expected_offset) const;
+
+        [[nodiscard]] kio::Task<kio::Result<std::pair<int, uint64_t>>> open_source_file(uint64_t src_file_id) const;
 
         void process_parsed_entry(const DataEntry& data_entry, uint64_t decoded_size, uint64_t entry_absolute_offset, uint64_t src_file_id, uint64_t dst_file_id, size_t window_start, Stats& stats);
 
@@ -179,7 +181,7 @@ namespace bitcask
 
         [[nodiscard]] bool should_flush_batch() const;
         void reset_batches();
-        kio::Task<kio::Result<void>> cleanup_source_files(uint64_t src_file_id) const;
+        [[nodiscard]] kio::Task<kio::Result<void>> cleanup_source_files(uint64_t src_file_id) const;
     };
 }  // namespace bitcask
 

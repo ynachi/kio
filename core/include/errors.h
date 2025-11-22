@@ -35,6 +35,7 @@ namespace kio
     // Custom application errors
     constexpr int kAppEmptyBuffer = 3000;
     constexpr int kAppUnknown = 3001;
+    constexpr int kAppInvalidArg = 3002;
 
     // -------------------------------------------------------------------------
     // Top-Level Categories
@@ -190,6 +191,8 @@ namespace kio
                 return "Buffer is empty";
             case kAppUnknown:
                 return "Unknown application error";
+            case kAppInvalidArg:
+                return "Invalid argument";
             default:
                 break;
         }
@@ -253,7 +256,7 @@ struct std::formatter<kio::Error>
 
 
 // -------------------------------------------------------------------------
-// 6. KIO_TRY Macro
+// KIO_TRY Macro
 // -------------------------------------------------------------------------
 
 namespace kio_try_internal
@@ -271,18 +274,14 @@ namespace kio_try_internal
     }
 }  // namespace kio_try_internal
 
-#define KIO_TRY_CONCAT_IMPL(a, b) a##b
-#define KIO_TRY_CONCAT(a, b) KIO_TRY_CONCAT_IMPL(a, b)
-#define KIO_TRY_VAR(name) KIO_TRY_CONCAT(name, __LINE__)
-
-#define KIO_TRY(expr)                                                       \
-    ({                                                                      \
-        auto KIO_TRY_VAR(__kio_result) = (expr);                            \
-        if (!KIO_TRY_VAR(__kio_result))                                     \
-        {                                                                   \
-            co_return std::unexpected(KIO_TRY_VAR(__kio_result).error());   \
-        }                                                                   \
-        ::kio_try_internal::kio_try_unwrap_impl(KIO_TRY_VAR(__kio_result)); \
+#define KIO_TRY(expr)                                                \
+    ({                                                               \
+        auto __kio_internal_res = (expr);                            \
+        if (!__kio_internal_res)                                     \
+        {                                                            \
+            co_return std::unexpected(__kio_internal_res.error());   \
+        }                                                            \
+        ::kio_try_internal::kio_try_unwrap_impl(__kio_internal_res); \
     })
 
 #endif  // KIO_ERRORS_H

@@ -3,6 +3,7 @@
 #include <fcntl.h>
 #include <filesystem>
 #include <gtest/gtest.h>
+#include <ranges>
 #include <thread>
 
 #include "core/include/coro.h"
@@ -17,7 +18,7 @@ class CompactorTest : public ::testing::Test
 protected:
     std::filesystem::path test_dir_;
     BitcaskConfig config_;
-    std::unique_ptr<KeyDir> keydir_;
+    std::unique_ptr<SimpleKeydir> keydir_;
     // Worker Components
     WorkerConfig worker_config_;
     std::unique_ptr<Worker> worker_;
@@ -34,7 +35,7 @@ protected:
         config_.write_buffer_size = 1024;  // 1KB batches
         config_.read_buffer_size = 512;  // 512B reads
 
-        keydir_ = std::make_unique<KeyDir>(2);
+        keydir_ = std::make_unique<SimpleKeydir>(2);
 
         // Setup Worker Thread
         worker_config_.uring_submit_timeout_ms = 10;
@@ -63,15 +64,18 @@ protected:
         const int fd = KIO_TRY(co_await worker_->async_openat(path, O_CREAT | O_WRONLY | O_APPEND, 0644));
 
         uint64_t offset = 0;
-        for (const auto& [key, value]: entries)
+        for (auto& [key, value]: entries)
         {
-            DataEntry entry(std::string(key), std::vector<char>(value.begin(), value.end()));
+            DataEntry entry;
+            entry.timestamp_ns = get_current_timestamp();
+            entry.key = key;
+            entry.value.assign(value.begin(), value.end());
 
             auto serialized = entry.serialize();
             KIO_TRY(co_await worker_->async_write_exact(fd, serialized));
 
             // Update KeyDir (thread-safe)
-            keydir_->put(std::string(key), {file_id, offset, static_cast<uint32_t>(serialized.size()), entry.timestamp_ns});
+            keydir_->insert_or_assign(entry.key, ValueLocation{file_id, offset, static_cast<uint32_t>(serialized.size()), entry.timestamp_ns});
 
             offset += serialized.size();
         }
@@ -164,11 +168,12 @@ TEST_F(CompactorTest, CompactAllLiveEntries)
         co_await worker_->async_close(dst_hint_fd);
 
         // Verify KeyDir updated
-        for (const auto& [key, _]: entries)
+        for (const auto& key: entries | std::views::keys)
         {
-            auto loc = keydir_->get(key);
-            EXPECT_TRUE(loc.has_value());
-            EXPECT_EQ(loc->file_id, dst_id);
+            auto it = keydir_->find(key);
+            EXPECT_TRUE(it != keydir_->end());
+            auto loc = it->second;
+            EXPECT_EQ(loc.file_id, dst_id);
         }
 
         co_return {};
@@ -215,17 +220,20 @@ TEST_F(CompactorTest, CompactDiscardsStaleEntries)
         co_await worker_->async_close(dst_hint_fd);
 
         // Verify KeyDir logic
-        auto loc1 = keydir_->get("key1");
-        EXPECT_TRUE(loc1.has_value());
-        EXPECT_EQ(loc1->file_id, new_file_id);
+        auto it1 = keydir_->find("key1");
+        EXPECT_TRUE(it1 != keydir_->end());
+        auto loc1 = it1->second;
+        EXPECT_EQ(loc1.file_id, new_file_id);
 
-        auto loc2 = keydir_->get("key2");
-        EXPECT_TRUE(loc2.has_value());
-        EXPECT_EQ(loc2->file_id, dst_id);
+        auto it2 = keydir_->find("key2");
+        EXPECT_TRUE(it2 != keydir_->end());
+        auto loc2 = it2->second;
+        EXPECT_EQ(loc2.file_id, dst_id);
 
-        auto loc3 = keydir_->get("key3");
-        EXPECT_TRUE(loc3.has_value());
-        EXPECT_EQ(loc3->file_id, new_file_id);
+        auto it3 = keydir_->find("key3");
+        EXPECT_TRUE(it1 != keydir_->end());
+        auto loc3 = it3->second;
+        EXPECT_EQ(loc3.file_id, new_file_id);
 
         co_return {};
     };
@@ -259,7 +267,8 @@ TEST_F(CompactorTest, CASFailureHandlesConcurrentUpdate)
 
         // SIMULATE: User updates key1 WHILE we're compacting (updates KeyDir)
         uint64_t racing_file_id = get_current_timestamp() + 500;
-        keydir_->put("key1", {racing_file_id, 0, 100, get_current_timestamp()});
+        // Use assignment to overwrite the existing key!
+        (*keydir_)["key1"] = {racing_file_id, 0, 100, get_current_timestamp()};
 
         auto stats_result = co_await compactor.compact_one(src_id, dst_fd, dst_hint_fd, dst_id);
 
@@ -274,9 +283,10 @@ TEST_F(CompactorTest, CASFailureHandlesConcurrentUpdate)
         co_await worker_->async_close(dst_hint_fd);
 
         // Verify KeyDir still points to racing update
-        auto loc = keydir_->get("key1");
-        EXPECT_TRUE(loc.has_value());
-        EXPECT_EQ(loc->file_id, racing_file_id);
+        auto it = keydir_->find("key1");
+        EXPECT_TRUE(it != keydir_->end());
+        auto loc = it->second;
+        EXPECT_EQ(loc.file_id, racing_file_id);
 
         co_return {};
     };
@@ -346,9 +356,10 @@ TEST_F(CompactorTest, NToOneMerge)
             for (int j = 1; j <= 2; j++)
             {
                 auto key = std::format("key{}_{}", i, j);
-                auto loc = keydir_->get(key);
-                EXPECT_TRUE(loc.has_value());
-                EXPECT_EQ(loc->file_id, dst_id);
+                auto it = keydir_->find(key);
+                EXPECT_TRUE(it != keydir_->end());
+                auto loc = it->second;
+                EXPECT_EQ(loc.file_id, dst_id);
             }
         }
 
