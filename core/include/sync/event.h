@@ -20,7 +20,6 @@ namespace kio::sync
      *
      * - Single Consumer? NO (Multiple coroutines can wait)
      * - Single Producer? NO (Any thread can notify)
-     * - Allocation Free? YES (Uses intrusive list on coroutine frames)
      * * Use this for 1-to-N signaling (broadcast).
      */
     class AsyncEvent
@@ -28,50 +27,47 @@ namespace kio::sync
         struct Awaiter
         {
             AsyncEvent& event;
-            Awaiter* next = nullptr;
-            std::coroutine_handle<> handle;
 
-            bool await_ready() const noexcept
-            {
-                // If the state points to SET_SENTINEL, we don't need to suspend
-                return event.state_.load(std::memory_order_acquire) == &AsyncEvent::SET_SENTINEL;
-            }
+            // Make these atomic so publication is explicit and visible to TSAN
+            std::atomic<Awaiter*> next{nullptr};
+
+            // store coroutine handle as a pointer (void*) atomically,
+            // we can't portably have atomic<coroutine_handle<>> so use address
+            std::atomic<void*> handle_ptr{nullptr};
+
+            bool await_ready() const noexcept { return event.state_.load(std::memory_order_acquire) == &AsyncEvent::SET_SENTINEL; }
 
             bool await_suspend(std::coroutine_handle<> h) noexcept
             {
-                handle = h;
+                // Publish the handle pointer first with release semantics
+                handle_ptr.store(static_cast<void*>(h.address()), std::memory_order_release);
 
-                // 2. CAS Loop to push ourselves onto the stack
                 void* old_head = event.state_.load(std::memory_order_acquire);
 
                 while (true)
                 {
                     if (old_head == &AsyncEvent::SET_SENTINEL)
                     {
-                        // Event happened concurrently while we were preparing.
-                        // Don't suspend, resume immediately.
+                        // event was set concurrently. Unpublish handle (optional), don't suspend.
+                        handle_ptr.store(nullptr, std::memory_order_release);
                         return false;
                     }
 
-                    // Link our 'next' to the current head
-                    next = static_cast<Awaiter*>(old_head);
+                    // link to current head (relaxed is fine; visibility is established by CAS below)
+                    next.store(static_cast<Awaiter*>(old_head), std::memory_order_relaxed);
 
-                    // Try to swap head to point to us
-                    // The acq_rel here ensures:
-                    // - Release: Our writes (handle, next) are visible to notify()
-                    // - Acquire: We see all previous waiters in the list
                     if (event.state_.compare_exchange_weak(old_head, this, std::memory_order_acq_rel, std::memory_order_acquire))
                     {
-                        // Success, we are now in the list and will be woken up by notify()
+                        // successfully published (release side): other thread's acquire will see handle_ptr/next
                         return true;
                     }
-                    // CAS failed, 'old_head' was updated by another thread.
-                    // Loop and try again with the new head.
+                    // CAS failed; 'old_head' was updated; loop and try again
                 }
             }
 
             void await_resume() const noexcept {}
         };
+
 
         // State pointer can be:
         // - nullptr: Not set, no waiters.
@@ -97,8 +93,6 @@ namespace kio::sync
          */
         void notify() noexcept
         {
-            // Atomically swap state to SET_SENTINEL.
-            // Acq/Rel ensures we see writes from waiters, and they see ours.
             void* old_head = state_.exchange(&SET_SENTINEL, std::memory_order_acq_rel);
 
             if (old_head == &SET_SENTINEL)
@@ -106,25 +100,25 @@ namespace kio::sync
                 return;  // Already set
             }
 
-            // old_head is the start of our linked list of waiters
             auto* curr = static_cast<Awaiter*>(old_head);
 
             while (curr)
             {
-                // CRITICAL: We must read 'next' BEFORE posting the handle.
-                // Once we post, the worker might resume the coroutine and destroy
-                // the 'curr' Awaiter object immediately (it lives on the stack).
-                auto* next = curr->next;
+                // read next with acquire to observe what the waiter published
+                auto* next = curr->next.load(std::memory_order_acquire);
 
-                // Schedule resumption on the worker
-                if (curr->handle)
+                // read handle pointer
+                void* hptr = curr->handle_ptr.load(std::memory_order_acquire);
+                if (hptr)
                 {
-                    owner_.post(curr->handle);
+                    std::coroutine_handle<> h = std::coroutine_handle<>::from_address(hptr);
+                    owner_.post(h);
                 }
 
                 curr = next;
             }
         }
+
 
         /**
          * @brief Check if the event is currently set.

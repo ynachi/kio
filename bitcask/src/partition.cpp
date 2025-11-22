@@ -8,7 +8,14 @@ using namespace bitcask;
 using namespace kio;
 using namespace kio::io;
 
-Partition::Partition(const BitcaskConfig& config, Worker& worker, const size_t partition_id) : worker_(worker), compactor_(worker, config, keydir_), config_(config), partition_id_(partition_id) {}
+Partition::Partition(const BitcaskConfig& config, Worker& worker, const size_t partition_id) : worker_(worker), config_(config), partition_id_(partition_id), compactor_(worker, config, keydir_)
+{
+    // TODO
+    // 1 ensure database dir exist, create a subdir for the partition
+
+    // Initialize, load keydir and stars
+    // Start compaction loop in detached mode
+}
 
 Task<Result<void>> Partition::put(std::string&& key, std::vector<char>&& value)
 {
@@ -182,4 +189,33 @@ bool Partition::should_compact_file(const uint64_t file_id) const
     if (it == stats_.data_files.end()) return false;
 
     return it->second.fragmentation() >= config_.fragmentation_threshold;
+}
+
+void Partition::signal_compaction(const uint64_t file_id)
+{
+    if (should_compact_file(file_id))
+    {
+        compaction_trigger_.notify();
+    }
+}
+
+std::vector<uint64_t> Partition::find_fragmented_files() const
+{
+    std::vector<uint64_t> result;
+
+    for (const auto& [file_id, stats]: stats_.data_files)
+    {
+        // Never compact an active file
+        if (file_id == active_file_->file_id())
+        {
+            continue;
+        }
+
+        if (stats.fragmentation() >= config_.fragmentation_threshold)
+        {
+            result.push_back(file_id);
+        }
+    }
+
+    return result;
 }

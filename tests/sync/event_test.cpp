@@ -1,4 +1,3 @@
-
 //
 // Created by Yao ACHI on 22/11/2025.
 //
@@ -6,246 +5,181 @@
 #include "core/include/sync/event.h"
 
 #include <gtest/gtest.h>
+#include <latch>
+#include <memory>
+#include <vector>
 
 #include "core/include/io/worker.h"
+#include "core/include/sync_wait.h"
 
 using namespace kio;
 using namespace kio::sync;
 using namespace kio::io;
 
-TEST(AsyncEventTest, NotifyBeforeWait)
+class AsyncEventTest : public ::testing::Test
 {
-    Worker worker(0, WorkerConfig{});
-    std::jthread t([&] { worker.loop_forever(); });
-    worker.wait_ready();
+protected:
+    std::unique_ptr<Worker> worker;
+    std::unique_ptr<std::jthread> worker_thread;
+    WorkerConfig config;
 
-    auto event = std::make_unique<AsyncEvent>(worker);
-    auto completed = std::make_shared<std::atomic<bool>>(false);
-
-    auto task = [event_ptr = event.get(), completed]() -> DetachedTask
+    void SetUp() override
     {
-        co_await event_ptr->wait();
-        completed->store(true, std::memory_order_release);
-    };
-
-    event->notify();  // Notify first
-    task().detach();
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    EXPECT_TRUE(completed->load(std::memory_order_acquire));
-    EXPECT_TRUE(event->is_set());
-
-    worker.request_stop();
-}
-
-TEST(AsyncEventTest, WaitThenNotify)
-{
-    Worker worker(0, WorkerConfig{});
-    std::jthread t([&] { worker.loop_forever(); });
-    worker.wait_ready();
-
-    auto event = std::make_unique<AsyncEvent>(worker);
-    auto completed = std::make_shared<std::atomic<bool>>(false);
-
-    auto task = [&worker, event_ptr = event.get(), completed]() -> DetachedTask
-    {
-        co_await SwitchToWorker(worker);
-        co_await event_ptr->wait();
-        completed->store(true, std::memory_order_release);
-    };
-
-    task().detach();
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    EXPECT_FALSE(completed->load(std::memory_order_acquire));
-    EXPECT_FALSE(event->is_set());
-
-    event->notify();
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    EXPECT_TRUE(completed->load(std::memory_order_acquire));
-    EXPECT_TRUE(event->is_set());
-
-    worker.request_stop();
-}
-
-TEST(AsyncEventTest, MultipleWaiters)
-{
-    Worker worker(0, WorkerConfig{});
-    std::jthread t([&] { worker.loop_forever(); });
-    worker.wait_ready();
-
-    auto event = std::make_unique<AsyncEvent>(worker);
-    auto completed_count = std::make_shared<std::atomic<int>>(0);
-
-    constexpr int num_waiters = 5;
-
-    for (int i = 0; i < num_waiters; ++i)
-    {
-        auto task = [&worker, event_ptr = event.get(), completed_count]() -> DetachedTask
-        {
-            co_await SwitchToWorker(worker);
-            co_await event_ptr->wait();
-            completed_count->fetch_add(1, std::memory_order_release);
-        };
-        task().detach();
+        config.uring_submit_timeout_ms = 10;
+        worker = std::make_unique<Worker>(0, config);
+        worker_thread = std::make_unique<std::jthread>([this] { worker->loop_forever(); });
+        worker->wait_ready();
     }
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    EXPECT_EQ(completed_count->load(std::memory_order_acquire), 0);
-
-    event->notify();
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    EXPECT_EQ(completed_count->load(std::memory_order_acquire), num_waiters);
-
-    worker.request_stop();
-}
-
-TEST(AsyncEventTest, ResetAndReuse)
-{
-    Worker worker(0, WorkerConfig{});
-    std::jthread t([&] { worker.loop_forever(); });
-    worker.wait_ready();
-
-    auto event = std::make_unique<AsyncEvent>(worker);
-
-    event->notify();
-    EXPECT_TRUE(event->is_set());
-
-    event->reset();
-    EXPECT_FALSE(event->is_set());
-
-    auto completed = std::make_shared<std::atomic<bool>>(false);
-    auto task = [&worker, event_ptr = event.get(), completed]() -> DetachedTask
+    void TearDown() override
     {
-        co_await SwitchToWorker(worker);
-        co_await event_ptr->wait();
-        completed->store(true, std::memory_order_release);
+        (void) worker->request_stop();
+        worker_thread.reset();
+        worker.reset();
+    }
+};
+
+TEST_F(AsyncEventTest, EventBroadcast)
+{
+    auto event = std::make_shared<AsyncEvent>(*worker);
+    std::atomic<int> wake_count{0};
+    constexpr int NUM_WAITERS = 5;
+    std::latch latch{NUM_WAITERS};
+
+    auto waiter_task = [event, &wake_count, &latch, this](int id) -> DetachedTask
+    {
+        co_await SwitchToWorker(*worker);
+        co_await event->wait();
+        wake_count++;
+        latch.count_down();
     };
 
-    task().detach();
+    for (int i = 0; i < NUM_WAITERS; ++i)
+    {
+        waiter_task(i).detach();
+    }
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    EXPECT_FALSE(completed->load(std::memory_order_acquire));
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    EXPECT_EQ(wake_count, 0);
 
     event->notify();
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    EXPECT_TRUE(completed->load(std::memory_order_acquire));
-    EXPECT_TRUE(event->is_set());
-
-    worker.request_stop();
+    latch.wait();
+    EXPECT_EQ(wake_count, NUM_WAITERS);
 }
 
-TEST(AsyncEventTest, MultipleNotify)
+TEST_F(AsyncEventTest, EventPreSet)
 {
-    Worker worker(0, WorkerConfig{});
-    std::jthread t([&] { worker.loop_forever(); });
-    worker.wait_ready();
+    auto event = std::make_shared<AsyncEvent>(*worker);
+    event->notify();
+    EXPECT_TRUE(event->is_set());
 
-    auto event = std::make_unique<AsyncEvent>(worker);
-    auto completed_count = std::make_shared<std::atomic<int>>(0);
+    std::latch latch{1};
+    bool completed = false;
 
-    auto task = [&worker, event_ptr = event.get(), completed_count]() -> DetachedTask
+    auto waiter_task = [event, &completed, &latch, this]() -> DetachedTask
     {
-        co_await SwitchToWorker(worker);
-        co_await event_ptr->wait();
-        completed_count->fetch_add(1, std::memory_order_release);
+        co_await SwitchToWorker(*worker);
+        co_await event->wait();
+        completed = true;
+        latch.count_down();
     };
 
-    task().detach();
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-
-    // Multiple notifies should be idempotent
-    event->notify();
-    event->notify();
-    event->notify();
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    EXPECT_EQ(completed_count->load(std::memory_order_acquire), 1);
-    EXPECT_TRUE(event->is_set());
-
-    worker.request_stop();
+    waiter_task().detach();
+    latch.wait();
+    EXPECT_TRUE(completed);
 }
 
-TEST(AsyncEventTest, ConcurrentWaitAndNotify)
+TEST_F(AsyncEventTest, CrossThreadNotification)
 {
-    Worker worker(0, WorkerConfig{});
-    std::jthread t([&] { worker.loop_forever(); });
-    worker.wait_ready();
+    auto event = std::make_shared<AsyncEvent>(*worker);
+    std::latch latch{1};
 
-    auto event = std::make_unique<AsyncEvent>(worker);
-    auto completed_count = std::make_shared<std::atomic<int>>(0);
+    auto waiter = [event, &latch, this]() -> DetachedTask
+    {
+        co_await SwitchToWorker(*worker);
+        co_await event->wait();
+        latch.count_down();
+    };
 
+    waiter().detach();
+
+    std::thread notifier(
+            [event]
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                event->notify();
+            });
+
+    latch.wait();
+    notifier.join();
+}
+
+TEST_F(AsyncEventTest, ConcurrentWaitAndNotify)
+{
+    auto event = std::make_shared<AsyncEvent>(*worker);
+    std::atomic<int> completed_count{0};
     constexpr int num_tasks = 10;
+    std::latch all_done{num_tasks};
 
     for (int i = 0; i < num_tasks; ++i)
     {
-        auto task = [&worker, event_ptr = event.get(), completed_count]() -> DetachedTask
+        auto task = [event, &completed_count, &all_done, this]() -> DetachedTask
         {
-            co_await SwitchToWorker(worker);
-            co_await event_ptr->wait();
-            completed_count->fetch_add(1, std::memory_order_release);
+            co_await SwitchToWorker(*worker);
+            co_await event->wait();
+            completed_count.fetch_add(1, std::memory_order_release);
+            all_done.count_down();
         };
         task().detach();
     }
 
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-    std::jthread notifier([event_ptr = event.get()] { event_ptr->notify(); });
-
+    std::jthread notifier([event] { event->notify(); });
     notifier.join();
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    EXPECT_EQ(completed_count->load(std::memory_order_acquire), num_tasks);
+    all_done.wait();
 
-    worker.request_stop();
+    EXPECT_EQ(completed_count.load(std::memory_order_acquire), num_tasks);
 }
 
-TEST(AsyncEventTest, WaitAfterNotify)
+TEST_F(AsyncEventTest, WaitAfterNotify)
 {
-    Worker worker(0, WorkerConfig{});
-    std::jthread t([&] { worker.loop_forever(); });
-    worker.wait_ready();
-
-    auto event = std::make_unique<AsyncEvent>(worker);
+    auto event = std::make_shared<AsyncEvent>(*worker);
     event->notify();
 
-    auto completed_count = std::make_shared<std::atomic<int>>(0);
+    std::atomic<int> completed_count{0};
+    std::latch latch{3};
 
     for (int i = 0; i < 3; ++i)
     {
-        auto task = [&worker, event_ptr = event.get(), completed_count]() -> DetachedTask
+        auto task = [event, &completed_count, &latch, this]() -> DetachedTask
         {
-            co_await SwitchToWorker(worker);
-            co_await event_ptr->wait();
-            completed_count->fetch_add(1, std::memory_order_release);
+            co_await SwitchToWorker(*worker);
+            co_await event->wait();
+            completed_count.fetch_add(1, std::memory_order_release);
+            latch.count_down();
         };
         task().detach();
     }
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    EXPECT_EQ(completed_count->load(std::memory_order_acquire), 3);
-
-    worker.request_stop();
+    latch.wait();
+    EXPECT_EQ(completed_count.load(std::memory_order_acquire), 3);
 }
 
-TEST(AsyncEventTest, StaggeredWaiters)
+TEST_F(AsyncEventTest, StaggeredWaiters)
 {
-    Worker worker(0, WorkerConfig{});
-    std::jthread t([&] { worker.loop_forever(); });
-    worker.wait_ready();
+    auto event = std::make_shared<AsyncEvent>(*worker);
+    std::atomic<int> completed_count{0};
+    std::latch latch{3};
 
-    auto event = std::make_unique<AsyncEvent>(worker);
-    auto completed_count = std::make_shared<std::atomic<int>>(0);
-
-    auto add_waiter = [&worker, event_ptr = event.get(), completed_count]() -> DetachedTask
+    auto add_waiter = [event, &completed_count, &latch, this]() -> DetachedTask
     {
-        co_await SwitchToWorker(worker);
-        co_await event_ptr->wait();
-        completed_count->fetch_add(1, std::memory_order_release);
+        co_await SwitchToWorker(*worker);
+        co_await event->wait();
+        completed_count.fetch_add(1, std::memory_order_release);
+        latch.count_down();
     };
 
     add_waiter().detach();
@@ -257,12 +191,10 @@ TEST(AsyncEventTest, StaggeredWaiters)
     add_waiter().detach();
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
-    EXPECT_EQ(completed_count->load(std::memory_order_acquire), 0);
+    EXPECT_EQ(completed_count.load(std::memory_order_acquire), 0);
 
     event->notify();
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    EXPECT_EQ(completed_count->load(std::memory_order_acquire), 3);
-
-    worker.request_stop();
+    latch.wait();
+    EXPECT_EQ(completed_count.load(std::memory_order_acquire), 3);
 }

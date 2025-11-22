@@ -14,6 +14,7 @@ set(CORE_HEADER_FILES
         include/ds/buffer_pool.h
         include/sync/baton.h
         include/sync/event.h
+        include/sync/when_any.h
 
         # metrics
         include/metrics/model.h

@@ -276,6 +276,12 @@ namespace kio::io
         ALOG_DEBUG("Worker {} destructor called", id_);
         // request stop if not already requested
 
+        // worker is shutting down with non resumed coroutines
+        if (op_data_pool_.size() != free_op_ids.size())
+        {
+            ALOG_WARN("Worker {} leaked {} op_ids during shutdown", id_, op_data_pool_.size() - free_op_ids.size());
+        }
+
         if (this->ring_.ring_fd >= 0)
         {
             io_uring_queue_exit(&ring_);

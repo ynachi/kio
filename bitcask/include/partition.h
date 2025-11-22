@@ -5,6 +5,7 @@
 #ifndef KIO_BITCASK_PARTITION_H
 #define KIO_BITCASK_PARTITION_H
 #include "compactor.h"
+#include "core/include/sync/baton.h"
 #include "data_file.h"
 #include "entry.h"
 
@@ -24,7 +25,6 @@ namespace bitcask
         std::unique_ptr<DataFile> active_file_;
         // a cache of opened read-only files
         std::unordered_map<uint64_t, FileHandle> sealed_files_;
-        Compactor compactor_;
         BitcaskConfig config_;
         size_t partition_id_;
         PartitionStats stats_;
@@ -37,7 +37,6 @@ namespace bitcask
         // File Management
         kio::Task<kio::Result<void>> rotate_active_file();
         kio::Task<kio::Result<std::unique_ptr<DataFile>>> new_data_file(uint64_t id);
-        kio::DetachedTask compaction_loop();
         /**
          * @brief Gets the FD that an entry location points to
          * @param it An iterator representing a location in a KeyDir
@@ -45,10 +44,23 @@ namespace bitcask
          */
         [[nodiscard]] kio::Result<int> find_fd(SimpleKeydir::const_iterator it);
         static uint64_t generate_file_id() { return get_current_timestamp<std::chrono::seconds>(); }
+
+        // ========================================================================
+        // Compaction
+        // ========================================================================
+        Compactor compactor_;
+        kio::DetachedTask compaction_loop();
+        void signal_compaction(uint64_t file_id);
         bool should_compact_file(uint64_t file_id) const;
+        // Event-driven compaction trigger
+        kio::sync::AsyncBaton compaction_trigger_;
+        // Find all files which needs compaction
+        std::vector<uint64_t> find_fragmented_files() const;
 
     public:
-        //************** constructors/destructor
+        // ========================================================================
+        // Constructors/Destructors
+        // ========================================================================
         Partition(const BitcaskConfig& config, kio::io::Worker& worker, size_t partition_id);
         ~Partition() = default;
 

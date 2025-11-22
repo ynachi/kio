@@ -11,7 +11,6 @@
 #include <liburing.h>
 #include <memory>
 #include <span>
-#include <string_view>
 #include <thread>
 
 #include "core/include/coro.h"

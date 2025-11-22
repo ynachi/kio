@@ -103,7 +103,11 @@ target_include_directories(buffer_pool_test
 )
 
 # sync tests
-add_executable(sync_tests sync/baton_test.cpp sync/event_test.cpp)
+add_executable(sync_tests
+        sync/baton_test.cpp
+        sync/event_test.cpp
+        sync/when_any_test.cpp
+)
 
 target_link_libraries(sync_tests
         PRIVATE
