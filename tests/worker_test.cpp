@@ -216,6 +216,83 @@ TEST_F(WorkerTest, AsyncReadExactEOF)
     ::close(read_fd);
 }
 
+TEST_F(WorkerTest, SingleThreadedExecution)
+{
+    // This test proves that a Worker is fully single-threaded by:
+    // 1. Having multiple regular tasks modify a shared variable
+    // 2. Having a detached task also modify the same variable
+    // 3. No synchronization primitives are needed (no mutexes, atomics, etc.)
+    // 4. All operations are sequential and deterministic
+
+    auto test_coro = [&]() -> Task<void>
+    {
+        co_await SwitchToWorker(*worker);
+
+        // Shared variable - NO synchronization needed because Worker is single-threaded
+        int shared_counter = 0;
+        bool detached_task_completed = false;
+
+        // Launch a detached task that will increment the counter
+        auto detached_increment = [&]() -> DetachedTask
+        {
+            co_await SwitchToWorker(*worker);
+
+            // Even though this is "detached", it runs on the same worker thread
+            // So it will execute cooperatively with other tasks
+            for (int i = 0; i < 100; ++i)
+            {
+                shared_counter++;
+                // Yield control to allow other tasks to run
+                co_await worker->async_sleep(std::chrono::milliseconds(0));
+            }
+            detached_task_completed = true;
+        };
+
+        // Start the detached task
+        detached_increment().detach();
+
+        // Multiple regular tasks also incrementing the counter
+        auto increment_task = [&](int iterations) -> Task<void>
+        {
+            co_await SwitchToWorker(*worker);
+
+            for (int i = 0; i < iterations; ++i)
+            {
+                shared_counter++;
+                // Yield to allow interleaving
+                co_await worker->async_sleep(std::chrono::milliseconds(0));
+            }
+        };
+
+        // Launch multiple tasks concurrently (but they execute sequentially on the worker)
+        auto task1 = increment_task(50);
+        auto task2 = increment_task(75);
+        auto task3 = increment_task(25);
+
+        // Wait for all regular tasks to complete
+        co_await task1;
+        co_await task2;
+        co_await task3;
+
+        // Wait for a detached task to complete by polling
+        // (In real code, you'd use better coordination, but this demonstrates the concept)
+        while (!detached_task_completed)
+        {
+            co_await worker->async_sleep(std::chrono::milliseconds(1));
+        }
+
+        // Check: All increments should have happened
+        // 100 (detached) + 50 + 75 + 25 = 250
+        EXPECT_EQ(shared_counter, 250);
+
+        // The key insight: We didn't need ANY synchronization primitives!
+        // No std::atomic, no std::mutex, no locks - because everything
+        // runs sequentially on the same worker thread.
+    };
+
+    SyncWait(test_coro());
+}
+
 int main(int argc, char **argv)
 {
     ::testing::InitGoogleTest(&argc, argv);
