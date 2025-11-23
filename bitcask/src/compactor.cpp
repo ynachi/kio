@@ -13,8 +13,8 @@ using namespace kio::io;
 
 namespace bitcask
 {
-    Compactor::Compactor(Worker& io_worker, const BitcaskConfig& config, SimpleKeydir& keydir, const CompactionLimits& limits) :
-        io_worker_(io_worker), config_(config), keydir_(keydir), limits_(limits), current_data_offset_(0), current_hint_offset_(0)
+    Compactor::Compactor(Worker& io_worker, const BitcaskConfig& config, SimpleKeydir& keydir, const uint64_t partition_id, PartitionStats& stats, const CompactionLimits& limits) :
+        io_worker_(io_worker), config_(config), keydir_(keydir), limits_(limits), partition_id_(partition_id), stats_(stats), current_data_offset_(0), current_hint_offset_(0)
     {
         ALOG_INFO("Compactor initialized for N-to-1 merge compaction");
         data_batch_.reserve(config.write_buffer_size);
@@ -63,8 +63,8 @@ namespace bitcask
 
     Task<Result<void>> Compactor::cleanup_source_files(uint64_t src_file_id) const
     {
-        const auto data_path = config_.directory / std::format("data_{}.db", src_file_id);
-        const auto hint_path = config_.directory / std::format("hint_{}.ht", src_file_id);
+        const auto data_path = get_data_file_path(src_file_id);
+        const auto hint_path = get_hint_file_path(src_file_id);
 
         // Remove data file
         if (auto res_data = co_await io_worker_.async_unlink_at(AT_FDCWD, data_path, 0); !res_data.has_value())
@@ -95,11 +95,9 @@ namespace bitcask
         keydir_batch_.clear();
     }
 
-    Task<Result<void>> Compactor::commit_batch(int dst_data_fd, int dst_hint_fd, Stats& stats)
+    Task<Result<void>> Compactor::commit_batch(int dst_data_fd, int dst_hint_fd)
     {
         if (data_batch_.empty()) co_return {};
-
-        ALOG_TRACE("Committing batch: data={}KB, hint={}KB, keydir={} entries", data_batch_.size() / 1024, hint_batch_.size() / 1024, keydir_batch_.size());
 
         // Write data and hints
         KIO_TRY(co_await io_worker_.async_write_exact(dst_data_fd, std::span(data_batch_)));
@@ -110,12 +108,6 @@ namespace bitcask
         {
             if (const bool success = update_keydir_if_matches(update.key, update.new_loc, update.expected_file_id, update.expected_offset); !success)
             {
-                // This entry was optimistically counted as "kept"
-                // Now we know it's actually stale, so fix the counts
-                stats.entries_kept--;
-                stats.entries_discarded++;
-                stats.bytes_written -= update.new_loc.total_size;
-
                 ALOG_TRACE("CAS failed for key '{}': concurrent update detected", update.key);
             }
         }
@@ -127,12 +119,10 @@ namespace bitcask
         co_return {};
     }
 
-    void Compactor::process_parsed_entry(const DataEntry& data_entry, uint64_t decoded_size, uint64_t entry_absolute_offset, uint64_t src_file_id, uint64_t dst_file_id, size_t window_start,
-                                         Stats& stats)
+    void Compactor::process_parsed_entry(const DataEntry& data_entry, uint64_t decoded_size, uint64_t entry_absolute_offset, uint64_t src_file_id, uint64_t dst_file_id, size_t window_start)
     {
         if (!is_live_entry(data_entry, entry_absolute_offset, src_file_id))
         {
-            stats.entries_discarded++;
             return;
         }
 
@@ -144,10 +134,6 @@ namespace bitcask
         data_batch_.insert(data_batch_.end(), raw_entry.begin(), raw_entry.end());
         struct_pack::serialize_to(hint_batch_, hint);
         keydir_batch_.emplace_back(std::string(data_entry.key), new_loc, src_file_id, entry_absolute_offset);
-
-        // Track both entries and bytes
-        stats.entries_kept++;
-        stats.bytes_written += decoded_size;
     }
 
     void Compactor::compact_decode_buffer(size_t& window_start)
@@ -162,7 +148,7 @@ namespace bitcask
         }
     }
 
-    Task<Result<void>> Compactor::parse_entries_from_buffer(uint64_t file_read_pos, uint64_t src_file_id, uint64_t dst_file_id, int dst_data_fd, int dst_hint_fd, size_t& window_start, Stats& stats)
+    Task<Result<void>> Compactor::parse_entries_from_buffer(uint64_t file_read_pos, uint64_t src_file_id, uint64_t dst_file_id, int dst_data_fd, int dst_hint_fd, size_t& window_start)
     {
         while (true)
         {
@@ -186,27 +172,27 @@ namespace bitcask
             const uint64_t buffer_start_in_file = file_read_pos - decode_buffer_.size();
             const uint64_t entry_absolute_offset = buffer_start_in_file + window_start;
 
-            process_parsed_entry(data_entry, decoded_size, entry_absolute_offset, src_file_id, dst_file_id, window_start, stats);
+            process_parsed_entry(data_entry, decoded_size, entry_absolute_offset, src_file_id, dst_file_id, window_start);
 
             window_start += decoded_size;
 
             if (should_flush_batch())
             {
-                KIO_TRY(co_await commit_batch(dst_data_fd, dst_hint_fd, stats));
+                KIO_TRY(co_await commit_batch(dst_data_fd, dst_hint_fd));
             }
         }
         co_return {};
     }
 
 
-    Task<Result<void>> Compactor::stream_and_compact_file(int src_fd, int dst_data_fd, int dst_hint_fd, uint64_t src_file_id, uint64_t dst_file_id, Stats& stats)
+    Task<Result<void>> Compactor::stream_and_compact_file(const int src_fd, const int dst_data_fd, const int dst_hint_fd, uint64_t src_file_id, const uint64_t dst_file_id)
     {
         uint64_t file_read_pos = 0;
         size_t window_start = 0;
 
         for (;;)
         {
-            // Zero-Copy Optimization: Read directly into the tail of decode_buffer_
+            // Read directly into the tail of decode_buffer_ to avoid copy
             const size_t current_size = decode_buffer_.size();
 
             if (decode_buffer_.capacity() < current_size + config_.read_buffer_size)
@@ -216,7 +202,7 @@ namespace bitcask
 
             // Resize to expose write area
             decode_buffer_.resize(current_size + config_.read_buffer_size);
-            std::span write_area(decode_buffer_.data() + current_size, config_.read_buffer_size);
+            const std::span write_area(decode_buffer_.data() + current_size, config_.read_buffer_size);
 
             // Read
             const auto bytes_read = KIO_TRY(co_await io_worker_.async_read_at(src_fd, write_area, file_read_pos));
@@ -235,7 +221,6 @@ namespace bitcask
             }
 
             file_read_pos += bytes_read;
-            stats.bytes_read += bytes_read;
 
             if (decode_buffer_.size() > limits_.max_decode_buffer)
             {
@@ -243,17 +228,15 @@ namespace bitcask
                 co_return std::unexpected(Error{ErrorCategory::Application, kIoDataCorrupted});
             }
 
-            KIO_TRY(co_await parse_entries_from_buffer(file_read_pos, src_file_id, dst_file_id, dst_data_fd, dst_hint_fd, window_start, stats));
+            KIO_TRY(co_await parse_entries_from_buffer(file_read_pos, src_file_id, dst_file_id, dst_data_fd, dst_hint_fd, window_start));
 
             compact_decode_buffer(window_start);
         }
         co_return {};
     }
 
-    Task<Result<Compactor::Stats>> Compactor::compact_one(uint64_t src_file_id, int dst_data_fd, int dst_hint_fd, uint64_t dst_file_id)
+    Task<Result<void>> Compactor::compact_one(uint64_t src_file_id, const int dst_data_fd, const int dst_hint_fd, uint64_t dst_file_id)
     {
-        const auto start_time = std::chrono::steady_clock::now();
-        Stats stats;
         reset_batches();
         decode_buffer_.clear();
 
@@ -266,9 +249,9 @@ namespace bitcask
         }
 
         // wrap fd to a FileHandle to automatically close fd when it goes out of scope.
-        auto src_handle = FileHandle(open_res.value().first);
+        const auto src_handle = FileHandle(open_res.value().first);
 
-        auto stream_result = co_await stream_and_compact_file(src_handle.get(), dst_data_fd, dst_hint_fd, src_file_id, dst_file_id, stats);
+        auto stream_result = co_await stream_and_compact_file(src_handle.get(), dst_data_fd, dst_hint_fd, src_file_id, dst_file_id);
 
         if (!stream_result.has_value())
         {
@@ -277,18 +260,14 @@ namespace bitcask
         }
 
         // Final flush
-        KIO_TRY(co_await commit_batch(dst_data_fd, dst_hint_fd, stats));
+        KIO_TRY(co_await commit_batch(dst_data_fd, dst_hint_fd));
 
         // clean up
         KIO_TRY(co_await cleanup_source_files(src_file_id));
 
-        // Update stats
-        stats.files_compacted = 1;
-        stats.duration = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start_time);
+        ALOG_DEBUG("Compacted file {} -> {}", src_file_id, dst_file_id);
 
-        ALOG_INFO("Compacted file {}: kept={} discarded={} written={}KB in {}ms", src_file_id, stats.entries_kept, stats.entries_discarded, stats.bytes_written / 1024, stats.duration.count());
-
-        co_return stats;
+        co_return {};
     }
 
 
@@ -301,7 +280,7 @@ namespace bitcask
         return false;
     }
 
-    bool Compactor::update_keydir_if_matches(const std::string& key, const ValueLocation& new_loc, uint64_t expected_file_id, uint64_t expected_offset) const
+    bool Compactor::update_keydir_if_matches(const std::string& key, const ValueLocation& new_loc, const uint64_t expected_file_id, const uint64_t expected_offset) const
     {
         const auto it = keydir_.find(key);
 
@@ -320,5 +299,20 @@ namespace bitcask
         it->second = new_loc;
         return true;
     }
+
+    Task<Result<std::pair<FileHandle, FileHandle>>> Compactor::create_compaction_files(const uint64_t file_id) const
+    {
+        const auto data_path = get_data_file_path(file_id);
+        const auto hint_path = get_hint_file_path(file_id);
+
+        const int data_fd = KIO_TRY(co_await io_worker_.async_openat(data_path, config_.write_flags, config_.file_mode));
+        const int hint_fd = KIO_TRY(co_await io_worker_.async_openat(hint_path, config_.write_flags, config_.file_mode));
+
+        // fallocate data file
+        KIO_TRY(co_await io_worker_.async_fallocate(data_fd, 0, config_.max_file_size));
+
+        co_return std::pair{FileHandle(data_fd), FileHandle(hint_fd)};
+    }
+
 
 }  // namespace bitcask

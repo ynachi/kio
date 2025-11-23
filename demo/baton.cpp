@@ -16,7 +16,7 @@ using namespace kio::io;
 using namespace kio::sync;
 
 //
-// Big warning, Baton sync events not data!
+// Big warning, Baton syncs events not data!
 //
 
 // ============================================================================

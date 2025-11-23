@@ -8,7 +8,8 @@ using namespace bitcask;
 using namespace kio;
 using namespace kio::io;
 
-Partition::Partition(const BitcaskConfig& config, Worker& worker, const size_t partition_id) : worker_(worker), config_(config), partition_id_(partition_id), compactor_(worker, config, keydir_)
+Partition::Partition(const BitcaskConfig& config, Worker& worker, const size_t partition_id) :
+    worker_(worker), config_(config), partition_id_(partition_id), compactor_(worker, config, keydir_, partition_id, stats_), compaction_trigger_(worker)
 {
     // TODO
     // 1 ensure database dir exist, create a subdir for the partition
@@ -218,4 +219,94 @@ std::vector<uint64_t> Partition::find_fragmented_files() const
     }
 
     return result;
+}
+
+
+DetachedTask Partition::compaction_loop()
+{
+    co_await SwitchToWorker(worker_);
+
+    ALOG_INFO("Partition {} compaction loop starting", partition_id_);
+
+    const auto st = worker_.get_stop_token();
+    while (!st.stop_requested())
+    {
+        // wait for event or timer
+        if (co_await compaction_trigger_.wait_for(config_.compaction_interval_s))
+        {
+            ALOG_INFO("Partition {}: compaction triggered by event", partition_id_);
+        }
+        else
+        {
+            ALOG_INFO("Partition {}: compaction triggered by timer", partition_id_);
+        }
+
+        // Find files to compact
+        auto fragmented_files = find_fragmented_files();
+
+        if (fragmented_files.empty())
+        {
+            ALOG_DEBUG("Partition {}: no files to compact", partition_id_);
+            compaction_trigger_.reset();
+            continue;
+        }
+
+        ALOG_INFO("Partition {}: compacting {} files", partition_id_, fragmented_files.size());
+        stats_.compaction_running = true;
+
+        // create the destination file ID for N-to-1 compaction
+        const uint64_t dst_file_id = generate_file_id();
+        auto file_result = co_await compactor_.create_compaction_files(dst_file_id);
+        if (!file_result.has_value())
+        {
+            ALOG_ERROR("Partition {}: failed to create compaction files: {}", partition_id_, file_result.error());
+            stats_.compaction_running = false;
+            continue;
+        }
+
+        auto [dst_data_handle, dst_hint_handle] = std::move(file_result.value());
+        auto dst_data_fd = dst_data_handle.get();
+        auto dst_hint_fd = dst_hint_handle.get();
+
+        // also add the new file to the sealed one, we can write and read at the same time
+        // and we will be looking to some entries there
+        auto path = config_.directory / std::format("partition_{}/data_{}.db", partition_id_, dst_file_id);
+        auto new_fd_res = co_await worker_.async_openat(path, O_RDONLY, 0);
+        if (!new_fd_res.has_value())
+        {
+            // TODO probably fatal, decide
+            ALOG_ERROR("Partition {}: failed to open new file: {}", partition_id_, new_fd_res.error());
+            continue;
+        }
+        sealed_files_.emplace(new_fd_res.value(), FileHandle{new_fd_res.value()});
+
+
+        compactor_.reset_for_new_merge();
+
+        for (auto src_file_id: fragmented_files)
+        {
+            if (auto result = co_await compactor_.compact_one(src_file_id, dst_data_fd, dst_hint_fd, dst_file_id); !result.has_value())
+            {
+                ALOG_ERROR("Partition {}: compaction of file {} failed: {}", partition_id_, src_file_id, result.error());
+
+                stats_.compactions_failed++;
+            }
+            else
+            {
+                stats_.compactions_total++;
+            }
+        }
+
+        // Sync destination files
+        co_await worker_.async_fsync(dst_data_fd);
+        co_await worker_.async_fsync(dst_hint_fd);
+
+        // Close destination files
+        co_await worker_.async_close(dst_data_fd);
+        co_await worker_.async_close(dst_hint_fd);
+
+        // reset triggger
+        compaction_trigger_.reset();
+        stats_.compaction_running = false;
+    }
 }

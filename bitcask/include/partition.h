@@ -25,9 +25,9 @@ namespace bitcask
         std::unique_ptr<DataFile> active_file_;
         // a cache of opened read-only files
         std::unordered_map<uint64_t, FileHandle> sealed_files_;
-        BitcaskConfig config_;
+        BitcaskConfig config_{};
         size_t partition_id_;
-        PartitionStats stats_;
+        PartitionStats stats_{};
 
         // Startup & Recovery Logic
         kio::Task<kio::Result<void>> recover_file(uint64_t file_id);
@@ -43,7 +43,6 @@ namespace bitcask
          * @return the FD to which to location points.
          */
         [[nodiscard]] kio::Result<int> find_fd(SimpleKeydir::const_iterator it);
-        static uint64_t generate_file_id() { return get_current_timestamp<std::chrono::seconds>(); }
 
         // ========================================================================
         // Compaction

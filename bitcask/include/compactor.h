@@ -82,9 +82,10 @@ namespace bitcask
          * @param io_worker worker to drive the io loop
          * @param config Database configuration
          * @param keydir The shared in-memory index
+         * @param partition_id The partition number
          * @param limits Optional compaction limits
          */
-        Compactor(kio::io::Worker& io_worker, const BitcaskConfig& config, SimpleKeydir& keydir, const CompactionLimits& limits = {});
+        Compactor(kio::io::Worker& io_worker, const BitcaskConfig& config, SimpleKeydir& keydir, uint64_t partition_id, PartitionStats& stats, const CompactionLimits& limits = {});
         ~Compactor();
 
         // not movable, not copyable
@@ -119,7 +120,7 @@ namespace bitcask
          * @param dst_file_id The destination file ID (for KeyDir updates)
          * @return FileCompactionStats on success, or an error
          */
-        kio::Task<kio::Result<Stats>> compact_one(uint64_t src_file_id, int dst_data_fd, int dst_hint_fd, uint64_t dst_file_id);
+        kio::Task<kio::Result<void>> compact_one(uint64_t src_file_id, int dst_data_fd, int dst_hint_fd, uint64_t dst_file_id);
 
         /**
          * @brief Checks if an entry is still live (referenced by KeyDir).
@@ -140,6 +141,9 @@ namespace bitcask
          */
         void reset_for_new_merge();
 
+        // creates data and hint compaction files
+        [[nodiscard]] kio::Task<kio::Result<std::pair<FileHandle, FileHandle>>> create_compaction_files(uint64_t file_id) const;
+
     private:
         struct KeyDirUpdate
         {
@@ -153,6 +157,8 @@ namespace bitcask
         BitcaskConfig config_;
         SimpleKeydir& keydir_;
         CompactionLimits limits_;
+        uint64_t partition_id_;
+        PartitionStats& stats_;
 
         // Buffers (reused across compactions)
         std::vector<char> decode_buffer_;
@@ -168,20 +174,21 @@ namespace bitcask
 
         [[nodiscard]] kio::Task<kio::Result<std::pair<int, uint64_t>>> open_source_file(uint64_t src_file_id) const;
 
-        void process_parsed_entry(const DataEntry& data_entry, uint64_t decoded_size, uint64_t entry_absolute_offset, uint64_t src_file_id, uint64_t dst_file_id, size_t window_start, Stats& stats);
+        void process_parsed_entry(const DataEntry& data_entry, uint64_t decoded_size, uint64_t entry_absolute_offset, uint64_t src_file_id, uint64_t dst_file_id, size_t window_start);
 
-        kio::Task<kio::Result<void>> parse_entries_from_buffer(uint64_t file_read_pos, uint64_t src_file_id, uint64_t dst_file_id, int dst_data_fd, int dst_hint_fd, size_t& window_start,
-                                                               Stats& stats);
+        kio::Task<kio::Result<void>> parse_entries_from_buffer(uint64_t file_read_pos, uint64_t src_file_id, uint64_t dst_file_id, int dst_data_fd, int dst_hint_fd, size_t& window_start);
 
         void compact_decode_buffer(size_t& window_start);
 
-        kio::Task<kio::Result<void>> stream_and_compact_file(int src_fd, int dst_data_fd, int dst_hint_fd, uint64_t src_file_id, uint64_t dst_file_id, Stats& stats);
+        kio::Task<kio::Result<void>> stream_and_compact_file(int src_fd, int dst_data_fd, int dst_hint_fd, uint64_t src_file_id, uint64_t dst_file_id);
 
-        kio::Task<kio::Result<void>> commit_batch(int dst_data_fd, int dst_hint_fd, Stats& stats);
+        kio::Task<kio::Result<void>> commit_batch(int dst_data_fd, int dst_hint_fd);
 
         [[nodiscard]] bool should_flush_batch() const;
         void reset_batches();
         [[nodiscard]] kio::Task<kio::Result<void>> cleanup_source_files(uint64_t src_file_id) const;
+        [[nodiscard]] std::filesystem::path get_data_file_path(uint64_t file_id) const { return config_.directory / std::format("partition_{}/data_{}.db", partition_id_, file_id); }
+        [[nodiscard]] std::filesystem::path get_hint_file_path(uint64_t file_id) const { return config_.directory / std::format("partition_{}/hint_{}.ht", partition_id_, file_id); }
     };
 }  // namespace bitcask
 
