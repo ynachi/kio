@@ -121,6 +121,23 @@ target_include_directories(sync_tests
         ${CMAKE_SOURCE_DIR}/src
 )
 
+# bytes_mut tests
+add_executable(bytes_mut_tests
+        ds/bytes_mut_test.cpp
+)
+
+target_link_libraries(bytes_mut_tests
+        PRIVATE
+        kio_lib
+        GTest::gtest
+        GTest::gtest_main
+)
+
+target_include_directories(bytes_mut_tests
+        PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+)
+
 
 gtest_discover_tests(sync_wait_test)
 gtest_discover_tests(lock_free_free_queue)
@@ -129,5 +146,6 @@ gtest_discover_tests(filemanager_test)
 gtest_discover_tests(kio_logger_test)
 gtest_discover_tests(buffer_pool_test)
 gtest_discover_tests(sync_tests)
+gtest_discover_tests(bytes_mut_tests)
 
 

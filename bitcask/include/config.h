@@ -19,32 +19,29 @@ namespace bitcask
     {
         std::filesystem::path directory;
 
-        /// file mode
         mode_t file_mode = 0644;
-        /// directory mode
         mode_t dir_mode = 0755;
-        /// Read open options
         int read_flags = O_RDONLY;
-        /// write flags
         int write_flags = O_CREAT | O_WRONLY | O_APPEND;
 
         // File rotation
         size_t max_file_size = 100 * 1024 * 1024;  // 100MB
+
         // Durability
         bool sync_on_write = false;
-        /// Periodic flush or the written data
         std::chrono::milliseconds sync_interval{1000ms};
 
         // Compaction
         bool auto_compact = true;
-        /// 50% dead data triggers compaction, checked on entry deletion and background scan
-        double fragmentation_threshold = 0.5;
-        /// Fallback compaction interval
+        double fragmentation_threshold = 0.5;  // 50% dead data
         std::chrono::milliseconds compaction_interval_s{120s};
 
         // Performance
-        size_t read_buffer_size = kFSReadChunkSize;
+        size_t read_buffer_size = 64 * 1024;  // 64KB
         size_t write_buffer_size = 4096;
+
+        // Limit open FDs per partition
+        size_t max_open_sealed_files = 100;
     };
 
 }  // namespace bitcask

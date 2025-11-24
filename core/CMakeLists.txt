@@ -12,6 +12,7 @@ set(CORE_HEADER_FILES
         include/fs.h
         include/async_logger.h
         include/ds/buffer_pool.h
+        include/ds/bytes_mut.h
         include/sync/baton.h
         include/sync/event.h
         include/sync/when_any.h

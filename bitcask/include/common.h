@@ -71,8 +71,6 @@ namespace bitcask
     /// Read the hint file entirely, they are small
     kio::Task<kio::Result<std::vector<char>>> read_file_content(kio::io::Worker& io_worker, int fd);
 
-    static uint64_t generate_file_id() { return get_current_timestamp<std::chrono::seconds>(); }
-
 }  // namespace bitcask
 
 #endif  // KIO_CONST_H

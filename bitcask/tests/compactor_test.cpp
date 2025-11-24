@@ -1,11 +1,10 @@
-#include "bitcask/include/compactor.h"
-
 #include <fcntl.h>
 #include <filesystem>
 #include <gtest/gtest.h>
 #include <ranges>
 #include <thread>
 
+#include "bitcask/include/compactor_old.h"
 #include "core/include/coro.h"
 #include "core/include/sync_wait.h"
 

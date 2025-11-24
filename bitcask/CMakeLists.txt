@@ -11,6 +11,8 @@ SET(BITCASK_H
         include/file_handle.h
         include/bitcask.h
         include/partition.h
+        include/fd_cache.h
+        include/file_id.h
 )
 
 SET(BITCASK_SRC
@@ -23,6 +25,7 @@ SET(BITCASK_SRC
         src/compactor.cpp
         src/bitcask.cpp
         src/partition.cpp
+        src/fd_cache.cpp
 )
 
 add_library(kio_bitcask ${BITCASK_H} ${BITCASK_SRC})

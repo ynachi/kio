@@ -1,318 +1,281 @@
 //
-// Created by Yao ACHI on 14/11/2025.
+// Created by Yao ACHI on 21/11/2025.
 //
+
+
 #include "bitcask/include/compactor.h"
 
 #include <format>
 #include <ylt/struct_pack.hpp>
 
-#include "bitcask/include/entry.h"
+#include "bitcask/include/file_handle.h"
 
 using namespace kio;
 using namespace kio::io;
 
-namespace bitcask
+namespace bitcask::compactor
 {
-    Compactor::Compactor(Worker& io_worker, const BitcaskConfig& config, SimpleKeydir& keydir, const uint64_t partition_id, PartitionStats& stats, const CompactionLimits& limits) :
-        io_worker_(io_worker), config_(config), keydir_(keydir), limits_(limits), partition_id_(partition_id), stats_(stats), current_data_offset_(0), current_hint_offset_(0)
+    Task<Result<void>> compact_files(CompactionContext& ctx)
     {
-        ALOG_INFO("Compactor initialized for N-to-1 merge compaction");
-        data_batch_.reserve(config.write_buffer_size);
-        hint_batch_.reserve(limits.max_hint_batch);
-        keydir_batch_.reserve(limits.max_keydir_batch);
-        // decode_buffer_ will be resized dynamically
-        decode_buffer_.reserve(config.read_buffer_size * 2);
-    }
+        ALOG_INFO("Starting N-to-1 compaction: {} files -> file {}", ctx.src_file_ids.size(), ctx.dst_file_id);
 
-    Compactor::~Compactor()
-    {
-        ALOG_DEBUG("Compactor shutting down...");
-        if (!io_worker_.request_stop())
+        // Initialize destination file stats
+        ctx.stats.data_files[ctx.dst_file_id] = PartitionStats::FileStats{};
+
+        // Create destination files
+        const auto data_path = detail::get_data_file_path(ctx, ctx.dst_file_id);
+        const auto hint_path = detail::get_hint_file_path(ctx, ctx.dst_file_id);
+
+        const int data_fd = KIO_TRY(co_await ctx.io_worker.async_openat(data_path, ctx.config.write_flags, ctx.config.file_mode));
+        const int hint_fd = KIO_TRY(co_await ctx.io_worker.async_openat(hint_path, ctx.config.write_flags, ctx.config.file_mode));
+
+        FileHandle data_handle(data_fd);
+        FileHandle hint_handle(hint_fd);
+
+        // Pre-allocate
+        KIO_TRY(co_await ctx.io_worker.async_fallocate(data_fd, 0, static_cast<off_t>(ctx.config.max_file_size)));
+
+        // Compact each source file
+        for (uint64_t src_file_id: ctx.src_file_ids)
         {
-            ALOG_ERROR("Failed to request compactor shutdown");
-        }
-        io_worker_.wait_shutdown();
-        ALOG_INFO("Compactor shut down successfully");
-    }
-
-    void Compactor::reset_for_new_merge()
-    {
-        current_data_offset_ = 0;
-        current_hint_offset_ = 0;
-        reset_batches();
-        decode_buffer_.clear();
-        ALOG_DEBUG("Compactor state reset for new merge");
-    }
-
-    Task<Result<std::pair<int, uint64_t>>> Compactor::open_source_file(uint64_t src_file_id) const
-    {
-        const auto src_path = config_.directory / std::format("data_{}.db", src_file_id);
-        const auto src_fd = KIO_TRY(co_await io_worker_.async_openat(src_path, config_.read_flags, config_.file_mode));
-
-        // Get file size
-        struct stat st{};
-        uint64_t file_size = 0;
-        if (::fstat(src_fd, &st) == 0)
-        {
-            file_size = st.st_size;
-        }
-
-        ALOG_DEBUG("Opened source file {} ({}KB)", src_file_id, file_size / 1024);
-        co_return std::pair{src_fd, file_size};
-    }
-
-    Task<Result<void>> Compactor::cleanup_source_files(uint64_t src_file_id) const
-    {
-        const auto data_path = get_data_file_path(src_file_id);
-        const auto hint_path = get_hint_file_path(src_file_id);
-
-        // Remove data file
-        if (auto res_data = co_await io_worker_.async_unlink_at(AT_FDCWD, data_path, 0); !res_data.has_value())
-        {
-            // Log but don't necessarily fail compaction because of this
-            ALOG_WARN("Failed to remove data file {}: {}", src_file_id, res_data.error());
-        }
-
-        // Remove the hint file
-        if (auto res_hint = co_await io_worker_.async_unlink_at(AT_FDCWD, hint_path, 0); !res_hint.has_value())
-        {
-            // Hint file might not exist, so this is often expected or minor
-            ALOG_DEBUG("Failed to remove hint file {}: {}", src_file_id, res_hint.error());
-        }
-
-        co_return {};
-    }
-
-    bool Compactor::should_flush_batch() const
-    {
-        return data_batch_.size() >= config_.write_buffer_size || hint_batch_.size() >= limits_.max_hint_batch || keydir_batch_.size() >= limits_.max_keydir_batch;
-    }
-
-    void Compactor::reset_batches()
-    {
-        data_batch_.clear();
-        hint_batch_.clear();
-        keydir_batch_.clear();
-    }
-
-    Task<Result<void>> Compactor::commit_batch(int dst_data_fd, int dst_hint_fd)
-    {
-        if (data_batch_.empty()) co_return {};
-
-        // Write data and hints
-        KIO_TRY(co_await io_worker_.async_write_exact(dst_data_fd, std::span(data_batch_)));
-        KIO_TRY(co_await io_worker_.async_write_exact(dst_hint_fd, std::span(hint_batch_)));
-
-        // Update KeyDir with CAS
-        for (const auto& update: keydir_batch_)
-        {
-            if (const bool success = update_keydir_if_matches(update.key, update.new_loc, update.expected_file_id, update.expected_offset); !success)
+            // log error regarding one file failing
+            if (auto result = co_await compact_one_file(ctx, src_file_id, data_fd, hint_fd); !result.has_value())
             {
-                ALOG_TRACE("CAS failed for key '{}': concurrent update detected", update.key);
+                ALOG_ERROR("Failed to compact file {}: {}", src_file_id, result.error());
+                co_return std::unexpected(result.error());
             }
-        }
-
-        current_data_offset_ += data_batch_.size();
-        current_hint_offset_ += hint_batch_.size();
-        reset_batches();
-
-        co_return {};
-    }
-
-    void Compactor::process_parsed_entry(const DataEntry& data_entry, uint64_t decoded_size, uint64_t entry_absolute_offset, uint64_t src_file_id, uint64_t dst_file_id, size_t window_start)
-    {
-        if (!is_live_entry(data_entry, entry_absolute_offset, src_file_id))
-        {
-            return;
-        }
-
-        std::span<const char> raw_entry(decode_buffer_.data() + window_start, decoded_size);
-        ValueLocation new_loc{dst_file_id, current_data_offset_ + data_batch_.size(), static_cast<uint32_t>(decoded_size), data_entry.timestamp_ns};
-
-        HintEntry hint{new_loc.timestamp_ns, new_loc.offset, new_loc.total_size, std::string(data_entry.key)};
-
-        data_batch_.insert(data_batch_.end(), raw_entry.begin(), raw_entry.end());
-        struct_pack::serialize_to(hint_batch_, hint);
-        keydir_batch_.emplace_back(std::string(data_entry.key), new_loc, src_file_id, entry_absolute_offset);
-    }
-
-    void Compactor::compact_decode_buffer(size_t& window_start)
-    {
-        if (window_start > 0)
-        {
-            // Move remaining data to the front
-            std::span leftover(decode_buffer_.data() + window_start, decode_buffer_.size() - window_start);
-            std::memmove(decode_buffer_.data(), leftover.data(), leftover.size());
-            decode_buffer_.resize(leftover.size());
-            window_start = 0;
-        }
-    }
-
-    Task<Result<void>> Compactor::parse_entries_from_buffer(uint64_t file_read_pos, uint64_t src_file_id, uint64_t dst_file_id, int dst_data_fd, int dst_hint_fd, size_t& window_start)
-    {
-        while (true)
-        {
-            std::span decode_span(decode_buffer_.data() + window_start, decode_buffer_.size() - window_start);
-            auto entry_result = DataEntry::deserialize(decode_span);
-
-            if (!entry_result.has_value())
-            {
-                if (entry_result.error().value == kIoNeedMoreData) break;
-                ALOG_ERROR("Deserialization error in file {}: {}", src_file_id, entry_result.error());
-                co_return std::unexpected(entry_result.error());
-            }
-
-            const auto& [data_entry, decoded_size] = entry_result.value();
-
-            // Calculate absolute file offset of this entry:
-            // file_read_pos points PAST the data we just read
-            // decode_buffer_ contains everything we've read but not yet processed
-            // window_start is the offset within decode_buffer_ where this entry starts
-            // So, entry offset = (file_read_pos - buffer_size) + window_start
-            const uint64_t buffer_start_in_file = file_read_pos - decode_buffer_.size();
-            const uint64_t entry_absolute_offset = buffer_start_in_file + window_start;
-
-            process_parsed_entry(data_entry, decoded_size, entry_absolute_offset, src_file_id, dst_file_id, window_start);
-
-            window_start += decoded_size;
-
-            if (should_flush_batch())
-            {
-                KIO_TRY(co_await commit_batch(dst_data_fd, dst_hint_fd));
-            }
-        }
-        co_return {};
-    }
-
-
-    Task<Result<void>> Compactor::stream_and_compact_file(const int src_fd, const int dst_data_fd, const int dst_hint_fd, uint64_t src_file_id, const uint64_t dst_file_id)
-    {
-        uint64_t file_read_pos = 0;
-        size_t window_start = 0;
-
-        for (;;)
-        {
-            // Read directly into the tail of decode_buffer_ to avoid copy
-            const size_t current_size = decode_buffer_.size();
-
-            if (decode_buffer_.capacity() < current_size + config_.read_buffer_size)
-            {
-                decode_buffer_.reserve(std::max(decode_buffer_.capacity() * 2, current_size + config_.read_buffer_size));
-            }
-
-            // Resize to expose write area
-            decode_buffer_.resize(current_size + config_.read_buffer_size);
-            const std::span write_area(decode_buffer_.data() + current_size, config_.read_buffer_size);
-
-            // Read
-            const auto bytes_read = KIO_TRY(co_await io_worker_.async_read_at(src_fd, write_area, file_read_pos));
-
-            // Shrink back to actual size
-            decode_buffer_.resize(current_size + bytes_read);
-
-            if (bytes_read == 0)
-            {
-                if (window_start != decode_buffer_.size())
-                {
-                    ALOG_ERROR("Corrupt file {}: partial entry at EOF", src_file_id);
-                    co_return std::unexpected(Error{ErrorCategory::File, kIoDataCorrupted});
-                }
-                break;
-            }
-
-            file_read_pos += bytes_read;
-
-            if (decode_buffer_.size() > limits_.max_decode_buffer)
-            {
-                ALOG_ERROR("Decode buffer overflow");
-                co_return std::unexpected(Error{ErrorCategory::Application, kIoDataCorrupted});
-            }
-
-            KIO_TRY(co_await parse_entries_from_buffer(file_read_pos, src_file_id, dst_file_id, dst_data_fd, dst_hint_fd, window_start));
-
-            compact_decode_buffer(window_start);
-        }
-        co_return {};
-    }
-
-    Task<Result<void>> Compactor::compact_one(uint64_t src_file_id, const int dst_data_fd, const int dst_hint_fd, uint64_t dst_file_id)
-    {
-        reset_batches();
-        decode_buffer_.clear();
-
-        ALOG_INFO("Compacting file {} -> {}", src_file_id, dst_file_id);
-
-        auto open_res = co_await open_source_file(src_file_id);
-        if (!open_res.has_value())
-        {
-            co_return std::unexpected(open_res.error());
-        }
-
-        // wrap fd to a FileHandle to automatically close fd when it goes out of scope.
-        const auto src_handle = FileHandle(open_res.value().first);
-
-        auto stream_result = co_await stream_and_compact_file(src_handle.get(), dst_data_fd, dst_hint_fd, src_file_id, dst_file_id);
-
-        if (!stream_result.has_value())
-        {
-            ALOG_ERROR("Failed compaction for {}: {}", src_file_id, stream_result.error());
-            co_return std::unexpected(stream_result.error());
         }
 
         // Final flush
-        KIO_TRY(co_await commit_batch(dst_data_fd, dst_hint_fd));
+        KIO_TRY(co_await detail::commit_batch(ctx, data_fd, hint_fd));
 
-        // clean up
-        KIO_TRY(co_await cleanup_source_files(src_file_id));
+        // Sync
+        KIO_TRY(co_await ctx.io_worker.async_fsync(data_fd));
+        KIO_TRY(co_await ctx.io_worker.async_fsync(hint_fd));
 
-        ALOG_DEBUG("Compacted file {} -> {}", src_file_id, dst_file_id);
+        double reduction = ctx.bytes_read > 0 ? 100.0 * (1.0 - static_cast<double>(ctx.bytes_written) / static_cast<double>(ctx.bytes_read)) : 0.0;
+
+        ALOG_INFO("Compaction complete: kept {}, discarded {}, wrote {}KB (from {}KB, {:.1f}% reduction)", ctx.entries_kept, ctx.entries_discarded, ctx.bytes_written / 1024, ctx.bytes_read / 1024,
+                  reduction);
 
         co_return {};
     }
 
-
-    bool Compactor::is_live_entry(const DataEntry& entry, const uint64_t old_offset, const uint64_t old_file_id) const
+    Task<Result<void>> compact_one_file(CompactionContext& ctx, const uint64_t src_file_id, const int dst_data_fd, const int dst_hint_fd)
     {
-        if (const auto it = keydir_.find(entry.key); it != keydir_.end())
+        detail::reset_batches(ctx);
+        ctx.decode_buffer.clear();
+
+        auto [src_fd, file_size] = KIO_TRY(co_await detail::open_source_file(ctx, src_file_id));
+
+        FileHandle src_handle(src_fd);
+        ctx.bytes_read += file_size;
+
+        KIO_TRY(co_await detail::stream_and_compact_file(ctx, src_fd, dst_data_fd, dst_hint_fd, src_file_id));
+
+        KIO_TRY(co_await detail::commit_batch(ctx, dst_data_fd, dst_hint_fd));
+
+        // Update stats: a source file is gone
+        if (const auto it = ctx.stats.data_files.find(src_file_id); it != ctx.stats.data_files.end())
         {
+            ctx.stats.bytes_reclaimed_total += it->second.total_bytes - it->second.live_bytes;
+            ctx.stats.data_files.erase(it);
+        }
+
+        ctx.stats.files_compacted_total++;
+
+        KIO_TRY(co_await detail::cleanup_source_files(ctx, src_file_id));
+
+        co_return {};
+    }
+
+    namespace detail
+    {
+        Task<Result<std::pair<int, uint64_t>>> open_source_file(const CompactionContext& ctx, const uint64_t src_file_id)
+        {
+            const auto src_path = get_data_file_path(ctx, src_file_id);
+            const auto src_fd = KIO_TRY(co_await ctx.io_worker.async_openat(src_path, ctx.config.read_flags, ctx.config.file_mode));
+
+            struct stat st{};
+            uint64_t file_size = 0;
+            if (::fstat(src_fd, &st) == 0)
+            {
+                file_size = st.st_size;
+            }
+
+            co_return std::pair{src_fd, file_size};
+        }
+
+
+        Task<Result<void>> stream_and_compact_file(CompactionContext& ctx, const int src_fd, const int dst_data_fd, const int dst_hint_fd, uint64_t src_file_id)
+        {
+            uint64_t file_read_pos = 0;
+
+            for (;;)
+            {
+                // Reserve space in the buffer
+                ctx.decode_buffer.reserve(ctx.config.read_buffer_size);
+                auto write_span = ctx.decode_buffer.writable_span();
+
+                // Read from upstream IO, write at remaining writable space in the buffer
+                const auto bytes_read = KIO_TRY(co_await ctx.io_worker.async_read_at(src_fd, write_span, file_read_pos));
+
+                ctx.decode_buffer.commit_write(bytes_read);
+
+                if (bytes_read == 0)
+                {
+                    if (!ctx.decode_buffer.is_empty())
+                    {
+                        ALOG_ERROR("Corrupt file {}: {} bytes remaining at EOF", src_file_id, ctx.decode_buffer.remaining());
+                        co_return std::unexpected(Error{ErrorCategory::File, kIoDataCorrupted});
+                    }
+                    break;
+                }
+
+                file_read_pos += bytes_read;
+
+                if (ctx.decode_buffer.remaining() > ctx.limits.max_decode_buffer)
+                {
+                    ALOG_ERROR("Buffer overflow: {}MB", ctx.decode_buffer.remaining() / 1024 / 1024);
+                    co_return std::unexpected(Error{ErrorCategory::Application, kIoDataCorrupted});
+                }
+
+                KIO_TRY(co_await parse_entries_from_buffer(ctx, file_read_pos, src_file_id, dst_data_fd, dst_hint_fd));
+
+                if (ctx.decode_buffer.should_compact())
+                {
+                    ctx.decode_buffer.compact();
+                }
+            }
+
+            co_return {};
+        }
+
+        Task<Result<void>> parse_entries_from_buffer(CompactionContext& ctx, const uint64_t file_read_pos, const uint64_t src_file_id, const int dst_data_fd, const int dst_hint_fd)
+        {
+            while (true)
+            {
+                auto readable = ctx.decode_buffer.readable_span();
+                auto entry_result = DataEntry::deserialize(readable);
+
+                if (!entry_result.has_value())
+                {
+                    if (entry_result.error().value == kIoNeedMoreData) break;
+                    co_return std::unexpected(entry_result.error());
+                }
+
+                const auto& [data_entry, decoded_size] = entry_result.value();
+
+                // Calculate entry offset in file
+                const uint64_t entry_offset = file_read_pos - ctx.decode_buffer.remaining();
+
+                process_parsed_entry(ctx, data_entry, decoded_size, entry_offset, src_file_id, readable);
+
+                ctx.decode_buffer.advance(decoded_size);
+
+                if (should_flush_batch(ctx))
+                {
+                    KIO_TRY(co_await commit_batch(ctx, dst_data_fd, dst_hint_fd));
+                }
+            }
+
+            co_return {};
+        }
+
+        void process_parsed_entry(CompactionContext& ctx, const DataEntry& data_entry, const uint64_t decoded_size, uint64_t entry_offset, uint64_t src_file_id, std::span<const char> readable_data)
+        {
+            if (!is_live_entry(ctx, data_entry, entry_offset, src_file_id))
+            {
+                ctx.entries_discarded++;
+                return;
+            }
+
+            ctx.entries_kept++;
+
+            std::span<const char> raw_entry = readable_data.subspan(0, decoded_size);
+
+            ValueLocation new_loc{ctx.dst_file_id, ctx.current_data_offset + ctx.data_batch.size(), static_cast<uint32_t>(decoded_size), data_entry.timestamp_ns};
+
+            const HintEntry hint{new_loc.timestamp_ns, new_loc.offset, new_loc.total_size, std::string(data_entry.key)};
+
+            ctx.data_batch.insert(ctx.data_batch.end(), raw_entry.begin(), raw_entry.end());
+            struct_pack::serialize_to(ctx.hint_batch, hint);
+            ctx.keydir_batch.emplace_back(std::string(data_entry.key), new_loc, src_file_id, entry_offset);
+        }
+
+        Task<Result<void>> commit_batch(CompactionContext& ctx, const int dst_data_fd, const int dst_hint_fd)
+        {
+            if (ctx.data_batch.empty()) co_return {};
+
+            KIO_TRY(co_await ctx.io_worker.async_write_exact(dst_data_fd, std::span(ctx.data_batch)));
+            KIO_TRY(co_await ctx.io_worker.async_write_exact(dst_hint_fd, std::span(ctx.hint_batch)));
+
+            ctx.bytes_written += ctx.data_batch.size();
+
+            auto& dst_stats = ctx.stats.data_files[ctx.dst_file_id];
+            dst_stats.total_bytes += ctx.data_batch.size();
+            dst_stats.live_bytes += ctx.data_batch.size();
+            dst_stats.live_entries += ctx.keydir_batch.size();
+
+            // Update KeyDir with CAS, adjust stats if CAS fails
+            for (const auto& update: ctx.keydir_batch)
+            {
+                if (!update_keydir_if_matches(ctx, update.key, update.new_loc, update.expected_file_id, update.expected_offset))
+                {
+                    dst_stats.live_bytes -= update.new_loc.total_size;
+                    dst_stats.live_entries--;
+                    dst_stats.dead_entries++;
+                }
+            }
+
+            ctx.current_data_offset += ctx.data_batch.size();
+            ctx.current_hint_offset += ctx.hint_batch.size();
+
+            reset_batches(ctx);
+            co_return {};
+        }
+
+        bool should_flush_batch(const CompactionContext& ctx)
+        {
+            return ctx.data_batch.size() >= ctx.config.write_buffer_size || ctx.hint_batch.size() >= ctx.limits.max_hint_batch || ctx.keydir_batch.size() >= ctx.limits.max_keydir_batch;
+        }
+
+        void reset_batches(CompactionContext& ctx)
+        {
+            ctx.data_batch.clear();
+            ctx.hint_batch.clear();
+            ctx.keydir_batch.clear();
+        }
+
+        Task<Result<void>> cleanup_source_files(const CompactionContext& ctx, const uint64_t src_file_id)
+        {
+            co_await ctx.io_worker.async_unlink_at(AT_FDCWD, get_data_file_path(ctx, src_file_id), 0);
+            co_await ctx.io_worker.async_unlink_at(AT_FDCWD, get_hint_file_path(ctx, src_file_id), 0);
+            co_return {};
+        }
+
+        bool is_live_entry(const CompactionContext& ctx, const DataEntry& entry, const uint64_t old_offset, const uint64_t old_file_id)
+        {
+            const auto it = ctx.keydir.find(entry.key);
+            if (it == ctx.keydir.end()) return false;
+
             return it->second.timestamp_ns == entry.timestamp_ns && it->second.offset == old_offset && it->second.file_id == old_file_id;
-        };
-        return false;
-    }
-
-    bool Compactor::update_keydir_if_matches(const std::string& key, const ValueLocation& new_loc, const uint64_t expected_file_id, const uint64_t expected_offset) const
-    {
-        const auto it = keydir_.find(key);
-
-        // If the key doesn't exist, or points to something else, fail.
-        if (it == keydir_.end())
-        {
-            return false;
         }
 
-        if (it->second.file_id != expected_file_id || it->second.offset != expected_offset)
+        bool update_keydir_if_matches(const CompactionContext& ctx, const std::string& key, const ValueLocation& new_loc, const uint64_t expected_file_id, const uint64_t expected_offset)
         {
-            return false;
+            const auto it = ctx.keydir.find(key);
+            if (it == ctx.keydir.end()) return false;
+
+            if (it->second.file_id != expected_file_id || it->second.offset != expected_offset) return false;
+
+            it->second = new_loc;
+            return true;
         }
 
-        // Match confirmed. Perform update and stats maintenance.
-        it->second = new_loc;
-        return true;
-    }
+        std::filesystem::path get_data_file_path(const CompactionContext& ctx, uint64_t file_id) { return ctx.config.directory / std::format("partition_{}/data_{}.db", ctx.partition_id, file_id); }
 
-    Task<Result<std::pair<FileHandle, FileHandle>>> Compactor::create_compaction_files(const uint64_t file_id) const
-    {
-        const auto data_path = get_data_file_path(file_id);
-        const auto hint_path = get_hint_file_path(file_id);
+        std::filesystem::path get_hint_file_path(const CompactionContext& ctx, uint64_t file_id) { return ctx.config.directory / std::format("partition_{}/hint_{}.ht", ctx.partition_id, file_id); }
+    }  // namespace detail
 
-        const int data_fd = KIO_TRY(co_await io_worker_.async_openat(data_path, config_.write_flags, config_.file_mode));
-        const int hint_fd = KIO_TRY(co_await io_worker_.async_openat(hint_path, config_.write_flags, config_.file_mode));
-
-        // fallocate data file
-        KIO_TRY(co_await io_worker_.async_fallocate(data_fd, 0, config_.max_file_size));
-
-        co_return std::pair{FileHandle(data_fd), FileHandle(hint_fd)};
-    }
-
-
-}  // namespace bitcask
+}  // namespace bitcask::compactor
