@@ -120,14 +120,14 @@ TEST_F(DataFileTest, WriteAndReadRoundtrip)
         EXPECT_EQ(df.size(), ser1.size());
 
         // --- Write second entry ---
-        auto write_res2 = co_await df.async_write(entry2);
+        const auto write_res2 = co_await df.async_write(entry2);
         EXPECT_TRUE(write_res2.has_value());
         auto res2 = write_res2.value();
         EXPECT_EQ(res2.first, ser1.size());
         EXPECT_EQ(df.size(), ser1.size() + ser2.size());
 
         // --- Close ---
-        auto close_res = co_await df.async_close();
+        const auto close_res = co_await df.async_close();
         EXPECT_TRUE(close_res.has_value());
         co_return;
     };

@@ -52,7 +52,7 @@ DetachedTask handle_client(Worker& worker, const int client_fd)
 }
 
 // Accept loop - runs on each worker independently
-DetachedTask accept_loop(Worker& worker, int listen_fd)
+DetachedTask accept_loop(Worker& worker, const int listen_fd)
 {
     ALOG_INFO("Worker accepting connections");
     const auto st = worker.get_stop_token();
@@ -62,7 +62,7 @@ DetachedTask accept_loop(Worker& worker, int listen_fd)
         sockaddr_storage client_addr{};
         socklen_t addr_len = sizeof(client_addr);
 
-        // Accept connection - blocks this coroutine until client connects
+        // Accept connection - blocks this coroutine until a client connects
         auto client_fd = co_await worker.async_accept(listen_fd, reinterpret_cast<sockaddr*>(&client_addr), &addr_len);
 
         if (!client_fd.has_value())
