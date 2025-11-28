@@ -4,15 +4,12 @@
 
 #ifndef KIO_HINT_FILE_H
 #define KIO_HINT_FILE_H
-#include <filesystem>
-#include <string>
 
 #include "config.h"
 #include "core/include/ds/buffer_pool.h"
 #include "core/include/io/worker.h"
 #include "entry.h"
 #include "file_handle.h"
-#include "keydir.h"
 
 namespace bitcask
 {
@@ -44,8 +41,6 @@ namespace bitcask
         [[nodiscard]] int fd() const { return handle_.get(); }
 
         kio::Task<kio::Result<void>> async_write(const HintEntry&& entry) const;  // NOLINT on [[no_discard]]
-        // Read a hint file and populate KeyDir
-        kio::Task<kio::Result<void>> async_read(KeyDir& keydir) const;
     };
 
 }  // namespace bitcask

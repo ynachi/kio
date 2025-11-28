@@ -20,24 +20,15 @@ namespace bitcask
 
     std::vector<char> DataEntry::serialize() const
     {
-        // Calculate the exact sizes needed ahead of time to avoid reallocations.
-        const auto payload_size = struct_pack::get_needed_size(*this);
+        // 1. Serialize the payload first to a temporary buffer.
+        const auto payload_buffer = struct_pack::serialize(*this);
+        const auto payload_size = payload_buffer.size();
         const auto total_size = kEntryFixedHeaderSize + payload_size;
 
-        std::vector<char> buffer;
-        // Reserve the total capacity to avoid reallocation
-        buffer.reserve(total_size);
+        // 2. Calculate CRC.
+        const uint32_t crc = crc32c::Crc32c(payload_buffer.data(), payload_buffer.size());
 
-        // Claim the 12-byte space for the header
-        buffer.resize(kEntryFixedHeaderSize);
-
-        // Append serialized data after the 12 bytes, reserved for CRC and payload size
-        struct_pack::serialize_to(buffer, *this);
-
-        const auto payload_span = std::span(buffer.data() + kEntryFixedHeaderSize, payload_size);
-        const uint32_t crc = crc32c::Crc32c(payload_span.data(), payload_span.size());
-
-        // Now fill CRC and size.
+        // 3. Prepare header values for little-endian storage.
         uint32_t crc_le = crc;
         uint64_t size_le = payload_size;
         if constexpr (std::endian::native == std::endian::big)
@@ -46,11 +37,24 @@ namespace bitcask
             size_le = std::byteswap(size_le);
         }
 
-        std::memcpy(buffer.data(), &crc_le, sizeof(crc_le));
-        std::memcpy(buffer.data() + 4, &size_le, sizeof(size_le));
+        // 4. Construct the final buffer: [CRC|SIZE|PAYLOAD] directly.
+        std::vector<char> buffer;
+        buffer.reserve(total_size);
+
+        // Append CRC (4 bytes)
+        const char* crc_ptr = reinterpret_cast<const char*>(&crc_le);
+        buffer.insert(buffer.end(), crc_ptr, crc_ptr + sizeof(crc_le));
+
+        // Append SIZE (8 bytes)
+        const char* size_ptr = reinterpret_cast<const char*>(&size_le);
+        buffer.insert(buffer.end(), size_ptr, size_ptr + sizeof(size_le));
+
+        // Append payload
+        buffer.insert(buffer.end(), payload_buffer.begin(), payload_buffer.end());
 
         return buffer;
     }
+
 
     Result<std::pair<DataEntry, uint64_t>> DataEntry::deserialize(std::span<const char> buffer)
     {
@@ -80,8 +84,9 @@ namespace bitcask
             return std::unexpected(Error{ErrorCategory::Serialization, kIoDeserialization});
         }
 
-        const auto entry_packed_size = struct_pack::get_needed_size(entry.value());
-        return std::make_pair(std::move(entry.value()), kEntryFixedHeaderSize + entry_packed_size);
+        DataEntry recovered = std::move(entry.value());
+        const auto entry_packed_size = struct_pack::get_needed_size(recovered);
+        return std::make_pair(std::move(recovered), kEntryFixedHeaderSize + entry_packed_size);
     }
 
     std::vector<char> HintEntry::serialize() const { return struct_pack::serialize(*this); }

@@ -96,7 +96,7 @@ TEST_F(EntrySerializationTest, CRCCorruptionDetection) {
 }
 
 TEST_F(EntrySerializationTest, TruncatedData) {
-    DataEntry entry("key", std::vector<char>{'v', 'a', 'l', 'u', 'e'});
+    const DataEntry entry("key", std::vector<char>{'v', 'a', 'l', 'u', 'e'});
     auto serialized = entry.serialize();
 
     // Truncate the buffer
@@ -117,7 +117,7 @@ TEST_F(EntrySerializationTest, PartialEntryInBuffer) {
     // Create a buffer with entry1 + half of entry2
     std::vector<char> buffer;
     buffer.insert(buffer.end(), s1.begin(), s1.end());
-    buffer.insert(buffer.end(), s2.begin(), s2.begin() + s2.size() / 2);
+    buffer.insert(buffer.end(), s2.begin(), s2.begin() + static_cast<int>(s2.size()) / 2);
 
     // Parse entry1
     auto result1 = DataEntry::deserialize(buffer);
@@ -192,9 +192,9 @@ TEST_F(EntrySerializationTest, EndiannessConsistency) {
 
 TEST_F(EntrySerializationTest, BinarySafety) {
     std::vector<char> binary_value = {0x00, 0x01, 0xFF, 0xFE, 0x80};
-    std::string binary_key = std::string("\x00\xFF\x80", 3);
+    auto binary_key = std::string("\x00\xFF\x80", 3);
 
-    DataEntry entry{std::string(binary_key), std::vector<char>(binary_value)};
+    const DataEntry entry{std::string(binary_key), std::vector<char>(binary_value)};
 
     auto serialized = entry.serialize();
     auto result = DataEntry::deserialize(serialized);
@@ -210,7 +210,7 @@ TEST_F(EntrySerializationTest, DISABLE_SerializationPerformance) {
     constexpr int iterations = 100000;
     std::vector value(1024, 'X'); // 1KB
 
-    auto start = std::chrono::high_resolution_clock::now();
+    const auto start = std::chrono::high_resolution_clock::now();
 
     for (int i = 0; i < iterations; ++i) {
         DataEntry entry("key_" + std::to_string(i), std::vector(value));
@@ -219,13 +219,13 @@ TEST_F(EntrySerializationTest, DISABLE_SerializationPerformance) {
         //ASSERT_TRUE(result.has_value());
     }
 
-    auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    const auto end = std::chrono::high_resolution_clock::now();
+    const auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
 
     std::cout << "Serialization Performance: "
               << iterations << " round-trips in "
               << duration.count() << "ms ("
-              << (iterations * 1000.0 / duration.count()) << " ops/sec)"
+              << (iterations * 1000.0 / static_cast<double>(duration.count())) << " ops/sec)"
               << std::endl;
 }
 
@@ -257,7 +257,7 @@ protected:
 
     void TearDown() override {
         if (worker_) {
-            worker_->request_stop();
+            (void)worker_->request_stop();
             worker_->wait_shutdown();
         }
 
@@ -308,7 +308,10 @@ TEST_F(EntryFileIOTest, WriteAndReadSingleEntry) {
         co_return {};
     };
 
-    SyncWait(test_coro());
+    //
+    if (auto res = SyncWait(test_coro()); !res.has_value()) {
+        ALOG_ERROR("Test function thrown an error: {}", res.error());
+    }
 }
 
 TEST_F(EntryFileIOTest, WriteAndReadMultipleEntries) {
@@ -368,7 +371,9 @@ TEST_F(EntryFileIOTest, WriteAndReadMultipleEntries) {
         co_return {};
     };
 
-    SyncWait(test_coro());
+    if (auto res = SyncWait(test_coro()); !res.has_value()) {
+        ALOG_ERROR("Test function thrown an error: {}", res.error());
+    }
 }
 
 TEST_F(EntryFileIOTest, WriteAtOffsetAndReadBack) {
@@ -447,7 +452,9 @@ TEST_F(EntryFileIOTest, WriteAtOffsetAndReadBack) {
         co_return {};
     };
 
-    SyncWait(test_coro());
+    if (auto res = SyncWait(test_coro()); !res.has_value()) {
+        ALOG_ERROR("Test function thrown an error: {}", res.error());
+    }
 }
 
 TEST_F(EntryFileIOTest, ReadPartialEntryDetection) {
@@ -484,7 +491,9 @@ TEST_F(EntryFileIOTest, ReadPartialEntryDetection) {
         co_return {};
     };
 
-    SyncWait(test_coro());
+    if (auto res = SyncWait(test_coro()); !res.has_value()) {
+        ALOG_ERROR("Test function thrown an error: {}", res.error());
+    }
 }
 
 TEST_F(EntryFileIOTest, SimulatePartitionReadWrite) {
@@ -554,7 +563,9 @@ TEST_F(EntryFileIOTest, SimulatePartitionReadWrite) {
         co_return {};
     };
 
-    SyncWait(test_coro());
+    if (auto res = SyncWait(test_coro()); !res.has_value()) {
+        ALOG_ERROR("Test function thrown an error: {}", res.error());
+    }
 }
 
 TEST_F(EntryFileIOTest, TombstoneFileIO) {
@@ -612,7 +623,9 @@ TEST_F(EntryFileIOTest, TombstoneFileIO) {
         co_return {};
     };
 
-    SyncWait(test_coro());
+    if (auto res = SyncWait(test_coro()); !res.has_value()) {
+        ALOG_ERROR("Test function thrown an error: {}", res.error());
+    }
 }
 
 TEST_F(EntryFileIOTest, WriteAppendReadConcurrent) {
@@ -718,5 +731,12 @@ TEST_F(EntryFileIOTest, WriteAppendReadConcurrent) {
         co_return {};
     };
 
-    SyncWait(test_coro());
+    if (auto res = SyncWait(test_coro()); !res.has_value()) {
+        ALOG_ERROR("Test function thrown an error: {}", res.error());
+    }
+}
+
+int main(int argc, char **argv) {
+    ::testing::InitGoogleTest(&argc, argv);
+    return RUN_ALL_TESTS();
 }

@@ -5,6 +5,7 @@
 #ifndef KIO_STATS_H
 #define KIO_STATS_H
 #include <cstdint>
+#include <ranges>
 #include <unordered_map>
 
 namespace bitcask
@@ -16,7 +17,6 @@ namespace bitcask
             uint64_t total_bytes{0};
             uint64_t live_bytes{0};
             uint64_t live_entries{0};
-            uint64_t dead_entries{0};
 
             [[nodiscard]] double fragmentation() const { return total_bytes > 0 ? 1.0 - static_cast<double>(live_bytes) / static_cast<double>(total_bytes) : 0.0; }
 
@@ -29,11 +29,11 @@ namespace bitcask
         // Compaction state
         bool compaction_running{false};
 
-        // Operation counters
+        // Runtime operation counters
         uint64_t puts_total{0};
         uint64_t gets_total{0};
         uint64_t gets_miss_total{0};
-        uint64_t deletes_total{0};
+        uint64_t deletes_total{0}; // total of deletion requests
 
         // Compaction metrics
         uint64_t compactions_total{0};
@@ -47,7 +47,7 @@ namespace bitcask
         [[nodiscard]] uint64_t total_reclaimable_bytes() const
         {
             uint64_t total = 0;
-            for (const auto& [_, stats]: data_files)
+            for (const auto& stats: data_files | std::views::values)
             {
                 total += stats.reclaimable_bytes();
             }
@@ -58,7 +58,7 @@ namespace bitcask
         {
             uint64_t total_bytes = 0;
             uint64_t live_bytes = 0;
-            for (const auto& [_, stats]: data_files)
+            for (const auto& stats: data_files | std::views::values)
             {
                 total_bytes += stats.total_bytes;
                 live_bytes += stats.live_bytes;

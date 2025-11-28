@@ -22,8 +22,8 @@ namespace bitcask
     {
         if (handle_.is_valid())
         {
-            // We can use async_close from worker if we release ownership from handle first
-            // to avoid double close, or just rely on handle destructor (sync close).
+            // We can use async_close from worker if we release ownership from a handle first
+            // to avoid double close or just rely on handle destructor (sync close).
             // Given the requirement for async_close, we release the FD.
             const int fd = handle_.release();
             KIO_TRY(co_await io_worker_.async_close(fd));
@@ -34,21 +34,25 @@ namespace bitcask
     Task<Result<std::pair<uint64_t, uint32_t>>> DataFile::async_write(const DataEntry& entry)
     {
         auto serialized_entry = entry.serialize();
-        // O_APPEND mode: physical positioning handled by kernel
-        // writing at the end of the file.
-        KIO_TRY(co_await io_worker_.async_write_exact(handle_.get(), serialized_entry));
+
+        // manual offset tracking. Current size if the writing offset
+        // because we use fallocate which conflicts with O_APPEND
+        const auto entry_offset = size_;
+        const auto written_len = static_cast<uint32_t>(serialized_entry.size());
+
+        // The file must be opened without O_APPEND for this pwrite-based call to work correctly.
+        KIO_TRY(co_await io_worker_.async_write_exact_at(handle_.get(), serialized_entry, entry_offset));
 
         if (config_.sync_on_write)
         {
-            // After the writing completes, force it to disk.
-            // We use fdatasync for better performance.
+            // After the writing completes, force it to disk if the user configured it
             KIO_TRY(co_await io_worker_.async_fdatasync(handle_.get()));
         }
 
-        auto entry_offset = size_;
-        auto writen_len = static_cast<uint32_t>(serialized_entry.size());
-        size_ += serialized_entry.size();
-        co_return std::pair{entry_offset, writen_len};
+        // Atomically update size_ for the next write
+        size_ += written_len;
+
+        co_return std::pair{entry_offset, written_len};
     }
 
 

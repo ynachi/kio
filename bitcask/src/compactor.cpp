@@ -224,7 +224,6 @@ namespace bitcask::compactor
                 {
                     dst_stats.live_bytes -= update.new_loc.total_size;
                     dst_stats.live_entries--;
-                    dst_stats.dead_entries++;
                 }
             }
 

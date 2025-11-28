@@ -22,7 +22,7 @@ namespace bitcask
         mode_t file_mode = 0644;
         mode_t dir_mode = 0755;
         int read_flags = O_RDONLY;
-        int write_flags = O_CREAT | O_WRONLY | O_APPEND;
+        int write_flags = O_CREAT | O_WRONLY ;
 
         // File rotation
         size_t max_file_size = 100 * 1024 * 1024;  // 100MB
