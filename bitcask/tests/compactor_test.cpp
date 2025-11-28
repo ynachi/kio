@@ -21,7 +21,7 @@ protected:
     BitcaskConfig config_;
 
     void SetUp() override {
-        alog::configure(1024, LogLevel::Debug);
+        alog::configure(1024, LogLevel::Disabled);
         test_dir_ = std::filesystem::temp_directory_path() / "bitcask_compaction_test";
         std::filesystem::remove_all(test_dir_);
         std::filesystem::create_directories(test_dir_);

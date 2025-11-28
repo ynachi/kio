@@ -89,7 +89,21 @@ target_link_libraries(compactor_test
         GTest::gtest_main
 )
 
+# Partition integration tests
+add_executable(partition_integration_test
+        tests/partition_integration_test.cpp
+)
+
+target_link_libraries(partition_integration_test
+        PRIVATE
+        kio_bitcask
+        kio_lib
+        GTest::gtest
+        GTest::gtest_main
+)
+
 gtest_discover_tests(entry_encode_decode_test)
 gtest_discover_tests(file_operations_test)
 gtest_discover_tests(partition_test)
 gtest_discover_tests(compactor_test)
+gtest_discover_tests(partition_integration_test)

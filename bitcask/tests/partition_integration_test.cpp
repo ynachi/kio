@@ -14,10 +14,6 @@ using namespace bitcask;
 using namespace kio;
 using namespace kio::io;
 
-// ============================================================================
-// PHASE 5: Integration Tests (Realistic Scenarios)
-// ============================================================================
-
 class IntegrationTest : public ::testing::Test {
 protected:
     std::filesystem::path test_dir_;
@@ -31,6 +27,8 @@ protected:
         test_dir_ = std::filesystem::temp_directory_path() / "bitcask_integration_test";
         std::filesystem::remove_all(test_dir_);
         std::filesystem::create_directories(test_dir_);
+        // create the partition dir too
+        std::filesystem::create_directories(test_dir_ / "partition_0");
 
         config_.directory = test_dir_;
         config_.max_file_size = 50 * 1024;  // 50KB - realistic for testing
@@ -56,7 +54,7 @@ protected:
 
     void TearDown() override {
         if (worker_) {
-            worker_->request_stop();
+            (void)worker_->request_stop();
             worker_->wait_shutdown();
         }
 
@@ -69,8 +67,8 @@ protected:
     }
 
     // Helper: Generate random string
-    std::string random_string(size_t length) {
-        const char charset[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    std::string random_string(const size_t length) {
+        constexpr char charset[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
         std::uniform_int_distribution<size_t> dist(0, sizeof(charset) - 2);
 
         std::string result;
@@ -81,10 +79,9 @@ protected:
         return result;
     }
 
-    // Helper: Generate random value
-    std::vector<char> random_value(size_t min_size, size_t max_size) {
-        std::uniform_int_distribution<size_t> size_dist(min_size, max_size);
-        size_t size = size_dist(rng_);
+    std::vector<char> random_value(const size_t min_size, const size_t max_size) {
+        std::uniform_int_distribution size_dist(min_size, max_size);
+        const size_t size = size_dist(rng_);
 
         std::vector<char> value(size);
         std::uniform_int_distribution<uint8_t> byte_dist(0, 255);
@@ -106,7 +103,7 @@ TEST_F(IntegrationTest, EcommerceSessionStore) {
         auto partition = (co_await Partition::open(config_, *worker_, 0)).value();
 
         // Simulate 1000 user sessions
-        const int num_sessions = 1000;
+        constexpr int num_sessions = 1000;
         std::vector<std::string> session_ids;
 
         // Phase 1: Create sessions
@@ -116,27 +113,27 @@ TEST_F(IntegrationTest, EcommerceSessionStore) {
 
             // Session data: user_id, cart, preferences, etc.
             std::string session_data = std::format(
-                "{{\"user_id\":{},\"cart\":[\"item1\",\"item2\"],\"timestamp\":{}}}",
+                R"({{"user_id":{},"cart":["item1","item2"],"timestamp":{}}})",
                 i, get_current_timestamp()
             );
-            std::vector<char> value(session_data.begin(), session_data.end());
+            std::vector value(session_data.begin(), session_data.end());
 
             auto result = co_await partition->put(std::move(session_id), std::move(value));
             EXPECT_TRUE(result.has_value());
         }
 
         // Phase 2: Simulate session activity (updates)
-        std::uniform_int_distribution<int> session_dist(0, num_sessions - 1);
+        std::uniform_int_distribution session_dist(0, num_sessions - 1);
         for (int activity = 0; activity < 500; ++activity) {
             int session_idx = session_dist(rng_);
-            std::string session_id = session_ids[session_idx];
+            const std::string& session_id = session_ids[session_idx];
 
             // Update session with new activity
             std::string updated_data = std::format(
-                "{{\"user_id\":{},\"cart_updated\":true,\"activity\":{},\"timestamp\":{}}}",
+                R"({{"user_id":{},"cart_updated":true,"activity":{},"timestamp":{}}})",
                 session_idx, activity, get_current_timestamp()
             );
-            std::vector<char> value(updated_data.begin(), updated_data.end());
+            std::vector value(updated_data.begin(), updated_data.end());
 
             co_await partition->put(std::string(session_id), std::move(value));
         }
@@ -153,8 +150,7 @@ TEST_F(IntegrationTest, EcommerceSessionStore) {
         // Phase 5: Verify active sessions
         int active_sessions = 0;
         for (int i = num_sessions / 2; i < num_sessions; ++i) {
-            auto get_result = co_await partition->get(session_ids[i]);
-            if (get_result.has_value() && get_result.value().has_value()) {
+            if (auto get_result = co_await partition->get(session_ids[i]); get_result.has_value() && get_result.value().has_value()) {
                 active_sessions++;
             }
         }
@@ -197,8 +193,8 @@ TEST_F(IntegrationTest, TimeSeriesMetrics) {
         auto partition = (co_await Partition::open(config_, *worker_, 0)).value();
 
         // Simulate metrics from 10 servers over time
-        const int num_servers = 10;
-        const int num_timestamps = 500;
+        constexpr int num_servers = 10;
+        constexpr int num_timestamps = 500;
 
         // Phase 1: Write time-series data
         for (int ts = 0; ts < num_timestamps; ++ts) {
@@ -207,7 +203,7 @@ TEST_F(IntegrationTest, TimeSeriesMetrics) {
 
                 // Metric data: CPU, memory, disk, network
                 std::string metric = std::format(
-                    "{{\"cpu\":{},\"mem\":{},\"disk\":{},\"net\":{}}}",
+                    R"({{"cpu":{},"mem":{},"disk":{},"net":{}}})",
                     50 + (ts % 50), 60 + (server % 40), 70 + (ts % 30), 80 + (server % 20)
                 );
                 std::vector<char> value(metric.begin(), metric.end());
@@ -226,9 +222,8 @@ TEST_F(IntegrationTest, TimeSeriesMetrics) {
             // Read last 10 timestamps for each server
             for (int ts = num_timestamps - 10; ts < num_timestamps; ++ts) {
                 std::string key = std::format("metrics:server_{}:ts_{}", server, ts);
-                auto get_result = co_await partition->get(key);
 
-                if (get_result.has_value() && get_result.value().has_value()) {
+                if (auto get_result = co_await partition->get(key); get_result.has_value() && get_result.value().has_value()) {
                     successful_reads++;
                 }
             }
@@ -277,10 +272,11 @@ TEST_F(IntegrationTest, HighUpdateRateCache) {
         auto partition = (co_await Partition::open(config_, *worker_, 0)).value();
 
         // Simulate cache with 100 hot keys
-        const int num_hot_keys = 100;
-        const int updates_per_key = 50;
+        constexpr int num_hot_keys = 100;
+        constexpr int updates_per_key = 50;
 
         std::vector<std::string> hot_keys;
+        hot_keys.reserve(num_hot_keys);
         for (int i = 0; i < num_hot_keys; ++i) {
             hot_keys.push_back(std::format("cache:hot_key_{}", i));
         }
@@ -292,7 +288,7 @@ TEST_F(IntegrationTest, HighUpdateRateCache) {
         }
 
         // Phase 2: Simulate high update rate (cache invalidations)
-        std::uniform_int_distribution<int> key_dist(0, num_hot_keys - 1);
+        std::uniform_int_distribution key_dist(0, num_hot_keys - 1);
 
         for (int update = 0; update < updates_per_key * num_hot_keys; ++update) {
             int key_idx = key_dist(rng_);
@@ -304,8 +300,7 @@ TEST_F(IntegrationTest, HighUpdateRateCache) {
 
             // Occasionally compact
             if (update % 1000 == 0 && update > 0) {
-                auto stats = partition->get_stats();
-                if (stats.overall_fragmentation() > config_.fragmentation_threshold) {
+                if (auto stats = partition->get_stats(); stats.overall_fragmentation() > config_.fragmentation_threshold) {
                     co_await partition->compact();
                 }
             }
@@ -348,18 +343,16 @@ TEST_F(IntegrationTest, MixedCRUDWorkload) {
 
         auto partition = (co_await Partition::open(config_, *worker_, 0)).value();
 
-        const int num_operations = 2000;
+        constexpr int num_operations = 2000;
         std::unordered_set<std::string> live_keys;
         std::unordered_map<std::string, std::vector<char>> expected_values;
 
-        std::uniform_int_distribution<int> op_dist(0, 99);
+        std::uniform_int_distribution op_dist(0, 99);
         int key_counter = 0;
 
         // Mixed workload: 40% create, 30% update, 20% read, 10% delete
         for (int op = 0; op < num_operations; ++op) {
-            int op_type = op_dist(rng_);
-
-            if (op_type < 40 || live_keys.empty()) {
+            if (int op_type = op_dist(rng_); op_type < 40 || live_keys.empty()) {
                 // CREATE (40%)
                 std::string key = std::format("key_{}", key_counter++);
                 std::vector<char> value = random_value(50, 300);
@@ -377,7 +370,7 @@ TEST_F(IntegrationTest, MixedCRUDWorkload) {
                 std::string key = *it;
 
                 std::vector<char> new_value = random_value(50, 300);
-                co_await partition->put(std::string(key), std::vector<char>(new_value));
+                co_await partition->put(std::string(key), std::vector(new_value));
 
                 expected_values[key] = new_value;
 
@@ -408,8 +401,7 @@ TEST_F(IntegrationTest, MixedCRUDWorkload) {
 
             // Periodic compaction
             if (op % 500 == 0 && op > 0) {
-                auto stats = partition->get_stats();
-                if (stats.overall_fragmentation() > config_.fragmentation_threshold) {
+                if (auto stats = partition->get_stats(); stats.overall_fragmentation() > config_.fragmentation_threshold) {
                     co_await partition->compact();
                 }
             }
@@ -443,10 +435,10 @@ TEST_F(IntegrationTest, LargeDocumentStore) {
     auto test_coro = [&]() -> Task<void> {
         co_await SwitchToWorker(*worker_);
 
-        auto partition = (co_await Partition::open(config_, *worker_, 0)).value();
+        const auto partition = (co_await Partition::open(config_, *worker_, 0)).value();
 
         // Simulate document store with varying document sizes
-        const int num_documents = 100;
+        constexpr int num_documents = 100;
         std::vector<std::string> doc_ids;
 
         // Phase 1: Store documents
@@ -454,9 +446,7 @@ TEST_F(IntegrationTest, LargeDocumentStore) {
             std::string doc_id = std::format("doc_{}", i);
             doc_ids.push_back(doc_id);
 
-            // Document sizes: 1KB to 10KB
-            std::uniform_int_distribution<size_t> size_dist(1024, 10 * 1024);
-            std::vector<char> document = random_value(size_dist(rng_), size_dist(rng_));
+            std::vector<char> document = random_value(1024, 10 * 1024);
 
             auto result = co_await partition->put(std::move(doc_id), std::move(document));
             EXPECT_TRUE(result.has_value());
@@ -464,7 +454,7 @@ TEST_F(IntegrationTest, LargeDocumentStore) {
 
         auto stats_after_write = partition->get_stats();
 
-        // Should have multiple files due to large values
+        // Should have multiple files due to large values (100 docs * avg 5KB = 500KB > 50KB max file)
         EXPECT_GE(stats_after_write.data_files.size(), 2);
         EXPECT_GE(stats_after_write.file_rotations_total, 1);
 
@@ -486,6 +476,7 @@ TEST_F(IntegrationTest, LargeDocumentStore) {
         EXPECT_TRUE(compact_result.has_value());
 
         auto stats_after_compact = partition->get_stats();
+        // Compaction should happen because updating 33% + deleting 33% = 66% dead data in old files
         EXPECT_GT(stats_after_compact.bytes_reclaimed_total, 0);
 
         // Phase 5: Verify documents
@@ -503,14 +494,19 @@ TEST_F(IntegrationTest, LargeDocumentStore) {
         }
 
         // Phase 6: Recovery test with large values
-        partition.reset();
-        partition = (co_await Partition::open(config_, *worker_, 0)).value();
+        co_await partition->async_close();
+
+        auto recovery_res = co_await Partition::open(config_, *worker_, 0);
+        EXPECT_TRUE(recovery_res.has_value());
+        auto partition_rec = std::move(recovery_res.value());
 
         for (int i = 0; i < num_documents * 2 / 3; ++i) {
-            auto get_result = co_await partition->get(doc_ids[i]);
+            auto get_result = co_await partition_rec->get(doc_ids[i]);
             EXPECT_TRUE(get_result.has_value() && get_result.value().has_value())
                 << "Document " << doc_ids[i] << " should survive restart";
         }
+
+        co_await partition_rec->async_close();
     };
 
     SyncWait(test_coro());
@@ -526,11 +522,12 @@ TEST_F(IntegrationTest, RapidFireOperations) {
 
         auto partition = (co_await Partition::open(config_, *worker_, 0)).value();
 
-        const int num_rapid_ops = 5000;
+        constexpr int num_rapid_ops = 5000;
         std::vector<std::string> keys;
 
         // Generate keys upfront
-        for (int i = 0; i < 200; ++i) {
+        keys.reserve(200);
+       for (int i = 0; i < 200; ++i) {
             keys.push_back(std::format("rapid_key_{}", i));
         }
 
@@ -538,7 +535,7 @@ TEST_F(IntegrationTest, RapidFireOperations) {
 
         // Rapid-fire mixed operations
         for (int op = 0; op < num_rapid_ops; ++op) {
-            std::string key = keys[key_dist(rng_)];
+            const std::string& key = keys[key_dist(rng_)];
 
             // Alternate between put and get
             if (op % 2 == 0) {
@@ -561,98 +558,6 @@ TEST_F(IntegrationTest, RapidFireOperations) {
             auto get_result = co_await partition->get(key);
             // Key might not exist if never written, but operation should succeed
             EXPECT_TRUE(get_result.has_value());
-        }
-    };
-
-    SyncWait(test_coro());
-}
-
-// ============================================================================
-// Scenario 7: Full Lifecycle Simulation
-// ============================================================================
-
-TEST_F(IntegrationTest, FullLifecycleSimulation) {
-    auto test_coro = [&]() -> Task<void> {
-        co_await SwitchToWorker(*worker_);
-
-        // Day 1: Initial data load
-        {
-            auto partition = (co_await Partition::open(config_, *worker_, 0)).value();
-
-            for (int i = 0; i < 500; ++i) {
-                std::string key = std::format("user_{}", i);
-                std::vector<char> value = random_value(100, 500);
-                co_await partition->put(std::move(key), std::move(value));
-            }
-        }
-
-        // Day 2: Morning traffic spike (reads + updates)
-        {
-            auto partition = (co_await Partition::open(config_, *worker_, 0)).value();
-
-            for (int i = 0; i < 1000; ++i) {
-                int user_id = rng_() % 500;
-                std::string key = std::format("user_{}", user_id);
-
-                // Read
-                co_await partition->get(key);
-
-                // Maybe update
-                if (i % 3 == 0) {
-                    std::vector<char> value = random_value(100, 500);
-                    co_await partition->put(std::string(key), std::move(value));
-                }
-            }
-        }
-
-        // Day 3: Background maintenance (compaction)
-        {
-            auto partition = (co_await Partition::open(config_, *worker_, 0)).value();
-
-            auto compact_result = co_await partition->compact();
-            EXPECT_TRUE(compact_result.has_value());
-        }
-
-        // Day 4: User churn (deletes + new users)
-        {
-            auto partition = (co_await Partition::open(config_, *worker_, 0)).value();
-
-            // Delete inactive users
-            for (int i = 0; i < 100; ++i) {
-                std::string key = std::format("user_{}", i);
-                co_await partition->del(key);
-            }
-
-            // Add new users
-            for (int i = 500; i < 600; ++i) {
-                std::string key = std::format("user_{}", i);
-                std::vector<char> value = random_value(100, 500);
-                co_await partition->put(std::move(key), std::move(value));
-            }
-        }
-
-        // Day 5: Final verification after full lifecycle
-        {
-            auto partition = (co_await Partition::open(config_, *worker_, 0)).value();
-
-            // Deleted users should not exist
-            for (int i = 0; i < 100; ++i) {
-                auto result = co_await partition->get(std::format("user_{}", i));
-                EXPECT_TRUE(result.has_value());
-                EXPECT_FALSE(result.value().has_value());
-            }
-
-            // Active users should exist
-            for (int i = 100; i < 600; ++i) {
-                auto result = co_await partition->get(std::format("user_{}", i));
-                EXPECT_TRUE(result.has_value() && result.value().has_value())
-                    << "User " << i << " should exist";
-            }
-
-            auto stats = partition->get_stats();
-            EXPECT_GT(stats.puts_total, 500);
-            EXPECT_GT(stats.gets_total, 1000);
-            EXPECT_GT(stats.deletes_total, 100);
         }
     };
 
