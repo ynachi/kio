@@ -4,12 +4,14 @@
 
 - Compiler: A C++23 compatible compiler (e.g., Clang 16+ or GCC 14+).
 - CMake: Version 3.28 or higher.
-- liburing >= 2.5 must be installed. You can use the package manager of your distribution to install it.
+- liburing (install the latest version, tested with 2.9).
 ```bash
 # On Debian/Ubuntu
-sudo apt-get install liburing-dev
-# On Fedora
-sudo dnf install liburing-devel
+git clone https://github.com/axboe/liburing.git
+cd liburing
+./configure --prefix=/usr/local
+make
+sudo make install
 ```
 
 ## Build
