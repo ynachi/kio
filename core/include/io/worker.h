@@ -396,6 +396,7 @@ namespace kio::io
          * @return An IO Result which is void or an error.
          */
         Task<Result<void>> async_unlink_at(int dirfd, std::filesystem::path path, int flags);
+        Task<Result<void>> async_ftruncate(int fd, off_t length);
     };
 
     /**

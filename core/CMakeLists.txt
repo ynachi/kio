@@ -1,5 +1,3 @@
-pkg_check_modules(LIBURING REQUIRED liburing)
-
 set(CORE_HEADER_FILES
         include/coro.h
         include/io/uring_awaitable.h
@@ -40,3 +38,4 @@ set(CORE_SRC_FILES
 add_library(kio_lib ${CORE_HEADER_FILES} ${CORE_SRC_FILES})
 target_link_libraries(kio_lib PUBLIC ${LIBURING_LIBRARIES} yalantinglibs::yalantinglibs)
 target_compile_options(kio_lib PRIVATE -Wall)
+target_compile_definitions(kio_lib PRIVATE _GNU_SOURCE)

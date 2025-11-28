@@ -583,11 +583,22 @@ namespace kio::io
         // We must treat -ETIME as a success, not an error.
         if (const int res = co_await make_uring_awaitable(*this, prep, &ts, 0); res < 0 && res != -ETIME)
         {
-            // This is a real error (e.g., the operation was cancelled)
+            // This is a real error (e.g. the operation was cancelled)
             co_return std::unexpected(Error::from_errno(-res));
         }
 
         // Success (res was 0, or res was -ETIME)
         co_return {};
     }
+
+    Task<Result<void>> Worker::async_ftruncate(int fd, off_t length)
+    {
+        auto prep = [](io_uring_sqe *sqe, int file_fd, const off_t off) { io_uring_prep_ftruncate(sqe, file_fd, off); };
+        if (const int ret = co_await make_uring_awaitable(*this, prep, fd, length); ret < 0)
+        {
+            co_return std::unexpected(Error::from_errno(-ret));
+        }
+        co_return {};
+    }
+
 }  // namespace kio::io
