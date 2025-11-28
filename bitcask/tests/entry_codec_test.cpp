@@ -10,7 +10,10 @@ using namespace kio::io;
 
 class EntrySerializationTest : public ::testing::Test {
 protected:
-    void SetUp() override {}
+    void SetUp() override
+    {
+        alog::configure(1024, LogLevel::Disabled);
+    }
 };
 
 TEST_F(EntrySerializationTest, DataEntryRoundTrip) {

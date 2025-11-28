@@ -7,7 +7,7 @@ using namespace kio::io;
 Partition::Partition(const BitcaskConfig& config, Worker& worker, const size_t partition_id) :
     worker_(worker), fd_cache_(worker, config.max_open_sealed_files), file_id_gen_(partition_id), config_(config), partition_id_(partition_id), compaction_trigger_(worker)
 {
-    // TODO: Recovery, initial file creation
+    //  Recovery, compaction loop delegated to open factory method
 }
 
 Task<Result<void>> Partition::put(std::string&& key, std::vector<char>&& value)
@@ -239,46 +239,12 @@ DetachedTask Partition::compaction_loop()
             ALOG_INFO("Partition {}: compaction triggered by timer", partition_id_);
         }
 
-        // Find files to compact
-        auto fragmented_files = find_fragmented_files();
-
-        if (fragmented_files.empty())
+        // compact all fragmented files
+        if (auto res = co_await compact(); !res.has_value())
         {
-            ALOG_DEBUG("Partition {}: no files to compact", partition_id_);
-            compaction_trigger_.reset();
-            continue;
+            ALOG_ERROR("Partition {}: co_await compaction failed", partition_id_);
         }
-
-        ALOG_INFO("Partition {}: compacting {} files", partition_id_, fragmented_files.size());
-
-        stats_.compaction_running = true;
-
-        // Generate destination file ID
-        const uint64_t dst_file_id = file_id_gen_.next();
-
-        // Create compaction context
-        compactor::CompactionContext ctx(worker_, config_, keydir_, stats_, partition_id_, dst_file_id, std::move(fragmented_files), compaction_limits_);
-
-        auto result = co_await compactor::compact_files(ctx);
-
-        if (!result.has_value())
-        {
-            ALOG_ERROR("Partition {}: compaction failed: {}", partition_id_, result.error());
-            stats_.compactions_failed++;
-        }
-        else
-        {
-            ALOG_INFO("Partition {}: compaction succeeded", partition_id_);
-            stats_.compactions_total++;
-
-            // Remove compacted files from FD cache
-            for (const uint64_t src_id: ctx.src_file_ids)
-            {
-                fd_cache_.remove(src_id);
-            }
-
-            // The new compacted file will be added to cache on first read
-        }
+        // The new compacted file will be added to cache on first read
 
         // Reset trigger
         compaction_trigger_.reset();
@@ -559,6 +525,11 @@ Task<Result<std::unique_ptr<Partition>>> Partition::open(const BitcaskConfig& co
     ALOG_INFO("Opening partition {}", partition_id);
     std::unique_ptr<Partition> partition(new Partition(config, worker, partition_id));
     KIO_TRY(co_await partition->recover());
+    if (config.auto_compact)
+    {
+        // run the compaction loop in the background
+       partition->compaction_loop().detach();
+    }
     co_return std::move(partition);
 }
 
@@ -599,5 +570,47 @@ Task<Result<void>> Partition::async_close()
     // The worker is not owned by the partition. It should not close it.
 
     ALOG_INFO("Partition {} closed successfully.", partition_id_);
+    co_return {};
+}
+
+
+Task<Result<void>> Partition::compact()
+{
+    auto fragmented_files = find_fragmented_files();
+
+    if (fragmented_files.empty())
+    {
+        ALOG_DEBUG("Partition {}: no files to compact", partition_id_);
+        compaction_trigger_.reset();
+        co_return {};
+    }
+
+    ALOG_INFO("Partition {}: compacting {} files", partition_id_, fragmented_files.size());
+
+    stats_.compaction_running = true;
+
+    // Generate destination file ID
+    const uint64_t dst_file_id = file_id_gen_.next();
+
+    // Create compaction context
+    compactor::CompactionContext ctx(worker_, config_, keydir_, stats_, partition_id_, dst_file_id, std::move(fragmented_files), compaction_limits_);
+
+    if (auto result = co_await compactor::compact_files(ctx); !result.has_value())
+    {
+        ALOG_ERROR("Partition {}: compaction failed: {}", partition_id_, result.error());
+        stats_.compactions_failed++;
+    }
+    else
+    {
+        ALOG_INFO("Partition {}: compaction succeeded", partition_id_);
+        stats_.compactions_total++;
+
+        // Remove compacted files from FD cache
+        for (const uint64_t src_id: ctx.src_file_ids)
+        {
+            fd_cache_.remove(src_id);
+        }
+    }
+
     co_return {};
 }

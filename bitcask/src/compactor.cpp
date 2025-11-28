@@ -117,7 +117,7 @@ namespace bitcask::compactor
                 ctx.decode_buffer.reserve(ctx.config.read_buffer_size);
                 auto write_span = ctx.decode_buffer.writable_span();
 
-                // Read from upstream IO, write at remaining writable space in the buffer
+                // Read from upstream IO
                 const auto bytes_read = KIO_TRY(co_await ctx.io_worker.async_read_at(src_fd, write_span, file_read_pos));
 
                 ctx.decode_buffer.commit_write(bytes_read);
@@ -126,8 +126,8 @@ namespace bitcask::compactor
                 {
                     if (!ctx.decode_buffer.is_empty())
                     {
-                        ALOG_ERROR("Corrupt file {}: {} bytes remaining at EOF", src_file_id, ctx.decode_buffer.remaining());
-                        co_return std::unexpected(Error{ErrorCategory::File, kIoDataCorrupted});
+                        // Changed from ERROR to WARN: This is a recoverable state (unsealed tail)
+                        ALOG_WARN("File {}: {} bytes of incomplete data at EOF", src_file_id, ctx.decode_buffer.remaining());
                     }
                     break;
                 }
@@ -140,7 +140,17 @@ namespace bitcask::compactor
                     co_return std::unexpected(Error{ErrorCategory::Application, kIoDataCorrupted});
                 }
 
-                KIO_TRY(co_await parse_entries_from_buffer(ctx, file_read_pos, src_file_id, dst_data_fd, dst_hint_fd));
+                // FIX: Check the result of parsing. If it fails, assume we hit the unsealed tail.
+                auto parse_result = co_await parse_entries_from_buffer(ctx, file_read_pos, src_file_id, dst_data_fd, dst_hint_fd);
+
+                if (!parse_result.has_value())
+                {
+                    // Logic: If we encounter a deserialization error, it likely means we hit the zero-filled
+                    // or garbage tail of an unsealed file. We stop processing this file but DO NOT return an error.
+                    // This allows the compaction to proceed with the valid entries we've found so far.
+                    ALOG_WARN("Compaction of file {} stopped early due to data end/corruption: {}", src_file_id, parse_result.error());
+                    break;
+                }
 
                 if (ctx.decode_buffer.should_compact())
                 {

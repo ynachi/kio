@@ -20,7 +20,7 @@ protected:
     BitcaskConfig config_;
 
     void SetUp() override {
-        alog::configure(1024, LogLevel::Debug);
+        alog::configure(1024, LogLevel::Disabled);
         test_dir_ = std::filesystem::temp_directory_path() / "bitcask_partition_test/";
         std::filesystem::remove_all(test_dir_);
         // create the partition dir too

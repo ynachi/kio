@@ -40,6 +40,7 @@ namespace bitcask
         kio::Task<kio::Result<void>> rotate_active_file();
         kio::Task<kio::Result<int>> find_fd(uint64_t file_id);
 
+        // Start the loop in background if compaction flag is set
         kio::DetachedTask compaction_loop();
         void signal_compaction(uint64_t file_id);
         bool should_compact_file(uint64_t file_id) const;

@@ -27,6 +27,7 @@ protected:
     std::mt19937 rng_;
 
     void SetUp() override {
+        alog::configure(1024, LogLevel::Disabled);
         test_dir_ = std::filesystem::temp_directory_path() / "bitcask_integration_test";
         std::filesystem::remove_all(test_dir_);
         std::filesystem::create_directories(test_dir_);
@@ -656,4 +657,9 @@ TEST_F(IntegrationTest, FullLifecycleSimulation) {
     };
 
     SyncWait(test_coro());
+}
+
+int main(int argc, char **argv) {
+    ::testing::InitGoogleTest(&argc, argv);
+    return RUN_ALL_TESTS();
 }
