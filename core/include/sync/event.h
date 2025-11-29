@@ -18,9 +18,9 @@ namespace kio::sync
      * @brief A synchronization primitive that allows MULTIPLE coroutines to suspend
      * until it is signaled (notified).
      *
+     * @note Use this for 1-to-N signaling (broadcast)
      * - Single Consumer? NO (Multiple coroutines can wait)
      * - Single Producer? NO (Any thread can notify)
-     * * Use this for 1-to-N signaling (broadcast).
      */
     class AsyncEvent
     {
@@ -40,7 +40,7 @@ namespace kio::sync
             bool await_suspend(std::coroutine_handle<> h) noexcept
             {
                 // Publish the handle pointer first with release semantics
-                handle_ptr.store(static_cast<void*>(h.address()), std::memory_order_release);
+                handle_ptr.store(h.address(), std::memory_order_release);
 
                 void* old_head = event.state_.load(std::memory_order_acquire);
 

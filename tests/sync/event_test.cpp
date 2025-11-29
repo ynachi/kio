@@ -42,15 +42,15 @@ protected:
 TEST_F(AsyncEventTest, EventBroadcast)
 {
     auto event = std::make_shared<AsyncEvent>(*worker);
-    std::atomic<int> wake_count{0};
+    std::atomic wake_count{0};
     constexpr int NUM_WAITERS = 5;
     std::latch latch{NUM_WAITERS};
 
-    auto waiter_task = [event, &wake_count, &latch, this](int id) -> DetachedTask
+    auto waiter_task = [event, &wake_count, &latch, this](int) -> DetachedTask
     {
         co_await SwitchToWorker(*worker);
         co_await event->wait();
-        wake_count++;
+        ++wake_count;
         latch.count_down();
     };
 
@@ -118,7 +118,7 @@ TEST_F(AsyncEventTest, CrossThreadNotification)
 TEST_F(AsyncEventTest, ConcurrentWaitAndNotify)
 {
     auto event = std::make_shared<AsyncEvent>(*worker);
-    std::atomic<int> completed_count{0};
+    std::atomic completed_count{0};
     constexpr int num_tasks = 10;
     std::latch all_done{num_tasks};
 
@@ -149,7 +149,7 @@ TEST_F(AsyncEventTest, WaitAfterNotify)
     auto event = std::make_shared<AsyncEvent>(*worker);
     event->notify();
 
-    std::atomic<int> completed_count{0};
+    std::atomic completed_count{0};
     std::latch latch{3};
 
     for (int i = 0; i < 3; ++i)
@@ -171,7 +171,7 @@ TEST_F(AsyncEventTest, WaitAfterNotify)
 TEST_F(AsyncEventTest, StaggeredWaiters)
 {
     auto event = std::make_shared<AsyncEvent>(*worker);
-    std::atomic<int> completed_count{0};
+    std::atomic completed_count{0};
     std::latch latch{3};
 
     auto add_waiter = [event, &completed_count, &latch, this]() -> DetachedTask

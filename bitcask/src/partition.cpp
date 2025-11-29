@@ -121,7 +121,6 @@ Task<Result<void>> Partition::del(const std::string& key)
 
 Task<Result<int>> Partition::find_fd(const uint64_t file_id)
 {
-
     // if file id is the active one, flush first
     if (file_id == active_file_->file_id())
     {
@@ -145,7 +144,6 @@ Task<Result<DataEntry>> Partition::async_read_entry(const int fd, const uint64_t
 
 Task<Result<void>> Partition::rotate_active_file()
 {
-
     // Get the actual written size before flushing and closing
     const uint64_t actual_size = active_file_->size();
     const int active_fd = active_file_->handle().get();
@@ -227,7 +225,7 @@ DetachedTask Partition::compaction_loop()
     ALOG_INFO("Partition {} compaction loop starting", partition_id_);
 
     const auto st = worker_.get_stop_token();
-    while (!st.stop_requested())
+    while (!st.stop_requested() && !shutting_down_.load())
     {
         // Wait for event or timer
         if (co_await compaction_trigger_.wait_for(config_.compaction_interval_s))
@@ -237,6 +235,12 @@ DetachedTask Partition::compaction_loop()
         else
         {
             ALOG_INFO("Partition {}: compaction triggered by timer", partition_id_);
+        }
+
+        // Check shutdown again after waking up
+        if (shutting_down_.load())
+        {
+            break;
         }
 
         // compact all fragmented files
@@ -528,7 +532,7 @@ Task<Result<std::unique_ptr<Partition>>> Partition::open(const BitcaskConfig& co
     if (config.auto_compact)
     {
         // run the compaction loop in the background
-       partition->compaction_loop().detach();
+        partition->compaction_loop().detach();
     }
     co_return std::move(partition);
 }
@@ -563,6 +567,12 @@ Task<Result<void>> Partition::async_close()
     co_await SwitchToWorker(worker_);
 
     ALOG_INFO("Partition {} closing...", partition_id_);
+
+    // Signal shutdown to compaction loop
+    shutting_down_.store(true);
+
+    // Wake up the compaction loop so it can exit cleanly
+    compaction_trigger_.notify();
 
     // Seal the active file if it exists and hasn't been sealed by rotation
     KIO_TRY(co_await seal_active_file());

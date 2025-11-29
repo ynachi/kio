@@ -49,7 +49,6 @@ namespace kio::io
         // The queue will automatically round up to the next power of 2 if needed
         size_t task_queue_capacity{1024};
 
-        constexpr WorkerConfig() = default;
         void check() const
         {
             if (uring_queue_depth == 0 || uring_submit_batch_size == 0 || tcp_backlog == 0 || op_slots_growth_factor <= 1.0f)

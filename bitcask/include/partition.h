@@ -34,6 +34,7 @@ namespace bitcask
 
         kio::sync::AsyncBaton compaction_trigger_;
         compactor::CompactionLimits compaction_limits_{};
+        std::atomic<bool> shutting_down_{false};
 
         // Helper methods
         kio::Task<kio::Result<DataEntry>> async_read_entry(int fd, uint64_t offset, uint32_t size) const;
@@ -86,9 +87,9 @@ namespace bitcask
          * @param config Bitcask configuration
          * @param worker The non-owning worker to be used by this partition
          * @param partition_id
-         * @return a uniq ptr to the partition
+         * @return an unique ptr to the partition
          *
-         * @note This method does not create the directory for the partion. The call MUST ensure it exist before.
+         * @note This method does not create the directory for the partition. The call MUST ensure it exist before.
          */
         static kio::Task<kio::Result<std::unique_ptr<Partition>>> open(const BitcaskConfig& config, kio::io::Worker& worker, size_t partition_id);
         kio::Task<kio::Result<void>> async_close();

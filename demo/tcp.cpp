@@ -39,9 +39,8 @@ DetachedTask handle_client(Worker& worker, const int client_fd)
         std::string response = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, World!";
 
         // Write response - this co_await also runs on the worker thread
-        auto sent = co_await worker.async_write(client_fd, std::span(response.data(), response.size()));
 
-        if (!sent.has_value())
+        if (auto sent = co_await worker.async_write(client_fd, std::span(response.data(), response.size())); !sent.has_value())
         {
             ALOG_ERROR("Write failed: {}", sent.error());
             break;

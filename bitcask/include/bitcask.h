@@ -6,13 +6,13 @@
 #define KIO_BITCASK_H
 #include <memory>
 
+#include "bitcask/include/partition.h"
 #include "config.h"
 #include "core/include/io/worker_pool.h"
-#include "data_file.h"
 
 namespace bitcask
 {
-      /**
+    /**
      * @brief Main Bitcask database interface
      *
      * Manages multiple partitions and routes operations based on key hash.
@@ -41,7 +41,7 @@ namespace bitcask
          * @param config Database configuration
          * @return Initialized BitKV instance or error
          */
-        static kio::Task<kio::Result<std::unique_ptr<BitKV>>> open(BitcaskConfig config);
+        static kio::Task<kio::Result<std::unique_ptr<BitKV>>> open(const BitcaskConfig& config, kio::io::WorkerConfig io_config, size_t partition_count);
 
         // ====================================================================
         // CORE OPERATIONS
@@ -91,96 +91,33 @@ namespace bitcask
          */
         kio::Task<kio::Result<void>> close();
 
-        // ====================================================================
-        // OBSERVABILITY
-        // ====================================================================
-
-        /**
-         * @brief Get aggregated stats from all partitions
-         */
-        DatabaseStats get_stats() const;
-
-        /**
-         * @brief Export stats as Prometheus metrics
-         */
-        std::string export_prometheus_metrics() const;
-
-        /**
-         * @brief Get per-partition stats (for debugging)
-         */
-        std::vector<PartitionStats> get_partition_stats() const;
-
-        /**
-         * @brief Health check
-         * Returns false if any partition is unhealthy
-         */
-        bool is_healthy() const;
-
-        /**
-         * @brief Get database info
-         */
-        struct DatabaseInfo
-        {
-            size_t partition_count;
-            size_t total_files;
-            uint64_t total_size_bytes;
-            uint64_t total_live_bytes;
-            double overall_fragmentation;
-        };
-        DatabaseInfo get_info() const;
-
-        ~BitKV();
+        ~BitKV() = default;
 
     private:
+        struct InitState
+        {
+            std::latch latch;
+            std::atomic<bool> has_error{false};
+            std::mutex error_mutex;
+            std::optional<kio::Error> first_error;
+            explicit InitState(const size_t count) : latch(static_cast<int>(count)) {}
+        };
+
         // Private constructor - use open() factory
-        BitKV(BitcaskConfig config, std::unique_ptr<kio::io::IOPool> io_pool);
+        BitKV(const BitcaskConfig& db_config, const kio::io::WorkerConfig& io_config, size_t partition_count);
 
         // ====================================================================
         // INITIALIZATION & RECOVERY
         // ====================================================================
 
-        /**
-         * @brief Initialize a database from scratch or recover existing
-         */
-        kio::Task<kio::Result<void>> initialize();
+        static kio::DetachedTask initialize_partition(BitKV& db, kio::io::Worker&, InitState& state);
 
         /**
          * @brief Ensure directory structure exists
          * Creates: data/partition_0/, data/partition_1/, etc.
          */
-        kio::Task<kio::Result<void>> ensure_directories();
+        void ensure_directories() const;
 
-        /**
-         * @brief Detect if partition count changed since last run
-         * Checks for partition directories that don't match the current config
-         */
-        kio::Task<kio::Result<bool>> partition_count_changed();
-
-        /**
-         * @brief Migrate data when partition count changes
-         *
-         * Process:
-         * 1. Read all keys from old partitions
-         * 2. Rehash each key with a new partition count
-         * 3. Move data files if needed
-         * 4. Rebuild hint files
-         *
-         * Note: This is complex and can be deferred for V1
-         * (just error out if partition count changes)
-         */
-        kio::Task<kio::Result<void>> migrate_partitions(
-            size_t old_partition_count,
-            size_t new_partition_count);
-
-        /**
-         * @brief Recover all partitions in parallel
-         */
-        kio::Task<kio::Result<void>> recover_all_partitions();
-
-        /**
-         * @brief Start compaction loops for all partitions
-         */
-        void start_compaction_loops();
 
         // ====================================================================
         // ROUTING
@@ -202,114 +139,17 @@ namespace bitcask
         // MEMBERS
         // ====================================================================
 
-        BitcaskConfig config_;
+        BitcaskConfig db_config_;
+        kio::io::WorkerConfig io_config_;
         std::unique_ptr<kio::io::IOPool> io_pool_;
+        // mutex used during initialization only. Each partition will be created on a different
+        // thread to parallelize recovery, then will be pushed to the partition list.
+        std::mutex partition_mu_;
         std::vector<std::unique_ptr<Partition>> partitions_;
+        size_t partition_count_;
 
         // Shutdown coordination
         std::atomic<bool> accepting_operations_{true};
-        std::vector<kio::DetachedTask> compaction_tasks_;
-    };
-
-    // ========================================================================
-    // AGGREGATED STATS
-    // ========================================================================
-
-    /**
-     * @brief Aggregated statistics across all partitions
-     */
-    struct DatabaseStats
-    {
-        // Per-partition stats
-        std::vector<PartitionStats> partitions;
-
-        // Aggregated totals
-        uint64_t total_puts{0};
-        uint64_t total_gets{0};
-        uint64_t total_gets_miss{0};
-        uint64_t total_deletes{0};
-
-        uint64_t total_compactions{0};
-        uint64_t total_compactions_failed{0};
-        uint64_t total_bytes_reclaimed{0};
-
-        uint64_t total_files{0};
-        uint64_t total_live_bytes{0};
-        uint64_t total_dead_bytes{0};
-
-        // FD cache stats (aggregated)
-        struct AggregatedCacheStats
-        {
-            uint64_t total_hits{0};
-            uint64_t total_misses{0};
-            uint64_t total_evictions{0};
-            double avg_hit_rate{0.0};
-        } fd_cache;
-
-        // Computed metrics
-        [[nodiscard]] double overall_fragmentation() const
-        {
-            return total_live_bytes + total_dead_bytes > 0
-                ? static_cast<double>(total_dead_bytes) / (total_live_bytes + total_dead_bytes)
-                : 0.0;
-        }
-
-        [[nodiscard]] double cache_hit_rate() const
-        {
-            return fd_cache.total_hits + fd_cache.total_misses > 0
-                ? static_cast<double>(fd_cache.total_hits) / (fd_cache.total_hits + fd_cache.total_misses)
-                : 0.0;
-        }
-
-        /**
-         * @brief Export as Prometheus format
-         *
-         * Example output:
-         * ```
-         * # HELP bitcask_puts_total Total number of put operations
-         * # TYPE bitcask_puts_total counter
-         * bitcask_puts_total 12345
-         *
-         * # HELP bitcask_gets_total Total number of get operations
-         * # TYPE bitcask_gets_total counter
-         * bitcask_gets_total{partition="0"} 5000
-         * bitcask_gets_total{partition="1"} 4500
-         * ...
-         * ```
-         */
-        std::string to_prometheus() const;
-
-        /**
-         * @brief Export as JSON (for REST APIs)
-         */
-        std::string to_json() const;
-
-        /**
-         * @brief Human-readable summary
-         */
-        std::string to_string() const;
-    };
-
-    // ========================================================================
-    // STATS COLLECTOR
-    // ========================================================================
-
-    /**
-     * @brief Helper to collect and aggregate stats from all partitions
-     */
-    class StatsCollector
-    {
-    public:
-        static DatabaseStats collect(const std::vector<std::unique_ptr<Partition>>& partitions);
-
-    private:
-        static void aggregate_partition_stats(
-            DatabaseStats& db_stats,
-            const PartitionStats& partition_stats);
-
-        static void aggregate_cache_stats(
-            DatabaseStats::AggregatedCacheStats& agg,
-            const FdCache::Stats& cache_stats);
     };
 
 }  // namespace bitcask
