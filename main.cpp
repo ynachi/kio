@@ -71,7 +71,7 @@ using namespace kio;
 int main()
 {
     // Setup logging
-    alog::configure(4096, LogLevel::Info);
+    alog::configure(4096, LogLevel::Debug);
 
     ALOG_INFO("Starting BitKV simple example");
 

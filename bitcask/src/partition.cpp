@@ -528,12 +528,12 @@ Task<Result<std::unique_ptr<Partition>>> Partition::open(const BitcaskConfig& co
 {
     ALOG_INFO("Opening partition {}", partition_id);
     std::unique_ptr<Partition> partition(new Partition(config, worker, partition_id));
-    KIO_TRY(co_await partition->recover());
-    if (config.auto_compact)
-    {
-        // run the compaction loop in the background
-        partition->compaction_loop().detach();
-    }
+    // KIO_TRY(co_await partition->recover());
+    // if (config.auto_compact)
+    // {
+    //     // run the compaction loop in the background
+    //     partition->compaction_loop().detach();
+    // }
     co_return std::move(partition);
 }
 
@@ -542,19 +542,31 @@ Task<Result<void>> Partition::seal_active_file()
     co_await SwitchToWorker(worker_);
 
     // Check if there is an active file to seal and if it has content
-    if (!active_file_ || active_file_->size() == 0)
+    if (active_file_ == nullptr)
     {
         co_return {};
     }
 
     const uint64_t actual_size = active_file_->size();
     const int active_fd = active_file_->handle().get();
+    uint64_t actual_file_id = active_file_id();
 
-    KIO_TRY(co_await worker_.async_fsync(active_fd));
+    if (active_fd > 0)
+    {
+        KIO_TRY(co_await worker_.async_fsync(active_fd));
 
-    KIO_TRY(co_await worker_.async_ftruncate(active_fd, static_cast<off_t>(actual_size)));
+        KIO_TRY(co_await worker_.async_ftruncate(active_fd, static_cast<off_t>(actual_size)));
 
-    KIO_TRY(co_await active_file_->async_close());
+        KIO_TRY(co_await active_file_->async_close());
+    }
+    else
+    {
+        // close and remove as this active file was never used
+        ALOG_DEBUG("The active file is empty, we will remove it, file_id {}", actual_file_id);
+        KIO_TRY(co_await active_file_->async_close());
+        const auto path = config_.directory / std::format("partition_{}/data_{}.db", partition_id_, actual_file_id);
+        KIO_TRY(co_await worker_.async_unlink_at(active_fd, path, config_.file_mode));
+    }
 
     // Remove pointer to prevent double-closing in dtor
     active_file_.reset();
@@ -564,14 +576,13 @@ Task<Result<void>> Partition::seal_active_file()
 
 Task<Result<void>> Partition::async_close()
 {
-    co_await SwitchToWorker(worker_);
-
     ALOG_INFO("Partition {} closing...", partition_id_);
 
     // Signal shutdown to compaction loop
     shutting_down_.store(true);
 
     // Wake up the compaction loop so it can exit cleanly
+
     compaction_trigger_.notify();
 
     // Seal the active file if it exists and hasn't been sealed by rotation

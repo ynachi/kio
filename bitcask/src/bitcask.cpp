@@ -106,7 +106,16 @@ Task<Result<void>> BitKV::close()
         co_await partition->async_close();
     }
 
-    io_pool_->stop();
-
     co_return {};
+}
+
+BitKV::~BitKV()
+{
+    // Stop the worker pool
+    // This is safe to call from main thread (destructor always runs on main thread)
+    // Partitions should already be closed via close()
+    if (io_pool_)
+    {
+        io_pool_->stop();
+    }
 }

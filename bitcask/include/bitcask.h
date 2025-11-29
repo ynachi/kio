@@ -82,16 +82,24 @@ namespace bitcask
         /**
          * @brief Graceful shutdown
          *
+         * Closes all partitions (async I/O operations).
+         * The worker pool will be stopped in the destructor.
+         *
          * Steps:
          * 1. Stop accepting new operations
          * 2. Flush all active files
          * 3. Stop compaction loops
          * 4. Close all partitions
-         * 5. Shutdown IOPool
          */
         kio::Task<kio::Result<void>> close();
 
-        ~BitKV() = default;
+        /**
+         * @brief Destructor
+         *
+         * Stops the worker pool. Partitions should already be closed via close().
+         * This is always safe to call from main thread.
+         */
+        ~BitKV();
 
     private:
         struct InitState

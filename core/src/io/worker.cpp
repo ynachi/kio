@@ -151,6 +151,15 @@ namespace kio::io
 
         // Submit the first read on the eventfd to listen for wake-ups
         submit_wakeup_read();
+
+        // Submit immediately so it's pending before loop starts
+        int ret = io_uring_submit(&ring_);
+        if (ret < 0)
+        {
+            throw std::system_error(-ret, std::system_category(), "Failed to submit initial wakeup read");
+        }
+
+        ALOG_DEBUG("Worker {}: Wakeup mechanism initialized ({} ops submitted)", id_, ret);
     }
 
     // TODO: manage submission errors
@@ -215,9 +224,7 @@ namespace kio::io
 
     int Worker::submit_sqes_wait()
     {
-        __kernel_timespec timeout = {.tv_sec = 0, .tv_nsec = config_.uring_submit_timeout_ms * 1000000};
-        io_uring_cqe *cqe = nullptr;
-        const int ret = io_uring_submit_and_wait_timeout(&ring_, &cqe, 1, &timeout, nullptr);
+        const int ret = io_uring_submit_and_wait(&ring_, 1);
         check_syscall_return(ret);
         return ret;
     }
@@ -242,8 +249,17 @@ namespace kio::io
                 {
                     h.resume();
                 }
-                // re-rearm the wakup read
-                submit_wakeup_read();
+
+                // Only re-arm the wakeup read if not stopping
+                // This prevents a pending operation during shutdown
+                if (!stop_token_.stop_requested())
+                {
+                    submit_wakeup_read();
+                }
+                else
+                {
+                    ALOG_DEBUG("Worker {}: Not re-arming wakeup read (shutting down)", id_);
+                }
                 continue;
             }
 
@@ -261,8 +277,19 @@ namespace kio::io
         // stop is idempotent
         if (stopped_.exchange(true))
         {
-            ALOG_DEBUG("IOPool::stop() called but pool is already stopped");
+            ALOG_DEBUG("Worker requested to stop but it is already stopped");
             return true;
+        }
+
+        assert(!is_on_worker_thread() && "FATAL: Worker::request_stop called from worker thread - will deadlock!");
+
+        if (is_on_worker_thread())
+        {
+            ALOG_ERROR("Worker stop called from worker {} thread", id_);
+            ALOG_ERROR("This will cause deadlock. Workers cannot stop themselves.");
+            ALOG_ERROR("Shutdown must be initiated from main thread or destructor.");
+
+            std::abort();
         }
 
         const auto stop = stop_source_.request_stop();
@@ -299,20 +326,38 @@ namespace kio::io
     void Worker::submit_wakeup_read()
     {
         io_uring_sqe *sqe = io_uring_get_sqe(&ring_);
+
         if (sqe == nullptr)
         {
-            // the io_uring queue is full
-            ALOG_ERROR("the system is busy, please retry later");
-            return;
+            // SQ is full - force a submission to make room
+            ALOG_WARN("Worker {}: SQ full, forcing submission to re-arm wakeup", id_);
+            io_uring_submit(&ring_);
+
+            // Try again
+            sqe = io_uring_get_sqe(&ring_);
+            if (sqe == nullptr)
+            {
+                // Still full - this is CRITICAL
+                ALOG_ERROR("Worker {}: Cannot submit wakeup read - SQ exhausted!", id_);
+                ALOG_ERROR("Worker may not wake up on stop signal!");
+                // This is a fatal, we cannot progress anymore
+                throw std::runtime_error("Failed to submit wakeup read");
+            }
         }
+
         io_uring_prep_read(sqe, wakeup_fd_, &wakeup_buffer_, sizeof(wakeup_buffer_), 0);
         io_uring_sqe_set_data64(sqe, kWakeupOpID);
-        ALOG_TRACE("Worker {} submitted wakeup read", id_);
+        ALOG_TRACE("Worker {} submitted wakeup read SQE", id_);
     }
 
     void Worker::wakeup_write()
     {
-        const auto ret = ::write(wakeup_fd_, &wakeup_buffer_, sizeof(wakeup_buffer_));
+        constexpr uint64_t value = 1;
+        const auto ret = ::write(wakeup_fd_, &value, sizeof(value));
+        if (ret != sizeof(value))
+        {
+            ALOG_ERROR("Failed to write to wakeup eventfd: {}", strerror(errno));
+        }
         check_syscall_return(static_cast<int>(ret));
         ALOG_TRACE("Worker {} wrote to wakeup fd", id_);
     }
@@ -322,7 +367,7 @@ namespace kio::io
         if (!task_queue_.try_push(h))
         {
             ALOG_ERROR("Worker {} task queue is full. Dropping task.", id_);
-            // In a real system, you might have a different strategy,
+            // TODO: have a different strategy,
             // like growing the queue or blocking the producer.
             return;
         }
@@ -579,7 +624,7 @@ namespace kio::io
 
         // Await the timeout operation.
         // The timeout operation returns -ECANCELED if cancelled.
-        // Crucially, a *successful* timer expiration completes with res = -ETIME.
+        // A *successful* timer expiration completes with res = -ETIME.
         // We must treat -ETIME as a success, not an error.
         if (const int res = co_await make_uring_awaitable(*this, prep, &ts, 0); res < 0 && res != -ETIME)
         {

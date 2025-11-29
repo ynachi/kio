@@ -103,6 +103,7 @@ int main()
     config.uring_queue_depth = 16800;
     config.default_op_slots = 8096;
 
+
     // Create a pool with 4 workers
     // Each worker will run accept_loop independently
     IOPool pool(8, config, [server_fd](Worker& worker) { accept_loop(worker, server_fd).detach(); });
