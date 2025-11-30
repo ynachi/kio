@@ -8,7 +8,8 @@ set(GTEST_GIT_TAG v1.17.0)
 # Optional Components
 #------------------------------------------
 option(KIO_BUILD_TESTS "Build the kio test suite" ON)
-option(KIO_BUILD_DEMOS "Build the kio demo executables" ON)
+option(KIO_BUILD_BITCASK "Build bitcask storage engine" ON)
+option(KIO_BUILD_DEMOS " Build the kio demo executables" ON)
 option(KIO_BUILD_BENCHMARKS "Build the kio benchmark executables" ON)
 
 # Enable Thread Sanitizer for debug builds
@@ -45,7 +46,10 @@ include(cmake/FindCRC32C.cmake)
 #----------------------------------------------
 include_directories(${CMAKE_SOURCE_DIR})
 add_subdirectory(core)
-add_subdirectory(bitcask)
+
+if (KIO_BUILD_BITCASK)
+    add_subdirectory(bitcask)
+endif ()
 
 if (KIO_BUILD_DEMOS)
     add_subdirectory(demo)

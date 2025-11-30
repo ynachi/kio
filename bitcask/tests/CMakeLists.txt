@@ -76,9 +76,9 @@ add_bitkv_test(bitkv_test
 )
 
 # Advanced integration tests (performance & concurrency)
-#add_bitkv_test(bitkv_advanced_test
-#        ${CMAKE_CURRENT_SOURCE_DIR}/bitkv_advanced_test.cpp
-#)
+add_bitkv_test(bitkv_advanced_test
+        ${CMAKE_CURRENT_SOURCE_DIR}/bitkv_advanced_test.cpp
+)
 
 # Error handling tests
 #add_bitkv_test(bitkv_error_test
