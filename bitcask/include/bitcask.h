@@ -51,13 +51,26 @@ namespace bitcask
          * @brief Put key-value pair
          * Routes to partition based on key hash
          */
-        kio::Task<kio::Result<void>> put(std::string key, std::string value);
+        kio::Task<kio::Result<void>> put(std::string&& key, std::vector<char>&& value);
 
         /**
          * @brief Get value for key
          * Routes to partition based on key hash
          */
         kio::Task<kio::Result<std::optional<std::vector<char>>>> get(const std::string& key);
+        /**
+         * Get returns the value converted to string
+         * @param key
+         * @return
+         */
+        kio::Task<kio::Result<std::optional<std::string>>> get_string(const std::string& key);
+        /**
+         * Put a string. Internally converts the string to a vector of char.
+         * @param key
+         * @param value
+         * @return
+         */
+        kio::Task<kio::Result<void>> put(std::string key, std::string value);
 
         /**
          * @brief Delete key
@@ -72,12 +85,12 @@ namespace bitcask
         /**
          * @brief Force sync all partitions to disk
          */
-        kio::Task<kio::Result<void>> sync();
+        kio::Task<kio::Result<void>> sync() const;
 
         /**
          * @brief Force compaction on all partitions
          */
-        kio::Task<kio::Result<void>> compact();
+        kio::Task<kio::Result<void>> compact() const;
 
         /**
          * @brief Graceful shutdown
@@ -91,7 +104,7 @@ namespace bitcask
          * 3. Stop compaction loops
          * 4. Close all partitions
          */
-        kio::Task<kio::Result<void>> close();
+        kio::Task<kio::Result<void>> close() const;
 
         /**
          * @brief Destructor
@@ -125,7 +138,7 @@ namespace bitcask
          * Creates: data/partition_0/, data/partition_1/, etc.
          */
         void ensure_directories() const;
-
+        void check_or_create_manifest() const;
 
         // ====================================================================
         // ROUTING
@@ -135,13 +148,12 @@ namespace bitcask
          * @brief Map key to partition ID
          * Uses consistent hashing: hash(key) % partition_count
          */
-        size_t route_to_partition(std::string_view key) const;
+        [[nodiscard]] size_t route_to_partition(std::string_view key) const;
 
         /**
          * @brief Get partition by ID
          */
         Partition& get_partition(size_t partition_id);
-        const Partition& get_partition(size_t partition_id) const;
 
         // ====================================================================
         // MEMBERS

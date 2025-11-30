@@ -785,7 +785,7 @@ TEST_F(CompactionTest, CompactionLoopTrigger) {
             if (partition->get_stats().compactions_total > 0) break;
         }
 
-        auto stats_after = partition->get_stats();
+        const auto stats_after = partition->get_stats();
 
         if (config_.auto_compact) {
             EXPECT_GE(stats_after.compactions_total, 1) << "Background loop should have compacted files";

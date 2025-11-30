@@ -6,11 +6,17 @@
 
 #ifndef KIO_CONST_H
 #define KIO_CONST_H
+#include <bit>
+#include <cstring>
+#include <expected>
 #include <sys/stat.h>
+#include <vector>
+#include <ylt/struct_pack.hpp>
 
 #include "core/include/coro.h"
 #include "core/include/errors.h"
 #include "core/include/io/worker.h"
+
 
 namespace bitcask
 {
@@ -26,6 +32,20 @@ namespace bitcask
     constexpr std::string_view kHintFilePrefix = "hint_";
     constexpr std::string_view kDataFileExtension = ".db";
     constexpr std::string_view kHintFileExtension = ".ht";
+    constexpr std::string_view kManifestFileName = "MANIFEST";
+
+    // Magic number to identify our file format (ASCII 'BKV1')
+    constexpr uint32_t kManifestMagic = 0x31564B42;
+
+    /**
+     * @brief Database Manifest to ensure topology consistency
+     */
+    struct Manifest
+    {
+        uint32_t magic = kManifestMagic;
+        uint32_t version = 1;
+        uint32_t partition_count{};
+    };
 
     /**
      * @brief Gets the current time as a 64-bit integer.
@@ -40,33 +60,18 @@ namespace bitcask
 
     /**
      * @brief Reads a Little-Endian integer from a raw buffer.
-     *
-     * This function safely reads a value of type T (e.g., uint32_t, uint64_t)
-     * from a byte buffer that is known to be in Little-Endian format.
-     * It correctly handles the byte order, swapping if the host machine
-     * is Big-Endian.
-     *
-     * @tparam T The integer type to read (e.g., uint32_t, uint64_t).
-     * @param buffer A pointer to the start of the byte buffer.
-     * @return The integer value in the host machine's native format.
      */
     template<typename T>
     constexpr T read_le(const char* buffer)
     {
-        // Safely copy the bytes from the buffer into the integer.
-        // This avoids strict-aliasing violations from reinterpret_cast.
         T val;
         std::memcpy(&val, buffer, sizeof(T));
-
-        // At compile-time, check if our machine is Big-Endian.
         if constexpr (std::endian::native == std::endian::big)
         {
-            // If so, swap the bytes to convert from LE to BE.
             return std::byteswap(val);
         }
         else
         {
-            // If we are on a Little-Endian machine, the bytes are already correct. Do nothing.
             return val;
         }
     }
@@ -77,14 +82,15 @@ namespace bitcask
     inline kio::Result<size_t> get_file_size(const int fd)
     {
         struct stat st{};
-        // this is a blocking system call, but it's ok. We call this method only during database init.
-        // Otherwise, do not use it anywhere else as it would block the whole event loop
         if (::fstat(fd, &st) < 0)
         {
             return std::unexpected(kio::Error::from_errno(errno));
         }
         return st.st_size;
     }
+
+    // Reflection for struct_pack
+    YLT_REFL(Manifest, magic, version, partition_count);
 
 }  // namespace bitcask
 

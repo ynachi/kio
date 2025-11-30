@@ -8,73 +8,14 @@
 using namespace bitcask;
 using namespace kio;
 
-// Task<Result<void>> simple_example()
-// {
-//     // Configure database
-//     BitcaskConfig config{
-//             .directory = "./data/simple_db",
-//             .max_file_size = 10 * 1024 * 1024,  // 10MB per file
-//             .fragmentation_threshold = 0.5,  // Compact at 50% fragmentation
-//             .compaction_interval_s = std::chrono::seconds(300),  // Every 5 minutes
-//             .read_buffer_size = 4096,
-//             .write_buffer_size = 4096,
-//             .max_open_sealed_files = 100,
-//     };
-//
-//     io::WorkerConfig io_config{.uring_queue_depth = 1024,
-//                                .uring_submit_batch_size = 128,
-//                                .tcp_backlog = 128,
-//                                .uring_submit_timeout_ms = 100,
-//                                .default_op_slots = 1024,
-//                                .op_slots_growth_factor = 1.5f,
-//                                .max_op_slots = 1024 * 1024};
-//
-//     // Open database with 4 partitions (one per core)
-//     auto db = KIO_TRY(co_await BitKV::open(config, io_config, 4));
-//
-//     ALOG_INFO("Database opened successfully");
-//
-//     // Put some data
-//     KIO_TRY(co_await db->put("user:123", "Alice"));
-//     KIO_TRY(co_await db->put("user:456", "Bob"));
-//     KIO_TRY(co_await db->put("user:789", "Charlie"));
-//
-//     ALOG_INFO("Wrote 3 users");
-//
-//     // Get data
-//     if (auto alice = KIO_TRY(co_await db->get("user:123")); alice.has_value())
-//     {
-//         std::string name(alice->begin(), alice->end());
-//         ALOG_INFO("Found user:123 = {}", name);
-//     }
-//
-//     // Update data
-//     KIO_TRY(co_await db->put("user:123", "Alice Smith"));
-//     ALOG_INFO("Updated user:123");
-//
-//     // Delete data
-//     KIO_TRY(co_await db->del("user:789"));
-//     ALOG_INFO("Deleted user:789");
-//
-//     // Verify deletion
-//     if (auto charlie = KIO_TRY(co_await db->get("user:789")); !charlie.has_value())
-//     {
-//         ALOG_INFO("user:789 successfully deleted");
-//     }
-//
-//     // Database will close automatically when db goes out of scope
-//     ALOG_INFO("Done!");
-//
-//     co_return {};
-// }
+// Helper to convert string to vector<char>
+std::vector<char> to_vec(const std::string& s) { return std::vector(s.begin(), s.end()); }
 
-int main()
+// Helper to convert vector<char> to string
+std::string to_string(const std::vector<char>& v) { return std::string(v.begin(), v.end()); }
+
+Task<Result<std::unique_ptr<BitKV>>> simple_example()
 {
-    // Setup logging
-    alog::configure(4096, LogLevel::Debug);
-
-    ALOG_INFO("Starting BitKV simple example");
-
     io::WorkerConfig io_config{};
     io_config.uring_queue_depth = 2048;
     io_config.default_op_slots = 4096;
@@ -84,15 +25,80 @@ int main()
             // Defaults for everything else
     };
 
-    auto db = SyncWait(BitKV::open(db_config, io_config, 1));
-    if (!db.has_value())
+    auto db_res = co_await BitKV::open(db_config, io_config, 1);
+    if (!db_res.has_value())
     {
-        ALOG_ERROR("Error opening database: {}", db.error());
-        std::exit(EXIT_FAILURE);
+        ALOG_ERROR("Error opening database: {}", db_res.error());
+        co_return std::unexpected(db_res.error());
     }
 
-    std::cout << "press a key to exit";
-    std::cin.get();
+    auto db = std::move(db_res.value());
+
+    ALOG_INFO("Database opened successfully");
+
+    // Put some data (value is vector<char>)
+    KIO_TRY(co_await db->put("user:123", to_vec("Alice")));
+    KIO_TRY(co_await db->put("user:456", to_vec("Bob")));
+    KIO_TRY(co_await db->put("user:789", to_vec("Charlie")));
+
+    ALOG_INFO("Wrote 3 users");
+
+    // Get data (returns optional<vector<char>>)
+    auto alice_result = KIO_TRY(co_await db->get("user:123"));
+    if (alice_result.has_value())
+    {
+        std::string name = to_string(alice_result.value());
+        ALOG_INFO("Found user:123 = {}", name);
+    }
+
+    // Update data
+    KIO_TRY(co_await db->put("user:123", to_vec("Alice Smith")));
+    ALOG_INFO("Updated user:123");
+
+    // Delete data
+    KIO_TRY(co_await db->del("user:789"));
+    ALOG_INFO("Deleted user:789");
+
+    // Verify deletion
+    auto charlie_result = KIO_TRY(co_await db->get("user:789"));
+    if (!charlie_result.has_value())
+    {
+        ALOG_INFO("user:789 successfully deleted");
+    }
+
+    // Store binary data (not just strings)
+    std::vector<char> binary_data = {0x01, 0x02, 0x03, 0x04, 0xFF, 0xFE};
+    KIO_TRY(co_await db->put("binary:key", std::move(binary_data)));
+    ALOG_INFO("Stored binary data");
+
+    // Retrieve binary data
+    auto binary_result = KIO_TRY(co_await db->get("binary:key"));
+    if (binary_result.has_value())
+    {
+        ALOG_INFO("Retrieved binary data, size: {}", binary_result->size());
+        ALOG_INFO("First byte: 0x{:02x}", static_cast<unsigned char>((*binary_result)[0]));
+    }
+
+    // Database will close automatically when db goes out of scope
+    ALOG_INFO("Done!");
+
+    co_return std::move(db);
+}
+
+int main()
+{
+    // Setup logging
+    alog::configure(4096, LogLevel::Debug);
+
+    ALOG_INFO("Starting BitKV simple example");
+
+    auto db = SyncWait(simple_example());
+    if (!db.has_value())
+    {
+        ALOG_ERROR("Example failed: {}", db.error());
+        return 1;
+    }
+
     SyncWait(db.value()->close());
 
     ALOG_INFO("Example complete");

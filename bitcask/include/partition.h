@@ -22,7 +22,12 @@ namespace bitcask
      */
     class Partition
     {
-        SimpleKeydir keydir_{};
+        // Memory Pool: Must be declared BEFORE keydir_ so it is initialized first
+        // We use unsynchronized_pool_resource because this partition runs on a single thread (shared-nothing).
+        std::pmr::unsynchronized_pool_resource mem_pool_;
+
+        // The KeyDir uses the pool
+        SimpleKeydir keydir_;
         kio::io::Worker& worker_;
         std::unique_ptr<DataFile> active_file_;
         FDCache fd_cache_;
@@ -41,8 +46,10 @@ namespace bitcask
         kio::Task<kio::Result<void>> rotate_active_file();
         kio::Task<kio::Result<int>> find_fd(uint64_t file_id);
 
-        // Start the loop in background if compaction flag is set
+        // Start the loop in the background if a compaction flag is set
         kio::DetachedTask compaction_loop();
+        // background sync job for the active file, in case sync_on_write is not set
+        kio::DetachedTask background_sync();
         void signal_compaction(uint64_t file_id);
         bool should_compact_file(uint64_t file_id) const;
         std::vector<uint64_t> find_fragmented_files() const;

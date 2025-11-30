@@ -1,7 +1,10 @@
 #include <bitcask/include/bitcask.h>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <mutex>
+
+#include "crc32c/crc32c.h"
 
 using namespace bitcask;
 using namespace kio;
@@ -17,8 +20,18 @@ Task<Result<std::unique_ptr<BitKV>>> BitKV::open(const BitcaskConfig& config, co
     ALOG_INFO("Opening BitKV with part count {}", partition_count);
     std::unique_ptr<BitKV> db(new BitKV(config, io_config, partition_count));
 
-    // ensure dirs are created and have the right permissions
-    db->ensure_directories();
+    try
+    {
+        // ensure dirs are created
+        db->ensure_directories();
+        // ensure the manifest is valid (must happen after ensure_directories)
+        db->check_or_create_manifest();
+    }
+    catch (const std::exception& e)
+    {
+        ALOG_ERROR("Failed to initialize BitKV: {}", e.what());
+        co_return std::unexpected(Error{ErrorCategory::Application, 1001});  // Generic error code for init fail
+    }
 
     InitState state(partition_count);
 
@@ -26,7 +39,6 @@ Task<Result<std::unique_ptr<BitKV>>> BitKV::open(const BitcaskConfig& config, co
 
     state.latch.wait();
 
-    // Check for errors
     if (state.has_error)
     {
         io_pool->stop();
@@ -46,7 +58,7 @@ void BitKV::ensure_directories() const
 
     try
     {
-        // Create base directory
+        // Create a base directory
         if (!std::filesystem::exists(db_config_.directory))
         {
             std::filesystem::create_directories(db_config_.directory);
@@ -56,8 +68,7 @@ void BitKV::ensure_directories() const
         // Create partition directories
         for (size_t i = 0; i < partition_count_; ++i)
         {
-            auto partition_dir = db_config_.directory / std::format("partition_{}", i);
-            if (!std::filesystem::exists(partition_dir))
+            if (auto partition_dir = db_config_.directory / std::format("partition_{}", i); !std::filesystem::exists(partition_dir))
             {
                 std::filesystem::create_directories(partition_dir);
                 std::filesystem::permissions(partition_dir, perms);
@@ -71,6 +82,61 @@ void BitKV::ensure_directories() const
     }
 }
 
+void BitKV::check_or_create_manifest() const
+{
+    if (std::filesystem::path manifest_path = db_config_.directory / kManifestFileName; std::filesystem::exists(manifest_path))
+    {
+        // Read and Verify
+        std::ifstream file(manifest_path, std::ios::binary);
+        if (!file.is_open())
+        {
+            ALOG_ERROR("Failed to open MANIFEST file");
+            throw std::runtime_error("Cannot open MANIFEST");
+        }
+
+        std::vector buffer((std::istreambuf_iterator(file)), std::istreambuf_iterator<char>());
+        auto res = struct_pack::deserialize<Manifest>(buffer);
+
+        if (!res.has_value())
+        {
+            ALOG_ERROR("Corrupted MANIFEST file");
+            throw std::runtime_error("Corrupted MANIFEST");
+        }
+
+        const auto& manifest = res.value();
+
+        if (manifest.magic != kManifestMagic)
+        {
+            ALOG_ERROR("Invalid MANIFEST magic");
+            throw std::runtime_error("Invalid MANIFEST magic");
+        }
+
+        if (manifest.partition_count != partition_count_)
+        {
+            ALOG_ERROR("Partition count mismatch! Config: {}, Manifest: {}", partition_count_, manifest.partition_count);
+            throw std::runtime_error("Partition count mismatch");
+        }
+    }
+    else
+    {
+        // Create a new Manifest
+        ALOG_INFO("Creating new MANIFEST with partition_count={}", partition_count_);
+        Manifest manifest;
+        manifest.partition_count = static_cast<uint32_t>(partition_count_);
+        auto data = struct_pack::serialize(manifest);
+
+        std::ofstream file(manifest_path, std::ios::binary);
+        file.write(data.data(), static_cast<int>(data.size()));
+        file.close();
+
+        if (!file.good())
+        {
+            ALOG_ERROR("Failed to write MANIFEST");
+            throw std::runtime_error("Failed to write MANIFEST");
+        }
+    }
+}
+
 
 DetachedTask BitKV::initialize_partition(BitKV& db, Worker& worker, InitState& state)
 {
@@ -80,7 +146,7 @@ DetachedTask BitKV::initialize_partition(BitKV& db, Worker& worker, InitState& s
     if (!res)
     {
         ALOG_ERROR("Partition open failed, partition_id={}", current_id);
-        // detached task does not propagate errors or exception, so store the state
+        // the detached task does not propagate errors or exception, so store the state
         state.has_error.store(true);
         {
             std::lock_guard lock(state.error_mutex);
@@ -99,7 +165,7 @@ DetachedTask BitKV::initialize_partition(BitKV& db, Worker& worker, InitState& s
     state.latch.count_down();
 }
 
-Task<Result<void>> BitKV::close()
+Task<Result<void>> BitKV::close() const
 {
     for (const auto& partition: partitions_)
     {
@@ -109,10 +175,78 @@ Task<Result<void>> BitKV::close()
     co_return {};
 }
 
+size_t BitKV::route_to_partition(const std::string_view key) const
+{
+    // Use CRC32C for stable, cross-platform routing
+    const uint32_t hash = crc32c::Crc32c(key.data(), key.size());
+    return hash % partition_count_;
+}
+
+Partition& BitKV::get_partition(const size_t partition_id)
+{
+    assert(partition_id < partition_count_);
+    return *partitions_.at(partition_id);
+}
+
+Task<Result<std::optional<std::vector<char>>>> BitKV::get(const std::string& key) { co_return KIO_TRY(co_await get_partition(route_to_partition(key)).get(key)); }
+
+Task<Result<std::optional<std::string>>> BitKV::get_string(const std::string& key)
+{
+    auto result = co_await get(key);
+    if (!result.has_value())
+    {
+        co_return std::unexpected(result.error());
+    }
+
+    if (!result.value().has_value())
+    {
+        co_return std::nullopt;
+    }
+
+    const auto& vec = result.value().value();
+    co_return std::string(vec.begin(), vec.end());
+}
+
+
+Task<Result<void>> BitKV::del(const std::string& key)
+{
+    KIO_TRY(co_await get_partition(route_to_partition(key)).del(key));
+    co_return {};
+}
+
+Task<Result<void>> BitKV::put(std::string&& key, std::vector<char>&& value)
+{
+    KIO_TRY(co_await get_partition(route_to_partition(key)).put(std::move(key), std::move(value)));
+    co_return {};
+}
+
+Task<Result<void>> BitKV::put(std::string key, std::string value)
+{
+    KIO_TRY(co_await put(std::move(key), std::vector(value.begin(), value.end())));
+    co_return {};
+}
+
+Task<Result<void>> BitKV::sync() const
+{
+    for (const auto& partition: partitions_)
+    {
+        KIO_TRY(co_await partition->sync());
+    }
+    co_return {};
+}
+
+Task<Result<void>> BitKV::compact() const
+{
+    for (const auto& partition: partitions_)
+    {
+        KIO_TRY(co_await partition->compact());
+    }
+    co_return {};
+}
+
 BitKV::~BitKV()
 {
     // Stop the worker pool
-    // This is safe to call from main thread (destructor always runs on main thread)
     // Partitions should already be closed via close()
     if (io_pool_)
     {

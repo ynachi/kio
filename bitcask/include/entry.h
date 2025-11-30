@@ -6,6 +6,7 @@
 #define KIO_ENTRY_H
 #include <chrono>
 #include <expected>
+#include <memory_resource>
 #include <span>
 #include <string>
 #include <vector>
@@ -123,9 +124,16 @@ namespace bitcask
         uint64_t timestamp_ns = get_current_timestamp();
     };
 
-    // TODO: rename me later
-    using SimpleKeydir = std::unordered_map<std::string, ValueLocation, std::hash<std::string_view>, std::equal_to<>>;  // NOSONAR
-
+    /**
+     * @brief PMR-optimized KeyDir.
+     * Uses std::pmr::unordered_map which allows us to back the hash map nodes
+     * with a memory pool (unsynchronized_pool_resource) instead of the global heap.
+     * This significantly reduces fragmentation for long-running DBs.
+     * * Note: We still use std::string for keys (not pmr::string) to maintain
+     * compatibility with the DataEntry struct and avoid excessive copying at API boundaries.
+     * The map nodes themselves (the biggest source of fragmentation) are pooled.
+     */
+    using SimpleKeydir = std::pmr::unordered_map<std::string, ValueLocation>;
 
     // for struct_pack
     YLT_REFL(DataEntry, timestamp_ns, flag, key, value);

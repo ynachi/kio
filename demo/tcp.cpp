@@ -106,7 +106,7 @@ int main()
 
     // Create a pool with 4 workers
     // Each worker will run accept_loop independently
-    IOPool pool(8, config, [server_fd](Worker& worker) { accept_loop(worker, server_fd).detach(); });
+    IOPool pool(4, config, [server_fd](Worker& worker) { accept_loop(worker, server_fd).detach(); });
 
     ALOG_INFO("Server running with 4 workers. Press Ctrl+C to stop.");
 

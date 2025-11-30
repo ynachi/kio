@@ -5,13 +5,16 @@ using namespace kio;
 using namespace kio::io;
 
 Partition::Partition(const BitcaskConfig& config, Worker& worker, const size_t partition_id) :
-    worker_(worker), fd_cache_(worker, config.max_open_sealed_files), file_id_gen_(partition_id), config_(config), partition_id_(partition_id), compaction_trigger_(worker)
+    keydir_(&mem_pool_), worker_(worker), fd_cache_(worker, config.max_open_sealed_files), file_id_gen_(partition_id), config_(config), partition_id_(partition_id), compaction_trigger_(worker)
 {
     //  Recovery, compaction loop delegated to open factory method
 }
 
 Task<Result<void>> Partition::put(std::string&& key, std::vector<char>&& value)
 {
+    // Assert partition is initialized
+    assert(active_file_ && "Partition not initialized - active_file_ is null");
+
     co_await SwitchToWorker(worker_);
 
     if (active_file_->should_rotate(config_.max_file_size))
@@ -53,6 +56,9 @@ Task<Result<void>> Partition::put(std::string&& key, std::vector<char>&& value)
 
 Task<Result<std::optional<std::vector<char>>>> Partition::get(const std::string& key)
 {
+    // Assert partition is initialized
+    assert(active_file_ && "Partition not initialized - active_file_ is null");
+
     co_await SwitchToWorker(worker_);
     stats_.gets_total++;
 
@@ -81,6 +87,9 @@ Task<Result<std::optional<std::vector<char>>>> Partition::get(const std::string&
 
 Task<Result<void>> Partition::del(const std::string& key)
 {
+    // Assert partition is initialized
+    assert(active_file_ && "Partition not initialized - active_file_ is null");
+
     co_await SwitchToWorker(worker_);
 
     stats_.deletes_total++;
@@ -144,6 +153,9 @@ Task<Result<DataEntry>> Partition::async_read_entry(const int fd, const uint64_t
 
 Task<Result<void>> Partition::rotate_active_file()
 {
+    // Assert partition is initialized
+    assert(active_file_ && "Partition not initialized - active_file_ is null");
+
     // Get the actual written size before flushing and closing
     const uint64_t actual_size = active_file_->size();
     const int active_fd = active_file_->handle().get();
@@ -528,12 +540,17 @@ Task<Result<std::unique_ptr<Partition>>> Partition::open(const BitcaskConfig& co
 {
     ALOG_INFO("Opening partition {}", partition_id);
     std::unique_ptr<Partition> partition(new Partition(config, worker, partition_id));
-    // KIO_TRY(co_await partition->recover());
-    // if (config.auto_compact)
-    // {
-    //     // run the compaction loop in the background
-    //     partition->compaction_loop().detach();
-    // }
+    KIO_TRY(co_await partition->recover());
+    if (config.auto_compact)
+    {
+        // run the compaction loop in the background
+        partition->compaction_loop().detach();
+    }
+    // if durability not set, start periodic sync
+    if (!config.sync_on_write)
+    {
+        partition->background_sync().detach();
+    }
     co_return std::move(partition);
 }
 
@@ -634,4 +651,38 @@ Task<Result<void>> Partition::compact()
     }
 
     co_return {};
+}
+
+Task<Result<void>> Partition::sync()
+{
+    co_await SwitchToWorker(worker_);
+    if (active_file_)
+    {
+        KIO_TRY(co_await worker_.async_fsync(active_file_->handle().get()));
+    }
+    co_return {};
+}
+
+DetachedTask Partition::background_sync()
+{
+    co_await SwitchToWorker(worker_);
+    ALOG_INFO("Partition {} background sync loop starting", partition_id_);
+
+    const auto st = worker_.get_stop_token();
+    while (!st.stop_requested() && !shutting_down_.load())
+    {
+        co_await worker_.async_sleep(std::chrono::milliseconds(config_.sync_interval));
+        // check again after wakeup
+        if (shutting_down_.load())
+        {
+            break;
+        }
+
+        if (auto res = co_await sync(); !res.has_value())
+        {
+            ALOG_ERROR("Partition {}: failed to sync: {}", partition_id_, res.error());
+            // do not exit
+        }
+    }
+    ALOG_INFO("Partition {} background sync loop exiting", partition_id_);
 }
