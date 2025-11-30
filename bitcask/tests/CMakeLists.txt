@@ -25,6 +25,7 @@ function(add_bitkv_test test_name source_file)
             -Wall
             -Wextra
             -Wpedantic
+            -Wno-gnu-statement-expression
             $<$<CONFIG:Debug>:-g -O0>
             $<$<CONFIG:Release>:-O3>
     )
