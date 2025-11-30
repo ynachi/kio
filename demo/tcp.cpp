@@ -5,9 +5,9 @@
 #include <iostream>
 #include <netinet/in.h>
 
-#include "core/include/async_logger.h"
-#include "core/include/io/worker_pool.h"
-#include "core/include/net.h"
+#include "kio/include/async_logger.h"
+#include "kio/include/io/worker_pool.h"
+#include "kio/include/net.h"
 
 using namespace kio::io;
 using namespace kio;

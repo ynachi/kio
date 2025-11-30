@@ -13,9 +13,9 @@
 #include <span>
 #include <thread>
 
-#include "core/include/coro.h"
-#include "core/include/ds/mpsc_queue.h"
-#include "core/include/errors.h"
+#include "kio/include/coro.h"
+#include "kio/include/ds/mpsc_queue.h"
+#include "kio/include/errors.h"
 
 namespace kio::io
 {

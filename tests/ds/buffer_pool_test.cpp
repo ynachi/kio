@@ -2,12 +2,12 @@
 // Created by Yao ACHI on 11/11/2025.
 //
 
-#include "core/include/ds/buffer_pool.h"
+#include "kio/include/ds/buffer_pool.h"
 
 #include <gtest/gtest.h>
 
-#include "core/include/coro.h"
-#include "core/include/sync_wait.h"
+#include "kio/include/coro.h"
+#include "kio/include/sync_wait.h"
 
 using namespace kio;
 

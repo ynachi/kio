@@ -2,13 +2,14 @@
 // Created by Yao ACHI on 26/11/2025.
 //
 
-#include <gtest/gtest.h>
 #include <filesystem>
+#include <gtest/gtest.h>
 #include <random>
 #include <unordered_set>
+
 #include "bitcask/include/partition.h"
-#include "core/include/io/worker.h"
-#include "core/include/sync_wait.h"
+#include "kio/include/io/worker.h"
+#include "kio/include/sync_wait.h"
 
 using namespace bitcask;
 using namespace kio;

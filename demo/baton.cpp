@@ -2,14 +2,14 @@
 // AsyncBaton Demo - Demonstrating cross-thread coordination patterns
 //
 
-#include "core/include/sync/baton.h"
+#include "kio/include/sync/baton.h"
 
 #include <chrono>
 #include <iostream>
 #include <thread>
 
-#include "core/include/coro.h"
-#include "core/include/io/worker.h"
+#include "kio/include/coro.h"
+#include "kio/include/io/worker.h"
 
 using namespace kio;
 using namespace kio::io;

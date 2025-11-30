@@ -2,9 +2,9 @@
 // Created by Yao ACHI on 12/11/2025.
 //
 
-#include "core/include/io/metrics.h"
+#include "kio/include/io/metrics.h"
 
-#include "core/include/sync_wait.h"
+#include "kio/include/sync_wait.h"
 
 namespace kio::io
 {

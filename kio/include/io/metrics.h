@@ -4,7 +4,7 @@
 
 #ifndef KIO_METRICS_H
 #define KIO_METRICS_H
-#include "core/include/metrics/collector.h"
+#include "kio/include/metrics/collector.h"
 #include "worker.h"
 
 namespace kio::io

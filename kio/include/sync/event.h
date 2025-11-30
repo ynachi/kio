@@ -9,7 +9,7 @@
 #include <cassert>
 #include <coroutine>
 
-#include "core/include/io/worker.h"
+#include "kio/include/io/worker.h"
 
 namespace kio::sync
 {

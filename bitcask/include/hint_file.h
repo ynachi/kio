@@ -6,10 +6,10 @@
 #define KIO_HINT_FILE_H
 
 #include "config.h"
-#include "core/include/ds/buffer_pool.h"
-#include "core/include/io/worker.h"
 #include "entry.h"
 #include "file_handle.h"
+#include "kio/include/ds/buffer_pool.h"
+#include "kio/include/io/worker.h"
 
 namespace bitcask
 {

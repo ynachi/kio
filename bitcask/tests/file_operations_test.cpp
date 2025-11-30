@@ -7,8 +7,8 @@
 
 #include "bitcask/include/data_file.h"
 #include "bitcask/include/hint_file.h"
-#include "core/include/io/worker.h"
-#include "core/include/sync_wait.h"
+#include "kio/include/io/worker.h"
+#include "kio/include/sync_wait.h"
 
 using namespace bitcask;
 using namespace kio;

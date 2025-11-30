@@ -8,7 +8,7 @@
 
 #include "bitcask/include/partition.h"
 #include "config.h"
-#include "core/include/io/worker_pool.h"
+#include "kio/include/io/worker_pool.h"
 
 namespace bitcask
 {
