@@ -19,7 +19,7 @@
 
 namespace kio::io
 {
-    struct alignas(64) WorkerStats
+    struct alignas(std::hardware_destructive_interference_size) WorkerStats
     {
         uint64_t bytes_read_total = 0;
         uint64_t bytes_written_total = 0;
