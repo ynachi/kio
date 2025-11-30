@@ -22,33 +22,45 @@ endif ()
 # Dependencies
 #----------------------------------------
 find_package(PkgConfig REQUIRED)
+pkg_check_modules(LIBURING REQUIRED liburing)
 
 # gtest
-if(KIO_BUILD_TESTS)
+if (KIO_BUILD_TESTS)
     include(cmake/FindGtest.cmake)
-endif()
+endif ()
 
 # benchmark
-if(KIO_BUILD_BENCHMARKS)
+if (KIO_BUILD_BENCHMARKS)
     include(cmake/FindBenchmark.cmake)
-endif()
+endif ()
+
+# ylt alibaba yalantislib
+include(cmake/FindYLT.cmake)
+
+# crc32
+include(cmake/FindCRC32C.cmake)
 
 #-----------------------------------------------
 # Includes
 #----------------------------------------------
 include_directories(${CMAKE_SOURCE_DIR})
 add_subdirectory(core)
+add_subdirectory(bitcask)
 
-if(KIO_BUILD_DEMOS)
+if (KIO_BUILD_DEMOS)
     add_subdirectory(demo)
-endif()
+endif ()
 
-if(KIO_BUILD_TESTS)
+if (KIO_BUILD_TESTS)
     include(CTest)
     enable_testing()
     add_subdirectory(tests)
-endif()
+endif ()
 
-if(KIO_BUILD_BENCHMARKS)
+if (KIO_BUILD_BENCHMARKS)
     add_subdirectory(benchmarks)
-endif()
+endif ()
+
+
+add_executable(testbed main.cpp)
+target_link_libraries(testbed PRIVATE kio_bitcask kio_lib)

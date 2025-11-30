@@ -114,6 +114,7 @@ compile_commands.json
 # Rust
 */*/target/
 Cargo.lock
+benchmarks/rust/tcp/target
 /target
 dump.rdb
 go-benchmark.iml

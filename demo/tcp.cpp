@@ -21,10 +21,10 @@ DetachedTask handle_client(Worker& worker, const int client_fd)
     while (!st.stop_requested())
     {
         // Read from the client - this co_await runs on the worker thread
-        auto n = co_await worker.async_read(client_fd, std::span(buffer, sizeof(buffer)), -1);
+        auto n = co_await worker.async_read(client_fd, std::span(buffer, sizeof(buffer)));
         if (!n.has_value())
         {
-            ALOG_DEBUG("Read failed: {}", n.error().message());
+            ALOG_DEBUG("Read failed: {}", n.error());
             // in the io_uring world, most of the errors are fatal, so no need to specialize
             break;
         }
@@ -39,11 +39,10 @@ DetachedTask handle_client(Worker& worker, const int client_fd)
         std::string response = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, World!";
 
         // Write response - this co_await also runs on the worker thread
-        auto sent = co_await worker.async_write(client_fd, std::span(response.data(), response.size()), -1);
 
-        if (!sent.has_value())
+        if (auto sent = co_await worker.async_write(client_fd, std::span(response.data(), response.size())); !sent.has_value())
         {
-            ALOG_ERROR("Write failed: {}", sent.error().message());
+            ALOG_ERROR("Write failed: {}", sent.error());
             break;
         }
     }
@@ -52,7 +51,7 @@ DetachedTask handle_client(Worker& worker, const int client_fd)
 }
 
 // Accept loop - runs on each worker independently
-DetachedTask accept_loop(Worker& worker, int listen_fd)
+DetachedTask accept_loop(Worker& worker, const int listen_fd)
 {
     ALOG_INFO("Worker accepting connections");
     const auto st = worker.get_stop_token();
@@ -62,12 +61,12 @@ DetachedTask accept_loop(Worker& worker, int listen_fd)
         sockaddr_storage client_addr{};
         socklen_t addr_len = sizeof(client_addr);
 
-        // Accept connection - blocks this coroutine until client connects
+        // Accept connection - blocks this coroutine until a client connects
         auto client_fd = co_await worker.async_accept(listen_fd, reinterpret_cast<sockaddr*>(&client_addr), &addr_len);
 
         if (!client_fd.has_value())
         {
-            ALOG_ERROR("error: {}", client_fd.error().message());
+            ALOG_ERROR("error: {}", client_fd.error());
             continue;
         }
 
@@ -85,13 +84,13 @@ int main()
     // ignore
     signal(SIGPIPE, SIG_IGN);
     // Setup logging
-    alog::configure(4096, LogLevel::Disabled);
+    alog::configure(4096, LogLevel::Info);
 
     // Create a listening socket
     auto server_fd_exp = net::create_tcp_socket("0.0.0.0", 8080, 4096);
-    if (!server_fd_exp)
+    if (!server_fd_exp.has_value())
     {
-        ALOG_ERROR("Failed to create server socket: {}", server_fd_exp.error().message());
+        ALOG_ERROR("Failed to create server socket: {}", server_fd_exp.error());
         return 1;
     }
 
@@ -104,9 +103,10 @@ int main()
     config.uring_queue_depth = 16800;
     config.default_op_slots = 8096;
 
-    // Create pool with 4 workers
+
+    // Create a pool with 4 workers
     // Each worker will run accept_loop independently
-    IOPool pool(8, config, [server_fd](Worker& worker) { accept_loop(worker, server_fd).detach(); });
+    IOPool pool(4, config, [server_fd](Worker& worker) { accept_loop(worker, server_fd).detach(); });
 
     ALOG_INFO("Server running with 4 workers. Press Ctrl+C to stop.");
 
@@ -116,8 +116,6 @@ int main()
     pool.stop();
 
     ALOG_INFO("Server stopped from main");
-
-    // std::this_thread::sleep_until(std::chrono::steady_clock::time_point::max());
 
     // Pool destructor stops all workers gracefully
     return 0;

@@ -6,11 +6,11 @@
 #define KIO_WORKER_H
 
 #include <expected>
+#include <filesystem>
 #include <latch>
 #include <liburing.h>
 #include <memory>
 #include <span>
-#include <string_view>
 #include <thread>
 
 #include "core/include/coro.h"
@@ -19,6 +19,21 @@
 
 namespace kio::io
 {
+    struct alignas(64) WorkerStats
+    {
+        uint64_t bytes_read_total = 0;
+        uint64_t bytes_written_total = 0;
+        uint64_t read_ops_total = 0;
+        uint64_t write_ops_total = 0;
+        uint64_t connections_accepted_total = 0;
+        uint64_t open_ops_total = 0;
+        uint64_t connect_ops_total = 0;
+        uint64_t coroutines_pool_resize_total = 0;
+        // This is also the amount of op id used from the pool
+        uint64_t active_coroutines = 0;
+    };
+
+
     struct WorkerConfig
     {
         size_t uring_queue_depth{1024};
@@ -34,7 +49,6 @@ namespace kio::io
         // The queue will automatically round up to the next power of 2 if needed
         size_t task_queue_capacity{1024};
 
-        constexpr WorkerConfig() = default;
         void check() const
         {
             if (uring_queue_depth == 0 || uring_submit_batch_size == 0 || tcp_backlog == 0 || op_slots_growth_factor <= 1.0f)
@@ -104,6 +118,7 @@ namespace kio::io
         std::stop_token stop_token_;
         // to avoid a double shutdown
         std::atomic<bool> stopped_{false};
+        WorkerStats stats_{};
 
         std::function<void(Worker&)> worker_init_callback_;
 
@@ -174,22 +189,213 @@ namespace kio::io
         void loop();
         ~Worker();
 
+        // stats
+        /**
+         * @brief Gets this worker's non-atomic stats.
+         * MUST only be called from this worker's thread.
+         * (Or safely via the IOPoolCollector)
+         */
+        [[nodiscard]] const WorkerStats& get_stats()
+        {
+            stats_.active_coroutines = op_data_pool_.size() - free_op_ids.size();
+            return stats_;
+        }
         // Io methods
-        Task<std::expected<int, Error>> async_accept(int server_fd, sockaddr* addr, socklen_t* addrlen);
-        Task<std::expected<int, Error>> async_read(int client_fd, std::span<char> buf, uint64_t offset);
-        Task<std::expected<int, Error>> async_openat(std::string_view path, int flags, mode_t mode);
-        Task<std::expected<int, Error>> async_write(int client_fd, std::span<const char> buf, uint64_t offset);
-        Task<std::expected<int, Error>> async_readv(int client_fd, const iovec* iov, int iovcnt, uint64_t offset);
-        Task<std::expected<int, Error>> async_writev(int client_fd, const iovec* iov, int iovcnt, uint64_t offset);
-        Task<std::expected<int, Error>> async_connect(int client_fd, const sockaddr* addr, socklen_t addrlen);
-        Task<std::expected<int, Error>> async_fallocate(int fd, int mode, off_t size);
-        Task<std::expected<int, Error>> async_close(int fd);
+        Task<Result<int>> async_accept(int server_fd, sockaddr* addr, socklen_t* addrlen);
+        /**
+         * @brief Asynchronously reads data from a streaming file descriptor (e.g., socket, pipe).
+         *
+         * @note This is for non-seekable I/O. It reads from the FD's current offset.
+         *
+         * @param client_fd The file descriptor to read from.
+         * @param buf A span of memory to read data into.
+         * @return An IO result with the client FD or an error
+         */
+        Task<Result<int>> async_read(int client_fd, std::span<char> buf);
+        /**
+         * @brief Asynchronously reads data from a file descriptor at a specific offset.
+         *
+         * @note This is for positional I/O.
+         *
+         * @param client_fd The file descriptor to read from.
+         * @param buf A span of memory to read data into.
+         * @param offset The file offset to read from.
+         * @return An IO Result embedding the number of bytes read or an error.
+         */
+        Task<Result<int>> async_read_at(int client_fd, std::span<char> buf, uint64_t offset);
+        /**
+         * @brief Asynchronously reads data from a file descriptor until the buffer is full.
+         *
+         * @note This function guarantees that it will not return successfully unless
+         * `buf.size()` bytes have been read. It does this by repeatedly calling
+         * the underlying `async_read` operation internally until the buffer is
+         * filled, automatically handling "short reads". This variant is for non-positional FDs
+         * i.e., streaming like networks, pipes, ...
+         *
+         * @param client_fd The file descriptor to read from.
+         * @param buf A span of memory to be filled with data.
+         * @return An IO Result embedding the number of bytes read or an error.
+         */
+        Task<Result<void>> async_read_exact(int client_fd, std::span<char> buf);
+        /**
+         * @brief Read the exact data size to fill the provided buffer. This method requires
+         * the FD to be seekable.
+         *
+         * @note Reaching EOF before filling the buffer is considered an error.
+         * In this case, a IoError::IoEoF will be returned.
+         *
+         * @param fd the FD to read from
+         * @param buf a writable std span
+         * @param offset the offset from which to read from
+         * @return A void IO result or an error
+         */
+        Task<Result<void>> async_read_exact_at(int fd, std::span<char> buf, uint64_t offset);
+        /**
+         * @brief Asynchronously opens or creates a file.
+         *
+         * @note This implementation uses `AT_FDCWD` internally,
+         * meaning the `path` is resolved relative to the current working directory.
+         * The coroutine frame will store a copy of the path string.
+         *
+         * @param path The path to the file.
+         * @param flags The file access flags (e.g., O_RDONLY, O_WRONLY, O_CREAT).
+         * @param mode The file permissions mode (e.g., 0644) used only if O_CREAT is specified.
+         * @return An IO Result which is void or an error.
+         */
+        Task<Result<int>> async_openat(std::filesystem::path path, int flags, mode_t mode);
+        /**
+         * @brief Asynchronously writes data to a streaming file descriptor (e.g., socket, pipe).
+         *
+         * @note This is for non-positional I/O. It writes to the FD's current offset.
+         *
+         * @param client_fd The file descriptor to write to.
+         * @param buf A span of constant memory to write.
+         * @return An IO result containing number of bytes writen FD or an error.
+         */
+        Task<Result<int>> async_write(int client_fd, std::span<const char> buf);
+        /**
+         * @brief Asynchronously writes data to a positional file descriptor (e.g., file).
+         *
+         * @note This is for positional I/O. It writes at the FD's specified offset. It can be used with streaming
+         * too by specifying -1 or 0 as an offset, but we suggest the dedicated method.
+         *
+         * @param client_fd The file descriptor to write to.
+         * @param buf A span of constant memory to write.
+         * @return A void IO result or an error
+         */
+        Task<Result<int>> async_write_at(int client_fd, std::span<const char> buf, uint64_t offset);
+        /**
+         * @brief Asynchronously writes the entire contents of a buffer to a file descriptor.
+         *
+         * @note This function guarantees that it will not return successfully unless
+         * the *entire* `buf.size()` bytes have been written. It does this by
+         * repeatedly calling the underlying `async_write` operation internally
+         * until the buffer is fully written, automatically handling "short writes".
+         *
+         * @param client_fd The file descriptor to write to.
+         * @param buf A span of constant memory to be written in its entirety.
+         * @return A void IO result or an error
+         */
+        Task<Result<void>> async_write_exact(int client_fd, std::span<const char> buf);
+        /**
+         * @brief Asynchronously reads data into a "scatter" array of buffers.
+         *
+         * @note This performs a *single* readv operation. It is not guaranteed to fill
+         * all buffers.
+         *
+         * @param client_fd The file descriptor to read from.
+         * @param iov A pointer to an array of iovec structures.
+         * @param iovcnt The number of iovec structures in the array.
+         * @param offset The file offset to read from.
+         * @return An IO result of the number of bytes read or an error.
+         */
+        Task<Result<int>> async_readv(int client_fd, const iovec* iov, int iovcnt, uint64_t offset);
+        Task<Result<void>> async_write_exact_at(int client_fd, std::span<const char> buf, uint64_t offset);
+        /**
+         * @brief Asynchronously writes data from a "gather" array of buffers.
+         *
+         * @note This performs a *single* writev operation. It is not guaranteed to
+         * write the data from all buffers.
+         *
+         * @param client_fd The file descriptor to write to.
+         * @param iov A pointer to an array of iovec structures.
+         * @param iovcnt The number of iovec structures in the array.
+         * @param offset The file offset to write at.
+         * @return A Task that resumes with a Result<int>.
+         * On success: The total number of bytes written from all buffers.
+         * On failure: An Error.
+         */
+        Task<Result<int>> async_writev(int client_fd, const iovec* iov, int iovcnt, uint64_t offset);
+        /**
+         * @brief Asynchronously initiates a connection on a socket.
+         *
+         * This is used for non-blocking client sockets.
+         *
+         * @param client_fd The socket file descriptor to connect.
+         * @param addr A pointer to the sockaddr structure containing the peer address.
+         * @param addrlen The length of the sockaddr structure.
+         * @return A Task that resumes with a Result<int>.
+         * On success: 0.
+         * On failure: An Error.
+         */
+        Task<Result<int>> async_connect(int client_fd, const sockaddr* addr, socklen_t addrlen);
+        /**
+         * @brief Asynchronously pre-allocates or de-allocates storage space for a file.
+         *
+         * @note This implementation internally calls `io_uring_prep_fallocate` with
+         * the offset fixed at 0.
+         *
+         * @param fd The file descriptor.
+         * @param mode The operation mode (e.g., 0 for falloc, FALLOC_FL_PUNCH_HOLE).
+         * @param size The number of bytes to allocate (length).
+         *  @return A void Result or an error.
+         */
+        Task<Result<void>> async_fallocate(int fd, int mode, off_t size);
+        /**
+         * @brief Asynchronously closes a file descriptor.
+         *
+         * After `co_await`ing this operation, the file descriptor `fd` must be
+         * considered invalid, regardless of the operation's success.
+         *
+         * @param fd The file descriptor to close.
+         * @return A void Result or an error.
+         */
+        Task<Result<void>> async_close(int fd);
         /**
          * Asynchronously sleep for `duration`. This is a non-blocking sleep.
          * @param duration
-         * @return
+         * @return void or an error
          */
         Task<std::expected<void, Error>> async_sleep(std::chrono::nanoseconds duration);
+
+        /**
+         * @brief Asynchronously flushes all modified data and metadata to disk.
+         * Equivalent to fsync(2).
+         * @param fd The file descriptor to sync.
+         * @return A void Result or an error.
+         */
+        Task<Result<void>> async_fsync(int fd);
+
+        /**
+         * @brief Asynchronously flushes all modified data to disk.
+         * Equivalent to fdatasync(2). May not update metadata (like mtime).
+         * @param fd The file descriptor to sync.
+         * @return A void Result or an error.
+         */
+        Task<Result<void>> async_fdatasync(int fd);
+        /**
+         * @brief Asynchronously unlink (remove) a file or directory.
+         *
+         * @param dirfd The directory file descriptor (use AT_FDCWD for the current working directory).
+         * @param path The filesystem path to remove.
+         * @param flags Removal behavior flags:
+         *             - 0: Remove regular files
+         *             - AT_REMOVEDIR: Remove empty directories
+         *             - AT_SYMLINK_NOFOLLOW: Remove symlinks without following
+         * @return An IO Result which is void or an error.
+         */
+        Task<Result<void>> async_unlink_at(int dirfd, std::filesystem::path path, int flags);
+        Task<Result<void>> async_ftruncate(int fd, off_t length);
     };
 
     /**

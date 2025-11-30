@@ -8,7 +8,7 @@ Comparison of a simple HTTP "Hello World" server between kio (C++20 + io_uring) 
 - Provider: Hetzner ARM
 - CPU: Ampere Altra (8 cores)
 - RAM: 16GB
-- Network: Internal (client and server on same provider)
+- Network: Internal (client and server on the same provider)
 - 1 VM for the server, 1 VM for the client
 
 **Software:**
@@ -105,9 +105,9 @@ IOPool pool(8, config, ...);
 ### Tokio (Rust)
 
 **Architecture:**
-- Multi-threaded work-stealing scheduler
+- Multithreaded work-stealing scheduler
 - io_uring support (experimental, not default)
-- SO_REUSEPORT for multi-threaded accept
+- SO_REUSEPORT for multithreaded accept
 - Tasks can migrate between threads
 
 **Key Features:**

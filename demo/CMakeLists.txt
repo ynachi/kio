@@ -27,3 +27,7 @@ target_link_libraries(retry_demo PRIVATE kio_lib)
 # Kio logger's demo
 add_executable(kio_logger_demo demo_logging.cpp)
 target_link_libraries(retry_demo PRIVATE kio_lib)
+
+# Kio baton demo
+add_executable(kio_baton_demo baton.cpp)
+target_link_libraries(kio_baton_demo PRIVATE kio_lib)
