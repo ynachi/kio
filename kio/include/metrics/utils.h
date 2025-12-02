@@ -22,6 +22,18 @@ namespace kio
 
     inline std::string SanitizeLabelValue(const std::string& v)
     {
+        bool needs_escape = false;
+        for (char c : v) {
+            if (c == '\\' || c == '"' || c == '\n') {
+                needs_escape = true;
+                break;
+            }
+        }
+
+        if (!needs_escape) {
+            return v; 
+        }
+
         std::string out;
         for (const char c: v)
         {

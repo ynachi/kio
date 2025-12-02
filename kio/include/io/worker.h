@@ -31,6 +31,7 @@ namespace kio::io
         uint64_t coroutines_pool_resize_total = 0;
         // This is also the amount of op id used from the pool
         uint64_t active_coroutines = 0;
+        uint64_t io_errors_total = 0;
     };
 
 
@@ -123,7 +124,7 @@ namespace kio::io
         std::function<void(Worker&)> worker_init_callback_;
 
         static void check_kernel_version();
-        static void check_syscall_return(int ret);
+        void check_syscall_return(int ret);
 
         /**
          * submits current ready sqes to the ring, block until timeout if there is no submission.
