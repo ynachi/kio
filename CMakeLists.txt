@@ -45,7 +45,7 @@ include(cmake/FindCRC32C.cmake)
 # Includes
 #----------------------------------------------
 include_directories(${CMAKE_SOURCE_DIR})
-add_subdirectory(core)
+add_subdirectory(kio)
 
 if (KIO_BUILD_BITCASK)
     add_subdirectory(bitcask)

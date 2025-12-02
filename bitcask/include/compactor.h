@@ -6,9 +6,9 @@
 #define KIO_COMPACTOR_H
 
 #include "config.h"
-#include "core/include/ds/bytes_mut.h"
-#include "core/include/io/worker.h"
 #include "entry.h"
+#include "kio/include/ds/bytes_mut.h"
+#include "kio/include/io/worker.h"
 #include "stats.h"
 
 namespace bitcask::compactor

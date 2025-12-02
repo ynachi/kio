@@ -7,7 +7,7 @@
 #include <memory>
 #include <vector>
 
-#include "core/include/coro.h"
+#include "kio/include/coro.h"
 #include "worker.h"
 
 namespace kio::io

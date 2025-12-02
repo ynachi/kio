@@ -2,15 +2,15 @@
 // Created by Yao ACHI on 30/11/2025.
 //
 
-#include <gtest/gtest.h>
-#include <filesystem>
-#include <vector>
-#include <string>
-#include <random>
 #include <algorithm>
+#include <filesystem>
+#include <gtest/gtest.h>
+#include <random>
+#include <string>
+#include <vector>
 
 #include "bitcask/include/bitcask.h"
-#include "core/include/sync_wait.h"
+#include "kio/include/sync_wait.h"
 
 using namespace bitcask;
 using namespace kio;

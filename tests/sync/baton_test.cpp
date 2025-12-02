@@ -2,11 +2,11 @@
 // Created by Yao ACHI on 22/11/2025.
 //
 
-#include "core/include/sync/baton.h"
+#include "kio/include/sync/baton.h"
 
 #include <gtest/gtest.h>
 
-#include "core/include/io/worker.h"
+#include "kio/include/io/worker.h"
 
 using namespace kio;
 using namespace kio::sync;

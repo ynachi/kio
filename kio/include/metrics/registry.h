@@ -4,10 +4,8 @@
 
 #ifndef KIO_REGISTRY_H
 #define KIO_REGISTRY_H
-#include <concepts>
 #include <memory>
 #include <mutex>
-#include <sstream>
 #include <vector>
 
 #include "collector.h"

@@ -6,10 +6,10 @@
 #include <latch>
 #include <thread>
 
-#include "core/include/coro.h"
-#include "core/include/io/worker.h"
-#include "core/include/sync_wait.h"
-#include "core/include/async_logger.h"
+#include "kio/include/async_logger.h"
+#include "kio/include/coro.h"
+#include "kio/include/io/worker.h"
+#include "kio/include/sync_wait.h"
 
 using namespace kio;
 

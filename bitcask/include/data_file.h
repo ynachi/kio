@@ -7,11 +7,11 @@
 #include <filesystem>
 
 #include "config.h"
-#include "core/include/coro.h"
-#include "core/include/ds/buffer_pool.h"
-#include "core/include/io/worker.h"
 #include "entry.h"
 #include "file_handle.h"
+#include "kio/include/coro.h"
+#include "kio/include/ds/buffer_pool.h"
+#include "kio/include/io/worker.h"
 
 namespace bitcask
 {

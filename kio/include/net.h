@@ -9,7 +9,7 @@
 #include <expected>
 #include <string_view>
 
-#include "core/include/errors.h"
+#include "kio/include/errors.h"
 
 namespace kio::net
 {

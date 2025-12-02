@@ -2,11 +2,12 @@
 // Created by Yao ACHI on 25/10/2025.
 //
 
-#include <gtest/gtest.h>
-#include <fstream>
 #include <filesystem>
-#include "core/include/fs.h"
-#include "core/include/sync_wait.h"
+#include <fstream>
+#include <gtest/gtest.h>
+
+#include "kio/include/fs.h"
+#include "kio/include/sync_wait.h"
 
 using namespace kio;
 using namespace kio::io;

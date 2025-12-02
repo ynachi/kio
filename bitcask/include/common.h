@@ -13,9 +13,9 @@
 #include <vector>
 #include <ylt/struct_pack.hpp>
 
-#include "core/include/coro.h"
-#include "core/include/errors.h"
-#include "core/include/io/worker.h"
+#include "kio/include/coro.h"
+#include "kio/include/errors.h"
+#include "kio/include/io/worker.h"
 
 
 namespace bitcask

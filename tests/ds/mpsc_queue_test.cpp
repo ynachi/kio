@@ -2,7 +2,7 @@
 // Created by Yao ACHI on 19/10/2025.
 //
 
-#include "core/include/ds/mpsc_queue.h"
+#include "kio/include/ds/mpsc_queue.h"
 
 #include <atomic>
 #include <cassert>

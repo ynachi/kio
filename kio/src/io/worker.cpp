@@ -1,15 +1,15 @@
 //
 // Created by Yao ACHI on 17/10/2025.
 //
-#include "core/include/io/worker.h"
+#include "kio/include/io/worker.h"
 
 #include <chrono>
 #include <liburing.h>
 #include <sys/eventfd.h>
 #include <sys/utsname.h>
 
-#include "core/include/async_logger.h"
-#include "core/include/io/uring_awaitable.h"
+#include "kio/include/async_logger.h"
+#include "kio/include/io/uring_awaitable.h"
 
 namespace kio::io
 {
@@ -44,6 +44,9 @@ namespace kio::io
             return;
         }
 
+        // real io error
+        stats_.io_errors_total++;
+
         ALOG_ERROR("Fatal I/O error: {}", strerror(-ret));
         throw std::system_error(-ret, std::system_category());
     }
@@ -75,6 +78,8 @@ namespace kio::io
         {
             free_op_ids.push_back(i);
         }
+
+        stats_.coroutines_pool_resize_total++;
 
         const auto id = free_op_ids.back();
         free_op_ids.pop_back();
@@ -390,6 +395,9 @@ namespace kio::io
         {
             co_return std::unexpected(Error::from_errno(-ret));
         }
+
+        stats_.connections_accepted_total++;
+
         co_return ret;
     }
 
@@ -405,6 +413,7 @@ namespace kio::io
         }
 
         stats_.bytes_read_total += static_cast<uint64_t>(ret);
+        stats_.read_ops_total++;
 
         co_return ret;
     }
@@ -459,6 +468,10 @@ namespace kio::io
         {
             co_return std::unexpected(Error::from_errno(-ret));
         }
+
+        stats_.bytes_written_total += static_cast<uint64_t>(ret);
+        stats_.write_ops_total++;
+
         co_return ret;
     }
 
@@ -517,6 +530,10 @@ namespace kio::io
         {
             co_return std::unexpected(Error::from_errno(-ret));
         }
+
+        stats_.bytes_read_total += static_cast<uint64_t>(ret);
+        stats_.read_ops_total++;
+
         co_return ret;
     }
 
@@ -528,6 +545,10 @@ namespace kio::io
         {
             co_return std::unexpected(Error::from_errno(-ret));
         }
+
+        stats_.bytes_written_total += static_cast<uint64_t>(ret);
+        stats_.write_ops_total++;
+
         co_return ret;
     }
 
@@ -539,6 +560,9 @@ namespace kio::io
         {
             co_return std::unexpected(Error::from_errno(-ret));
         }
+
+        stats_.connect_ops_total++;
+
         co_return ret;
     }
 
@@ -550,6 +574,9 @@ namespace kio::io
         {
             co_return std::unexpected(Error::from_errno(-ret));
         }
+
+        stats_.open_ops_total++;
+
         co_return ret;
     }
 
