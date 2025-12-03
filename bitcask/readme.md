@@ -1,5 +1,7 @@
 # BitKV - High-Performance Embedded Key-Value Store
 
+⚠️ This doc is mostly correct but need some reviews. 
+
 A modern, async-native implementation of the Bitcask storage engine for C++20.
 
 ## What is BitKV?
