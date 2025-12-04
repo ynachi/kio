@@ -163,23 +163,39 @@ namespace kio::io
         void signal_init_complete() { init_latch_.count_down(); }
         void signal_shutdown_complete() { shutdown_latch_.count_down(); }
         void resume_coro_by_id(const uint64_t op_id) const { op_data_pool_[op_id].handle_.resume(); }
+
+
         [[nodiscard]]
         std::stop_token get_stop_token() const
         {
             return stop_source_.get_token();
         }
-        // sends a stop request signal
+
+        /**
+         * Get the ID of the worker.
+         * @return the ID of the worker
+         */
         [[nodiscard]]
         size_t get_id() const noexcept
         {
             return id_;
         }
+
+        /**
+         * @brief Start the worker event loop. This is a blocking start.
+         */
         void loop_forever();
 
         void wait_ready() const { init_latch_.wait(); }
         void wait_shutdown() const { shutdown_latch_.wait(); }
         [[nodiscard]]
         bool request_stop();
+
+        /**
+         * @brief Tells whether this worker is running
+         * @return a bool stating the state of the worker
+         */
+        [[nodiscard]] bool is_running() const noexcept { return stopped_.load(std::memory_order_acquire) == false; }
 
         Worker(const Worker&) = delete;
         Worker& operator=(const Worker&) = delete;
@@ -201,7 +217,10 @@ namespace kio::io
             stats_.active_coroutines = op_data_pool_.size() - free_op_ids.size();
             return stats_;
         }
+
+        //==========================================================
         // Io methods
+        //=========================================================
         Task<Result<int>> async_accept(int server_fd, sockaddr* addr, socklen_t* addrlen);
         /**
          * @brief Asynchronously reads data from a streaming file descriptor (e.g., socket, pipe).
@@ -399,6 +418,9 @@ namespace kio::io
         Task<Result<void>> async_ftruncate(int fd, off_t length);
     };
 
+    //==========================================================
+    // Worker context switch
+    //=========================================================
     /**
      * @brief An awaitable that switches the execution of a coroutine
      * to the thread of the specified IOWorker.
