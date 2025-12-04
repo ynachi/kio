@@ -5,9 +5,9 @@
 #ifndef KIO_NET_H
 #define KIO_NET_H
 #include <arpa/inet.h>
-#include <cstdint>
 #include <expected>
 #include <string_view>
+#include <unistd.h>
 
 #include "kio/include/errors.h"
 
@@ -18,6 +18,23 @@ namespace kio::net
         sockaddr_storage addr{};
         socklen_t addrlen{};
         int family{};
+    };
+
+    struct FDGuard
+    {
+        int fd = -1;
+        explicit FDGuard(const int f) : fd(f) {}
+        ~FDGuard()
+        {
+            if (fd >= 0)
+            {
+                ::close(fd);
+                fd = -1;
+            };
+        }
+        FDGuard(FDGuard&& other) noexcept : fd(other.fd) { other.fd = -1; }
+        FDGuard(const FDGuard&) = delete;
+        [[nodiscard]] int get() const { return fd; }
     };
 
     /**

@@ -12,6 +12,7 @@
 #include "kio/include/io/metrics.h"
 #include "kio/include/io/worker.h"
 #include "kio/include/metrics/registry.h"
+#include "kio/include/metrics/server.h"
 #include "kio/include/net.h"
 
 
@@ -46,9 +47,8 @@ DetachedTask HandleClient(Worker &worker, const int client_fd)
         std::string response = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, World!";
 
         // Write response - this co_await also runs on the worker thread
-        auto sent = co_await worker.async_write(client_fd, std::span(response.data(), response.size()));
 
-        if (!sent.has_value())
+        if (auto sent = co_await worker.async_write(client_fd, std::span(response.data(), response.size())); !sent.has_value())
         {
             ALOG_ERROR("Write failed: {}", sent.error());
             break;
@@ -70,7 +70,7 @@ DetachedTask accept_loop(Worker &worker, int listen_fd)
         sockaddr_storage client_addr{};
         socklen_t addr_len = sizeof(client_addr);
 
-        // Accept connection - blocks this coroutine until client connects
+        // Accept connection - blocks this coroutine until a client connects
         auto client_fd = co_await worker.async_accept(listen_fd, reinterpret_cast<sockaddr *>(&client_addr), &addr_len);
 
         if (!client_fd.has_value())
@@ -93,10 +93,10 @@ int main()
     // ignore signals
     signal(SIGPIPE, SIG_IGN);
     // Setup logging
-    alog::configure(1024, LogLevel::Info);
+    alog::configure(1024, LogLevel::Debug);
 
     // create a server socket
-    const std::string ip_address = "127.0.0.1";
+    const std::string ip_address = "0.0.0.0";
     constexpr int port = 8080;
 
     auto server_fd = create_tcp_socket(ip_address, port, 128);
@@ -111,8 +111,6 @@ int main()
     config.uring_queue_depth = 2048;
     config.default_op_slots = 4096;
 
-    std::stop_source stop_source;
-
     // Here we create the worker and assign the accept_loop coroutine to it. This is one way to run
     // our io operations in the worker thread. Because that function runs directly in the worker, we don't need to use
     // the SwitchToWorker mechanism. Also notes that workers are lazy. Here the worker is created, but the event loop
@@ -124,6 +122,10 @@ int main()
     const auto worker_collector = std::make_shared<WorkerMetricsCollector>(worker);
     registry.Register(worker_collector);
 
+    // Start a metrics server
+    MetricsServer metrics_server("0.0.0.0", 9092);
+    metrics_server.start();
+
     ALOG_INFO("Main thread: Waiting for worker to initialize...");
 
     // Start the worker in a thread. This is useful because loop_forever is a blocking method.
@@ -134,8 +136,16 @@ int main()
     ALOG_INFO("Main thread: Worker is ready.");
 
     // Block here, wait for the user input to progress.
-    ALOG_INFO("Server listening on 127.0.0.1:8080. Press Enter to stop...");
+    std::cout << "\n";
+    std::cout << "=================================================\n";
+    std::cout << std::format("Echo server:    telnet {} {}\n", ip_address, port);
+    std::cout << "Metrics:        curl http://localhost:9090/metrics\n";
+    std::cout << "=================================================\n";
+    std::cout << "\nPress Enter to stop...\n\n";
     std::cin.get();
+
+    // Shutdown
+    ALOG_INFO("Shutting down...");
 
     // print metrics
     std::cout << std::format("worker metrics: {}", registry.Scrape());
@@ -147,10 +157,13 @@ int main()
         ::close(server_fd.value());
         std::exit(1);
     }
-    // This signals the thread and drains completions
-
-    // 9. Wait for the worker to fully shut down
+    // ait for the worker to fully shut down
+    worker.wait_shutdown();
     ::close(server_fd.value());
+
+    // stop metrics server
+    metrics_server.stop();
+
     ALOG_INFO("Main thread: Worker has shut down. Exiting.");
 
     return 0;

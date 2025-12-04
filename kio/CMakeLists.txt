@@ -21,6 +21,7 @@ set(CORE_HEADER_FILES
         include/metrics/utils.h
         include/metrics/collector.h
         include/metrics/registry.h
+        include/metrics/server.h
 )
 
 set(CORE_SRC_FILES
@@ -33,6 +34,7 @@ set(CORE_SRC_FILES
         src/fs.cpp
         src/ds/buffer_pool.cpp
         src/metrics/serializer.cpp
+        src/metrics/server.cpp
 )
 
 add_library(kio_lib ${CORE_HEADER_FILES} ${CORE_SRC_FILES})
