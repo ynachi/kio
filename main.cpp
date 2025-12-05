@@ -67,7 +67,10 @@ Task<Result<std::unique_ptr<BitKV>>> simple_example()
     }
 
     // Store binary data (not just strings)
-    std::vector<char> binary_data = {0x01, 0x02, 0x03, 0x04, 0xFF, 0xFE};
+    std::vector<char> binary_data = {
+        char(0x01), char(0x02), char(0x03),
+        char(0x04), char(0xFF), char(0xFE)
+    };
     KIO_TRY(co_await db->put("binary:key", std::move(binary_data)));
     ALOG_INFO("Stored binary data");
 

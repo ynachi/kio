@@ -1,6 +1,3 @@
-# Try to find GTest using the system package manager
-find_package(GTest)
-
 # If GTest is not found, download it using FetchContent
 if(NOT GTest_FOUND)
     message(STATUS "GTest not found. Downloading from GitHub...")
