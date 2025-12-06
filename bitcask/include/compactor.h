@@ -5,10 +5,10 @@
 #ifndef KIO_COMPACTOR_H
 #define KIO_COMPACTOR_H
 
-#include "../../kio/core/worker.h"
+#include "kio/core/bytes_mut.h"
+#include "kio/core/worker.h"
 #include "config.h"
 #include "entry.h"
-#include "kio/include/ds/bytes_mut.h"
 #include "stats.h"
 
 namespace bitcask::compactor

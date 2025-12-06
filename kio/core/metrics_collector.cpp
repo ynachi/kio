@@ -4,7 +4,7 @@
 
 #include "metrics_collector.h"
 
-#include "sync_wait.h"
+#include "../sync/sync_wait.h"
 
 namespace kio::io
 {

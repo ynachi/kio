@@ -6,7 +6,7 @@
 #define KIO_FD_CACHE_H
 #include <list>
 
-#include "../../kio/core/worker.h"
+#include "kio/core/worker.h"
 #include "file_handle.h"
 
 namespace bitcask

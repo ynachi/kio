@@ -5,9 +5,9 @@
 
 #include <iostream>
 
-#include "../kio/core/coro.h"
-#include "../kio/core/worker.h"
-#include "kio/include/net.h"
+#include "kio/core/coro.h"
+#include "kio/core/worker.h"
+#include "kio/net/net.h"
 
 
 using namespace kio;

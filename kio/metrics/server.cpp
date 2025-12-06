@@ -2,16 +2,17 @@
 // Created by Yao ACHI on 02/12/2025.
 //
 
-#include "kio/include/metrics/server.h"
+#include "kio/metrics/server.h"
 
 #include <unistd.h>
 #include <utility>
 
-#include "../../core/async_logger.h"
-#include "../../core/sync_wait.h"
-#include "kio/include/ds/bytes_mut.h"
-#include "kio/include/metrics/registry.h"
-#include "kio/include/net.h"
+#include "../net/net.h"
+#include "kio/core/async_logger.h"
+#include "kio/core/bytes_mut.h"
+#include "kio/core/worker.h"
+#include "kio/metrics/registry.h"
+#include "kio/sync/sync_wait.h"
 
 namespace kio
 {
@@ -67,7 +68,7 @@ namespace kio
 
     }  // anonymous namespace
 
-    MetricsServer::MetricsServer(std::string bind_addr, const uint16_t port, WorkerConfig config) : bind_addr_(std::move(bind_addr)), port_(port)
+    MetricsServer::MetricsServer(std::string bind_addr, const uint16_t port, io::WorkerConfig config) : bind_addr_(std::move(bind_addr)), port_(port)
     {
         auto res = create_tcp_socket(bind_addr_, port_, 128);
         if (!res.has_value())
@@ -79,7 +80,7 @@ namespace kio
         server_fd_ = res.value();
         ALOG_INFO("Metrics server listening on endpoint: {}:{}, FD:{}", bind_addr_, port_, server_fd_);
 
-        worker_ = std::make_unique<Worker>(kMetricServerWorkerId, config, [this](Worker& w) { accept_loop(w, server_fd_).detach(); });
+        worker_ = std::make_unique<io::Worker>(kMetricServerWorkerId, config, [this](io::Worker& w) { accept_loop(w, server_fd_).detach(); });
     }
 
     void MetricsServer::start()

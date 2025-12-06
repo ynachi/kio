@@ -1,11 +1,11 @@
 //
 // Created by Yao ACHI on 12/11/2025.
 //
-#include "kio/include/metrics/serializer.h"
+#include "kio/metrics/serializer.h"
 
 #include <sstream>
 
-#include "kio/include/metrics/utils.h"
+#include "kio/metrics/utils.h"
 
 namespace kio
 {
@@ -44,21 +44,6 @@ namespace kio
     {
         return "";
         // TODO
-        // nlohmann::json j;
-        // for (auto& fam : snapshot.GetFamilies()) {
-        //     nlohmann::json jf;
-        //     jf["name"] = fam.name;
-        //     jf["type"] = ToString(fam.type);
-        //     jf["help"] = fam.help;
-        //     for (auto& s : fam.samples) {
-        //         jf["samples"].push_back({
-        //             {"labels", s.labels},
-        //             {"value", s.value}
-        //         });
-        //     }
-        //     j["metrics"].push_back(jf);
-        // }
-        // return j.dump(2);
     }
 
 

@@ -7,7 +7,7 @@
 #include <gtest/gtest.h>
 
 #include "../../kio/core/coro.h"
-#include "../../kio/core/sync_wait.h"
+#include "../../kio/sync/sync_wait.h"
 
 using namespace kio;
 

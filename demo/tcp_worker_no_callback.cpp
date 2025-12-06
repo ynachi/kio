@@ -5,10 +5,10 @@
 
 #include <iostream>
 
-#include "../kio/core/coro.h"
-#include "../kio/core/sync_wait.h"
-#include "../kio/core/worker.h"
-#include "kio/include/net.h"
+#include "kio/core/coro.h"
+#include "kio/core/worker.h"
+#include "kio/net/net.h"
+#include "kio/sync/sync_wait.h"
 
 
 using namespace kio;

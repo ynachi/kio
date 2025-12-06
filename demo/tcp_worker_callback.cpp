@@ -8,12 +8,12 @@
 
 #include <iostream>
 
-#include "../kio/core/async_logger.h"
-#include "../kio/core/metrics_collector.h"
-#include "../kio/core/worker.h"
-#include "kio/include/metrics/registry.h"
-#include "kio/include/metrics/server.h"
-#include "kio/include/net.h"
+#include "kio/core/async_logger.h"
+#include "kio/core/metrics_collector.h"
+#include "kio/core/worker.h"
+#include "kio/net/net.h"
+#include "kio/metrics/registry.h"
+#include "kio/metrics/server.h"
 
 
 using namespace kio;

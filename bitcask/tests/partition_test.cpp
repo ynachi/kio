@@ -3,8 +3,8 @@
 #include <filesystem>
 #include <gtest/gtest.h>
 
-#include "../../kio/core/sync_wait.h"
 #include "../../kio/core/worker.h"
+#include "../../kio/sync/sync_wait.h"
 
 using namespace bitcask;
 using namespace kio;

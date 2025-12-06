@@ -1,12 +1,11 @@
 #include <barrier>
 #include <filesystem>
 #include <gtest/gtest.h>
-#include <latch>
 #include <random>
 #include <unordered_map>
 
-#include "../../kio/core/async_logger.h"
-#include "../../kio/core/sync_wait.h"
+#include "kio/core/async_logger.h"
+#include "kio/sync/sync_wait.h"
 #include "bitcask/include/bitcask.h"
 
 using namespace bitcask;

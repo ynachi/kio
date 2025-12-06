@@ -6,8 +6,8 @@
 #define KIO_SERVER_H
 #include <string_view>
 
-#include "../../core/worker.h"
-#include "kio/include/net.h"
+#include "../net/net.h"
+#include "kio/core/worker.h"
 
 namespace kio
 {

@@ -6,7 +6,6 @@
 #define KIO_CONFIG_H
 
 #include <chrono>
-#include <fcntl.h>
 #include <filesystem>
 
 #include "common.h"

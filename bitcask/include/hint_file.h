@@ -5,11 +5,11 @@
 #ifndef KIO_HINT_FILE_H
 #define KIO_HINT_FILE_H
 
-#include "../../kio/core/worker.h"
+#include "kio/core/worker.h"
 #include "config.h"
 #include "entry.h"
 #include "file_handle.h"
-#include "kio/include/ds/buffer_pool.h"
+
 
 namespace bitcask
 {

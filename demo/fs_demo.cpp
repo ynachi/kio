@@ -1,8 +1,8 @@
 #include <iostream>
 
-#include "../kio/core/async_logger.h"
-#include "../kio/core/sync_wait.h"
-#include "kio/include/fs.h"
+#include "kio/core/async_logger.h"
+#include "kio/fs/fs.h"
+#include "kio/sync/sync_wait.h"
 
 using namespace kio;
 using namespace kio::io;

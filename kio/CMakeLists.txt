@@ -4,24 +4,23 @@ set(CORE_HEADER_FILES
         core/worker.h
         core/worker_pool.h
         core/metrics_collector.h
-        include/ds/mpsc_queue.h
-        core/sync_wait.h
+        sync/mpsc_queue.h
+        sync/sync_wait.h
         core/errors.h
-        include/fs.h
+        fs/fs.h
         core/async_logger.h
-        include/ds/buffer_pool.h
-        include/ds/bytes_mut.h
-        include/sync/baton.h
-        include/sync/event.h
-        include/sync/when_any.h
+        core/bytes_mut.h
+        sync/baton.h
+        sync/event.h
+        sync/when_any.h
 
         # metrics
-        include/metrics/model.h
-        include/metrics/serializer.h
-        include/metrics/utils.h
-        include/metrics/collector.h
-        include/metrics/registry.h
-        include/metrics/server.h
+        metrics/model.h
+        metrics/serializer.h
+        metrics/utils.h
+        metrics/collector.h
+        metrics/registry.h
+        metrics/server.h
 )
 
 set(CORE_SRC_FILES
@@ -29,12 +28,11 @@ set(CORE_SRC_FILES
         core/worker.cpp
         core/worker_pool.cpp
         core/metrics_collector.cpp
-        include/net.h
-        src/net.cpp
-        src/fs.cpp
-        src/ds/buffer_pool.cpp
-        src/metrics/serializer.cpp
-        src/metrics/server.cpp
+        net/net.h
+        net/net.cpp
+        fs/fs.cpp
+        metrics/serializer.cpp
+        metrics/server.cpp
 )
 
 add_library(kio_lib ${CORE_HEADER_FILES} ${CORE_SRC_FILES})

@@ -6,7 +6,7 @@
 
 #include <ylt/struct_pack.hpp>
 
-#include "../../kio/core/async_logger.h"
+#include "kio/core/async_logger.h"
 #include "crc32c/crc32c.h"
 
 namespace bitcask

@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-#include "../../kio/core/sync_wait.h"
+#include "kio/sync/sync_wait.h"
 #include "bitcask/include/bitcask.h"
 
 using namespace bitcask;

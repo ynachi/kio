@@ -4,11 +4,10 @@
 #include <csignal>
 #include <format>
 #include <iostream>
-#include <netinet/in.h>
 
-#include "../kio/core/async_logger.h"
-#include "../kio/core/worker_pool.h"
-#include "kio/include/net.h"
+#include "kio/core/async_logger.h"
+#include "kio/core/worker_pool.h"
+#include "kio/net/net.h"
 
 using namespace kio::io;
 using namespace kio;

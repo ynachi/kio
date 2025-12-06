@@ -1,8 +1,8 @@
 #include <chrono>
 
 #include "../kio/core/async_logger.h"
-#include "../kio/core/sync_wait.h"
 #include "../kio/core/worker.h"
+#include "../kio/sync/sync_wait.h"
 
 using namespace kio;
 using namespace io;
