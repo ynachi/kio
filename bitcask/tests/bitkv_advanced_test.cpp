@@ -5,9 +5,9 @@
 #include <random>
 #include <unordered_map>
 
+#include "../../kio/core/async_logger.h"
+#include "../../kio/core/sync_wait.h"
 #include "bitcask/include/bitcask.h"
-#include "kio/include/async_logger.h"
-#include "kio/include/sync_wait.h"
 
 using namespace bitcask;
 using namespace kio;
@@ -28,7 +28,7 @@ protected:
 
     void SetUp() override
     {
-        alog::configure(4096, LogLevel::Debug);
+        alog::configure(4096, LogLevel::Disabled);
 
         test_dir_ = std::filesystem::temp_directory_path() / "bitkv_advanced_test";
         std::filesystem::remove_all(test_dir_);

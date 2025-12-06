@@ -11,8 +11,8 @@
 #include <coroutine>
 #include <liburing.h>
 
-#include "kio/include/coro.h"
-#include "kio/include/io/worker.h"
+#include "../../core/coro.h"
+#include "../../core/worker.h"
 
 namespace kio::sync
 {

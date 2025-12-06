@@ -7,11 +7,11 @@
 #include <unistd.h>
 #include <utility>
 
-#include "kio/include/async_logger.h"
+#include "../../core/async_logger.h"
+#include "../../core/sync_wait.h"
 #include "kio/include/ds/bytes_mut.h"
 #include "kio/include/metrics/registry.h"
 #include "kio/include/net.h"
-#include "kio/include/sync_wait.h"
 
 namespace kio
 {

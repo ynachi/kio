@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 
+#include "../../kio/core/sync_wait.h"
 #include "bitcask/include/entry.h"
-#include "kio/include/sync_wait.h"
 
 using namespace bitcask;
 using namespace kio;

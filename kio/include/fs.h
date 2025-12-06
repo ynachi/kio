@@ -6,9 +6,9 @@
 #define KIO_FS_H
 #include <expected>
 
-#include "coro.h"
-#include "errors.h"
-#include "io/worker_pool.h"
+#include "../core/coro.h"
+#include "../core/errors.h"
+#include "../core/worker_pool.h"
 
 namespace kio
 {

@@ -8,8 +8,8 @@
 #include <latch>
 #include <memory>
 
-#include "kio/include/io/worker.h"
-#include "kio/include/sync_wait.h"
+#include "../../kio/core/sync_wait.h"
+#include "../../kio/core/worker.h"
 
 using namespace kio;
 using namespace kio::sync;

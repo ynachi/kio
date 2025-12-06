@@ -32,6 +32,9 @@ set(ENV{PKG_CONFIG_PATH} "$ENV{PKG_CONFIG_PATH}:/usr/local/lib/pkgconfig:/usr/lo
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LibUring REQUIRED IMPORTED_TARGET liburing)
 
+#gflags
+find_package(gflags REQUIRED)
+
 # gtest
 if (KIO_BUILD_TESTS)
     find_package(GTest REQUIRED)

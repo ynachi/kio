@@ -31,3 +31,11 @@ target_link_libraries(retry_demo PRIVATE kio_lib)
 # Kio baton demo
 add_executable(kio_baton_demo baton.cpp)
 target_link_libraries(kio_baton_demo PRIVATE kio_lib)
+
+#------------------------------------------------
+# PERFORMANCE TESTS
+#------------------------------------------------
+
+# net perf
+add_executable(net_perf perf/net_perf.cpp)
+target_link_libraries(net_perf PRIVATE kio_lib gflags::gflags)

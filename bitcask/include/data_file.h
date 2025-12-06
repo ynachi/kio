@@ -6,12 +6,12 @@
 #define KIO_DATAFILE_H
 #include <filesystem>
 
+#include "../../kio/core/coro.h"
+#include "../../kio/core/worker.h"
 #include "config.h"
 #include "entry.h"
 #include "file_handle.h"
-#include "kio/include/coro.h"
 #include "kio/include/ds/buffer_pool.h"
-#include "kio/include/io/worker.h"
 
 namespace bitcask
 {

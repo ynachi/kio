@@ -5,8 +5,8 @@
 
 #include <iostream>
 
-#include "kio/include/coro.h"
-#include "kio/include/io/worker.h"
+#include "../kio/core/coro.h"
+#include "../kio/core/worker.h"
 #include "kio/include/net.h"
 
 

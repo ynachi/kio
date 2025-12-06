@@ -6,7 +6,7 @@
 
 #include <gtest/gtest.h>
 
-#include "kio/include/io/worker.h"
+#include "../../kio/core/worker.h"
 
 using namespace kio;
 using namespace kio::sync;

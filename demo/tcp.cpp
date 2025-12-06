@@ -2,11 +2,12 @@
 // Created by Yao ACHI on 04/10/2025.
 //
 #include <csignal>
+#include <format>
 #include <iostream>
 #include <netinet/in.h>
 
-#include "kio/include/async_logger.h"
-#include "kio/include/io/worker_pool.h"
+#include "../kio/core/async_logger.h"
+#include "../kio/core/worker_pool.h"
 #include "kio/include/net.h"
 
 using namespace kio::io;
@@ -35,12 +36,11 @@ DetachedTask handle_client(Worker& worker, const int client_fd)
             break;
         }
 
-        // Process data (parse HTTP, handle request, etc.)
-        std::string response = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, World!";
+        const size_t read_size = n.value();
 
         // Write response - this co_await also runs on the worker thread
 
-        if (auto sent = co_await worker.async_write(client_fd, std::span(response.data(), response.size())); !sent.has_value())
+        if (auto sent = co_await worker.async_write(client_fd, std::span(buffer, read_size)); !sent.has_value())
         {
             ALOG_ERROR("Write failed: {}", sent.error());
             break;

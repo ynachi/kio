@@ -6,7 +6,7 @@
 #define KIO_SERVER_H
 #include <string_view>
 
-#include "kio/include/io/worker.h"
+#include "../../core/worker.h"
 #include "kio/include/net.h"
 
 namespace kio
@@ -92,9 +92,8 @@ namespace kio
         static DetachedTask accept_loop(io::Worker& worker, int server_fd);
         std::string bind_addr_;
         uint16_t port_;
-        std::jthread ev_thread_;
-
         std::unique_ptr<io::Worker> worker_;
+        std::jthread ev_thread_;
         int server_fd_{-1};
 
         // HTTP request handler

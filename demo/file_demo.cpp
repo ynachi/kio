@@ -10,11 +10,11 @@
 #include <numeric>
 #include <thread>
 
-#include "kio/include/async_logger.h"
-#include "kio/include/coro.h"
-#include "kio/include/errors.h"
-#include "kio/include/io/worker.h"
-#include "kio/include/sync_wait.h"
+#include "../kio/core/async_logger.h"
+#include "../kio/core/coro.h"
+#include "../kio/core/errors.h"
+#include "../kio/core/sync_wait.h"
+#include "../kio/core/worker.h"
 
 using namespace kio;
 using namespace kio::io;

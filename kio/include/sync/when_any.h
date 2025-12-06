@@ -7,7 +7,7 @@
 #include <atomic>
 #include <tuple>
 
-#include "kio/include/coro.h"
+#include "../../core/coro.h"
 #include "kio/include/sync/baton.h"
 
 namespace kio::sync
