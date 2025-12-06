@@ -7,7 +7,6 @@
 #include <gtest/gtest.h>
 #include <latch>
 #include <memory>
-#include <vector>
 
 #include "kio/include/io/worker.h"
 #include "kio/include/sync_wait.h"

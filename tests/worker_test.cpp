@@ -27,7 +27,7 @@ protected:
 
     void SetUp() override
     {
-        alog::configure(1024, LogLevel::Disabled);
+        alog::configure(1024, LogLevel::Debug);
 
         test_dir = std::filesystem::temp_directory_path() / "kio_tests/";
         std::filesystem::create_directories(test_dir);

@@ -44,7 +44,7 @@ namespace kio::net
      * @param backlog
      * @return
      */
-    Result<int> create_tcp_socket(std::string_view ip_address, std::uint16_t port, int backlog);
+    Result<int> create_tcp_socket(std::string_view ip_address, uint16_t port, int backlog);
     Result<void> listen_on_sock(int fd, const SocketAddress& addr, int backlog);
     // set so_reuse on sockets
     Result<void> set_fd_server_options(int fd);

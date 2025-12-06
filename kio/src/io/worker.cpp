@@ -222,8 +222,8 @@ namespace kio::io
         {
             ALOG_ERROR("Worker {} failed during run(): {}", id_, e.what());
             // ensure latches are released so the pool doesn't wait forever
-            this->wait_ready();
-            this->wait_shutdown();
+            signal_init_complete();
+            signal_shutdown_complete();
         }
     }
 

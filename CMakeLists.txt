@@ -4,13 +4,19 @@ project(kio)
 set(CMAKE_CXX_STANDARD 23)
 set(GTEST_GIT_TAG v1.17.0)
 
+# For Google CRC32
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+
+# Cmake find modules
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
+
+
 # -----------------------------------------
 # Optional Components
 #------------------------------------------
 option(KIO_BUILD_TESTS "Build the kio test suite" ON)
 option(KIO_BUILD_BITCASK "Build bitcask storage engine" ON)
 option(KIO_BUILD_DEMOS " Build the kio demo executables" ON)
-option(KIO_BUILD_BENCHMARKS "Build the kio benchmark executables" ON)
 
 # Enable Thread Sanitizer for debug builds
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
@@ -22,24 +28,20 @@ endif ()
 #-----------------------------------------
 # Dependencies
 #----------------------------------------
+set(ENV{PKG_CONFIG_PATH} "$ENV{PKG_CONFIG_PATH}:/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/usr/lib64/pkgconfig")
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(LIBURING REQUIRED liburing)
+pkg_check_modules(LibUring REQUIRED IMPORTED_TARGET liburing)
 
 # gtest
 if (KIO_BUILD_TESTS)
-    include(cmake/FindGtest.cmake)
+    find_package(GTest REQUIRED)
 endif ()
 
-# benchmark
-if (KIO_BUILD_BENCHMARKS)
-    include(cmake/FindBenchmark.cmake)
-endif ()
+# YLT
+find_package(YLT REQUIRED)
 
-# ylt alibaba yalantislib
-include(cmake/FindYLT.cmake)
-
-# crc32
-include(cmake/FindCRC32C.cmake)
+# CRC32C
+find_package(CRC32C REQUIRED)
 
 #-----------------------------------------------
 # Includes
@@ -59,10 +61,6 @@ if (KIO_BUILD_TESTS)
     include(CTest)
     enable_testing()
     add_subdirectory(tests)
-endif ()
-
-if (KIO_BUILD_BENCHMARKS)
-    add_subdirectory(benchmarks)
 endif ()
 
 

@@ -193,7 +193,10 @@ TEST_F(EntrySerializationTest, EndiannessConsistency) {
 }
 
 TEST_F(EntrySerializationTest, BinarySafety) {
-    std::vector<char> binary_value = {0x00, 0x01, 0xFF, 0xFE, 0x80};
+    std::vector<char> binary_value = {
+        char(0x01), char(0x02), char(0x03),
+        char(0x04), char(0xFF), char(0xFE)
+    };;
     auto binary_key = std::string("\x00\xFF\x80", 3);
 
     const DataEntry entry{std::string(binary_key), std::vector<char>(binary_value)};
