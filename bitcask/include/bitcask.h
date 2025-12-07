@@ -6,9 +6,9 @@
 #define KIO_BITCASK_H
 #include <memory>
 
+#include "kio/core/worker_pool.h"
 #include "bitcask/include/partition.h"
 #include "config.h"
-#include "kio/include/io/worker_pool.h"
 
 namespace bitcask
 {

@@ -1,12 +1,12 @@
 //
 // Created by Yao ACHI on 05/10/2025.
 //
-#include "kio/include/sync_wait.h"
+#include "kio/sync/sync_wait.h"
 
 #include <gtest/gtest.h>
 #include <stdexcept>
 
-#include "kio/include/coro.h"
+#include "kio/core/coro.h"
 
 using namespace kio;
 

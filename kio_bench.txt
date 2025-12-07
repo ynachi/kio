@@ -1,0 +1,575 @@
+KIO
+——————
+
+1) 1 worker, low concurrency
+
+➜  benchmarks oha -c 10 -z 30s http://localhost:8080/
+oha -c 50 -z 30s http://localhost:8080/
+oha -c 100 -z 30s http://localhost:8080/
+Summary:
+  Success rate: 100.00%
+  Total:        30000.1394 ms
+  Slowest:      3.0840 ms
+  Fastest:      0.0237 ms
+  Average:      0.0532 ms
+  Requests/sec: 178323.1045
+
+  Total data:   66.32 MiB
+  Size/request: 13 B
+  Size/sec:     2.21 MiB
+
+Response time histogram:
+  0.024 ms [1]       |
+  0.330 ms [5347989] |■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+  0.636 ms [352]     |
+  0.942 ms [51]      |
+  1.248 ms [1313]    |
+  1.554 ms [8]       |
+  1.860 ms [0]       |
+  2.166 ms [0]       |
+  2.472 ms [0]       |
+  2.778 ms [0]       |
+  3.084 ms [1]       |
+
+Response time distribution:
+  10.00% in 0.0399 ms
+  25.00% in 0.0445 ms
+  50.00% in 0.0510 ms
+  75.00% in 0.0587 ms
+  90.00% in 0.0672 ms
+  95.00% in 0.0736 ms
+  99.00% in 0.0937 ms
+  99.90% in 0.1930 ms
+  99.99% in 1.1700 ms
+
+
+Details (average, fastest, slowest):
+  DNS+dialup:   0.2070 ms, 0.0916 ms, 0.5528 ms
+  DNS-lookup:   0.0122 ms, 0.0047 ms, 0.0192 ms
+
+Status code distribution:
+  [200] 5349715 responses
+
+Error distribution:
+  [3] aborted due to deadline
+Summary:
+  Success rate: 100.00%
+  Total:        30001.1209 ms
+  Slowest:      4.2130 ms
+  Fastest:      0.0295 ms
+  Average:      0.1761 ms
+  Requests/sec: 279732.9812
+
+  Total data:   104.05 MiB
+  Size/request: 13 B
+  Size/sec:     3.47 MiB
+
+Response time histogram:
+  0.029 ms [1]       |
+  0.448 ms [8360573] |■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+  0.866 ms [16805]   |
+  1.285 ms [6224]    |
+  1.703 ms [8637]    |
+  2.121 ms [21]      |
+  2.540 ms [1]       |
+  2.958 ms [0]       |
+  3.376 ms [14]      |
+  3.795 ms [0]       |
+  4.213 ms [14]      |
+
+Response time distribution:
+  10.00% in 0.1072 ms
+  25.00% in 0.1372 ms
+  50.00% in 0.1711 ms
+  75.00% in 0.2074 ms
+  90.00% in 0.2434 ms
+  95.00% in 0.2671 ms
+  99.00% in 0.3311 ms
+  99.90% in 1.2872 ms
+  99.99% in 1.3955 ms
+
+
+Details (average, fastest, slowest):
+  DNS+dialup:   0.7194 ms, 0.0850 ms, 1.4034 ms
+  DNS-lookup:   0.0063 ms, 0.0028 ms, 0.0214 ms
+
+Status code distribution:
+  [200] 8392290 responses
+
+Error distribution:
+  [13] aborted due to deadline
+Summary:
+  Success rate: 100.00%
+  Total:        30000.6720 ms
+  Slowest:      17.1414 ms
+  Fastest:      0.0298 ms
+  Average:      0.3320 ms
+  Requests/sec: 298795.1741
+
+  Total data:   111.13 MiB
+  Size/request: 13 B
+  Size/sec:     3.70 MiB
+
+Response time histogram:
+   0.030 ms [1]       |
+   1.741 ms [8963210] |■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+   3.452 ms [764]     |
+   5.163 ms [0]       |
+   6.874 ms [0]       |
+   8.586 ms [0]       |
+  10.297 ms [0]       |
+  12.008 ms [0]       |
+  13.719 ms [0]       |
+  15.430 ms [1]       |
+  17.141 ms [61]      |
+
+Response time distribution:
+  10.00% in 0.1953 ms
+  25.00% in 0.2531 ms
+  50.00% in 0.3235 ms
+  75.00% in 0.3976 ms
+  90.00% in 0.4684 ms
+  95.00% in 0.5149 ms
+  99.00% in 0.6283 ms
+  99.90% in 1.5331 ms
+  99.99% in 1.7346 ms
+
+
+Details (average, fastest, slowest):
+  DNS+dialup:   10.1083 ms, 0.1187 ms, 16.5728 ms
+  DNS-lookup:   0.0066 ms, 0.0029 ms, 0.0594 ms
+
+Status code distribution:
+  [200] 8964037 responses
+
+Error distribution:
+  [19] aborted due to deadline
+
+2) 4 workers, low concurrency
+
+➜  benchmarks oha -c 10 -z 30s http://localhost:8080/
+oha -c 50 -z 30s http://localhost:8080/
+oha -c 100 -z 30s http://localhost:8080/
+oha -c 200 -z 30s http://localhost:8080/
+Summary:
+  Success rate: 100.00%
+  Total:        30000.2646 ms
+  Slowest:      2.9668 ms
+  Fastest:      0.0237 ms
+  Average:      0.0539 ms
+  Requests/sec: 176101.5802
+
+  Total data:   65.50 MiB
+  Size/request: 13 B
+  Size/sec:     2.18 MiB
+
+Response time histogram:
+  0.024 ms [1]       |
+  0.318 ms [5281330] |■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+  0.612 ms [358]     |
+  0.907 ms [51]      |
+  1.201 ms [1318]    |
+  1.495 ms [12]      |
+  1.790 ms [0]       |
+  2.084 ms [0]       |
+  2.378 ms [0]       |
+  2.673 ms [10]      |
+  2.967 ms [10]      |
+
+Response time distribution:
+  10.00% in 0.0404 ms
+  25.00% in 0.0451 ms
+  50.00% in 0.0515 ms
+  75.00% in 0.0594 ms
+  90.00% in 0.0679 ms
+  95.00% in 0.0745 ms
+  99.00% in 0.0959 ms
+  99.90% in 0.1987 ms
+  99.99% in 1.1703 ms
+
+
+Details (average, fastest, slowest):
+  DNS+dialup:   0.1806 ms, 0.0868 ms, 0.4482 ms
+  DNS-lookup:   0.0128 ms, 0.0038 ms, 0.0244 ms
+
+Status code distribution:
+  [200] 5283090 responses
+
+Error distribution:
+  [4] aborted due to deadline
+Summary:
+  Success rate: 100.00%
+  Total:        30000.8961 ms
+  Slowest:      2.6726 ms
+  Fastest:      0.0286 ms
+  Average:      0.1776 ms
+  Requests/sec: 277197.0530
+
+  Total data:   103.10 MiB
+  Size/request: 13 B
+  Size/sec:     3.44 MiB
+
+Response time histogram:
+  0.029 ms [1]       |
+  0.293 ms [8117635] |■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+  0.557 ms [181738]  |
+  0.822 ms [2965]    |
+  1.086 ms [409]     |
+  1.351 ms [10363]   |
+  1.615 ms [2929]    |
+  1.879 ms [22]      |
+  2.144 ms [2]       |
+  2.408 ms [38]      |
+  2.673 ms [47]      |
+
+Response time distribution:
+  10.00% in 0.1071 ms
+  25.00% in 0.1378 ms
+  50.00% in 0.1733 ms
+  75.00% in 0.2109 ms
+  90.00% in 0.2468 ms
+  95.00% in 0.2697 ms
+  99.00% in 0.3234 ms
+  99.90% in 1.2924 ms
+  99.99% in 1.4011 ms
+
+
+Details (average, fastest, slowest):
+  DNS+dialup:   0.6197 ms, 0.1222 ms, 1.2140 ms
+  DNS-lookup:   0.0062 ms, 0.0024 ms, 0.0310 ms
+
+Status code distribution:
+  [200] 8316149 responses
+
+Error distribution:
+  [11] aborted due to deadline
+Summary:
+  Success rate: 100.00%
+  Total:        30001.3468 ms
+  Slowest:      22.1603 ms
+  Fastest:      0.0317 ms
+  Average:      0.3352 ms
+  Requests/sec: 295939.4807
+
+  Total data:   110.07 MiB
+  Size/request: 13 B
+  Size/sec:     3.67 MiB
+
+Response time histogram:
+   0.032 ms [1]       |
+   2.245 ms [8878186] |■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+   4.457 ms [279]     |
+   6.670 ms [0]       |
+   8.883 ms [0]       |
+  11.096 ms [38]      |
+  13.309 ms [0]       |
+  15.522 ms [0]       |
+  17.735 ms [0]       |
+  19.947 ms [0]       |
+  22.160 ms [62]      |
+
+Response time distribution:
+  10.00% in 0.2111 ms
+  25.00% in 0.2645 ms
+  50.00% in 0.3248 ms
+  75.00% in 0.3915 ms
+  90.00% in 0.4623 ms
+  95.00% in 0.5114 ms
+  99.00% in 0.6366 ms
+  99.90% in 1.5410 ms
+  99.99% in 1.7758 ms
+
+
+Details (average, fastest, slowest):
+  DNS+dialup:   7.8456 ms, 0.1060 ms, 13.2670 ms
+  DNS-lookup:   0.0052 ms, 0.0029 ms, 0.0223 ms
+
+Status code distribution:
+  [200] 8878566 responses
+
+Error distribution:
+  [17] aborted due to deadline
+Summary:
+  Success rate: 100.00%
+  Total:        30001.3204 ms
+  Slowest:      42.1890 ms
+  Fastest:      0.0358 ms
+  Average:      0.6560 ms
+  Requests/sec: 303358.8812
+
+  Total data:   112.83 MiB
+  Size/request: 13 B
+  Size/sec:     3.76 MiB
+
+Response time histogram:
+   0.036 ms [1]       |
+   4.251 ms [9101011] |■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+   8.466 ms [1]       |
+  12.682 ms [0]       |
+  16.897 ms [50]      |
+  21.112 ms [12]      |
+  25.328 ms [0]       |
+  29.543 ms [0]       |
+  33.758 ms [0]       |
+  37.974 ms [0]       |
+  42.189 ms [62]      |
+
+Response time distribution:
+  10.00% in 0.4246 ms
+  25.00% in 0.5231 ms
+  50.00% in 0.6349 ms
+  75.00% in 0.7592 ms
+  90.00% in 0.8952 ms
+  95.00% in 0.9977 ms
+  99.00% in 1.3481 ms
+  99.90% in 2.1655 ms
+  99.99% in 2.7337 ms
+
+
+Details (average, fastest, slowest):
+  DNS+dialup:   17.5877 ms, 0.1264 ms, 40.7304 ms
+  DNS-lookup:   0.0059 ms, 0.0024 ms, 0.0579 ms
+
+Status code distribution:
+  [200] 9101137 responses
+
+Error distribution:
+  [30] aborted due to deadline
+
+3) For the test, lets stick to 4 workers. As our CPUs are not close to be saturated
+➜  ~ oha -c 200 -z 60s http://localhost:8080/
+oha -c 400 -z 60s http://localhost:8080/
+oha -c 800 -z 60s http://localhost:8080/
+oha -c 1000 -z 60s http://localhost:8080/
+oha -c 1500 -z 60s http://localhost:8080/
+Summary:
+  Success rate: 100.00%
+  Total:        60001.9969 ms
+  Slowest:      33.0436 ms
+  Fastest:      0.0338 ms
+  Average:      0.6391 ms
+  Requests/sec: 311564.7808
+
+  Total data:   231.77 MiB
+  Size/request: 13 B
+  Size/sec:     3.86 MiB
+
+Response time histogram:
+   0.034 ms [1]        |
+   3.335 ms [18693964] |■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+   6.636 ms [273]      |
+   9.937 ms [108]      |
+  13.238 ms [0]        |
+  16.539 ms [64]       |
+  19.840 ms [0]        |
+  23.141 ms [0]        |
+  26.442 ms [0]        |
+  29.743 ms [0]        |
+  33.044 ms [62]       |
+
+Response time distribution:
+  10.00% in 0.4119 ms
+  25.00% in 0.5100 ms
+  50.00% in 0.6195 ms
+  75.00% in 0.7428 ms
+  90.00% in 0.8795 ms
+  95.00% in 0.9794 ms
+  99.00% in 1.2625 ms
+  99.90% in 2.0267 ms
+  99.99% in 2.5542 ms
+
+
+Details (average, fastest, slowest):
+  DNS+dialup:   13.3036 ms, 0.4685 ms, 30.2812 ms
+  DNS-lookup:   0.0085 ms, 0.0023 ms, 0.2509 ms
+
+Status code distribution:
+  [200] 18694472 responses
+
+Error distribution:
+  [37] aborted due to deadline
+Summary:
+  Success rate: 100.00%
+  Total:        60003.2085 ms
+  Slowest:      57.5709 ms
+  Fastest:      0.0367 ms
+  Average:      1.3427 ms
+  Requests/sec: 297071.9141
+
+  Total data:   220.99 MiB
+  Size/request: 13 B
+  Size/sec:     3.68 MiB
+
+Response time histogram:
+   0.037 ms [1]        |
+   5.790 ms [17824507] |■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+  11.544 ms [456]      |
+  17.297 ms [1]        |
+  23.050 ms [124]      |
+  28.804 ms [4]        |
+  34.557 ms [4]        |
+  40.311 ms [58]       |
+  46.064 ms [0]        |
+  51.817 ms [0]        |
+  57.571 ms [62]       |
+
+Response time distribution:
+  10.00% in 0.9748 ms
+  25.00% in 1.1327 ms
+  50.00% in 1.3025 ms
+  75.00% in 1.5049 ms
+  90.00% in 1.7373 ms
+  95.00% in 1.9234 ms
+  99.00% in 2.5504 ms
+  99.90% in 3.5871 ms
+  99.99% in 4.6135 ms
+
+
+Details (average, fastest, slowest):
+  DNS+dialup:   20.8601 ms, 0.0838 ms, 56.1942 ms
+  DNS-lookup:   0.0053 ms, 0.0023 ms, 0.0281 ms
+
+Status code distribution:
+  [200] 17825217 responses
+
+Error distribution:
+  [51] aborted due to deadline
+Summary:
+  Success rate: 100.00%
+  Total:        60004.9442 ms
+  Slowest:      84.7287 ms
+  Fastest:      0.0439 ms
+  Average:      2.8645 ms
+  Requests/sec: 278705.6837
+
+  Total data:   207.34 MiB
+  Size/request: 13 B
+  Size/sec:     3.46 MiB
+
+Response time histogram:
+   0.044 ms [1]        |
+   8.512 ms [16721823] |■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+  16.981 ms [1269]     |
+  25.449 ms [112]      |
+  33.918 ms [182]      |
+  42.386 ms [0]        |
+  50.855 ms [128]      |
+  59.323 ms [29]       |
+  67.792 ms [35]       |
+  76.260 ms [0]        |
+  84.729 ms [60]       |
+
+Response time distribution:
+  10.00% in 1.9644 ms
+  25.00% in 2.2932 ms
+  50.00% in 2.7731 ms
+  75.00% in 3.3382 ms
+  90.00% in 3.8842 ms
+  95.00% in 4.2349 ms
+  99.00% in 5.1332 ms
+  99.90% in 6.7044 ms
+  99.99% in 8.6054 ms
+
+
+Details (average, fastest, slowest):
+  DNS+dialup:   25.5081 ms, 0.1055 ms, 79.7116 ms
+  DNS-lookup:   0.0052 ms, 0.0020 ms, 0.0668 ms
+
+Status code distribution:
+  [200] 16723639 responses
+
+Error distribution:
+  [80] aborted due to deadline
+Summary:
+  Success rate: 100.00%
+  Total:        60006.2108 ms
+  Slowest:      85.7326 ms
+  Fastest:      0.0433 ms
+  Average:      3.5773 ms
+  Requests/sec: 279019.3345
+
+  Total data:   207.57 MiB
+  Size/request: 13 B
+  Size/sec:     3.46 MiB
+
+Response time histogram:
+   0.043 ms [1]        |
+   8.612 ms [16738215] |■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+  17.181 ms [4032]     |
+  25.750 ms [155]      |
+  34.319 ms [107]      |
+  42.888 ms [2]        |
+  51.457 ms [127]      |
+  60.026 ms [38]       |
+  68.595 ms [24]       |
+  77.164 ms [0]        |
+  85.733 ms [62]       |
+
+Response time distribution:
+  10.00% in 1.5911 ms
+  25.00% in 2.4452 ms
+  50.00% in 3.8326 ms
+  75.00% in 4.5549 ms
+  90.00% in 5.0851 ms
+  95.00% in 5.4112 ms
+  99.00% in 6.2614 ms
+  99.90% in 7.7045 ms
+  99.99% in 9.4751 ms
+
+
+Details (average, fastest, slowest):
+  DNS+dialup:   21.1712 ms, 0.0954 ms, 79.5860 ms
+  DNS-lookup:   0.0046 ms, 0.0018 ms, 0.0567 ms
+
+Status code distribution:
+  [200] 16742763 responses
+
+Error distribution:
+  [130] aborted due to deadline
+Summary:
+  Success rate: 100.00%
+  Total:        60009.7847 ms
+  Slowest:      122.4136 ms
+  Fastest:      0.0468 ms
+  Average:      5.8577 ms
+  Requests/sec: 255577.5376
+
+  Total data:   190.14 MiB
+  Size/request: 13 B
+  Size/sec:     3.17 MiB
+
+Response time histogram:
+    0.047 ms [1]        |
+   12.283 ms [15332452] |■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+   24.520 ms [3404]     |
+   36.757 ms [120]      |
+   48.994 ms [457]      |
+   61.230 ms [165]      |
+   73.467 ms [93]       |
+   85.704 ms [126]      |
+   97.940 ms [46]       |
+  110.177 ms [18]       |
+  122.414 ms [60]       |
+
+Response time distribution:
+  10.00% in 4.9151 ms
+  25.00% in 5.3841 ms
+  50.00% in 5.8540 ms
+  75.00% in 6.3081 ms
+  90.00% in 6.7372 ms
+  95.00% in 7.0532 ms
+  99.00% in 8.3624 ms
+  99.90% in 10.7492 ms
+  99.99% in 14.4167 ms
+
+
+Details (average, fastest, slowest):
+  DNS+dialup:   34.5808 ms, 0.0525 ms, 112.7662 ms
+  DNS-lookup:   0.0046 ms, 0.0018 ms, 0.0517 ms
+
+Status code distribution:
+  [200] 15336942 responses
+
+Error distribution:
+  [211] aborted due to deadline
+➜  ~

@@ -2,7 +2,7 @@
 // Created by Yao ACHI on 25/10/2025.
 //
 
-#include "kio/include/io/worker.h"
+#include "kio/core/worker.h"
 
 #include <gtest/gtest.h>
 #include <sys/socket.h>
@@ -10,9 +10,9 @@
 #include <unistd.h>
 #include <unordered_set>
 
-#include "kio/include/coro.h"
-#include "kio/include/errors.h"
-#include "kio/include/sync_wait.h"
+#include "kio/core/coro.h"
+#include "kio/core/errors.h"
+#include "kio/sync/sync_wait.h"
 
 using namespace kio;
 using namespace kio::io;

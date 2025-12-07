@@ -6,8 +6,8 @@
 #include <fstream>
 #include <gtest/gtest.h>
 
-#include "kio/include/fs.h"
-#include "kio/include/sync_wait.h"
+#include "../kio/fs/fs.h"
+#include "kio/sync/sync_wait.h"
 
 using namespace kio;
 using namespace kio::io;

@@ -5,12 +5,12 @@
 #ifndef KIO_BITCASK_PARTITION_H
 #define KIO_BITCASK_PARTITION_H
 
+#include "kio/sync/baton.h"
 #include "compactor.h"
 #include "data_file.h"
 #include "entry.h"
 #include "fd_cache.h"
 #include "file_id.h"
-#include "kio/include/sync/baton.h"
 
 namespace bitcask
 {

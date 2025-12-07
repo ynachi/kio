@@ -1,9 +1,9 @@
 #include <bitcask/include/bitcask.h>
 #include <iostream>
 
-#include "kio/include/async_logger.h"
-#include "kio/include/coro.h"
-#include "kio/include/sync_wait.h"
+#include "kio/core/async_logger.h"
+#include "kio/core/coro.h"
+#include "kio/sync/sync_wait.h"
 
 using namespace bitcask;
 using namespace kio;

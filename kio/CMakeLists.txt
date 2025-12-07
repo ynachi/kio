@@ -1,43 +1,48 @@
 set(CORE_HEADER_FILES
-        include/coro.h
-        include/io/uring_awaitable.h
-        include/io/worker.h
-        include/io/worker_pool.h
-        include/io/metrics.h
-        include/ds/mpsc_queue.h
-        include/sync_wait.h
-        include/errors.h
-        include/fs.h
-        include/async_logger.h
-        include/ds/buffer_pool.h
-        include/ds/bytes_mut.h
-        include/sync/baton.h
-        include/sync/event.h
-        include/sync/when_any.h
+        core/coro.h
+        core/uring_awaitable.h
+        core/worker.h
+        core/worker_pool.h
+        core/metrics_collector.h
+        sync/mpsc_queue.h
+        sync/sync_wait.h
+        core/errors.h
+        fs/fs.h
+        core/async_logger.h
+        core/bytes_mut.h
+        sync/baton.h
+        sync/event.h
+        sync/when_any.h
 
         # metrics
-        include/metrics/model.h
-        include/metrics/serializer.h
-        include/metrics/utils.h
-        include/metrics/collector.h
-        include/metrics/registry.h
-        include/metrics/server.h
+        metrics/model.h
+        metrics/serializer.h
+        metrics/utils.h
+        metrics/collector.h
+        metrics/registry.h
+        metrics/server.h
 )
 
 set(CORE_SRC_FILES
-        src/coro.cpp
-        src/io/worker.cpp
-        src/io/worker_pool.cpp
-        src/io/metrics.cpp
-        include/net.h
-        src/net.cpp
-        src/fs.cpp
-        src/ds/buffer_pool.cpp
-        src/metrics/serializer.cpp
-        src/metrics/server.cpp
+        core/worker.cpp
+        core/worker_pool.cpp
+        core/metrics_collector.cpp
+        net/net.h
+        net/net.cpp
+        fs/fs.cpp
+        metrics/serializer.cpp
+        metrics/server.cpp
 )
 
 add_library(kio_lib ${CORE_HEADER_FILES} ${CORE_SRC_FILES})
-target_link_libraries(kio_lib PUBLIC PkgConfig::LibUring yalantinglibs::yalantinglibs)
-target_compile_options(kio_lib PRIVATE -Wall)
+target_link_libraries(kio_lib PRIVATE PkgConfig::LibUring yalantinglibs::yalantinglibs)
+target_compile_options(kio_lib PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+        -Wno-gnu-statement-expression
+        $<$<CONFIG:Debug>:-g -O0>
+        $<$<CONFIG:Release>:-O3>
+)
 target_compile_definitions(kio_lib PRIVATE _GNU_SOURCE)
+

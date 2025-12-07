@@ -6,8 +6,8 @@
 
 #include <gtest/gtest.h>
 
-#include "kio/include/coro.h"
-#include "kio/include/sync_wait.h"
+#include "../../kio/core/coro.h"
+#include "../../kio/sync/sync_wait.h"
 
 using namespace kio;
 

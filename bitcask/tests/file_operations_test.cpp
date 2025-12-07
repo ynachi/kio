@@ -5,10 +5,10 @@
 #include <filesystem>
 #include <gtest/gtest.h>
 
+#include "../../kio/core/worker.h"
+#include "../../kio/sync/sync_wait.h"
 #include "bitcask/include/data_file.h"
 #include "bitcask/include/hint_file.h"
-#include "kio/include/io/worker.h"
-#include "kio/include/sync_wait.h"
 
 using namespace bitcask;
 using namespace kio;

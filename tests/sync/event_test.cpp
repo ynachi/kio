@@ -2,14 +2,14 @@
 // Created by Yao ACHI on 22/11/2025.
 //
 
-#include "kio/include/sync/event.h"
+#include "kio/sync/event.h"
 
 #include <gtest/gtest.h>
 #include <latch>
 #include <memory>
 
-#include "kio/include/io/worker.h"
-#include "kio/include/sync_wait.h"
+#include "kio/core/worker.h"
+#include "kio/sync/sync_wait.h"
 
 using namespace kio;
 using namespace kio::sync;

@@ -2,14 +2,14 @@
 // AsyncBaton Demo - Demonstrating cross-thread coordination patterns
 //
 
-#include "kio/include/sync/baton.h"
+#include "kio/sync/baton.h"
 
 #include <chrono>
 #include <iostream>
 #include <thread>
 
-#include "kio/include/coro.h"
-#include "kio/include/io/worker.h"
+#include "kio/core/coro.h"
+#include "kio/core/worker.h"
 
 using namespace kio;
 using namespace kio::io;
@@ -67,7 +67,7 @@ void demo_producer_consumer()
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-    worker.request_stop();
+    (void)worker.request_stop();
 }
 
 // ============================================================================
@@ -149,7 +149,7 @@ void demo_request_response_timeout()
 
     slow_responder.join();
 
-    worker.request_stop();
+    (void)worker.request_stop();
 }
 
 // ============================================================================
@@ -241,7 +241,7 @@ void demo_pipeline()
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-    worker.request_stop();
+    (void)worker.request_stop();
 }
 
 // ============================================================================
@@ -257,8 +257,8 @@ void demo_event_debouncing()
 
     AsyncBaton event_signal(worker);
     AsyncBaton handler_done(worker);
-    std::atomic<int> event_count{0};
-    std::atomic<bool> keep_running{true};
+    std::atomic_int event_count{0};
+    std::atomic_bool keep_running{true};
 
     // Event handler with debouncing
     auto event_handler = [&]() -> DetachedTask
@@ -317,7 +317,7 @@ void demo_event_debouncing()
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-    worker.request_stop();
+    (void)worker.request_stop();
 }
 
 // ============================================================================
@@ -407,7 +407,7 @@ void demo_barrier()
     w3.join();
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-    worker.request_stop();
+    (void)worker.request_stop();
 }
 
 // ============================================================================

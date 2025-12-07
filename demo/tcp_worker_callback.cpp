@@ -8,12 +8,12 @@
 
 #include <iostream>
 
-#include "kio/include/async_logger.h"
-#include "kio/include/io/metrics.h"
-#include "kio/include/io/worker.h"
-#include "kio/include/metrics/registry.h"
-#include "kio/include/metrics/server.h"
-#include "kio/include/net.h"
+#include "kio/core/async_logger.h"
+#include "kio/core/metrics_collector.h"
+#include "kio/core/worker.h"
+#include "kio/net/net.h"
+#include "kio/metrics/registry.h"
+#include "kio/metrics/server.h"
 
 
 using namespace kio;
@@ -43,12 +43,9 @@ DetachedTask HandleClient(Worker &worker, const int client_fd)
             break;
         }
 
-        // Process data (parse HTTP, handle request, etc.)
-        std::string response = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, World!";
-
         // Write response - this co_await also runs on the worker thread
 
-        if (auto sent = co_await worker.async_write(client_fd, std::span(response.data(), response.size())); !sent.has_value())
+        if (auto sent = co_await worker.async_write(client_fd, std::span(buffer, n.value())); !sent.has_value())
         {
             ALOG_ERROR("Write failed: {}", sent.error());
             break;
@@ -60,7 +57,7 @@ DetachedTask HandleClient(Worker &worker, const int client_fd)
 
 
 // Accept loop - runs on each worker independently
-DetachedTask accept_loop(Worker &worker, int listen_fd)
+DetachedTask accept_loop(Worker &worker, const int listen_fd)
 {
     ALOG_INFO("Worker accepting connections");
     const auto st = std::stop_token{};
