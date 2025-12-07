@@ -39,7 +39,7 @@ namespace kio::io
                    "kio::async_* operation was called from the wrong thread. "
                    "You must co_await SwitchToWorker(worker) at the start of your task.");
 
-            sqe_ = io_uring_get_sqe(&worker_.get_ring());
+            sqe_ = io_uring_get_sqe(&internal::WorkerAccess::get_ring(worker_));
             if (sqe_ == nullptr)
             {
                 // no SQE available right now; return error immediately
@@ -48,8 +48,8 @@ namespace kio::io
             }
 
             // allocate an op id and record the coroutine handle
-            op_id_ = worker_.get_op_id();
-            worker_.init_op_slot(op_id_, h);
+            op_id_ = internal::WorkerAccess::get_op_id(worker_);
+            internal::WorkerAccess::init_op_slot(worker_, op_id_, h);
 
             // Call prep sqe
             std::apply([this]<typename... T>(T&&... unpacked_args) { io_uring_prep_(sqe_, std::forward<T>(unpacked_args)...); }, args_);
@@ -66,7 +66,7 @@ namespace kio::io
                 return immediate_result_;
             }
 
-            return static_cast<int>(worker_.get_op_result(op_id_));
+            return static_cast<int>(internal::WorkerAccess::get_op_result(worker_, op_id_));
         };
 
         explicit IoUringAwaitable(Worker& worker, Prep prep, Args... args) : worker_(worker), io_uring_prep_(std::move(prep)), args_(std::move(args)...) {}

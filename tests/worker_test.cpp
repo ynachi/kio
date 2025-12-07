@@ -51,7 +51,7 @@ protected:
 
     // Helper coroutine to run a test on the worker thread
     template<typename Awaitable>
-    auto RunOnWorker(Awaitable &&awaitable)
+    auto RunOnWorker(Awaitable&& awaitable)
     {
         using AwaitableType = std::remove_reference_t<Awaitable>;
         auto task = [&]() -> Task<decltype(std::declval<AwaitableType>().await_resume())>
@@ -94,7 +94,7 @@ TEST_F(WorkerTest, AsyncReadOnBadFdReturnsError)
         auto result = co_await worker->async_read(bad_fd, std::span(buffer));
 
         EXPECT_FALSE(result.has_value());
-        //The error must be 'InvalidFileDescriptor' (EBADF)
+        // The error must be 'InvalidFileDescriptor' (EBADF)
         EXPECT_EQ(result.error().value, EBADF);
     };
 
@@ -276,22 +276,21 @@ TEST_F(WorkerTest, GetOpIdPoolGrowthCorrectness)
     {
         co_await SwitchToWorker(*worker);
 
-        const size_t initial_capacity = worker->get_stats().active_coroutines + worker->get_stats().active_coroutines; // just trigger reading
+        const size_t initial_capacity = worker->get_stats().active_coroutines + worker->get_stats().active_coroutines;  // just trigger reading
 
         std::unordered_set<uint64_t> ids;
         for (size_t i = 0; i < initial_capacity + 10; ++i)
         {
-            uint64_t id = worker->get_op_id();
+            uint64_t id = kio::io::internal::WorkerAccess::get_op_id(*worker);
             ids.insert(id);
-            worker->init_op_slot(id, {});
+            kio::io::internal::WorkerAccess::init_op_slot(*worker, id, {});
         }
 
         EXPECT_GT(worker->get_stats().active_coroutines, initial_capacity);
-        EXPECT_EQ(ids.size(), initial_capacity + 10); // all IDs unique
+        EXPECT_EQ(ids.size(), initial_capacity + 10);  // all IDs unique
 
         // cleanup
-        for (const auto id : ids)
-            worker->release_op_id(id);
+        for (const auto id: ids) kio::io::internal::WorkerAccess::release_op_id(*worker, id);
     };
 
     SyncWait(test_coro());
@@ -303,12 +302,12 @@ TEST_F(WorkerTest, ReleaseOpIdReuseCorrectness)
     {
         co_await SwitchToWorker(*worker);
 
-        const uint64_t id1 = worker->get_op_id();
-        worker->release_op_id(id1);
+        const uint64_t id1 = kio::io::internal::WorkerAccess::get_op_id(*worker);
+        kio::io::internal::WorkerAccess::release_op_id(*worker, id1);
 
-        const uint64_t id2 = worker->get_op_id();
-        EXPECT_EQ(id1, id2); // recycled ID must be reissued
-        worker->release_op_id(id2);
+        const uint64_t id2 = kio::io::internal::WorkerAccess::get_op_id(*worker);
+        EXPECT_EQ(id1, id2);  // recycled ID must be reissued
+        kio::io::internal::WorkerAccess::release_op_id(*worker, id2);
     };
 
     SyncWait(test_coro());
@@ -320,13 +319,13 @@ TEST_F(WorkerTest, DoubleReleaseOpIdIsSafe)
     {
         co_await SwitchToWorker(*worker);
 
-        const uint64_t id = worker->get_op_id();
-        worker->release_op_id(id);
-        worker->release_op_id(id); // should NOT crash or corrupt
+        const uint64_t id = kio::io::internal::WorkerAccess::get_op_id(*worker);
+        kio::io::internal::WorkerAccess::release_op_id(*worker, id);
+        kio::io::internal::WorkerAccess::release_op_id(*worker, id);  // should NOT crash or corrupt
 
-        const uint64_t id2 = worker->get_op_id();
-        EXPECT_EQ(id, id2); // still reusable
-        worker->release_op_id(id2);
+        const uint64_t id2 = kio::io::internal::WorkerAccess::get_op_id(*worker);
+        EXPECT_EQ(id, id2);  // still reusable
+        kio::io::internal::WorkerAccess::release_op_id(*worker, id2);
     };
 
     SyncWait(test_coro());
@@ -369,9 +368,9 @@ TEST_F(WorkerTest, RequestStopIsIdempotentAndWakesLoop)
 TEST_F(WorkerTest, AsyncReadExactAtOffsetCorrectness)
 {
     namespace fs = std::filesystem;
-    const fs::path path = test_dir /  "read_exact_offset_test.bin";
+    const fs::path path = test_dir / "read_exact_offset_test.bin";
 
-    const std::string data = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"; // 26 bytes
+    const std::string data = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";  // 26 bytes
     const int fd = ::open(path.c_str(), O_CREAT | O_RDWR, 0644);
     ASSERT_GT(fd, 0);
     ASSERT_EQ((::write(fd, data.data(), data.size())), data.size());
@@ -399,14 +398,14 @@ TEST_F(WorkerTest, AsyncReadExactAtOffsetCorrectness)
 TEST_F(WorkerTest, AsyncWriteExactFile_Correctness)
 {
     namespace fs = std::filesystem;
-    const fs::path path = test_dir /  "write_exact_test.bin";
+    const fs::path path = test_dir / "write_exact_test.bin";
 
     // Initial file
     int fd = ::open(path.c_str(), O_CREAT | O_RDWR, 0644);
     ASSERT_GT(fd, 0);
     ::close(fd);
 
-    std::string payload = "hello async uring world"; // > 5 bytes, includes spaces
+    std::string payload = "hello async uring world";  // > 5 bytes, includes spaces
     const size_t N = payload.size();
 
     auto coro = [&]() -> Task<void>
@@ -439,7 +438,7 @@ TEST_F(WorkerTest, AsyncWriteExactFile_Correctness)
 TEST_F(WorkerTest, DirectIO_AlignedOffsetAndSize)
 {
     namespace fs = std::filesystem;
-    const fs::path path = test_dir /  "direct_io_test.bin";
+    const fs::path path = test_dir / "direct_io_test.bin";
 
     // Open a file with O_DIRECT
     const int fd = ::open(path.c_str(), O_CREAT | O_RDWR | O_DIRECT, 0644);
@@ -484,7 +483,7 @@ TEST_F(WorkerTest, DirectIO_AlignedOffsetAndSize)
 TEST_F(WorkerTest, DISABLED_DirectIO_UnalignedOffset_Fails)
 {
     namespace fs = std::filesystem;
-    const fs::path path = test_dir /  "direct_io_unaligned.bin";
+    const fs::path path = test_dir / "direct_io_unaligned.bin";
 
     const int fd = ::open(path.c_str(), O_CREAT | O_RDWR | O_DIRECT, 0644);
     ASSERT_GT(fd, 0);
@@ -493,7 +492,7 @@ TEST_F(WorkerTest, DISABLED_DirectIO_UnalignedOffset_Fails)
     {
         co_await SwitchToWorker(*worker);
         char buf[4096];
-        const auto r = co_await worker->async_read_at(fd, std::span(buf, 4096), 3); // ❗ 3 is NOT aligned
+        const auto r = co_await worker->async_read_at(fd, std::span(buf, 4096), 3);  // ❗ 3 is NOT aligned
         EXPECT_FALSE(r.has_value());
     };
 
@@ -502,7 +501,7 @@ TEST_F(WorkerTest, DISABLED_DirectIO_UnalignedOffset_Fails)
 }
 
 
-int main(int argc, char **argv)
+int main(int argc, char** argv)
 {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

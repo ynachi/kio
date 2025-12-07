@@ -19,6 +19,42 @@
 
 namespace kio::io
 {
+    class Worker;
+
+    namespace internal
+    {
+        /**
+         * @brief Attorney for accessing Worker's private scheduling APIs.
+         *
+         *
+         * @warning DO NOT USE DIRECTLY IN APPLICATION CODE.
+         *
+         * Use high-level abstractions instead, for instance:
+         * - SwitchToWorker(worker) for context switching
+         * - DetachedTask for fire-and-forget operations
+         * - Task<T> for structured concurrency
+         *
+         * This is intentionally in the 'internal' namespace to signal that it's
+         * not part of the public API, even though it's technically accessible.
+         */
+        struct WorkerAccess
+        {
+            /**
+             * @brief Schedule a coroutine handle on the worker's event loop.
+             * @param worker The worker to schedule on
+             * @param h The coroutine handle to schedule
+             */
+            static void post(Worker& worker, std::coroutine_handle<> h);
+            static io_uring& get_ring(Worker& worker) noexcept;
+            [[nodiscard]] static uint64_t get_op_id(Worker& worker);
+            static void release_op_id(Worker& worker, uint64_t op_id) noexcept;
+            static void init_op_slot(Worker& worker, uint64_t op_id, std::coroutine_handle<> h);
+            [[nodiscard]] static int64_t get_op_result(Worker& worker, uint64_t op_id);
+            static void set_op_result(Worker& worker, uint64_t op_id, int result);
+            static void resume_coro_by_id(Worker& worker, uint64_t op_id);
+        };
+    }  // namespace internal
+
     struct alignas(std::hardware_destructive_interference_size) WorkerStats
     {
         uint64_t bytes_read_total = 0;
@@ -85,6 +121,9 @@ namespace kio::io
      */
     class Worker
     {
+        // This attorney is the only friend
+        friend struct internal::WorkerAccess;
+
         // Special op IDs for internal operations, starting from a high range
         // to avoid collision with user op_ids from the pool.
         static constexpr size_t kWakeupOpID = ~uint64_t{0};
@@ -123,20 +162,13 @@ namespace kio::io
 
         std::function<void(Worker&)> worker_init_callback_;
 
+        //=====================================
+        // PRIVATE METHODS
+        //=====================================
+
         static void check_kernel_version();
         void check_syscall_return(int ret);
-
-        /**
-         * submits current ready sqes to the ring, block until timeout if there is no submission.
-         * When used in a loop (like an event loop), timing out allows checking other instructions.
-         * @return The number of SQEs submitted or a negative errno.
-         */
         int submit_sqes_wait();
-        /**
-         * Processes available completions from the ring since the lastest submit.
-         * This method processes completions until a stop signal is received. Submissions
-         * performed after the stop signal will not be processed.
-         */
         void process_completions();
         // typically used during shutdown. Drain the completion queue
         void drain_completions();
@@ -144,42 +176,44 @@ namespace kio::io
         void submit_wakeup_read();
         void wakeup_write();
 
-    public:
+        //========================================
+        // PRIVATE METHODS, SHARED WITH ATTORNEY
+        //========================================
         void post(std::coroutine_handle<> h);
-        [[nodiscard]] bool is_on_worker_thread() const;
-
         io_uring& get_ring() noexcept { return ring_; }
-        [[nodiscard]]
-        uint64_t get_op_id();
+        [[nodiscard]] uint64_t get_op_id();
         void release_op_id(uint64_t op_id) noexcept;
         void init_op_slot(const uint64_t op_id, const std::coroutine_handle<> h) { op_data_pool_[op_id] = {h, 0}; }
-        [[nodiscard]]
-        int64_t get_op_result(const uint64_t op_id) const
-        {
-            return op_data_pool_[op_id].result;
-        }
+        [[nodiscard]] int64_t get_op_result(const uint64_t op_id) const { return op_data_pool_[op_id].result; }
         void set_op_result(const uint64_t op_id, const int result) { op_data_pool_[op_id].result = result; }
-
-        void signal_init_complete() { init_latch_.count_down(); }
-        void signal_shutdown_complete() { shutdown_latch_.count_down(); }
         void resume_coro_by_id(const uint64_t op_id) const { op_data_pool_[op_id].handle_.resume(); }
 
+    public:
+        //=============================================
+        // PUBLIC UTILITY METHODS
+        //=============================================
+        /**
+         * @brief check if the current thread is a worker thread.
+         * Typically used to check if a coroutine is operating outside of a worker.
+         *
+         * @return bool
+         */
+        [[nodiscard]] bool is_on_worker_thread() const;
+        void signal_init_complete() { init_latch_.count_down(); }
+        void signal_shutdown_complete() { shutdown_latch_.count_down(); }
 
-        [[nodiscard]]
-        std::stop_token get_stop_token() const
-        {
-            return stop_source_.get_token();
-        }
+        /**
+         *@brief Gets a std::jthread stop token linked to the worker thread
+         *
+         * @return
+         */
+        [[nodiscard]] std::stop_token get_stop_token() const { return stop_source_.get_token(); }
 
         /**
          * Get the ID of the worker.
          * @return the ID of the worker
          */
-        [[nodiscard]]
-        size_t get_id() const noexcept
-        {
-            return id_;
-        }
+        [[nodiscard]] size_t get_id() const noexcept { return id_; }
 
         /**
          * @brief Start the worker event loop. This is a blocking start.
@@ -190,23 +224,27 @@ namespace kio::io
         void wait_shutdown() const { shutdown_latch_.wait(); }
         [[nodiscard]]
         bool request_stop();
-
+        void initialize();
+        void loop();
         /**
          * @brief Tells whether this worker is running
          * @return a bool stating the state of the worker
          */
         [[nodiscard]] bool is_running() const noexcept { return stopped_.load(std::memory_order_acquire) == false; }
 
+        //
+        // CTOR/DTOR
+        //
         Worker(const Worker&) = delete;
         Worker& operator=(const Worker&) = delete;
         Worker(Worker&&) = delete;
         Worker& operator=(Worker&&) = delete;
         Worker(size_t id, const WorkerConfig& config, std::function<void(Worker&)> worker_init_callback = {});
-        void initialize();
-        void loop();
         ~Worker();
 
-        // stats
+        //
+        // MONITORING
+        //
         /**
          * @brief Gets this worker's non-atomic stats.
          * MUST only be called from this worker's thread.
@@ -432,9 +470,30 @@ namespace kio::io
         explicit SwitchToWorker(Worker& worker) : worker_(worker) {}
 
         bool await_ready() const noexcept { return worker_.is_on_worker_thread(); }  // NOLINT
-        void await_suspend(std::coroutine_handle<> h) const { worker_.post(h); }
+        void await_suspend(std::coroutine_handle<> h) const { internal::WorkerAccess::post(worker_, h); }
         void await_resume() const noexcept {}  // NOLINT
     };
+
+    //
+    // INTERNAL METHODS IMPLEMENTATION
+    //
+    namespace internal
+    {
+        inline void WorkerAccess::post(Worker& worker, std::coroutine_handle<> h) { worker.post(h); }
+
+        inline io_uring& WorkerAccess::get_ring(Worker& worker) noexcept { return worker.get_ring(); }
+
+        [[nodiscard]] inline uint64_t WorkerAccess::get_op_id(Worker& worker) { return worker.get_op_id(); }
+
+        inline void WorkerAccess::release_op_id(Worker& worker, const uint64_t op_id) noexcept { worker.release_op_id(op_id); }
+
+        inline void WorkerAccess::init_op_slot(Worker& worker, const uint64_t op_id, std::coroutine_handle<> h) { worker.init_op_slot(op_id, h); }
+
+        [[nodiscard]] inline int64_t WorkerAccess::get_op_result(Worker& worker, const uint64_t op_id) { return worker.get_op_result(op_id); }
+
+        inline void WorkerAccess::set_op_result(Worker& worker, uint64_t op_id, const int result) { worker.set_op_result(op_id, result); }
+        inline void WorkerAccess::resume_coro_by_id(Worker& worker, const uint64_t op_id) { worker.resume_coro_by_id(op_id); }
+    }  // namespace internal
 }  // namespace kio::io
 
 #endif  // KIO_WORKER_H
