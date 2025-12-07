@@ -24,7 +24,6 @@ set(CORE_HEADER_FILES
 )
 
 set(CORE_SRC_FILES
-        src/coro.cpp
         core/worker.cpp
         core/worker_pool.cpp
         core/metrics_collector.cpp
@@ -36,6 +35,14 @@ set(CORE_SRC_FILES
 )
 
 add_library(kio_lib ${CORE_HEADER_FILES} ${CORE_SRC_FILES})
-target_link_libraries(kio_lib PUBLIC PkgConfig::LibUring yalantinglibs::yalantinglibs)
-target_compile_options(kio_lib PRIVATE -Wall)
+target_link_libraries(kio_lib PRIVATE PkgConfig::LibUring yalantinglibs::yalantinglibs)
+target_compile_options(kio_lib PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+        -Wno-gnu-statement-expression
+        $<$<CONFIG:Debug>:-g -O0>
+        $<$<CONFIG:Release>:-O3>
+)
 target_compile_definitions(kio_lib PRIVATE _GNU_SOURCE)
+

@@ -20,7 +20,7 @@
 #include <thread>
 #include <unistd.h>
 
-#include "kio/include/ds/mpsc_queue.h"
+#include "kio/sync/mpsc_queue.h"
 
 namespace kio {
     inline int64_t get_thread_id() noexcept {

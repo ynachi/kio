@@ -16,7 +16,8 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 #------------------------------------------
 option(KIO_BUILD_TESTS "Build the kio test suite" ON)
 option(KIO_BUILD_BITCASK "Build bitcask storage engine" ON)
-option(KIO_BUILD_DEMOS " Build the kio demo executables" ON)
+option(KIO_BUILD_DEMOS "Build the kio demo executables" ON)
+option(KIO_BUILD_BENCHMARK "Build codes used to benchmark kio against other libs" ON)
 
 # Enable Thread Sanitizer for debug builds
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
@@ -46,6 +47,11 @@ find_package(YLT REQUIRED)
 # CRC32C
 find_package(CRC32C REQUIRED)
 
+
+# for benchmarks
+if (KIO_BUILD_BENCHMARK)
+    find_package(PhotonLibOS REQUIRED)
+endif ()
 #-----------------------------------------------
 # Includes
 #----------------------------------------------
@@ -58,6 +64,11 @@ endif ()
 
 if (KIO_BUILD_DEMOS)
     add_subdirectory(demo)
+endif ()
+
+# for benchmarks
+if (KIO_BUILD_BENCHMARK)
+    add_subdirectory(benchmarks/cpp)
 endif ()
 
 if (KIO_BUILD_TESTS)

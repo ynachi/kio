@@ -15,7 +15,7 @@
 
 #include "coro.h"
 #include "errors.h"
-#include "kio/include/ds/mpsc_queue.h"
+#include "kio/sync/mpsc_queue.h"
 
 namespace kio::io
 {
