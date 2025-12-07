@@ -372,8 +372,7 @@ namespace kio::io
         if (!task_queue_.try_push(h))
         {
             ALOG_ERROR("Worker {} task queue is full. Dropping task.", id_);
-            // TODO: have a different strategy,
-            // like growing the queue or blocking the producer.
+            // TODO: have a different strategy, like growing the queue or blocking the producer.
             return;
         }
 
