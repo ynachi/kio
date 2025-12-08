@@ -23,6 +23,16 @@ set(CORE_HEADER_FILES
         metrics/server.h
 )
 
+set(TLS_HEADER_FILES
+        tls/context.h
+        tls/stream.h
+)
+
+set(TLS_SRC_FILES
+        tls/context.cpp
+        tls/stream.cpp
+)
+
 set(CORE_SRC_FILES
         core/worker.cpp
         core/worker_pool.cpp
@@ -34,8 +44,20 @@ set(CORE_SRC_FILES
         metrics/server.cpp
 )
 
-add_library(kio_lib ${CORE_HEADER_FILES} ${CORE_SRC_FILES})
-target_link_libraries(kio_lib PRIVATE PkgConfig::LibUring yalantinglibs::yalantinglibs)
+add_library(kio_lib
+        ${CORE_HEADER_FILES}
+        ${CORE_SRC_FILES}
+        ${TLS_HEADER_FILES}
+        ${TLS_SRC_FILES}
+)
+
+target_link_libraries(kio_lib PRIVATE
+        PkgConfig::LibUring
+        yalantinglibs::yalantinglibs
+        OpenSSL::SSL
+        OpenSSL::Crypto
+        Threads::Threads
+)
 target_compile_options(kio_lib PRIVATE
         -Wall
         -Wextra

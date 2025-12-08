@@ -590,6 +590,50 @@ namespace kio::io
         co_return {};
     }
 
+    Task<Result<void>> Worker::async_poll(int fd, int events)
+    {
+        auto prep = [](io_uring_sqe *sqe, const int p_fd, const int p_events) { io_uring_prep_poll_add(sqe, p_fd, static_cast<unsigned>(p_events)); };
+
+        if (const int ret = co_await make_uring_awaitable(*this, prep, fd, events); ret < 0)
+        {
+            co_return std::unexpected(Error::from_errno(-ret));
+        }
+        co_return {};
+    }
+
+    Task<Result<void>> Worker::async_sendfile(int out_fd, int in_fd, off_t offset, size_t count)
+    {
+        auto prep = [](io_uring_sqe *sqe, const int out, const int in, const off_t off, const size_t len) { io_uring_prep_splice(sqe, in, off, out, -1, static_cast<unsigned int>(len), 0); };
+
+        int ret = co_await make_uring_awaitable(*this, prep, out_fd, in_fd, offset, count);
+        if (ret < 0)
+        {
+            co_return std::unexpected(Error::from_errno(-ret));
+        }
+
+        stats_.bytes_written_total += static_cast<uint64_t>(ret);
+        stats_.write_ops_total++;
+
+        co_return {};
+    }
+
+    Task<Result<void>> Worker::async_sendmsg(const int fd, const msghdr *msg, const int flags)
+    {
+        auto prep = [](io_uring_sqe *sqe, const int f, const msghdr *m, const int fl) { io_uring_prep_sendmsg(sqe, f, m, fl); };
+
+        const int ret = co_await make_uring_awaitable(*this, prep, fd, msg, flags);
+
+        if (ret < 0)
+        {
+            co_return std::unexpected(Error::from_errno(-ret));
+        }
+
+        stats_.bytes_written_total += static_cast<uint64_t>(ret);
+        stats_.write_ops_total++;
+
+        co_return {};
+    }
+
     Task<Result<void>> Worker::async_close(int fd)
     {
         auto prep = [](io_uring_sqe *sqe, const int file_fd) { io_uring_prep_close(sqe, file_fd); };
