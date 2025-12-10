@@ -26,11 +26,13 @@ set(CORE_HEADER_FILES
 set(TLS_HEADER_FILES
         tls/context.h
         tls/stream.h
+        tls/listener.h
 )
 
 set(TLS_SRC_FILES
         tls/context.cpp
         tls/stream.cpp
+        tls/listener.cpp
 )
 
 set(CORE_SRC_FILES
@@ -38,6 +40,7 @@ set(CORE_SRC_FILES
         core/worker_pool.cpp
         core/metrics_collector.cpp
         net/net.h
+        net/socket.h
         net/net.cpp
         fs/fs.cpp
         metrics/serializer.cpp
