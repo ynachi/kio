@@ -6,7 +6,6 @@
 #ifndef KIO_ERRORS_H
 #define KIO_ERRORS_H
 
-#include <cerrno>
 #include <expected>
 #include <format>
 #include <string>
@@ -20,22 +19,36 @@ namespace kio
     // Specific Error Codes (Constants)
     // -------------------------------------------------------------------------
 
-    // io_uring specific error codes
+    // io_uring specific error codes (1000-1999)
     constexpr int kIouringSqFull = 1000;
     constexpr int kIouringCqFull = 1001;
     constexpr int kIouringSqeTooEarly = 1002;
     constexpr int kIouringCancelled = 1003;
 
-    // io serialization/deserialization errors
+    // io serialization/deserialization errors (2000-2999)
     constexpr int kIoDeserialization = 2004;
     constexpr int kIoDataCorrupted = 2005;
     constexpr int kIoEof = 2006;
     constexpr int kIoNeedMoreData = 2007;
 
-    // Custom application errors
+    // Custom application errors (3000-3999)
     constexpr int kAppEmptyBuffer = 3000;
     constexpr int kAppUnknown = 3001;
     constexpr int kAppInvalidArg = 3002;
+
+    // TLS/KTLS errors (4000-4999)
+    constexpr int kTlsHandshakeFailed = 4000;
+    constexpr int kTlsContextCreationFailed = 4001;
+    constexpr int kTlsKtlsEnableFailed = 4002;
+    constexpr int kTlsCertificateLoadFailed = 4003;
+    constexpr int kTlsPrivateKeyLoadFailed = 4004;
+    constexpr int kTlsVerificationFailed = 4005;
+    constexpr int kTlsNotConnected = 4006;
+    constexpr int kTlsAlreadyConnected = 4007;
+    constexpr int kTlsUnsupportedCipher = 4008;
+    constexpr int kTlsWantRead = 4009;
+    constexpr int kTlsWantWrite = 4010;
+    constexpr int kTlsShutdownFailed = 4011;
 
     // -------------------------------------------------------------------------
     // Top-Level Categories
@@ -51,6 +64,7 @@ namespace kio
         Uring,  // For io_uring specific issues
         Serialization,  // For parsing/encoding issues
         Application,  // High-level app logic
+        Tls,  // TLS/KTLS errors
         Unknown
     };
 
@@ -79,6 +93,8 @@ namespace kio
                 return "Serialization";
             case Application:
                 return "Application";
+            case Tls:
+                return "TLS";
             case Unknown:
                 return "Unknown";
         }
@@ -93,7 +109,8 @@ namespace kio
         // Custom Ranges
         if (err >= 1000 && err < 2000) return Uring;
         if (err >= 2000 && err < 3000) return Serialization;
-        if (err >= 3000) return Application;
+        if (err >= 3000 && err < 4000) return Application;
+        if (err >= 4000 && err < 5000) return Tls;
 
         // Standard POSIX mapping
         switch (err)  // NOSONAR on number of switch cases
@@ -171,6 +188,7 @@ namespace kio
         // Handle Custom Codes
         switch (value)
         {
+            // io_uring errors
             case kIouringSqFull:
                 return "Submission queue full";
             case kIouringCqFull:
@@ -179,6 +197,8 @@ namespace kio
                 return "SQE submitted too early";
             case kIouringCancelled:
                 return "Operation cancelled";
+
+            // Serialization errors
             case kIoDeserialization:
                 return "Deserialization failure";
             case kIoDataCorrupted:
@@ -187,12 +207,41 @@ namespace kio
                 return "End of file";
             case kIoNeedMoreData:
                 return "Need more data";
+
+            // Application errors
             case kAppEmptyBuffer:
                 return "Buffer is empty";
             case kAppUnknown:
                 return "Unknown application error";
             case kAppInvalidArg:
                 return "Invalid argument";
+
+            // TLS errors
+            case kTlsHandshakeFailed:
+                return "TLS handshake failed";
+            case kTlsContextCreationFailed:
+                return "Failed to create TLS context";
+            case kTlsKtlsEnableFailed:
+                return "KTLS offload not available";
+            case kTlsCertificateLoadFailed:
+                return "Failed to load certificate";
+            case kTlsPrivateKeyLoadFailed:
+                return "Failed to load private key";
+            case kTlsVerificationFailed:
+                return "Certificate verification failed";
+            case kTlsNotConnected:
+                return "TLS not connected (handshake required)";
+            case kTlsAlreadyConnected:
+                return "TLS already connected";
+            case kTlsUnsupportedCipher:
+                return "Cipher not supported by KTLS";
+            case kTlsWantRead:
+                return "TLS wants read";
+            case kTlsWantWrite:
+                return "TLS wants write";
+            case kTlsShutdownFailed:
+                return "TLS shutdown failed";
+
             default:
                 break;
         }
@@ -242,7 +291,7 @@ namespace kio
 template<>
 struct std::formatter<kio::Error>
 {
-    // Parses format specifications (we don't use any custom ones, so just generic)
+    // Parses format specifications
     static constexpr auto parse(std::format_parse_context const& ctx) { return ctx.begin(); }
 
     // Formats the Error into the context
@@ -250,6 +299,7 @@ struct std::formatter<kio::Error>
     {
         // Example output: "Network: Connection reset by peer (104)"
         // Example output: "IOUring: Submission queue full (1000)"
+        // Example output: "TLS: KTLS offload not available (4002)"
         return std::format_to(ctx.out(), "{}: {} ({})", kio::CategoryToString(err.category), kio::ErrorValueToString(err.value), err.value);
     }
 };

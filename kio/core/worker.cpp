@@ -551,7 +551,7 @@ namespace kio::io
         co_return ret;
     }
 
-    Task<Result<int>> Worker::async_connect(const int client_fd, const sockaddr *addr, const socklen_t addrlen)
+    Task<Result<void>> Worker::async_connect(const int client_fd, const sockaddr *addr, const socklen_t addrlen)
     {
         auto prep = [](io_uring_sqe *sqe, const int fd, const sockaddr *a, const socklen_t al) { io_uring_prep_connect(sqe, fd, a, al); };
         auto ret = co_await make_uring_awaitable(*this, prep, client_fd, addr, addrlen);
@@ -562,7 +562,7 @@ namespace kio::io
 
         stats_.connect_ops_total++;
 
-        co_return ret;
+        co_return {};
     }
 
     Task<Result<int>> Worker::async_openat(const std::filesystem::path path, const int flags, const mode_t mode)  // NOLINT on path, we need a copy in the coroutine frame, so a reference won't cut it

@@ -17,7 +17,7 @@ using namespace kio::tls;
 
 Task<Result<int>> connect_with_retries(Worker& worker, std::string_view host, uint16_t port)
 {
-    const net::SocketAddress addr = KIO_TRY(net::parse_address(host, port));
+    const net::SocketAddress addr = KIO_TRY(net::resolve_address(host, port));
 
     int max_retries = 5;
     auto delay = std::chrono::milliseconds(200);
@@ -68,7 +68,7 @@ Task<Result<void>> https_get_ktls(Worker& worker, std::string_view host, uint16_
 
     // 1. Create SSL context with CA path (Fixes verification error)
     // REPLACE with your actual CA path
-    SslContext ctx = ca_path.empty() ? create_client_context() : create_client_context(std::string(ca_path));
+    TlsContext ctx = ca_path.empty() ? create_client_context() : create_client_context(std::string(ca_path));
 
     ALOG_INFO("CA certificate: {}", ca_path.empty() ? "not set (verification disabled)" : std::string(ca_path));
 
@@ -76,7 +76,7 @@ Task<Result<void>> https_get_ktls(Worker& worker, std::string_view host, uint16_
     // ctx.set_verify_peer(false);
 
     // Create a TLS stream with SNI
-    TlSStream tls(worker, client_fd, ctx, host);
+    TlsStream tls(worker, client_fd, ctx, host);
 
     // KTLS handshake
     KIO_TRY(co_await tls.async_handshake());

@@ -49,6 +49,7 @@ find_package(CRC32C REQUIRED)
 
 # openssl, min 3 required
 find_package(OpenSSL 3 REQUIRED)
+message(STATUS "OpenSSL: ${OPENSSL_VERSION}")
 find_package(Threads REQUIRED)
 
 # for benchmarks

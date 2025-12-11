@@ -19,7 +19,7 @@ Task<Result<int>> connect_with_retries(Worker& worker)
 
     // This is an address we know will refuse connection.
     // Use the 2-argument KIO_TRY for assignment
-    const SocketAddress addr = KIO_TRY(parse_address("127.0.0.1", 8080));
+    const SocketAddress addr = KIO_TRY(resolve_address("127.0.0.1", 8080));
 
     int max_retries = 5;
     auto delay = std::chrono::milliseconds(200);

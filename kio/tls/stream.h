@@ -5,112 +5,158 @@
 #ifndef KIO_TLS_STREAM_H
 #define KIO_TLS_STREAM_H
 #include <openssl/ssl.h>
+#include <string_view>
 
 #include "context.h"
 #include "kio/core/worker.h"
+#include "kio/net/socket.h"
 
 namespace kio::tls
 {
     /**
-     * @brief Async TLS connection with automatic KTLS offload
+     * @brief Async TLS connection with mandatory KTLS offload
      *
      * Features:
      * - Automatic KTLS enablement (OpenSSL 3.0 handles everything)
-     * - Transparent fallback to userspace if KTLS unavailable
+     * - KTLS is mandatory - connection fails if KTLS cannot be enabled
      * - Zero-copy sendfile when KTLS is active
-     * - Async handshake using io_uring poll
+     * - Async handshake and shutdown using io_uring poll
      *
      * Usage:
      * @code
-     * SslContext ctx(true, "server.crt", "server.key");
-     * TlsStream tls(worker, client_fd, ctx);
+     * auto ctx_res = TlsContext::make_server(config);
+     * TlsStream stream(worker, std::move(socket), *ctx_res, TlsRole::Server);
      *
-     * co_await tls.handshake();
-     * co_await tls.write("Hello!");
-     * auto data = co_await tls.read(buffer);
+     * co_await stream.async_handshake();
+     * co_await stream.async_write("Hello!");
+     * auto n = co_await stream.async_read(buffer);
+     * co_await stream.async_close();  // Clean shutdown
      * @endcode
+     *
+     * @note KTLS Requirement: This stream requires KTLS to be successfully
+     * negotiated. Ensure:
+     * - OpenSSL 3.0+ is installed
+     * - Kernel TLS module is loaded (`sudo modprobe tls`)
+     * - A KTLS-compatible cipher is used (AES-GCM or ChaCha20-Poly1305)
      */
-    class TlSStream
+    class TlsStream
     {
         io::Worker& worker_;
-        int fd_;
+        TlsContext& ctx_;
+        net::Socket socket_;
         SSL* ssl_{nullptr};
+        TlsRole role_;
         std::string server_name_;  // For SNI
+        net::SocketAddress peer_addr_{};
+
+        bool handshake_done_{false};
+        bool ktls_active_{false};
+
+        std::string cached_version_{};
+        std::string cached_cipher_{};
+        std::string cached_alpn_{};
+
+        Result<void> enable_ktls();
+        [[nodiscard]] Task<Result<void>> do_handshake_step() const;
+        [[nodiscard]] Task<Result<void>> do_shutdown_step();
+
 
     public:
-        /**
-         * @brief Create a TLS stream for an already-connected socket
-         *
-         * @param worker kio worker for async operations
-         * @param fd Socket file descriptor (must be connected)
-         * @param ctx SSL context (server or client)
-         * @param server_name Server name for SNI (client only, optional)
-         */
-        TlSStream(io::Worker& worker, int fd, const SslContext& ctx, std::string_view server_name = "");
+        // Takes ownership of the socket
+        TlsStream(io::Worker& worker, net::Socket socket, TlsContext& context, TlsRole role);
 
-        ~TlSStream()
+        ~TlsStream()
         {
             if (ssl_)
             {
-                // Send close_notify if the connection is still active
-                // Note: With KTLS, SSL_shutdown() will use the kernel's TLS offload
-                SSL_shutdown(ssl_);
+                if (handshake_done_)
+                {
+                    // Mark as already shut down to prevent SSL_free from trying
+                    // to send close_notify (which would block)
+                    SSL_set_shutdown(ssl_, SSL_SENT_SHUTDOWN | SSL_RECEIVED_SHUTDOWN);
+                }
                 SSL_free(ssl_);
                 ssl_ = nullptr;
             }
+            ALOG_DEBUG("TlsStream destroyed for fd={}", socket_.get());
         }
 
-        // Move-only
-        TlSStream(TlSStream&& other) noexcept : worker_(other.worker_), fd_(std::exchange(other.fd_, -1)), ssl_(std::exchange(other.ssl_, nullptr)), server_name_(std::move(other.server_name_)) {}
+        // Move-only, no move assignable because Worker& and TlsContext& are references
+        TlsStream(TlsStream&&) noexcept;
+        TlsStream& operator=(TlsStream&&) = delete;
 
-        TlSStream(const TlSStream&) = delete;
-        TlSStream& operator=(const TlSStream&) = delete;
-        TlSStream& operator=(TlSStream&&) = delete;
-
-        // -------------------------------------------------------------------------
-        // Handshake
-        // -------------------------------------------------------------------------
-        /**
-         * @brief Performs handshake and verifies KTLS activation.
-         * Fails if the kernel refuses to offload encryption.
-         */
-        Task<Result<void>> async_handshake();
-
-
-        // -------------------------------------------------------------------------
-        // IO operations
-        // -------------------------------------------------------------------------
-        Task<Result<int>> async_read(std::span<char> buf) { return worker_.async_read(fd_, buf); }
 
         /**
-         * @brief Zero-overhead write with KTLS.
-         * Kernel transparently encrypts the data - no special syscalls needed!
+         * @brief Perform async TLS handshake
+         * @param hostname Optional hostname for SNI (client-side)
+         * @return Result<void> - fails if handshake or KTLS negotiation fails
          */
-        Task<Result<int>> async_write(std::span<const char> buf)
-        {
-            // With KTLS active, plain write() works - kernel handles encryption
-            return worker_.async_write(fd_, buf);
-        }
-
-        // shutdown sending tls close_notify message
-        Task<Result<void>> shutdown_goodbye();
+        Task<Result<void>> async_handshake(std::string_view hostname = {});
 
         /**
-         * @brief Gracefully close TLS connection
+         * @brief Async read using kernel TLS (zero-copy)
+         * @param buf Buffer to read into
+         * @return Number of bytes read, or error
          */
-        Task<Result<void>> shutdown()
-        {
-            // To send a proper TLS close_notify on a KTLS socket,
-            // we need sendmsg() with CMSG_TYPE = TLS_SET_RECORD_TYPE.
-            // Standard write() wraps data in Application Records.
+        Task<Result<int>> async_read(std::span<char> buf) { return worker_.async_read(socket_.get(), buf); }
 
-            // For this high-perf implementation, we rely on the TCP FIN
-            // (triggered by async_close later) to tear down the connection.
-            // This saves an implementation of async_sendmsg.
-            // If you strictly need close_notify, use Worker::shutdown_goodbye.
+        /**
+         * @brief Async write using kernel TLS (zero-copy)
+         * @param buf Buffer to write from
+         * @return Number of bytes written, or error
+         */
+        Task<Result<int>> async_write(std::span<const char> buf) { return worker_.async_write(socket_.get(), buf); }
 
-            co_return {};
-        }
+        /**
+         * @brief Async write entire buffer using kernel TLS
+         * @param buf Buffer to write completely
+         * @return void on success, error on failure
+         */
+        Task<Result<void>> async_write_exact(std::span<const char> buf) { return worker_.async_write_exact(socket_.get(), buf); }
+
+        /**
+         * @brief Async sendfile using kernel TLS (true zero-copy)
+         * @param in_fd Source file descriptor
+         * @param offset Offset in source file
+         * @param count Number of bytes to send
+         * @return void on success, error on failure
+         */
+        Task<Result<void>> async_sendfile(int in_fd, off_t offset, size_t count) { return worker_.async_sendfile(socket_.get(), in_fd, offset, count); }
+
+        /**
+         * @brief Perform clean TLS shutdown (sends close_notify)
+         *
+         * This performs a proper bidirectional TLS shutdown:
+         * 1. Sends close_notify to peer
+         * 2. Waits for peer's close_notify (with timeout protection)
+         *
+         * @return void on success (including if peer already closed)
+         */
+        [[nodiscard]] Task<Result<void>> async_shutdown();
+
+        /**
+         * @brief Shutdown TLS and close the underlying socket
+         *
+         * This is the recommended way to close a TlsStream. It:
+         * 1. Performs TLS shutdown (best effort)
+         * 2. Closes the underlying socket
+         *
+         * @return void (shutdown errors are logged but don't fail the close)
+         */
+        Task<Result<void>> async_close();
+
+        // Connection info
+        [[nodiscard]] bool is_ktls_active() const;
+        [[nodiscard]] std::string_view get_cipher() const;
+        [[nodiscard]] std::string_view get_version() const;
+        [[nodiscard]] bool is_handshake_done() const { return handshake_done_; }
+        [[nodiscard]] int fd() const { return socket_.get(); }
+
+        // Peer address
+        void set_peer_addr(const net::SocketAddress&& addr) { peer_addr_ = addr; }
+        [[nodiscard]] std::string peer_ip() const { return peer_addr_.ip; }
+        [[nodiscard]] uint16_t peer_port() const { return peer_addr_.port; }
+        [[nodiscard]] const net::SocketAddress& peer_addr() const { return peer_addr_; }
     };
 
 }  // namespace kio::tls

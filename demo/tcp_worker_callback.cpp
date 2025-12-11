@@ -96,7 +96,7 @@ int main()
     const std::string ip_address = "0.0.0.0";
     constexpr int port = 8080;
 
-    auto server_fd = create_tcp_socket(ip_address, port, 128);
+    auto server_fd = create_tcp_server_socket(ip_address, port, 128);
     if (!server_fd)
     {
         ALOG_ERROR("Failed to create server socket: {}", server_fd.error());

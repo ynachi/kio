@@ -13,30 +13,20 @@
 #include "kio/core/async_logger.h"
 #include "kio/core/worker_pool.h"
 #include "kio/net/net.h"
+#include "kio/tls/listener.h"
 #include "kio/tls/stream.h"
 
 using namespace kio;
 using namespace kio::tls;
 using namespace kio::io;
+using namespace kio::net;
 
 // =========================================================================
 // EXAMPLE 1: High-Performance Echo Server (KTLS-Only)
 // =========================================================================
 
-DetachedTask handle_client(Worker& worker, int client_fd, SslContext& ctx)
+DetachedTask handle_client(TlsStream stream)
 {
-    ALOG_INFO("New client connected (fd={})", client_fd);
-
-    TlSStream tls(worker, client_fd, ctx);
-
-    // Handshake - KTLS or fail
-    if (auto handshake_result = co_await tls.async_handshake(); !handshake_result)
-    {
-        ALOG_ERROR("KTLS handshake failed, closing connection, error {}", handshake_result.error());
-        co_await worker.async_close(client_fd);
-        co_return;
-    }
-
     ALOG_INFO("✅ Client ready (pure kernel TLS mode)");
 
     // From here on, it's pure kernel I/O!
@@ -45,8 +35,8 @@ DetachedTask handle_client(Worker& worker, int client_fd, SslContext& ctx)
     size_t total_bytes = 0;
     while (true)
     {
-        auto read_result = co_await tls.async_read(buffer);
-        if (!read_result)
+        auto read_result = co_await stream.async_read(buffer);
+        if (!read_result.has_value())
         {
             if (read_result.error().value == kIoEof)
             {
@@ -64,9 +54,8 @@ DetachedTask handle_client(Worker& worker, int client_fd, SslContext& ctx)
 
         // Echo back (pure kernel write!)
         // TODO use write exact later
-        auto write_result = co_await tls.async_write(std::span<const char>(buffer, bytes_read));
 
-        if (!write_result)
+        if (auto write_result = co_await stream.async_write(std::span<const char>(buffer, bytes_read)); !write_result.has_value())
         {
             ALOG_ERROR("Write error: {}", write_result.error());
             break;
@@ -74,35 +63,40 @@ DetachedTask handle_client(Worker& worker, int client_fd, SslContext& ctx)
     }
 
     ALOG_INFO("Connection closed. Total bytes: {}", total_bytes);
-    co_await tls.shutdown();
-    co_await worker.async_close(client_fd);
+    co_await stream.async_shutdown();
 }
 
 // Accept loop - runs on each worker independently
-DetachedTask accept_loop(Worker& worker, const int listen_fd, SslContext& ctx)
+DetachedTask accept_loop(Worker& worker, ListenerConfig& listener_cfg, TlsContext& ctx)
 {
     ALOG_INFO("✅ Starting KTLS-only server (OpenSSL 3.0+ enforced at build)");
     const auto st = worker.get_stop_token();
 
+    auto listener_res = TlsListener::bind(worker, listener_cfg, ctx);
+    if (!listener_res.has_value())
+    {
+        ALOG_DEBUG("Failed to create listener, error: {}", listener_res.error());
+    }
+
+    auto listener = std::move(listener_res.value());
+
     while (!st.stop_requested())
     {
-        sockaddr_storage client_addr{};
-        socklen_t addr_len = sizeof(client_addr);
-
         // Accept connection - blocks this coroutine until a client connects
-        auto client_fd = co_await worker.async_accept(listen_fd, reinterpret_cast<sockaddr*>(&client_addr), &addr_len);
+        auto accept_res = co_await listener.accept();
 
-        if (!client_fd.has_value())
+        if (!accept_res.has_value())
         {
-            ALOG_ERROR("error: {}", client_fd.error());
+            ALOG_ERROR("error: {}", accept_res.error());
             continue;
         }
 
-        ALOG_DEBUG("Accepted connection on fd {}", client_fd.value());
+        auto stream = std::move(accept_res.value());
+        ALOG_DEBUG("Accepted connection on endpoint {}:{}", stream.peer_ip(), stream.peer_ip());
 
         // Spawn coroutine to handle this client
         // Each connection runs independently on this worker
-        handle_client(worker, client_fd.value(), ctx).detach();
+        handle_client(std::move(stream)).detach();
     }
     ALOG_INFO("Worker {} stop accepting connexions", worker.get_id());
 }
@@ -115,23 +109,26 @@ int main()
 
     ALOG_INFO("OpenSSL version: {}", OpenSSL_version(OPENSSL_VERSION));
 
-    auto server_fd_exp = net::create_tcp_socket("0.0.0.0", 8080, 4096);
-    if (!server_fd_exp.has_value())
-    {
-        ALOG_ERROR("Failed to create server socket: {}", server_fd_exp.error());
-        return 1;
-    }
+    ListenerConfig listener_cfg{};
+    listener_cfg.port = 8080;
 
-    auto server_fd = *server_fd_exp;
-
-    ALOG_INFO("Listening on port 8080");
+    TlsConfig tls_cfg{};
+    tls_cfg.cert_path = "/home/ynachi/test_certs/server.crt";
+    tls_cfg.key_path = "/home/ynachi/test_certs/server.key";
 
     // Create SSL context (reuse for all connections!)
-    SslContext ctx = create_server_context("/home/ynachi/test_certs/server.crt", "/home/ynachi/test_certs/server.key");
+    auto ctx_res = TlsContext::make_server(tls_cfg);
+    if (!ctx_res.has_value())
+    {
+        ALOG_ERROR("Failed to create Tls Context");
+        ALOG_DEBUG("{}", ctx_res.error());
+    }
 
     ALOG_INFO("🚀 KTLS-Only Server listening");
     ALOG_INFO("⚡ Zero-copy mode - maximum performance!");
     ALOG_INFO("📝 TLS 1.3 only, no fallback");
+
+    auto ctx = std::move(ctx_res.value());
 
     // Configure workers
     WorkerConfig config{};
@@ -139,7 +136,7 @@ int main()
     config.default_op_slots = 8096;
 
     // Create a worker pool
-    IOPool pool(4, config, [server_fd, &ctx](Worker& worker) { accept_loop(worker, server_fd, ctx).detach(); });
+    IOPool pool(4, config, [&listener_cfg, &ctx](Worker& worker) { accept_loop(worker, listener_cfg, ctx).detach(); });
     Worker* worker = pool.get_worker(0);
 
     if (!worker)

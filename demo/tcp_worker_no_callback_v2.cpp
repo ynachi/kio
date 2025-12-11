@@ -102,7 +102,7 @@ int main()
     const std::string ip_address = "127.0.0.1";
     constexpr int port = 8080;
 
-    auto server_fd = create_tcp_socket(ip_address, port, 128);
+    auto server_fd = create_tcp_server_socket(ip_address, port, 128);
     if (!server_fd)
     {
         // Assuming IoErrorToString exists

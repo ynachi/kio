@@ -15,15 +15,51 @@
 #include "kio/core/errors.h"
 #include "kio/core/worker.h"
 
+// OpenSSL 3.0+ KTLS support
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+#define KIO_HAVE_OPENSSL3 1
+#else
+#define KIO_HAVE_OPENSSL3 0
+#endif
+
 namespace kio::tls
 {
     // -------------------------------------------------------------------------
-    // Error Codes
+    // Enums & Config
     // -------------------------------------------------------------------------
+    enum class TlsVersion
+    {
+        TLS_1_2,
+        TLS_1_3
+    };
+    enum class TlsRole
+    {
+        Client,
+        Server
+    };
 
-    constexpr int kTlsKtlsNotSupported = 5000;
-    constexpr int kTlsKtlsNotEnabled = 5001;
-    constexpr int kTlsHandshakeFailed = 5002;
+    struct TlsConfig
+    {
+        // Identity (Required for Server)
+        std::filesystem::path cert_path{};
+        std::filesystem::path key_path{};
+
+        // Trust (Required for Client)
+        std::filesystem::path ca_cert_path{};
+        std::filesystem::path ca_dir_path{};
+
+        TlsVersion min_version{TlsVersion::TLS_1_2};
+        bool verify_hostname{true};
+        int verify_mode{SSL_VERIFY_PEER};
+        std::vector<std::string> alpn_protocols{};
+        // Cipher suites (empty = use OpenSSL defaults)
+        // Only KTLS-compatible ciphers will work: AES-GCM, ChaCha20-Poly1305
+        std::string cipher_suites{};
+        std::string ciphersuites_tls13{};
+        bool enable_session_cache{true};
+        // SNI
+        std::string server_name{};
+    };
 
 
     /**
@@ -32,22 +68,15 @@ namespace kio::tls
      * This class configures OpenSSL to automatically enable KTLS when possible.
      * No manual key extraction or kernel calls are needed!
      */
-    class SslContext
+    class TlsContext
     {
         SSL_CTX* ctx_{nullptr};
-        bool is_server_{false};
+        bool is_server_{true};
+        explicit TlsContext(SSL_CTX* ctx, const bool is_server = true) : ctx_(ctx), is_server_(is_server) {}
+        static Result<TlsContext> make(const TlsConfig& config, TlsRole role);
 
     public:
-        /**
-         * @brief Create SSL context for server or client
-         *
-         * @param is_server true for a server, false for a client
-         * @param cert_path Path to a certificate file (server only)
-         * @param key_path Path to a private key file (server only)
-         */
-        explicit SslContext(bool is_server, const std::string& cert_path = "", const std::string& key_path = "");
-
-        ~SslContext()
+        ~TlsContext()
         {
             if (ctx_)
             {
@@ -56,9 +85,9 @@ namespace kio::tls
         }
 
         // Move-only
-        SslContext(SslContext&& other) noexcept : ctx_(std::exchange(other.ctx_, nullptr)) {}
+        TlsContext(TlsContext&& other) noexcept : ctx_(std::exchange(other.ctx_, nullptr)) {}
 
-        SslContext& operator=(SslContext&& other) noexcept
+        TlsContext& operator=(TlsContext&& other) noexcept
         {
             if (this != &other)
             {
@@ -68,8 +97,8 @@ namespace kio::tls
             return *this;
         }
 
-        SslContext(const SslContext&) = delete;
-        SslContext& operator=(const SslContext&) = delete;
+        TlsContext(const TlsContext&) = delete;
+        TlsContext& operator=(const TlsContext&) = delete;
 
         [[nodiscard]]
         SSL_CTX* get() const noexcept
@@ -77,29 +106,23 @@ namespace kio::tls
             return ctx_;
         }
 
-        [[nodiscard]]
-        bool is_server() const noexcept
-        {
-            return is_server_;
-        }
+        static Result<TlsContext> make_client(const TlsConfig& config) { return make(config, TlsRole::Client); }
 
-        /**
-         * @brief Enable/disable certificate verification
-         */
-        void set_verify_peer(const bool verify) const { SSL_CTX_set_verify(ctx_, verify ? SSL_VERIFY_PEER : SSL_VERIFY_NONE, nullptr); }
+        static Result<TlsContext> make_server(const TlsConfig& config) { return make(config, TlsRole::Server); }
     };
 
+    //
+    // KTLS helpers
+    //
+    bool is_ktls_available();
+    Result<void> require_ktls();
+    std::string get_ktls_info();
 
-    /**
-     * @brief Create SSL context for servers
-     */
-    inline SslContext create_server_context(const std::string& cert_path, const std::string& key_path) { return SslContext(true, cert_path, key_path); }
-
-    /**
-     * @brief Create SSL context for clients
-     * @param ca_path Optional path to CA certificate file for verification
-     */
-    SslContext create_client_context(const std::string& ca_path = "");
+    namespace detail
+    {
+        int tls_version_to_openssl(TlsVersion version);
+        std::string get_openssl_error();
+    }  // namespace detail
 
 }  // namespace kio::tls
 

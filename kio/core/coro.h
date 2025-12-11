@@ -80,14 +80,14 @@ namespace kio
 
             final_awaiter final_suspend() noexcept { return {}; }
             // Stores the exception pointer so it can be re-thrown by the awaiting coroutine.
-            void unhandled_exception() { result_ = std::current_exception(); }
+            void unhandled_exception() { result_.template emplace<2>(std::current_exception()); }
 
             // Stores the final result in the promise so the awaiting coroutine can retrieve it
             // Conditionally provide return_value OR return_void, not both
             void return_value(T value)
                 requires(!std::is_void_v<T>)
             {
-                result_ = std::move(value);
+                result_.template emplace<1>(std::move(value));
             }
         };
 

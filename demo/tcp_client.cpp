@@ -19,7 +19,7 @@ Task<Result<int>> connect_to_server(Worker& worker, std::string_view host, uint1
     co_await SwitchToWorker(worker);
 
     ALOG_INFO("Resolving {}:{}...", host, port);
-    const net::SocketAddress addr = KIO_TRY(net::parse_address(host, port));
+    const net::SocketAddress addr = KIO_TRY(net::resolve_address(host, port));
 
     ALOG_INFO("Creating socket...");
     int fd = KIO_TRY(net::create_raw_socket(addr.family));
