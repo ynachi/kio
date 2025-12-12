@@ -7,6 +7,14 @@
 
 namespace kio::tls
 {
+    // Helper coroutine: used ONLY when we have buffered OpenSSL data.
+    // This ensures we don't pay the coroutine frame cost for the common KTLS path.
+    // In another word, this is to avoid something like co_return co_await when its is not absolutely necessary.
+    static Task<Result<int>> buffered_read_task(int result)
+    {
+        co_return result;
+    }
+
     TlsStream::TlsStream(io::Worker& worker, net::Socket socket, TlsContext& context, const TlsRole role) : worker_(worker), ctx_(context), socket_(std::move(socket)), role_(role)
     {
         ssl_ = SSL_new(ctx_.get());
@@ -19,6 +27,7 @@ namespace kio::tls
             SSL_free(ssl_);
             throw std::runtime_error("Failed to set SSL fd: " + detail::get_openssl_error());
         }
+        // SSL_MODE_ENABLE_PARTIAL_WRITE is crucial for async
         SSL_set_mode(ssl_, SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
 
         ALOG_DEBUG("TlsStream created for fd={}", socket_.get());
@@ -26,11 +35,8 @@ namespace kio::tls
 
     TlsStream::TlsStream(TlsStream&& other) noexcept :
         worker_(other.worker_), ctx_(other.ctx_), socket_(std::move(other.socket_)), ssl_(std::exchange(other.ssl_, nullptr)), role_(other.role_), server_name_(std::exchange(other.server_name_, "")),
-        handshake_done_(other.handshake_done_), ktls_active_(other.ktls_active_), cached_version_(std::exchange(other.cached_version_, "")), cached_cipher_(std::exchange(other.cached_cipher_, "")),
-        cached_alpn_(std::exchange(other.cached_alpn_, ""))
+        handshake_done_(other.handshake_done_), ktls_active_(other.ktls_active_)
     {
-        // Mark the moved-from object as not having completed handshake
-        // to prevent its destructor from trying to do SSL shutdown operations
         other.handshake_done_ = false;
         other.ktls_active_ = false;
     }
@@ -84,7 +90,6 @@ namespace kio::tls
 
         if (role_ == TlsRole::Client && !hostname.empty())
         {
-            // Store hostname persistently - the c_str() must remain valid
             server_name_ = std::string(hostname);
             SSL_set_tlsext_host_name(ssl_, server_name_.c_str());
             SSL_set1_host(ssl_, server_name_.c_str());
@@ -95,22 +100,16 @@ namespace kio::tls
         handshake_done_ = true;
         ALOG_DEBUG("TLS handshake completed");
 
-        // Cache connection info
         if (const char* ver = SSL_get_version(ssl_))
         {
-            cached_version_ = ver;
-            ALOG_DEBUG("SSL version is {}", cached_version_);
+            ALOG_DEBUG("SSL version is {}", ver);
         }
         if (const char* cipher = SSL_get_cipher_name(ssl_))
         {
-            cached_cipher_ = cipher;
-            ALOG_DEBUG("SSL cipher is {}", cached_cipher_);
+            ALOG_DEBUG("SSL cipher is {}", cipher);
         }
 
-        if (auto res = enable_ktls(); !res)
-        {
-            co_return std::unexpected(res.error());
-        }
+        KIO_TRY(enable_ktls());
 
         co_return {};
     }
@@ -118,141 +117,120 @@ namespace kio::tls
     Result<void> TlsStream::enable_ktls()
     {
 #if KIO_HAVE_OPENSSL3
+        // Check if OpenSSL successfully negotiated KTLS
         bool tx = BIO_get_ktls_send(SSL_get_wbio(ssl_));
         bool rx = BIO_get_ktls_recv(SSL_get_rbio(ssl_));
+
         if (tx && rx)
         {
             ktls_active_ = true;
             ALOG_DEBUG("KTLS enabled: TX={}, RX={}", tx, rx);
             return {};
         }
+
+        // Detailed error logging to help debugging
         ALOG_ERROR("KTLS failed to negotiate. TX={}, RX={}", tx, rx);
         ALOG_ERROR("  - Kernel TLS module loaded? (modprobe tls)");
         ALOG_ERROR("  - Cipher: {} (need AES-GCM or ChaCha20-Poly1305)", SSL_get_cipher_name(ssl_));
+
+        // This is a strict requirement for this implementation
         return std::unexpected(Error{ErrorCategory::Tls, kTlsKtlsEnableFailed});
 #else
         return std::unexpected(Error{ErrorCategory::Tls, kTlsKtlsEnableFailed});
 #endif
     }
 
+    Task<Result<int>> TlsStream::async_read(std::span<char> buf)
+    {
+        // Drain OpenSSL buffer if needed (rare path)
+        if (ssl_ && SSL_pending(ssl_) > 0)
+        {
+            // This is a synchronous memory copy from OpenSSL internal buffer
+            int n = SSL_read(ssl_, buf.data(), static_cast<int>(buf.size()));
+            if (n > 0)
+            {
+                // Return a helper task that is already "ready" with the result.
+                // This allocates a frame, but only for this edge case.
+                return buffered_read_task(n);
+            }
+        }
+
+        return worker_.async_read(socket_.get(), buf);
+    }
+
+    Task<Result<int>> TlsStream::async_write(std::span<const char> buf)
+    {
+        return worker_.async_write(socket_.get(), buf);
+    }
+
+    Task<Result<void>> TlsStream::async_write_exact(std::span<const char> buf)
+    {
+        return worker_.async_write_exact(socket_.get(), buf);
+    }
+
     Task<Result<void>> TlsStream::do_shutdown_step()
     {
         const auto st = worker_.get_stop_token();
-
-        // Maximum iterations to prevent infinite loops on misbehaving peers
         constexpr int kMaxShutdownIterations = 10;
         int iterations = 0;
 
         while (!st.stop_requested() && iterations++ < kMaxShutdownIterations)
         {
-            // Note: SSL_shutdown returns:
-            //   0 = shutdown initiated, need to call again to complete (wait for peer's close_notify)
-            //   1 = shutdown complete (both sides have sent close_notify)
-            //  <0 = error
             const int ret = SSL_shutdown(ssl_);
 
             if (ret == 1)
             {
-                // Clean bidirectional shutdown complete
                 ALOG_DEBUG("TLS shutdown complete (bidirectional)");
                 co_return {};
             }
 
             if (ret == 0)
             {
-                // We've sent our close_notify, now wait for peer's
-                // Need to call SSL_shutdown again after receiving peer's close_notify
-                // First, wait for data to arrive
-                if (auto poll_res = co_await worker_.async_poll(socket_.get(), POLLIN); !poll_res)
+                // Wait for peer's close_notify
+                if (const auto poll_res = co_await worker_.async_poll(socket_.get(), POLLIN); !poll_res)
                 {
-                    // Poll failed, but we've already sent our close_notify
-                    // This is acceptable - peer may have already closed
-                    ALOG_DEBUG("TLS shutdown: poll failed after sending close_notify, treating as complete");
+                    ALOG_DEBUG("TLS shutdown: poll failed, treating as complete");
                     co_return {};
                 }
                 continue;
             }
 
-            // ret < 0: check the error
-            const int err = SSL_get_error(ssl_, ret);
-            switch (err)
+            switch (const int err = SSL_get_error(ssl_, ret))
             {
                 case SSL_ERROR_WANT_READ:
                     KIO_TRY(co_await worker_.async_poll(socket_.get(), POLLIN));
                     break;
-
                 case SSL_ERROR_WANT_WRITE:
                     KIO_TRY(co_await worker_.async_poll(socket_.get(), POLLOUT));
                     break;
-
                 case SSL_ERROR_ZERO_RETURN:
-                    // Peer already closed - this is fine during shutdown
-                    ALOG_DEBUG("TLS shutdown: peer already closed");
-                    co_return {};
-
                 case SSL_ERROR_SYSCALL:
-                {
-                    const int sys_err = errno;
-                    if (sys_err == 0 || sys_err == EPIPE || sys_err == ECONNRESET)
-                    {
-                        // Connection already closed by peer - acceptable during shutdown
-                        ALOG_DEBUG("TLS shutdown: connection reset by peer");
-                        co_return {};
-                    }
-                    ALOG_WARN("TLS shutdown syscall error: {}", strerror(sys_err));
-                    co_return std::unexpected(Error::from_errno(sys_err));
-                }
-
-                case SSL_ERROR_SSL:
-                    ALOG_WARN("TLS shutdown SSL error: {}", detail::get_openssl_error());
-                    co_return std::unexpected(Error{ErrorCategory::Tls, kTlsShutdownFailed});
-
+                    // Peer closed, fine.
+                    co_return {};
                 default:
-                    ALOG_WARN("TLS shutdown unknown error: {}", err);
-                    co_return std::unexpected(Error{ErrorCategory::Tls, kTlsShutdownFailed});
+                     ALOG_WARN("TLS shutdown error: {}", err);
+                     co_return std::unexpected(Error{ErrorCategory::Tls, kTlsShutdownFailed});
             }
         }
-
-        if (iterations >= kMaxShutdownIterations)
-        {
-            ALOG_WARN("TLS shutdown: max iterations reached, forcing close");
-        }
-
         co_return {};
     }
 
     Task<Result<void>> TlsStream::async_shutdown()
     {
+        if (!ssl_ || !handshake_done_) co_return {};
         ALOG_DEBUG("TLS shutdown initiated for fd={}", socket_.get());
-
-        if (!ssl_)
-        {
-            co_return {};
-        }
-
-        if (!handshake_done_)
-        {
-            // Never completed handshake, nothing to shut down
-            ALOG_DEBUG("TLS shutdown: handshake was never completed, skipping");
-            co_return {};
-        }
-
         co_return co_await do_shutdown_step();
     }
 
     Task<Result<void>> TlsStream::async_close()
     {
-        if (auto shutdown_res = co_await async_shutdown(); !shutdown_res)
-        {
-            // Log but don't fail - we still want to close the socket
-            ALOG_WARN("TLS shutdown failed during close: {}", shutdown_res.error());
-        }
+        // Best effort shutdown
+        co_await async_shutdown();
 
         if (socket_.is_valid())
         {
             co_await worker_.async_close(socket_.release());
         }
-
         co_return {};
     }
 

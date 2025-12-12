@@ -1,8 +1,26 @@
 //
 // Created by Yao ACHI on 11/12/2025.
+
 //
 // KTLS Client Demo - Tests TLS client functionality with the kio framework
 //
+
+/**
+ * Here is how you can create a cert to test
+openssl genrsa -out ca.key 4096
+openssl req -new -x509 -days 365 -key ca.key -out ca.crt \
+    -subj "/CN=Test CA"
+
+# 2. Create server certificate request
+openssl genrsa -out server.key 4096
+openssl req -new -key server.key -out server.csr \
+    -subj "/CN=localhost"
+
+# 3. Sign with CA
+openssl x509 -req -days 365 -in server.csr \
+    -CA ca.crt -CAkey ca.key -CAcreateserial \
+    -out server.crt
+ */
 
 #include <format>
 #include <gflags/gflags.h>
@@ -13,124 +31,24 @@
 #include "kio/net/net.h"
 #include "kio/sync/sync_wait.h"
 #include "kio/tls/context.h"
-#include "kio/tls/listener.h"  // For TlsConnector
+#include "kio/tls/listener.h"
 
 // CLI flags
 DEFINE_string(host, "127.0.0.1", "Server host");
 DEFINE_uint32(port, 8080, "Server port");
-DEFINE_string(mode, "echo", "Test mode: raw, simple, echo, http, or perf");
+DEFINE_string(mode, "echo", "Test mode: raw, simple, echo, or perf");
 DEFINE_string(path, "/", "HTTP path for http mode");
 DEFINE_uint64(bytes, 10 * 1024 * 1024, "Bytes to transfer for perf mode");
-DEFINE_string(ca, "", "CA certificate path (optional)");
+DEFINE_string(ca, "/home/ynachi/test_certs/ca.crt", "CA certificate path, optional but must be provided if verify is true");
 DEFINE_bool(verify, false, "Enable certificate verification");
 
 using namespace kio;
 using namespace kio::io;
 using namespace kio::tls;
 
-// =========================================================================
-// Raw Test - Bypass TlsConnector to isolate issues
-// =========================================================================
-
-Task<Result<void>> raw_test(Worker& worker, TlsContext& ctx, std::string_view host, uint16_t port)
-{
-    co_await SwitchToWorker(worker);
-    ALOG_INFO("Raw test: connecting to {}:{}", host, port);
-
-    // Step 1: Resolve address
-    auto addr_res = net::resolve_address(host, port);
-    if (!addr_res.has_value())
-    {
-        ALOG_ERROR("Address resolution failed: {}", addr_res.error());
-        co_return std::unexpected(addr_res.error());
-    }
-    auto addr = addr_res.value();
-    ALOG_INFO("Address resolved");
-
-    // Step 2: Create socket
-    auto fd_res = net::create_tcp_fd(addr.family);
-    if (!fd_res.has_value())
-    {
-        ALOG_ERROR("Socket creation failed: {}", fd_res.error());
-        co_return std::unexpected(fd_res.error());
-    }
-    int fd = fd_res.value();
-    ALOG_INFO("Socket created: fd={}", fd);
-
-    // Step 3: Connect
-    auto connect_res = co_await worker.async_connect(fd, addr.as_sockaddr(), addr.addrlen);
-    if (!connect_res.has_value())
-    {
-        ALOG_ERROR("Connect failed: {}", connect_res.error());
-        ::close(fd);
-        co_return std::unexpected(connect_res.error());
-    }
-    ALOG_INFO("TCP connected");
-
-    // Step 4: Create TlsStream (this does SSL_new, SSL_set_fd)
-    net::Socket socket(fd);
-    TlsStream stream(worker, std::move(socket), ctx, TlsRole::Client);
-    ALOG_INFO("TlsStream created, fd in stream: {}", stream.fd());
-
-    // Step 5: Handshake
-    auto hs_res = co_await stream.async_handshake(host);
-    if (!hs_res.has_value())
-    {
-        ALOG_ERROR("Handshake failed: {}", hs_res.error());
-        co_return std::unexpected(hs_res.error());
-    }
-    ALOG_INFO("Handshake complete, KTLS={}, cipher={}", stream.is_ktls_active(), stream.get_cipher());
-
-    // Step 6: Write (using raw worker call to bypass any TlsStream issues)
-    const char* msg = "TEST\n";
-    ALOG_INFO("Writing 5 bytes via stream.async_write...");
-    auto write_res = co_await stream.async_write({msg, 5});
-    if (!write_res.has_value())
-    {
-        ALOG_ERROR("Write failed: {}", write_res.error());
-        co_return std::unexpected(write_res.error());
-    }
-    ALOG_INFO("Write completed: {} bytes", write_res.value());
-
-    // Step 7: Small delay to ensure data is sent
-    ALOG_INFO("Sleeping 100ms...");
-    co_await worker.async_sleep(std::chrono::milliseconds(100));
-
-    // Step 8: Read
-    char buffer[256];
-    ALOG_INFO("Reading via stream.async_read...");
-    auto read_res = co_await stream.async_read(buffer);
-    if (!read_res.has_value())
-    {
-        ALOG_ERROR("Read failed: {}", read_res.error());
-
-        // Try reading again with raw fd to see if it's a TlsStream issue
-        ALOG_INFO("Trying raw read on fd {}...", stream.fd());
-        auto raw_read_res = co_await worker.async_read(stream.fd(), std::span<char>(buffer, sizeof(buffer)));
-        if (!raw_read_res.has_value())
-        {
-            ALOG_ERROR("Raw read also failed: {}", raw_read_res.error());
-        }
-        else
-        {
-            ALOG_INFO("Raw read succeeded: {} bytes", raw_read_res.value());
-        }
-
-        co_return std::unexpected(read_res.error());
-    }
-    ALOG_INFO("Read completed: {} bytes", read_res.value());
-
-    std::string_view response(buffer, read_res.value());
-    ALOG_INFO("Response: '{}'", response);
-
-    co_await stream.async_close();
-    ALOG_INFO("✅ Raw test passed!");
-
-    co_return {};
-}
 
 // =========================================================================
-// Simple Test - Just connect and send one message (for debugging)
+// Simple Demo - Just connect and send one message
 // =========================================================================
 
 Task<Result<void>> simple_test(Worker& worker, TlsContext& ctx, std::string_view host, uint16_t port)
@@ -151,8 +69,8 @@ Task<Result<void>> simple_test(Worker& worker, TlsContext& ctx, std::string_view
     ALOG_INFO("✅ Connected! fd={}, KTLS={}", stream.fd(), stream.is_ktls_active());
 
     // Simple message
-    const char* msg = "PING\n";
-    const size_t msg_len = 5;
+    auto msg = "PING\n";
+    constexpr size_t msg_len = 5;
 
     ALOG_INFO("Sending {} bytes...", msg_len);
     auto write_result = co_await stream.async_write({msg, msg_len});
@@ -217,7 +135,7 @@ Task<Result<void>> echo_test(Worker& worker, TlsContext& ctx, std::string_view h
 
     for (const auto& msg: messages)
     {
-        std::string_view msg_trimmed(msg.data(), msg.size() > 0 && msg.back() == '\n' ? msg.size() - 1 : msg.size());
+        std::string_view msg_trimmed(msg.data(), !msg.empty() && msg.back() == '\n' ? msg.size() - 1 : msg.size());
         ALOG_INFO("Sending: '{}'", msg_trimmed);
 
         KIO_TRY(co_await stream.async_write_exact({msg.data(), msg.size()}));
@@ -237,7 +155,7 @@ Task<Result<void>> echo_test(Worker& worker, TlsContext& ctx, std::string_view h
         }
 
         std::string_view response(buffer, bytes_read);
-        std::string_view response_trimmed(response.data(), response.size() > 0 && response.back() == '\n' ? response.size() - 1 : response.size());
+        std::string_view response_trimmed(response.data(), !response.empty() && response.back() == '\n' ? response.size() - 1 : response.size());
         ALOG_INFO("Received: '{}'", response_trimmed);
 
         if (response != msg)
@@ -254,72 +172,12 @@ Task<Result<void>> echo_test(Worker& worker, TlsContext& ctx, std::string_view h
 }
 
 // =========================================================================
-// HTTP GET Test - Send an HTTP request and read the response
-// =========================================================================
-
-Task<Result<void>> http_get_test(Worker& worker, TlsContext& ctx, std::string_view host, uint16_t port, std::string_view path)
-{
-    co_await SwitchToWorker(worker);
-    ALOG_INFO("HTTP GET https://{}:{}{}", host, port, path);
-
-    TlsConnector connector(worker, ctx);
-    TlsStream stream = KIO_TRY(co_await connector.connect(host, port));
-
-    ALOG_INFO("✅ TLS handshake complete!");
-    ALOG_INFO("   Version: {}", stream.get_version());
-    ALOG_INFO("   Cipher:  {}", stream.get_cipher());
-    ALOG_INFO("   KTLS:    {}", stream.is_ktls_active() ? "active" : "NOT active");
-
-    std::string request = std::format(
-            "GET {} HTTP/1.1\r\n"
-            "Host: {}\r\n"
-            "User-Agent: kio-ktls-client/1.0\r\n"
-            "Accept: */*\r\n"
-            "Connection: close\r\n"
-            "\r\n",
-            path, host);
-
-    KIO_TRY(co_await stream.async_write_exact({request.data(), request.size()}));
-    ALOG_INFO("Request sent ({} bytes)", request.size());
-
-    char buffer[8192];
-    std::string response;
-    size_t total_read = 0;
-
-    while (true)
-    {
-        auto read_result = co_await stream.async_read(buffer);
-        if (!read_result.has_value())
-        {
-            ALOG_ERROR("Read error: {}", read_result.error());
-            break;
-        }
-
-        const int bytes_read = read_result.value();
-        if (bytes_read == 0)
-        {
-            ALOG_DEBUG("Server closed connection (EOF)");
-            break;
-        }
-
-        total_read += bytes_read;
-        response.append(buffer, bytes_read);
-    }
-
-    ALOG_INFO("Response received ({} bytes total)", total_read);
-    std::cout << "\n--- Response Start ---\n" << response << "\n--- Response End ---\n\n";
-
-    co_await stream.async_close();
-    co_return {};
-}
-
-// =========================================================================
 // Throughput Test - Send large amount of data to measure performance
 // =========================================================================
 
 Task<Result<void>> throughput_test(Worker& worker, TlsContext& ctx, std::string_view host, uint16_t port, size_t total_bytes)
 {
-    co_await SwitchToWorker(worker);
+   co_await SwitchToWorker(worker);
     ALOG_INFO("Starting throughput test to {}:{} ({} bytes)", host, port, total_bytes);
 
     TlsConnector connector(worker, ctx);
@@ -328,7 +186,7 @@ Task<Result<void>> throughput_test(Worker& worker, TlsContext& ctx, std::string_
     ALOG_INFO("✅ Connected! KTLS: {}", stream.is_ktls_active() ? "active" : "NOT active");
 
     constexpr size_t kChunkSize = 16384;
-    std::vector<char> send_buf(kChunkSize, 'X');
+    std::vector send_buf(kChunkSize, 'X');
     std::vector<char> recv_buf(kChunkSize);
 
     size_t bytes_sent = 0;
@@ -390,19 +248,17 @@ Task<Result<void>> throughput_test(Worker& worker, TlsContext& ctx, std::string_
 
 int main(int argc, char* argv[])
 {
-    alog::configure(4096, LogLevel::Debug);
+    alog::configure(4096, LogLevel::Info);
 
     gflags::SetUsageMessage(
             "KTLS Client Demo - Test TLS client with kio framework\n\n"
             "Modes:\n"
             "  simple - Minimal test (connect, send, receive, close)\n"
             "  echo   - Send messages and verify echo response\n"
-            "  http   - Send HTTP GET request\n"
             "  perf   - Throughput benchmark\n\n"
             "Examples:\n"
             "  ktls_client_demo --mode=simple --host=127.0.0.1 --port=8080\n"
             "  ktls_client_demo --mode=echo --host=127.0.0.1 --port=8080\n"
-            "  ktls_client_demo --mode=http --host=example.com --port=443 --verify\n"
             "  ktls_client_demo --mode=perf --bytes=104857600");
 
     gflags::ParseCommandLineFlags(&argc, &argv, true);
@@ -456,21 +312,13 @@ int main(int argc, char* argv[])
     // Run the test
     Result<void> result;
 
-    if (FLAGS_mode == "raw")
-    {
-        result = SyncWait(raw_test(worker, ctx, FLAGS_host, static_cast<uint16_t>(FLAGS_port)));
-    }
-    else if (FLAGS_mode == "simple")
+    if (FLAGS_mode == "simple")
     {
         result = SyncWait(simple_test(worker, ctx, FLAGS_host, static_cast<uint16_t>(FLAGS_port)));
     }
     else if (FLAGS_mode == "echo")
     {
         result = SyncWait(echo_test(worker, ctx, FLAGS_host, static_cast<uint16_t>(FLAGS_port)));
-    }
-    else if (FLAGS_mode == "http")
-    {
-        result = SyncWait(http_get_test(worker, ctx, FLAGS_host, static_cast<uint16_t>(FLAGS_port), FLAGS_path));
     }
     else if (FLAGS_mode == "perf")
     {
@@ -479,7 +327,7 @@ int main(int argc, char* argv[])
     else
     {
         ALOG_ERROR("Unknown mode: '{}'. Use 'raw', 'simple', 'echo', 'http', or 'perf'.", FLAGS_mode);
-        worker.request_stop();
+        (void)worker.request_stop();
         return 1;
     }
 
@@ -492,6 +340,6 @@ int main(int argc, char* argv[])
         ALOG_INFO("✅ Test completed successfully!");
     }
 
-    worker.request_stop();
+    (void)worker.request_stop();
     return result.has_value() ? 0 : 1;
 }

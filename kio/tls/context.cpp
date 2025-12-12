@@ -67,6 +67,23 @@ namespace kio::tls
         return std::unexpected(Error{ErrorCategory::Tls, kTlsKtlsEnableFailed});
 #endif
 
+        // =========================================================================
+        // FOR KTLS + TLS 1.3:
+        // Disable session tickets to prevent post-handshake messages.
+        //
+        // In TLS 1.3, servers send NewSessionTicket messages AFTER the handshake
+        // completes. With KTLS, after we enable kernel TLS offload, any raw read
+        // will receive these tickets as corrupted data (EIO error).
+        //
+        // Disabling tickets prevents this issue. Session resumption will still
+        // work via session IDs (TLS 1.2) or other mechanisms if configured.
+        // =========================================================================
+        if (role == TlsRole::Server)
+        {
+            SSL_CTX_set_num_tickets(ctx, 0);
+            ALOG_DEBUG("TLS 1.3 session tickets disabled (required for KTLS)");
+        }
+
         // Load certificate chain (required for server, optional for client mutual TLS)
         if (!config.cert_path.empty())
         {

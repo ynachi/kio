@@ -41,3 +41,16 @@ target_link_libraries(ktls_server_demo PRIVATE kio_lib)
 
 add_executable(ktls_client_demo ktls_client.cpp)
 target_link_libraries(ktls_client_demo PRIVATE kio_lib gflags::gflags)
+
+# Tls file server/client
+add_executable(ktls_file_server
+        tls_file_server/protocol.h
+        tls_file_server/file_client.cpp
+)
+target_link_libraries(ktls_file_server PRIVATE kio_lib gflags::gflags)
+
+add_executable(ktls_file_client
+        tls_file_server/protocol.h
+        tls_file_server/file_client.cpp
+)
+target_link_libraries(ktls_file_client PRIVATE kio_lib gflags::gflags)

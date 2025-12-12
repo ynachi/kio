@@ -9,7 +9,6 @@
 #include <openssl/ssl.h>
 #include <poll.h>
 #include <string>
-#include <string_view>
 
 #include "kio/core/coro.h"
 #include "kio/core/errors.h"
@@ -40,11 +39,11 @@ namespace kio::tls
 
     struct TlsConfig
     {
-        // Identity (Required for Server)
+        // Identity required for Server
         std::filesystem::path cert_path{};
         std::filesystem::path key_path{};
 
-        // Trust (Required for Client)
+        // Trust required for Client
         std::filesystem::path ca_cert_path{};
         std::filesystem::path ca_dir_path{};
 
@@ -63,10 +62,9 @@ namespace kio::tls
 
 
     /**
-     * @brief RAII wrapper for SSL_CTX with automatic KTLS enablement
+     * @brief Provides a TLS Context for client and servers automatic KTLS enablement
      *
      * This class configures OpenSSL to automatically enable KTLS when possible.
-     * No manual key extraction or kernel calls are needed!
      */
     class TlsContext
     {
@@ -106,8 +104,18 @@ namespace kio::tls
             return ctx_;
         }
 
+        /**
+         * Creates a TLS context for clients
+         * @param config TLS configurations
+         * @return returns a KIO results containing a tls context
+         */
         static Result<TlsContext> make_client(const TlsConfig& config) { return make(config, TlsRole::Client); }
 
+        /**
+         * Create a TLS context for servers (or listeners).
+         * @param config TLS configurations
+         * @return returns a KIO results containing a tls context
+         */
         static Result<TlsContext> make_server(const TlsConfig& config) { return make(config, TlsRole::Server); }
     };
 

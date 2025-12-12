@@ -52,10 +52,6 @@ namespace kio::tls
         bool handshake_done_{false};
         bool ktls_active_{false};
 
-        std::string cached_version_{};
-        std::string cached_cipher_{};
-        std::string cached_alpn_{};
-
         Result<void> enable_ktls();
         [[nodiscard]] Task<Result<void>> do_handshake_step() const;
         [[nodiscard]] Task<Result<void>> do_shutdown_step();
@@ -94,34 +90,34 @@ namespace kio::tls
         Task<Result<void>> async_handshake(std::string_view hostname = {});
 
         /**
-         * @brief Async read using kernel TLS (zero-copy)
+         * @brief Async read using kernel TLS
          * @param buf Buffer to read into
          * @return Number of bytes read, or error
          */
-        Task<Result<int>> async_read(std::span<char> buf) { return worker_.async_read(socket_.get(), buf); }
+        Task<Result<int>> async_read(std::span<char> buf);
 
         /**
-         * @brief Async write using kernel TLS (zero-copy)
+         * @brief Async write using kernel TLS
          * @param buf Buffer to write from
          * @return Number of bytes written, or error
          */
-        Task<Result<int>> async_write(std::span<const char> buf) { return worker_.async_write(socket_.get(), buf); }
+        Task<Result<int>> async_write(std::span<const char> buf);
 
         /**
          * @brief Async write entire buffer using kernel TLS
          * @param buf Buffer to write completely
          * @return void on success, error on failure
          */
-        Task<Result<void>> async_write_exact(std::span<const char> buf) { return worker_.async_write_exact(socket_.get(), buf); }
+        Task<Result<void>> async_write_exact(std::span<const char> buf);
 
         /**
-         * @brief Async sendfile using kernel TLS (true zero-copy)
+         * @brief Async sendfile using kernel TLS
          * @param in_fd Source file descriptor
-         * @param offset Offset in source file
+         * @param offset Offset in a source file
          * @param count Number of bytes to send
          * @return void on success, error on failure
          */
-        Task<Result<void>> async_sendfile(int in_fd, off_t offset, size_t count) { return worker_.async_sendfile(socket_.get(), in_fd, offset, count); }
+        Task<Result<void>> async_sendfile(const int in_fd, const off_t offset, const size_t count) { return worker_.async_sendfile(socket_.get(), in_fd, offset, count); }
 
         /**
          * @brief Perform clean TLS shutdown (sends close_notify)

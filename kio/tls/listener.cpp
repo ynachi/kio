@@ -46,7 +46,7 @@ namespace kio::tls
         }
 
         // now bind and listen
-        if (auto res = listen_on_sock(socket.get(), addr_res.value(), config.backlog); !res)
+        if (auto res = listen_on_sock(socket.get(), addr_res.value(), config.backlog); !res.has_value())
         {
             return std::unexpected(res.error());
         }

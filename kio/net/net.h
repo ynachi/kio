@@ -87,7 +87,7 @@ namespace kio::net
     Result<void> set_tcp_fd_options(int fd);
 
     //===========
-    // Review the methods below, we might have to remove them
+    // TODO: Review the methods below, we might have to remove them
     // =============
     /**
      * Creates a TCP socket and start listening on it. This socket is set as reuse and non-blocking
@@ -105,8 +105,15 @@ namespace kio::net
      * @return A socket FD on success, or an IoError.
      */
     Result<int> create_raw_socket(int family);
+
     /**
-     * Turns an ip/hostname port into a socket address
+     * @brief Turns an ip/hostname port into a socket address.
+     *
+     * @note This method performs a DNS resolution for hostnames.
+     * At this time the resolution is blocking so not ideal in a single worker context.
+     * So we recommend using IP address directly if possible, until and async dns resolution
+     * mechanism is built.
+     *
      * @param ip_address ip or hostname
      * @param port port
      * @return
