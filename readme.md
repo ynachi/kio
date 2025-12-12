@@ -83,9 +83,17 @@ undefined behaviors. `SwitchToWorker` post any io operation that happens after i
 See [Worker without callback, use SwitchToWorker](./demo/tcp_worker_no_callback_v2.cpp) for an example of how to use
 `SwitchToWorker`.  
 
+## Kernel TLS (KTLS)
+Kio supports TLS by leveraging Linux KTLS. This provides very high TLS traffic by bypassing user space for TLS data.
+Handshake still happens in user space. Look at the following for more details:
+- [ktls server demo](./demo/ktls_server.cpp)
+- [ktls client demo](./demo/ktls_client.cpp)
+
+The doc for TLS is todo. But the examples are enough to get you started.
+
 ## FileManager and File 
 `FileManager` is an abstraction to create perform file operations. `FileManager` creates files and assign them to 
-workers based on the path. This affinity is useful for maximum performance. Check the file related demos for more details. 
+workers based on the path. This affinity is useful for maximum performance. Check the file-related demos for more details. 
 
 ## How to build Kio
 

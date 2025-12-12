@@ -86,7 +86,7 @@ int main()
     alog::configure(4096, LogLevel::Info);
 
     // Create a listening socket
-    auto server_fd_exp = net::create_tcp_socket("0.0.0.0", 8080, 4096);
+    auto server_fd_exp = net::create_tcp_server_socket("0.0.0.0", 8080, 4096);
     if (!server_fd_exp.has_value())
     {
         ALOG_ERROR("Failed to create server socket: {}", server_fd_exp.error());
