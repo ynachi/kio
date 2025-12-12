@@ -116,7 +116,7 @@ int main(int argc, char** argv)
     alog::configure(4096, LogLevel::Info);
 
     // Create a listening socket
-    auto server_fd_exp = net::create_tcp_socket(FLAGS_ip, FLAGS_port, static_cast<int>(FLAGS_backlog));
+    auto server_fd_exp = net::create_tcp_server_socket(FLAGS_ip, FLAGS_port, static_cast<int>(FLAGS_backlog));
     if (!server_fd_exp.has_value())
     {
         ALOG_ERROR("Failed to create server socket: {}", server_fd_exp.error());

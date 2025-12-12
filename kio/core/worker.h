@@ -15,6 +15,8 @@
 
 #include "coro.h"
 #include "errors.h"
+#include "kio/net/net.h"
+#include "kio/net/socket.h"
 #include "kio/sync/mpsc_queue.h"
 
 namespace kio::io
@@ -260,6 +262,7 @@ namespace kio::io
         // Io methods
         //=========================================================
         Task<Result<int>> async_accept(int server_fd, sockaddr* addr, socklen_t* addrlen);
+        Task<Result<int>> async_accept(const net::Socket& socket, net::SocketAddress& addr) { return async_accept(socket.get(), reinterpret_cast<sockaddr*>(&addr.addr), &addr.addrlen); }
         /**
          * @brief Asynchronously reads data from a streaming file descriptor (e.g., socket, pipe).
          *
@@ -393,10 +396,9 @@ namespace kio::io
          * @param addr A pointer to the sockaddr structure containing the peer address.
          * @param addrlen The length of the sockaddr structure.
          * @return A Task that resumes with a Result<int>.
-         * On success: 0.
          * On failure: An Error.
          */
-        Task<Result<int>> async_connect(int client_fd, const sockaddr* addr, socklen_t addrlen);
+        Task<Result<void>> async_connect(int client_fd, const sockaddr* addr, socklen_t addrlen);
         /**
          * @brief Asynchronously pre-allocates or de-allocates storage space for a file.
          *
@@ -453,7 +455,17 @@ namespace kio::io
          * @return An IO Result which is void or an error.
          */
         Task<Result<void>> async_unlink_at(int dirfd, std::filesystem::path path, int flags);
+        /**
+         * @brief Truncates a file.
+         *
+         * @param fd FD of the file to truncate.
+         * @param length Size of the truncate.
+         * @return
+         */
         Task<Result<void>> async_ftruncate(int fd, off_t length);
+        Task<Result<void>> async_poll(int fd, int events);
+        Task<Result<void>> async_sendfile(int out_fd, int in_fd, off_t offset, size_t count);
+        Task<Result<void>> async_sendmsg(int fd, const msghdr* msg, int flags);
     };
 
     //==========================================================

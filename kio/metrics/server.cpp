@@ -70,7 +70,7 @@ namespace kio
 
     MetricsServer::MetricsServer(std::string bind_addr, const uint16_t port, io::WorkerConfig config) : bind_addr_(std::move(bind_addr)), port_(port)
     {
-        auto res = create_tcp_socket(bind_addr_, port_, 128);
+        auto res = create_tcp_server_socket(bind_addr_, port_, 128);
         if (!res.has_value())
         {
             ALOG_ERROR("Failed to create metrics server socket: {}", res.error());
