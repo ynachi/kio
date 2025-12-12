@@ -63,8 +63,21 @@ namespace kio::tls
         ALOG_DEBUG("KTLS option enabled on SSL_CTX");
 #else
         ALOG_ERROR("OpenSSL 3.0+ required for KTLS support");
+        SSL_CTX_free(ctx);
         return std::unexpected(Error{ErrorCategory::Tls, kTlsKtlsEnableFailed});
 #endif
+
+        // Load certificate chain (required for server, optional for client mutual TLS)
+        if (!config.cert_path.empty())
+        {
+            if (SSL_CTX_use_certificate_chain_file(ctx, config.cert_path.c_str()) != 1)
+            {
+                ALOG_ERROR("Failed to load certificate from {}: {}", config.cert_path.string(), detail::get_openssl_error());
+                SSL_CTX_free(ctx);
+                return std::unexpected(Error{ErrorCategory::Tls, kTlsCertificateLoadFailed});
+            }
+            ALOG_DEBUG("Loaded certificate chain from {}", config.cert_path.string());
+        }
 
         // Load private key
         if (!config.key_path.empty())
@@ -76,13 +89,6 @@ namespace kio::tls
                 return std::unexpected(Error{ErrorCategory::Tls, kTlsPrivateKeyLoadFailed});
             }
 
-            if (SSL_CTX_use_certificate_chain_file(ctx, config.cert_path.c_str()) != 1)
-            {
-                ALOG_ERROR("Failed to load ca from {}: {}", config.cert_path.string(), detail::get_openssl_error());
-                SSL_CTX_free(ctx);
-                return std::unexpected(Error{ErrorCategory::Tls, kTlsCertificateLoadFailed});
-            }
-
             if (SSL_CTX_check_private_key(ctx) != 1)
             {
                 ALOG_ERROR("Private key does not match certificate: {}", detail::get_openssl_error());
@@ -90,6 +96,17 @@ namespace kio::tls
                 return std::unexpected(Error{ErrorCategory::Tls, kTlsPrivateKeyLoadFailed});
             }
             ALOG_DEBUG("Loaded private key from {}", config.key_path.string());
+        }
+
+        // Validate server has both cert and key
+        if (role == TlsRole::Server)
+        {
+            if (config.cert_path.empty() || config.key_path.empty())
+            {
+                ALOG_ERROR("Server TLS context requires both certificate and private key");
+                SSL_CTX_free(ctx);
+                return std::unexpected(Error{ErrorCategory::Tls, kTlsCertificateLoadFailed});
+            }
         }
 
         // Load CA certificates
@@ -117,6 +134,7 @@ namespace kio::tls
 
         // Verification
         SSL_CTX_set_verify(ctx, config.verify_mode, nullptr);
+
         // Cipher suites
         if (!config.cipher_suites.empty())
         {
@@ -150,7 +168,7 @@ namespace kio::tls
             SSL_CTX_set_alpn_protos(ctx, protos.data(), protos.size());
         }
 
-        return TlsContext{ctx};
+        return TlsContext{ctx, role == TlsRole::Server};
     }
 
     bool is_ktls_available()

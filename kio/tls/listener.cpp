@@ -42,7 +42,7 @@ namespace kio::tls
         auto addr_res = resolve_address(config.bind_address, config.port);
         if (!addr_res.has_value())
         {
-            std::unexpected(addr_res.error());
+            return std::unexpected(addr_res.error());
         }
 
         // now bind and listen
@@ -92,7 +92,7 @@ namespace kio::tls
         ALOG_DEBUG("Socket options successfully set on FD {}", fd);
 
         KIO_TRY(co_await worker_.async_connect(fd, addr.as_sockaddr(), addr.addrlen));
-        ALOG_ERROR("Connected to server {}:{}", hostname, port);
+        ALOG_DEBUG("Connected to server {}:{}", hostname, port);
 
         TlsStream stream(worker_, std::move(socket), ctx_, TlsRole::Client);
         KIO_TRY(co_await stream.async_handshake(hostname));

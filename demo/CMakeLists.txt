@@ -40,4 +40,4 @@ add_executable(ktls_server_demo ktls_server.cpp)
 target_link_libraries(ktls_server_demo PRIVATE kio_lib)
 
 add_executable(ktls_client_demo ktls_client.cpp)
-target_link_libraries(ktls_client_demo PRIVATE kio_lib)
+target_link_libraries(ktls_client_demo PRIVATE kio_lib gflags::gflags)

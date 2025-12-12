@@ -16,6 +16,7 @@ namespace kio::tls
         }
         if (SSL_set_fd(ssl_, socket_.get()) != 1)
         {
+            SSL_free(ssl_);
             throw std::runtime_error("Failed to set SSL fd: " + detail::get_openssl_error());
         }
         SSL_set_mode(ssl_, SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
@@ -83,8 +84,10 @@ namespace kio::tls
 
         if (role_ == TlsRole::Client && !hostname.empty())
         {
-            SSL_set_tlsext_host_name(ssl_, std::string(hostname).c_str());
-            SSL_set1_host(ssl_, std::string(hostname).c_str());
+            // Store hostname persistently - the c_str() must remain valid
+            server_name_ = std::string(hostname);
+            SSL_set_tlsext_host_name(ssl_, server_name_.c_str());
+            SSL_set1_host(ssl_, server_name_.c_str());
         }
 
         ALOG_DEBUG("Starting TLS handshake for fd={}", socket_.get());
@@ -120,34 +123,16 @@ namespace kio::tls
         if (tx && rx)
         {
             ktls_active_ = true;
+            ALOG_DEBUG("KTLS enabled: TX={}, RX={}", tx, rx);
             return {};
         }
-        ALOG_ERROR("KTLS Failed to Negotiate. TX={}, RX={}", tx, rx);
+        ALOG_ERROR("KTLS failed to negotiate. TX={}, RX={}", tx, rx);
         ALOG_ERROR("  - Kernel TLS module loaded? (modprobe tls)");
         ALOG_ERROR("  - Cipher: {} (need AES-GCM or ChaCha20-Poly1305)", SSL_get_cipher_name(ssl_));
         return std::unexpected(Error{ErrorCategory::Tls, kTlsKtlsEnableFailed});
 #else
         return std::unexpected(Error{ErrorCategory::Tls, kTlsKtlsEnableFailed});
 #endif
-    }
-
-    Task<Result<void>> TlsStream::async_shutdown()
-    {
-        ALOG_DEBUG("TLS shutdown initiated for fd={}", socket_.get());
-
-        if (!ssl_)
-        {
-            co_return {};
-        }
-
-        if (!handshake_done_)
-        {
-            // Never completed handshake, nothing to shut down
-            ALOG_DEBUG("TLS shutdown: handshake was never completed, skipping");
-            co_return {};
-        }
-
-        co_return co_await do_shutdown_step();
     }
 
     Task<Result<void>> TlsStream::do_shutdown_step()
@@ -189,7 +174,8 @@ namespace kio::tls
             }
 
             // ret < 0: check the error
-            switch (const int err = SSL_get_error(ssl_, ret))
+            const int err = SSL_get_error(ssl_, ret);
+            switch (err)
             {
                 case SSL_ERROR_WANT_READ:
                     KIO_TRY(co_await worker_.async_poll(socket_.get(), POLLIN));
@@ -235,6 +221,25 @@ namespace kio::tls
         co_return {};
     }
 
+    Task<Result<void>> TlsStream::async_shutdown()
+    {
+        ALOG_DEBUG("TLS shutdown initiated for fd={}", socket_.get());
+
+        if (!ssl_)
+        {
+            co_return {};
+        }
+
+        if (!handshake_done_)
+        {
+            // Never completed handshake, nothing to shut down
+            ALOG_DEBUG("TLS shutdown: handshake was never completed, skipping");
+            co_return {};
+        }
+
+        co_return co_await do_shutdown_step();
+    }
+
     Task<Result<void>> TlsStream::async_close()
     {
         if (auto shutdown_res = co_await async_shutdown(); !shutdown_res)
@@ -252,5 +257,18 @@ namespace kio::tls
     }
 
     bool TlsStream::is_ktls_active() const { return ktls_active_; }
-    std::string_view TlsStream::get_cipher() const { return SSL_get_cipher_name(ssl_); }
+
+    std::string_view TlsStream::get_cipher() const
+    {
+        if (!ssl_) return {};
+        const char* cipher = SSL_get_cipher_name(ssl_);
+        return cipher ? cipher : "";
+    }
+
+    std::string_view TlsStream::get_version() const
+    {
+        if (!ssl_) return {};
+        const char* ver = SSL_get_version(ssl_);
+        return ver ? ver : "";
+    }
 }  // namespace kio::tls
