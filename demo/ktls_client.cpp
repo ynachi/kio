@@ -248,7 +248,7 @@ Task<Result<void>> throughput_test(Worker& worker, TlsContext& ctx, std::string_
 
 int main(int argc, char* argv[])
 {
-    alog::configure(4096, LogLevel::Info);
+    alog::configure(4096, LogLevel::Debug);
 
     gflags::SetUsageMessage(
             "KTLS Client Demo - Test TLS client with kio framework\n\n"

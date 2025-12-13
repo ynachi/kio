@@ -115,7 +115,7 @@ DetachedTask accept_loop(Worker& worker, const ListenerConfig& listener_cfg, Tls
 
 int main()
 {
-    alog::configure(4096, LogLevel::Info);
+    alog::configure(4096, LogLevel::Debug);
 
     // do not kill our server on a broken pipe
     signal(SIGPIPE, SIG_IGN);

@@ -464,6 +464,30 @@ namespace kio::io
          */
         Task<Result<void>> async_ftruncate(int fd, off_t length);
         Task<Result<void>> async_poll(int fd, int events);
+        /**
+         * @brief Asynchronously transfers data between two file descriptors using a zero-copy pipe buffer.
+         *
+         * This function implements a generic "splice loop" to move data from a source to a destination
+         * entirely within kernel space, avoiding userspace memory copies.
+         *
+         * Implementation Mechanics:
+         * Linux `splice(2)` requires at least one of the file descriptors to be a pipe. To transfer
+         * data between two non-pipe FDs (e.g., File->Socket or File->File), this function creates
+         * a temporary local pipe to act as a kernel-space bridge:
+         * [Source FD] --splice--> [Local Pipe] --splice--> [Destination FD]
+         *
+         * This double-splice technique ensures compatibility with any FD type supported by splice.
+         *
+         * Use Cases:
+         * - **Network Streaming**: Sending files to TCP sockets (supports KTLS offload if enabled).
+         * - **File Copying**: Efficiently copying data between files on disk.
+         *
+         * @param out_fd The destination file descriptor (Socket, File, etc.).
+         * @param in_fd The source file descriptor (must support splice read).
+         * @param offset is The offset in the source file to start reading from.
+         * @param count  The total number of bytes to transfer.
+         * @return void on success, or an Error on failure.
+         */
         Task<Result<void>> async_sendfile(int out_fd, int in_fd, off_t offset, size_t count);
         Task<Result<void>> async_sendmsg(int fd, const msghdr* msg, int flags);
     };

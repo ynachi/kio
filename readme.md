@@ -84,7 +84,7 @@ See [Worker without callback, use SwitchToWorker](./demo/tcp_worker_no_callback_
 `SwitchToWorker`.  
 
 ## Kernel TLS (KTLS)
-Kio supports TLS by leveraging Linux KTLS. This provides very high TLS traffic by bypassing user space for TLS data.
+Kio supports TLS by leveraging Linux KTLS. This provides high-performance TLS traffic by bypassing user space for TLS data.
 Handshake still happens in user space. Look at the following for more details:
 - [ktls server demo](./demo/ktls_server.cpp)
 - [ktls client demo](./demo/ktls_client.cpp)
@@ -104,7 +104,6 @@ See [build.md](./docs/build.md) for instructions on how to build Kio.
 see [benchmarks](./docs/benchmark.md) for benchmarks against Tokio.
 
 ## WIP
-- KTLS
 - BitCask - log structured kv storage - https://riak.com/assets/bitcask-intro.pdf
 
 

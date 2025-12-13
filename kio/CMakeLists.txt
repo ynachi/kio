@@ -59,7 +59,6 @@ target_link_libraries(kio_lib PRIVATE
         yalantinglibs::yalantinglibs
         OpenSSL::SSL
         OpenSSL::Crypto
-        Threads::Threads
 )
 target_compile_options(kio_lib PRIVATE
         -Wall

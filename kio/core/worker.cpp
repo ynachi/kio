@@ -3,6 +3,7 @@
 //
 #include "worker.h"
 
+#include <fcntl.h>
 #include <chrono>
 #include <liburing.h>
 #include <sys/eventfd.h>
@@ -601,21 +602,73 @@ namespace kio::io
         co_return {};
     }
 
-    Task<Result<void>> Worker::async_sendfile(int out_fd, int in_fd, off_t offset, size_t count)
-    {
-        auto prep = [](io_uring_sqe *sqe, const int out, const int in, const off_t off, const size_t len) { io_uring_prep_splice(sqe, in, off, out, -1, static_cast<unsigned int>(len), 0); };
+Task<Result<void>> Worker::async_sendfile(int out_fd, int in_fd, off_t offset, size_t count)
+{
+     //Sendfile is not directly supported by io_uring, so we use splice.
 
-        int ret = co_await make_uring_awaitable(*this, prep, out_fd, in_fd, offset, count);
-        if (ret < 0)
+    // Create a local pipe for this specific transfer
+    int raw_pipe[2];
+    if (::pipe(raw_pipe) < 0) {
+        co_return std::unexpected(Error::from_errno(errno));
+    }
+
+    // Use FDGuard to be sure those will always properly be closed
+    const net::FDGuard pipe_read(raw_pipe[0]);
+    const net::FDGuard pipe_write(raw_pipe[1]);
+
+    // Set non-blocking
+    ::fcntl(pipe_read.get(), F_SETFL, O_NONBLOCK);
+    ::fcntl(pipe_write.get(), F_SETFL, O_NONBLOCK);
+
+    size_t remaining = count;
+    off_t current_offset = offset;
+
+    // Prepare io_uring splice operation
+    auto prep_splice = [](io_uring_sqe *sqe, const int in, const off_t off_in, const int out, const off_t off_out, const size_t len) {
+        io_uring_prep_splice(sqe, in, off_in, out, off_out, static_cast<unsigned int>(len), 0);
+    };
+
+    while (remaining > 0)
+    {
+        constexpr size_t kChunkSize = 65536;
+        size_t to_splice = std::min(remaining, kChunkSize);
+
+        // --- STEP A: Splice File -> Pipe (Write End) ---
+        // Result is the number of bytes moved into the pipe
+        const int res_in = co_await make_uring_awaitable(*this, prep_splice,
+                                                   in_fd, current_offset,
+                                                   pipe_write.get(), -1,
+                                                   to_splice);
+
+        if (res_in < 0) co_return std::unexpected(Error::from_errno(-res_in));
+        if (res_in == 0) co_return std::unexpected(Error{ErrorCategory::File, kIoEof});
+
+        // --- STEP B: Splice Pipe (Read End) -> Socket ---
+        // We must drain the pipe completely before looping back to fill it again
+        auto pipe_remaining = static_cast<size_t>(res_in);
+        while (pipe_remaining > 0)
         {
-            co_return std::unexpected(Error::from_errno(-ret));
+            const int res_out = co_await make_uring_awaitable(*this, prep_splice,
+                                                        pipe_read.get(), -1,
+                                                        out_fd, -1,
+                                                        pipe_remaining);
+
+            if (res_out < 0) co_return std::unexpected(Error::from_errno(-res_out));
+            if (res_out == 0) co_return std::unexpected(Error{ErrorCategory::Network, EPIPE});
+
+            pipe_remaining -= res_out;
         }
 
-        stats_.bytes_written_total += static_cast<uint64_t>(ret);
-        stats_.write_ops_total++;
+        current_offset += res_in;
+        remaining -= res_in;
 
-        co_return {};
+        // stats
+        stats_.bytes_written_total += res_in;
     }
+
+    stats_.write_ops_total++;
+    co_return {};
+}
 
     Task<Result<void>> Worker::async_sendmsg(const int fd, const msghdr *msg, const int flags)
     {
