@@ -11,8 +11,8 @@
 #include <coroutine>
 #include <liburing.h>
 
-#include "../core/coro.h"
-#include "../core/worker.h"
+#include "kio/core/coro.h"
+#include "kio/core/worker.h"
 
 namespace kio::sync
 {
@@ -50,7 +50,7 @@ namespace kio::sync
 
                 if (const auto handle = waiter_.load(std::memory_order_relaxed))
                 {
-                    owner_.post(handle);
+                    io::internal::WorkerAccess::post(owner_, handle);
                 }
             }
         }
@@ -93,16 +93,13 @@ namespace kio::sync
 
                 bool await_suspend(std::coroutine_handle<> h) noexcept
                 {
-                    // 1. Store handle
                     baton_.waiter_.store(h, std::memory_order_relaxed);
 
-                    // 2. Ensure handle write is visible before state change
                     std::atomic_thread_fence(std::memory_order_release);
 
-                    // 3. Try to transition NOT_SET -> WAITING
                     if (uint8_t expected = NOT_SET; baton_.state_.compare_exchange_strong(expected, WAITING, std::memory_order_acq_rel, std::memory_order_acquire))
                     {
-                        return true;  // Suspend
+                        return true;
                     }
 
                     // CAS failed. Since we are the only consumer, this MUST mean
@@ -132,7 +129,7 @@ namespace kio::sync
                 std::chrono::nanoseconds duration;
 
                 uint64_t timer_op_id = static_cast<uint64_t>(-1);
-                struct __kernel_timespec ts{};
+                __kernel_timespec ts{};
                 bool timer_submitted = false;
                 bool baton_signaled = false;
                 std::atomic<bool> resumed{false};
@@ -153,30 +150,28 @@ namespace kio::sync
                     baton.waiter_.store(h, std::memory_order_relaxed);
                     std::atomic_thread_fence(std::memory_order_release);
 
-                    uint8_t expected = NOT_SET;
-                    if (!baton.state_.compare_exchange_strong(expected, WAITING, std::memory_order_acq_rel, std::memory_order_acquire))
+                    if (uint8_t expected = NOT_SET; !baton.state_.compare_exchange_strong(expected, WAITING, std::memory_order_acq_rel, std::memory_order_acquire))
                     {
                         // Baton already SET - no timeout needed
                         baton_signaled = true;
                         return false;
                     }
 
-                    // Step 2: Set up timer (baton is now in WAITING state)
-                    timer_op_id = baton.owner_.get_op_id();
-                    baton.owner_.init_op_slot(timer_op_id, h);
+                    // Set up the timer (baton is now in WAITING state)
+                    timer_op_id = io::internal::WorkerAccess::get_op_id(baton.owner_);
+                    io::internal::WorkerAccess::init_op_slot(baton.owner_, timer_op_id, h);
 
                     ts.tv_sec = std::chrono::duration_cast<std::chrono::seconds>(duration).count();
                     ts.tv_nsec = (duration % std::chrono::seconds(1)).count();
 
-                    io_uring_sqe* sqe = io_uring_get_sqe(&baton.owner_.get_ring());
+                    io_uring_sqe* sqe = io_uring_get_sqe(&io::internal::WorkerAccess::get_ring(baton.owner_));
                     if (!sqe)
                     {
                         // Failed to get SQE - must unregister from baton
-                        baton.owner_.release_op_id(timer_op_id);
+                        io::internal::WorkerAccess::release_op_id(baton.owner_, timer_op_id);
                         timer_op_id = static_cast<uint64_t>(-1);
 
-                        uint8_t state = WAITING;
-                        if (baton.state_.compare_exchange_strong(state, NOT_SET, std::memory_order_acq_rel, std::memory_order_acquire))
+                        if (uint8_t state = WAITING; baton.state_.compare_exchange_strong(state, NOT_SET, std::memory_order_acq_rel, std::memory_order_acquire))
                         {
                             // Successfully unregistered - immediate timeout
                             baton_signaled = false;
@@ -211,21 +206,20 @@ namespace kio::sync
                     }
 
                     // Determine who resumed us by checking baton state
-                    const bool baton_is_set = baton.state_.load(std::memory_order_acquire) == SET;
 
-                    if (baton_is_set)
+                    if (baton.state_.load(std::memory_order_acquire) == SET)
                     {
                         // Baton signaled us
                         baton_signaled = true;
 
-                        // CRITICAL: We cannot safely cancel the timer because:
-                        // 1. The timer CQE might already be in the completion queue
-                        // 2. io_uring_prep_timeout_remove creates a NEW CQE with different op_id
-                        // 3. The original timer CQE will still arrive with timer_op_id
+                        // We cannot safely cancel the timer because:
+                        // The timer CQE might already be in the completion queue
+                        // io_uring_prep_timeout_remove creates a NEW CQE with different op_id
+                        // The original timer CQE will still arrive with timer_op_id
                         //
                         // Solution: Let the timer complete naturally and ignore its CQE
                         // by replacing the handler with noop_coroutine()
-                        baton.owner_.init_op_slot(timer_op_id, std::noop_coroutine());
+                        io::internal::WorkerAccess::init_op_slot(baton.owner_, timer_op_id, std::noop_coroutine());
 
                         // DO NOT attempt to cancel - just let it timeout naturally
                         // The noop handler will safely consume the CQE when it arrives
@@ -234,8 +228,7 @@ namespace kio::sync
                     {
                         // We were resumed by timer CQE
                         // Try to unregister from baton
-                        uint8_t expected = WAITING;
-                        if (baton.state_.compare_exchange_strong(expected, NOT_SET, std::memory_order_acq_rel, std::memory_order_acquire))
+                        if (uint8_t expected = WAITING; baton.state_.compare_exchange_strong(expected, NOT_SET, std::memory_order_acq_rel, std::memory_order_acquire))
                         {
                             // Successfully unregistered - pure timeout
                             baton_signaled = false;
@@ -244,17 +237,17 @@ namespace kio::sync
                         {
                             // CAS failed - baton was SET concurrently
                             // Report timeout (we're processing timer CQE)
-                            // Second resume from task queue will be caught by double-resume check
+                            // Second resume from the task queue will be caught by double-resume check
                             baton_signaled = false;
                         }
-                        // timer_op_id will be released by worker when processing the CQE
+                        // worker will release timer_op_id when processing the CQE
                     }
 
-                    // Mark timer as no longer active
+                    // Mark the timer as no longer active
                     timer_submitted = false;
                 }
 
-                bool was_signaled() const noexcept { return baton_signaled; }
+                [[nodiscard]] bool was_signaled() const noexcept { return baton_signaled; }
             };
 
             TimeoutState state{*this, timeout};
@@ -303,52 +296,48 @@ namespace kio::sync
                 }
 
                 // 1. Prepare Timer
-                timer_op_id = baton.owner_.get_op_id();
-                baton.owner_.init_op_slot(timer_op_id, h);
+                timer_op_id = io::internal::WorkerAccess::get_op_id(baton.owner_);
+                io::internal::WorkerAccess::init_op_slot(baton.owner_, timer_op_id, h);
 
                 ts.tv_sec = std::chrono::duration_cast<std::chrono::seconds>(duration).count();
                 ts.tv_nsec = (duration % std::chrono::seconds(1)).count();
 
-                io_uring_sqe* sqe = io_uring_get_sqe(&baton.owner_.get_ring());
-                if (sqe)
+                if (io_uring_sqe* sqe = io_uring_get_sqe(&io::internal::WorkerAccess::get_ring(baton.owner_)))
                 {
                     io_uring_prep_timeout(sqe, &ts, 0, 0);
                     io_uring_sqe_set_data64(sqe, timer_op_id);
-                    // Note: Worker loop submits automatically, or we rely on implicit submission
-                    // from previous ops. Usually safe in kio architecture.
                 }
                 else
                 {
                     // Ring full fallback: treat as immediate timeout
-                    baton.owner_.release_op_id(timer_op_id);
+                    io::internal::WorkerAccess::release_op_id(baton.owner_, timer_op_id);
                     timer_won_out = true;
                     return false;
                 }
 
-                // 2. Register Baton
+                // Register Baton
                 baton.waiter_.store(h, std::memory_order_relaxed);
                 std::atomic_thread_fence(std::memory_order_release);
 
-                uint8_t expected = NOT_SET;
-                if (baton.state_.compare_exchange_strong(expected, WAITING, std::memory_order_acq_rel, std::memory_order_acquire))
+                if (uint8_t expected = NOT_SET; baton.state_.compare_exchange_strong(expected, WAITING, std::memory_order_acq_rel, std::memory_order_acquire))
                 {
                     return true;  // Successfully suspended
                 }
 
-                // Baton is SET (Race: notify happened during setup).
-                // Cancel timer immediately.
+                // Baton is SET
+                // Cancel the timer immediately.
                 // We replace the callback with noop so the CQE is harmless.
-                baton.owner_.init_op_slot(timer_op_id, std::noop_coroutine());
+                io::internal::WorkerAccess::init_op_slot(baton.owner_, timer_op_id, std::noop_coroutine());
 
                 // Try to remove the timeout from kernel to be clean
-                io_uring_sqe* cancel_sqe = io_uring_get_sqe(&baton.owner_.get_ring());
-                if (cancel_sqe)
+                if (io_uring_sqe* cancel_sqe = io_uring_get_sqe(&io::internal::WorkerAccess::get_ring(baton.owner_)))
                 {
                     io_uring_prep_timeout_remove(cancel_sqe, timer_op_id, 0);
-                    io_uring_sqe_set_data64(cancel_sqe, baton.owner_.get_op_id());  // dummy op_id for remove
+                    io_uring_sqe_set_data64(cancel_sqe, io::internal::WorkerAccess::get_op_id(baton.owner_));
                 }
 
-                return false;  // Resume immediately
+                // Resume immediately
+                return false;
             }
 
             void await_resume()
@@ -359,27 +348,25 @@ namespace kio::sync
                     baton_won_out = true;
 
                     // If we started a timer, we must detach it
-                    if (timer_op_id != (uint64_t) -1)
+                    if (timer_op_id != static_cast<uint64_t>(-1))
                     {
                         // Detach handler so future timeout/cancel CQE doesn't resume us
-                        baton.owner_.init_op_slot(timer_op_id, std::noop_coroutine());
+                        io::internal::WorkerAccess::init_op_slot(baton.owner_, timer_op_id, std::noop_coroutine());
 
                         // Request kernel removal
-                        io_uring_sqe* sqe = io_uring_get_sqe(&baton.owner_.get_ring());
-                        if (sqe)
+                        if (io_uring_sqe* sqe = io_uring_get_sqe(&io::internal::WorkerAccess::get_ring(baton.owner_)))
                         {
                             io_uring_prep_timeout_remove(sqe, timer_op_id, 0);
                             // We grab a throwaway op_id for the removal just to keep accounting straight
-                            io_uring_sqe_set_data64(sqe, baton.owner_.get_op_id());
+                            io_uring_sqe_set_data64(sqe, io::internal::WorkerAccess::get_op_id(baton.owner_));
                         }
                     }
                 }
                 else
                 {
-                    // Baton not ready. Must be Timer?
+                    // Baton doesn't ready. Must be Timer?
                     // Try to unregister from Baton.
-                    uint8_t expected = WAITING;
-                    if (baton.state_.compare_exchange_strong(expected, NOT_SET, std::memory_order_acq_rel, std::memory_order_acquire))
+                    if (uint8_t expected = WAITING; baton.state_.compare_exchange_strong(expected, NOT_SET, std::memory_order_acq_rel, std::memory_order_acquire))
                     {
                         // Successfully removed from Baton. Pure Timeout.
                         timer_won_out = true;
