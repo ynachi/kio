@@ -5,8 +5,8 @@
 #include <filesystem>
 #include <gtest/gtest.h>
 
-#include "../../kio/core/worker.h"
-#include "../../kio/sync/sync_wait.h"
+#include "kio/core/worker.h"
+#include "kio/sync/sync_wait.h"
 #include "bitcask/include/data_file.h"
 #include "bitcask/include/hint_file.h"
 

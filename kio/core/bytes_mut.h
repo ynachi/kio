@@ -15,10 +15,9 @@ namespace kio
     /**
      * @brief A growable buffer optimized for reading data in chunks and consuming it.
      *
-     * Inspired by Rust's BytesMut, this provides:
-     * - Zero-copy reads via advance() (no memory until compact())
-     * - Separate read and write regions
-     * - Efficient growth with reserve()
+     * Features:
+     * - Lazy Compaction: Only moves memory when strictly necessary.
+     * - Smart Growth: Copies only live data when resizing.
      *
      * Memory layout:
      * [consumed data | readable data | writable space]
@@ -51,27 +50,47 @@ namespace kio
     {
     public:
         BytesMut() = default;
-        explicit BytesMut(const size_t initial_capacity) { buffer_.reserve(initial_capacity); }
+        explicit BytesMut(const size_t initial_capacity) {
+            buffer_.reserve(initial_capacity);
+            buffer_.resize(initial_capacity);
+        }
 
         /**
          * @brief Ensures at least `additional` bytes of writable space.
-         * May trigger compaction or reallocation.
+         * May trigger reallocation.
          */
-        void reserve(size_t additional)
-        {
+        void reserve(const size_t additional) {
             if (writable() >= additional) return;
 
-            // Try compacting first if there's significant consumed space
-            if (read_pos_ >= buffer_.size() / kCompressionFactor && read_pos_ > 0)
-            {
-                compact();
-                if (writable() >= additional) return;
+            const size_t data_len = remaining();
+            const size_t available_total = buffer_.capacity();
+
+            // Strategy 1: Compact in place if it fits
+            if (available_total >= data_len + additional) {
+                // Threshold: only compact if significant waste
+                if (read_pos_ >= kAutoCompactionThreshold || read_pos_ >= buffer_.size() / 4) {
+                    compact();
+                }
+
+                if (buffer_.size() < write_pos_ + additional) {
+                    buffer_.resize(write_pos_ + additional);
+                }
+                return;
             }
 
-            // Need to grow the buffer
-            const size_t needed_capacity = write_pos_ + additional;
-            buffer_.reserve(needed_capacity);
-            buffer_.resize(needed_capacity);
+            // Strategy 2: Reallocate, copy ONLY live data
+            const size_t new_capacity = std::max(available_total * 2, data_len + additional);
+            std::vector<char> new_buffer;
+            new_buffer.reserve(new_capacity);
+            new_buffer.resize(new_capacity);
+
+            if (data_len > 0) {
+                std::memcpy(new_buffer.data(), buffer_.data() + read_pos_, data_len);
+            }
+
+            buffer_ = std::move(new_buffer);
+            read_pos_ = 0;
+            write_pos_ = data_len;
         }
 
         /**
@@ -122,7 +141,9 @@ namespace kio
         /**
          * @brief Number of bytes available for writing
          */
-        [[nodiscard]] size_t writable() const { return buffer_.size() - write_pos_; }
+        [[nodiscard]] size_t writable() const {
+            return buffer_.size() - write_pos_;
+        }
 
         /**
          * @brief Commits `n` bytes of written data
@@ -208,7 +229,8 @@ namespace kio
         std::vector<char> buffer_;
         size_t read_pos_ = 0;
         size_t write_pos_ = 0;
-        const size_t kCompressionFactor = 2;
+        static constexpr  size_t kCompressionFactor = 2;
+        static constexpr size_t kAutoCompactionThreshold = 1024;
     };
 }  // namespace kio
 #endif  // KIO_BYTES_MUT_H

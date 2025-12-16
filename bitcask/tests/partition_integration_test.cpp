@@ -7,8 +7,8 @@
 #include <random>
 #include <unordered_set>
 
-#include "../../kio/core/worker.h"
-#include "../../kio/sync/sync_wait.h"
+#include "kio/core/worker.h"
+#include "kio/sync/sync_wait.h"
 #include "bitcask/include/partition.h"
 
 using namespace bitcask;

@@ -5,22 +5,24 @@
 #include <filesystem>
 #include <gtest/gtest.h>
 
-#include "../../kio/core/worker.h"
-#include "../../kio/sync/sync_wait.h"
 #include "bitcask/include/partition.h"
+#include "kio/core/worker.h"
+#include "kio/sync/sync_wait.h"
 
 using namespace bitcask;
 using namespace kio;
 using namespace kio::io;
 
-class CompactionTest : public ::testing::Test {
+class CompactionTest : public ::testing::Test
+{
 protected:
     std::filesystem::path test_dir_;
     std::unique_ptr<Worker> worker_;
     std::thread worker_thread_;
     BitcaskConfig config_;
 
-    void SetUp() override {
+    void SetUp() override
+    {
         alog::configure(1024, LogLevel::Disabled);
         test_dir_ = std::filesystem::temp_directory_path() / "bitcask_compaction_test";
         std::filesystem::remove_all(test_dir_);
@@ -38,20 +40,21 @@ protected:
         worker_config.uring_queue_depth = 128;
         worker_ = std::make_unique<Worker>(0, worker_config);
 
-        worker_thread_ = std::thread([this]() {
-            worker_->loop_forever();
-        });
+        worker_thread_ = std::thread([this]() { worker_->loop_forever(); });
 
         worker_->wait_ready();
     }
 
-    void TearDown() override {
-        if (worker_) {
-            (void)worker_->request_stop();
+    void TearDown() override
+    {
+        if (worker_)
+        {
+            (void) worker_->request_stop();
             worker_->wait_shutdown();
         }
 
-        if (worker_thread_.joinable()) {
+        if (worker_thread_.joinable())
+        {
             worker_thread_.join();
         }
 
@@ -63,8 +66,10 @@ protected:
 // ============================================================================
 // Basic Compaction Tests
 // ============================================================================
-TEST_F(CompactionTest, ReducesFileCount) {
-    auto test_coro = [&]() -> Task<void> {
+TEST_F(CompactionTest, ReducesFileCount)
+{
+    auto test_coro = [&]() -> Task<void>
+    {
         co_await SwitchToWorker(*worker_);
 
         auto partition_result = co_await Partition::open(config_, *worker_, 0);
@@ -75,13 +80,15 @@ TEST_F(CompactionTest, ReducesFileCount) {
         std::vector data(500, 'X');
 
         // Write to multiple files
-        for (int i = 0; i < 20; ++i) {
+        for (int i = 0; i < 20; ++i)
+        {
             std::string key = std::format("key_{}", i);
             co_await partition->put(std::move(key), std::vector(data));
         }
 
         // Update half (creates dead data)
-        for (int i = 0; i < 10; ++i) {
+        for (int i = 0; i < 10; ++i)
+        {
             std::string key = std::format("key_{}", i);
             co_await partition->put(std::move(key), std::vector(data));
         }
@@ -91,7 +98,7 @@ TEST_F(CompactionTest, ReducesFileCount) {
 
         EXPECT_GT(files_before, 1) << "Should have multiple files";
 
-        //Compact
+        // Compact
         auto compact_result = co_await partition->compact();
         EXPECT_TRUE(compact_result.has_value());
 
@@ -106,8 +113,10 @@ TEST_F(CompactionTest, ReducesFileCount) {
     SyncWait(test_coro());
 }
 
-TEST_F(CompactionTest, PreservesLiveData) {
-    auto test_coro = [&]() -> Task<void> {
+TEST_F(CompactionTest, PreservesLiveData)
+{
+    auto test_coro = [&]() -> Task<void>
+    {
         co_await SwitchToWorker(*worker_);
 
         auto partition_res = co_await Partition::open(config_, *worker_, 0);
@@ -116,7 +125,8 @@ TEST_F(CompactionTest, PreservesLiveData) {
 
         // Write initial data
         std::vector<std::string> keys;
-        for (int i = 0; i < 50; ++i) {
+        for (int i = 0; i < 50; ++i)
+        {
             std::string key = std::format("key_{}", i);
             std::string val_str = std::format("value_{}", i);
             std::vector value(val_str.begin(), val_str.end());
@@ -126,7 +136,8 @@ TEST_F(CompactionTest, PreservesLiveData) {
         }
 
         // Create fragmentation by updating some keys
-        for (int i = 0; i < 25; ++i) {
+        for (int i = 0; i < 25; ++i)
+        {
             std::string key = std::format("key_{}", i);
             std::string val_str = std::format("updated_{}", i);
             std::vector value(val_str.begin(), val_str.end());
@@ -139,19 +150,24 @@ TEST_F(CompactionTest, PreservesLiveData) {
         EXPECT_TRUE(compact_result.has_value());
 
         // Verify all live data is accessible
-        for (int i = 0; i < 50; ++i) {
+        for (int i = 0; i < 50; ++i)
+        {
             std::string key = std::format("key_{}", i);
             auto get_result = co_await partition->get(key);
 
             EXPECT_TRUE(get_result.has_value()) << "Failed to get " << key;
             EXPECT_TRUE(get_result.value().has_value()) << key << " should exist";
 
-            if (get_result.value().has_value()) {
+            if (get_result.value().has_value())
+            {
                 // Check correct value (updated or original)
                 std::string expected;
-                if (i < 25) {
+                if (i < 25)
+                {
                     expected = std::format("updated_{}", i);
-                } else {
+                }
+                else
+                {
                     expected = std::format("value_{}", i);
                 }
 
@@ -164,8 +180,10 @@ TEST_F(CompactionTest, PreservesLiveData) {
     SyncWait(test_coro());
 }
 
-TEST_F(CompactionTest, RemovesDeletedKeys) {
-    auto test_coro = [&]() -> Task<void> {
+TEST_F(CompactionTest, RemovesDeletedKeys)
+{
+    auto test_coro = [&]() -> Task<void>
+    {
         co_await SwitchToWorker(*worker_);
 
         auto partition_res = co_await Partition::open(config_, *worker_, 0);
@@ -173,21 +191,24 @@ TEST_F(CompactionTest, RemovesDeletedKeys) {
         auto partition = std::move(partition_res.value());
 
         // Write data
-        for (int i = 0; i < 30; ++i) {
+        for (int i = 0; i < 30; ++i)
+        {
             std::string key = std::format("key_{}", i);
             std::vector value(100, 'X');
             co_await partition->put(std::move(key), std::move(value));
         }
 
         // Delete half
-        for (int i = 0; i < 15; ++i) {
+        for (int i = 0; i < 15; ++i)
+        {
             std::string key = std::format("key_{}", i);
             co_await partition->del(key);
         }
 
         auto stats_before = partition->get_stats();
         uint64_t total_bytes_before = 0;
-        for (const auto& file_stats: stats_before.data_files | std::views::values) {
+        for (const auto& file_stats: stats_before.data_files | std::views::values)
+        {
             total_bytes_before += file_stats.total_bytes;
         }
 
@@ -196,17 +217,18 @@ TEST_F(CompactionTest, RemovesDeletedKeys) {
 
         auto stats_after = partition->get_stats();
         uint64_t total_bytes_after = 0;
-        for (const auto& file_stats: stats_after.data_files | std::views::values) {
+        for (const auto& file_stats: stats_after.data_files | std::views::values)
+        {
             total_bytes_after += file_stats.total_bytes;
         }
 
         // Should have reclaimed space
-        EXPECT_LT(total_bytes_after, total_bytes_before)
-            << "Compaction should reduce total file size";
+        EXPECT_LT(total_bytes_after, total_bytes_before) << "Compaction should reduce total file size";
         EXPECT_GT(stats_after.bytes_reclaimed_total, 0);
 
         // Verify deleted keys stay deleted
-        for (int i = 0; i < 15; ++i) {
+        for (int i = 0; i < 15; ++i)
+        {
             std::string key = std::format("key_{}", i);
             auto get_result = co_await partition->get(key);
 
@@ -215,12 +237,12 @@ TEST_F(CompactionTest, RemovesDeletedKeys) {
         }
 
         // Verify kept keys exist
-        for (int i = 15; i < 30; ++i) {
+        for (int i = 15; i < 30; ++i)
+        {
             std::string key = std::format("key_{}", i);
             auto get_result = co_await partition->get(key);
 
-            EXPECT_TRUE(get_result.has_value() && get_result.value().has_value())
-                << key << " should exist";
+            EXPECT_TRUE(get_result.has_value() && get_result.value().has_value()) << key << " should exist";
         }
     };
 
@@ -228,8 +250,10 @@ TEST_F(CompactionTest, RemovesDeletedKeys) {
 }
 
 // Compaction Handles Concurrent Updates (via KeyDir CAS)
-TEST_F(CompactionTest, HandlesStaleEntries) {
-    auto test_coro = [&]() -> Task<void> {
+TEST_F(CompactionTest, HandlesStaleEntries)
+{
+    auto test_coro = [&]() -> Task<void>
+    {
         co_await SwitchToWorker(*worker_);
 
         auto partition_res = co_await Partition::open(config_, *worker_, 0);
@@ -239,20 +263,23 @@ TEST_F(CompactionTest, HandlesStaleEntries) {
         std::vector data(300, 'X');
 
         // Write initial data (will be in old files)
-        for (int i = 0; i < 10; ++i) {
+        for (int i = 0; i < 10; ++i)
+        {
             std::string key = std::format("key_{}", i);
             co_await partition->put(std::string(key), std::vector(data));
         }
 
         // Force file rotation by writing more
-        for (int i = 10; i < 20; ++i) {
+        for (int i = 10; i < 20; ++i)
+        {
             std::string key = std::format("key_{}", i);
             co_await partition->put(std::string(key), std::vector(data));
         }
 
         // Update keys 0-5 AFTER they're in old files
         // This simulates the case where compaction might encounter stale entries
-        for (int i = 0; i < 5; ++i) {
+        for (int i = 0; i < 5; ++i)
+        {
             std::string key = std::format("key_{}", i);
             std::vector new_data(300, 'Y');
             co_await partition->put(std::move(key), std::move(new_data));
@@ -263,29 +290,31 @@ TEST_F(CompactionTest, HandlesStaleEntries) {
         EXPECT_TRUE(compact_result.has_value());
 
         // Verify updated keys have correct values (not the old ones)
-        for (int i = 0; i < 5; ++i) {
+        for (int i = 0; i < 5; ++i)
+        {
             std::string key = std::format("key_{}", i);
             auto get_result = co_await partition->get(key);
 
             EXPECT_TRUE(get_result.has_value() && get_result.value().has_value());
 
-            if (get_result.value().has_value()) {
+            if (get_result.value().has_value())
+            {
                 // Should be 'Y', not 'X'
-                EXPECT_EQ(get_result.value().value()[0], 'Y')
-                    << "Key " << key << " should have updated value";
+                EXPECT_EQ(get_result.value().value()[0], 'Y') << "Key " << key << " should have updated value";
             }
         }
 
         // Keys 5-9 should still have 'X'
-        for (int i = 5; i < 10; ++i) {
+        for (int i = 5; i < 10; ++i)
+        {
             std::string key = std::format("key_{}", i);
             auto get_result = co_await partition->get(key);
 
             EXPECT_TRUE(get_result.has_value() && get_result.value().has_value());
 
-            if (get_result.value().has_value()) {
-                EXPECT_EQ(get_result.value().value()[0], 'X')
-                    << "Key " << key << " should have original value";
+            if (get_result.value().has_value())
+            {
+                EXPECT_EQ(get_result.value().value()[0], 'X') << "Key " << key << " should have original value";
             }
         }
     };
@@ -294,8 +323,10 @@ TEST_F(CompactionTest, HandlesStaleEntries) {
 }
 
 // Recovery After Compaction Tests
-TEST_F(CompactionTest, RecoveryAfterCompaction) {
-    auto test_coro = [&]() -> Task<void> {
+TEST_F(CompactionTest, RecoveryAfterCompaction)
+{
+    auto test_coro = [&]() -> Task<void>
+    {
         co_await SwitchToWorker(*worker_);
 
         // Phase 1: Write, compact, close
@@ -305,14 +336,16 @@ TEST_F(CompactionTest, RecoveryAfterCompaction) {
             auto partition = std::move(partition_res.value());
 
             // Write data
-            for (int i = 0; i < 20; ++i) {
+            for (int i = 0; i < 20; ++i)
+            {
                 std::string key = std::format("key_{}", i);
                 std::vector value(200, static_cast<char>('A' + i % 26));
                 co_await partition->put(std::move(key), std::move(value));
             }
 
             // Update to create fragmentation
-            for (int i = 0; i < 10; ++i) {
+            for (int i = 0; i < 10; ++i)
+            {
                 std::string key = std::format("key_{}", i);
                 std::vector value(200, 'Z');
                 co_await partition->put(std::move(key), std::move(value));
@@ -333,14 +366,15 @@ TEST_F(CompactionTest, RecoveryAfterCompaction) {
             auto partition = std::move(partition_res.value());
 
             // Verify all data
-            for (int i = 0; i < 20; ++i) {
+            for (int i = 0; i < 20; ++i)
+            {
                 std::string key = std::format("key_{}", i);
                 auto get_result = co_await partition->get(key);
 
-                EXPECT_TRUE(get_result.has_value() && get_result.value().has_value())
-                    << "Key " << key << " should exist after recovery";
+                EXPECT_TRUE(get_result.has_value() && get_result.value().has_value()) << "Key " << key << " should exist after recovery";
 
-                if (get_result.value().has_value()) {
+                if (get_result.value().has_value())
+                {
                     char expected_char = (i < 10) ? 'Z' : static_cast<char>('A' + i % 26);
                     EXPECT_EQ(get_result.value().value()[0], expected_char);
                 }
@@ -352,8 +386,10 @@ TEST_F(CompactionTest, RecoveryAfterCompaction) {
 }
 
 
-TEST_F(CompactionTest, MultipleCompactionCycles) {
-    auto test_coro = [&]() -> Task<void> {
+TEST_F(CompactionTest, MultipleCompactionCycles)
+{
+    auto test_coro = [&]() -> Task<void>
+    {
         co_await SwitchToWorker(*worker_);
 
         auto partition_res = co_await Partition::open(config_, *worker_, 0);
@@ -367,22 +403,26 @@ TEST_F(CompactionTest, MultipleCompactionCycles) {
         std::vector data(400, 'X');
 
         // Cycle 1
-        for (int i = 0; i < 15; ++i) {
+        for (int i = 0; i < 15; ++i)
+        {
             co_await partition->put(std::format("key_{}", i), std::vector(data));
         }
-        for (int i = 0; i < 10; ++i) {
+        for (int i = 0; i < 10; ++i)
+        {
             co_await partition->put(std::format("key_{}", i), std::vector(data));
         }
         co_await partition->compact();
 
         // Cycle 2
-        for (int i = 0; i < 10; ++i) {
+        for (int i = 0; i < 10; ++i)
+        {
             co_await partition->put(std::format("key_{}", i), std::vector(data));
         }
         co_await partition->compact();
 
         // Cycle 3
-        for (int i = 5; i < 15; ++i) {
+        for (int i = 5; i < 15; ++i)
+        {
             co_await partition->del(std::format("key_{}", i));
         }
         co_await partition->compact();
@@ -392,12 +432,14 @@ TEST_F(CompactionTest, MultipleCompactionCycles) {
         EXPECT_GE(stats.compactions_total, 3);
 
         // Verify final state
-        for (int i = 0; i < 5; ++i) {
+        for (int i = 0; i < 5; ++i)
+        {
             auto get_result = co_await partition->get(std::format("key_{}", i));
             EXPECT_TRUE(get_result.has_value() && get_result.value().has_value());
         }
 
-        for (int i = 5; i < 15; ++i) {
+        for (int i = 5; i < 15; ++i)
+        {
             auto get_result = co_await partition->get(std::format("key_{}", i));
             EXPECT_TRUE(get_result.has_value());
             EXPECT_FALSE(get_result.value().has_value()) << "Should be deleted";
@@ -412,8 +454,10 @@ TEST_F(CompactionTest, MultipleCompactionCycles) {
 // Edge Cases & Stress Tests
 // ============================================================================
 
-TEST_F(CompactionTest, AllDeadData) {
-    auto test_coro = [&]() -> Task<void> {
+TEST_F(CompactionTest, AllDeadData)
+{
+    auto test_coro = [&]() -> Task<void>
+    {
         co_await SwitchToWorker(*worker_);
 
         auto partition_res = co_await Partition::open(config_, *worker_, 0);
@@ -421,14 +465,16 @@ TEST_F(CompactionTest, AllDeadData) {
         auto partition = std::move(partition_res.value());
 
         // Write data
-        for (int i = 0; i < 20; ++i) {
+        for (int i = 0; i < 20; ++i)
+        {
             std::string key = std::format("key_{}", i);
             std::vector value(200, 'X');
             co_await partition->put(std::move(key), std::move(value));
         }
 
         // Delete everything
-        for (int i = 0; i < 20; ++i) {
+        for (int i = 0; i < 20; ++i)
+        {
             co_await partition->del(std::format("key_{}", i));
         }
 
@@ -444,7 +490,8 @@ TEST_F(CompactionTest, AllDeadData) {
         EXPECT_GT(stats_after.bytes_reclaimed_total, 0);
 
         // All gets should return nothing
-        for (int i = 0; i < 20; ++i) {
+        for (int i = 0; i < 20; ++i)
+        {
             auto get_result = co_await partition->get(std::format("key_{}", i));
             EXPECT_TRUE(get_result.has_value());
             EXPECT_FALSE(get_result.value().has_value());
@@ -454,8 +501,10 @@ TEST_F(CompactionTest, AllDeadData) {
     SyncWait(test_coro());
 }
 
-TEST_F(CompactionTest, NoDeadData) {
-    auto test_coro = [&]() -> Task<void> {
+TEST_F(CompactionTest, NoDeadData)
+{
+    auto test_coro = [&]() -> Task<void>
+    {
         co_await SwitchToWorker(*worker_);
 
         auto partition_res = co_await Partition::open(config_, *worker_, 0);
@@ -463,7 +512,8 @@ TEST_F(CompactionTest, NoDeadData) {
         auto partition = std::move(partition_res.value());
 
         // Write fresh data (no updates, no deletes)
-        for (int i = 0; i < 10; ++i) {
+        for (int i = 0; i < 10; ++i)
+        {
             std::string key = std::format("key_{}", i);
             std::vector value(100, 'X');
             co_await partition->put(std::move(key), std::move(value));
@@ -479,7 +529,8 @@ TEST_F(CompactionTest, NoDeadData) {
 
         // Bytes reclaimed should be minimal (only headers/metadata overhead)
         // All keys should still be accessible
-        for (int i = 0; i < 10; ++i) {
+        for (int i = 0; i < 10; ++i)
+        {
             auto get_result = co_await partition->get(std::format("key_{}", i));
             EXPECT_TRUE(get_result.has_value() && get_result.value().has_value());
         }
@@ -488,8 +539,10 @@ TEST_F(CompactionTest, NoDeadData) {
     SyncWait(test_coro());
 }
 
-TEST_F(CompactionTest, ManySmallUpdates) {
-    auto test_coro = [&]() -> Task<void> {
+TEST_F(CompactionTest, ManySmallUpdates)
+{
+    auto test_coro = [&]() -> Task<void>
+    {
         co_await SwitchToWorker(*worker_);
 
         auto partition_res = co_await Partition::open(config_, *worker_, 0);
@@ -504,7 +557,8 @@ TEST_F(CompactionTest, ManySmallUpdates) {
         // max_file_size = 4KB.
         // This guarantees ~6 rotations, creating multiple sealed files
         // that contain entirely dead data (versions 0..48), ensuring they exceed the threshold.
-        for (int version = 0; version < 50; ++version) {
+        for (int version = 0; version < 50; ++version)
+        {
             std::string val_str = std::format("version_{}", version);
             // Pad to 512 bytes
             std::vector value(512, 'X');
@@ -534,7 +588,8 @@ TEST_F(CompactionTest, ManySmallUpdates) {
         auto get_result = co_await partition->get(key);
         EXPECT_TRUE(get_result.has_value() && get_result.value().has_value());
 
-        if (get_result.value().has_value()) {
+        if (get_result.value().has_value())
+        {
             std::string expected_prefix = "version_49";
             // Check prefix
             std::string actual(get_result.value().value().begin(), get_result.value().value().begin() + static_cast<int>(expected_prefix.size()));
@@ -547,8 +602,10 @@ TEST_F(CompactionTest, ManySmallUpdates) {
     SyncWait(test_coro());
 }
 
-TEST_F(CompactionTest, StatsTracking) {
-    auto test_coro = [&]() -> Task<void> {
+TEST_F(CompactionTest, StatsTracking)
+{
+    auto test_coro = [&]() -> Task<void>
+    {
         co_await SwitchToWorker(*worker_);
 
         auto partition_res = co_await Partition::open(config_, *worker_, 0);
@@ -557,12 +614,14 @@ TEST_F(CompactionTest, StatsTracking) {
 
         // Create workload
         std::vector data(300, 'X');
-        for (int i = 0; i < 30; ++i) {
+        for (int i = 0; i < 30; ++i)
+        {
             co_await partition->put(std::format("key_{}", i), std::vector(data));
         }
 
         // Update to fragment
-        for (int i = 0; i < 15; ++i) {
+        for (int i = 0; i < 15; ++i)
+        {
             co_await partition->put(std::format("key_{}", i), std::vector<char>(data));
         }
 
@@ -594,8 +653,10 @@ TEST_F(CompactionTest, StatsTracking) {
 // ============================================================================
 
 
-TEST_F(CompactionTest, DirectCompactorAPI) {
-    auto test_coro = [&]() -> Task<void> {
+TEST_F(CompactionTest, DirectCompactorAPI)
+{
+    auto test_coro = [&]() -> Task<void>
+    {
         co_await SwitchToWorker(*worker_);
 
         // Create a partition and write data
@@ -605,12 +666,14 @@ TEST_F(CompactionTest, DirectCompactorAPI) {
         auto partition = std::move(partition_res.value());
 
         std::vector data(200, 'A');
-        for (int i = 0; i < 20; ++i) {
+        for (int i = 0; i < 20; ++i)
+        {
             co_await partition->put(std::format("key_{}", i), std::vector(data));
         }
 
         // Update to create fragmentation
-        for (int i = 0; i < 10; ++i) {
+        for (int i = 0; i < 10; ++i)
+        {
             std::vector new_data(200, 'B');
             co_await partition->put(std::format("key_{}", i), std::move(new_data));
         }
@@ -620,7 +683,8 @@ TEST_F(CompactionTest, DirectCompactorAPI) {
         // are the primary way to test compaction correctness.
 
         // Verify compaction worked by checking data is accessible
-        for (int i = 0; i < 20; ++i) {
+        for (int i = 0; i < 20; ++i)
+        {
             auto get_result = co_await partition->get(std::format("key_{}", i));
             EXPECT_TRUE(get_result.has_value() && get_result.value().has_value());
         }
@@ -629,8 +693,10 @@ TEST_F(CompactionTest, DirectCompactorAPI) {
     SyncWait(test_coro());
 }
 
-TEST_F(CompactionTest, FragmentationThreshold) {
-    auto test_coro = [&]() -> Task<void> {
+TEST_F(CompactionTest, FragmentationThreshold)
+{
+    auto test_coro = [&]() -> Task<void>
+    {
         co_await SwitchToWorker(*worker_);
 
         auto partition_res = co_await Partition::open(config_, *worker_, 0);
@@ -639,13 +705,15 @@ TEST_F(CompactionTest, FragmentationThreshold) {
 
         // Write data
         std::vector data(300, 'X');
-        for (int i = 0; i < 20; ++i) {
+        for (int i = 0; i < 20; ++i)
+        {
             co_await partition->put(std::format("key_{}", i), std::vector(data));
         }
 
         // Create exactly threshold fragmentation (50%)
         // Update half the keys
-        for (int i = 0; i < 10; ++i) {
+        for (int i = 0; i < 10; ++i)
+        {
             co_await partition->put(std::format("key_{}", i), std::vector(data));
         }
 
@@ -670,29 +738,34 @@ TEST_F(CompactionTest, FragmentationThreshold) {
 // The KeyDir CAS logic ensures that if a key is updated during compaction,
 // the old value moved by compaction does NOT overwrite the new value in KeyDir.
 // ----------------------------------------------------------------------------
-TEST_F(CompactionTest, ConcurrentUpdatesDuringCompaction) {
-    auto test_coro = [&]() -> Task<void> {
+TEST_F(CompactionTest, ConcurrentUpdatesDuringCompaction)
+{
+    auto test_coro = [&]() -> Task<void>
+    {
         co_await SwitchToWorker(*worker_);
 
         const auto partition = (co_await Partition::open(config_, *worker_, 0)).value();
 
         // 1. Seed data (lots of it to make compaction slow)
         std::vector payload(100, 'A');
-        for (int i = 0; i < 1000; ++i) {
+        for (int i = 0; i < 1000; ++i)
+        {
             co_await partition->put(std::format("static_{}", i), std::vector(payload));
         }
         // Create garbage to ensure compaction has work to do
-        for (int i = 0; i < 500; ++i) {
+        for (int i = 0; i < 500; ++i)
+        {
             co_await partition->put(std::format("static_{}", i), std::vector(payload));
         }
 
         // 2. Define concurrent tasks
 
         // Task A: The Compactor
-        auto task_compact = [&]() -> Task<void> {
+        auto task_compact = [&]() -> Task<void>
+        {
             co_await SwitchToWorker(*worker_);
             // Yield a bit to let the writer start
-            for(int i=0; i<10; ++i) co_await worker_->async_sleep(std::chrono::milliseconds(1));
+            for (int i = 0; i < 10; ++i) co_await worker_->async_sleep(std::chrono::milliseconds(1));
 
             const auto res = co_await partition->compact();
             EXPECT_TRUE(res.has_value());
@@ -700,10 +773,12 @@ TEST_F(CompactionTest, ConcurrentUpdatesDuringCompaction) {
 
         // Task B: The Concurrent Writer
         // Writes to a specific key "race_key" continuously.
-        auto task_writer = [&]() -> Task<void> {
+        auto task_writer = [&]() -> Task<void>
+        {
             co_await SwitchToWorker(*worker_);
 
-            for (int i = 0; i < 100; ++i) {
+            for (int i = 0; i < 100; ++i)
+            {
                 // Changing values: V_0, V_1, ... V_99
                 std::string val = std::format("V_{}", i);
                 co_await partition->put("race_key", std::vector<char>(val.begin(), val.end()));
@@ -750,8 +825,10 @@ TEST_F(CompactionTest, ConcurrentUpdatesDuringCompaction) {
 // Verifies that the background compaction loop responds to the manual trigger
 // and performs compaction when signaled.
 // ----------------------------------------------------------------------------
-TEST_F(CompactionTest, CompactionLoopTrigger) {
-    auto test_coro = [&]() -> Task<void> {
+TEST_F(CompactionTest, CompactionLoopTrigger)
+{
+    auto test_coro = [&]() -> Task<void>
+    {
         co_await SwitchToWorker(*worker_);
 
         // Enable auto-compaction config
@@ -765,11 +842,13 @@ TEST_F(CompactionTest, CompactionLoopTrigger) {
 
         // 1. Create fragmentation to give the loop something to do
         std::vector data(400, 'A');
-        for (int i = 0; i < 20; ++i) {
+        for (int i = 0; i < 20; ++i)
+        {
             co_await partition->put(std::format("key_{}", i), std::vector(data));
         }
         // Update to create dead data
-        for (int i = 0; i < 15; ++i) {
+        for (int i = 0; i < 15; ++i)
+        {
             co_await partition->put(std::format("key_{}", i), std::vector(data));
         }
 
@@ -780,14 +859,16 @@ TEST_F(CompactionTest, CompactionLoopTrigger) {
         // 4. Wait for the background loop to process the compaction
         // The loop waits on compaction_trigger_ OR the timeout.
         // We put a generous wait here (up to 2 seconds) to allow the loop to wake up.
-        for (int i = 0; i < 40; ++i) {
+        for (int i = 0; i < 40; ++i)
+        {
             co_await worker_->async_sleep(std::chrono::milliseconds(50));
             if (partition->get_stats().compactions_total > 0) break;
         }
 
         const auto stats_after = partition->get_stats();
 
-        if (config_.auto_compact) {
+        if (config_.auto_compact)
+        {
             EXPECT_GE(stats_after.compactions_total, 1) << "Background loop should have compacted files";
         }
 
@@ -797,7 +878,8 @@ TEST_F(CompactionTest, CompactionLoopTrigger) {
     SyncWait(test_coro());
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv)
+{
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }
