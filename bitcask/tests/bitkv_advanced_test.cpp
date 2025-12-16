@@ -13,10 +13,6 @@ using namespace kio;
 using namespace kio::io;
 using namespace std::chrono_literals;
 
-// ============================================================================
-// Test Fixture
-// ============================================================================
-
 class BitKVAdvancedTest : public ::testing::Test
 {
 protected:

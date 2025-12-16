@@ -13,7 +13,7 @@ function(add_bitkv_test test_name source_file)
             GTest::gtest_main
     )
 
-    # Include directories (adjust paths as needed)
+    # Include directories
     target_include_directories(${test_name} PRIVATE
             ${CMAKE_SOURCE_DIR}/include
             ${CMAKE_SOURCE_DIR}/bitcask/include

@@ -56,6 +56,7 @@ find_package(Threads REQUIRED)
 if (KIO_BUILD_BENCHMARK)
     find_package(PhotonLibOS REQUIRED)
 endif ()
+
 #-----------------------------------------------
 # Includes
 #----------------------------------------------
@@ -78,9 +79,9 @@ endif ()
 if (KIO_BUILD_TESTS)
     include(CTest)
     enable_testing()
+    add_subdirectory(kio/tests)
     add_subdirectory(tests)
 endif ()
-
 
 add_executable(testbed main.cpp)
 target_link_libraries(testbed PRIVATE kio_bitcask kio_lib)

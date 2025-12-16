@@ -14,6 +14,9 @@ set(CORE_HEADER_FILES
         sync/event.h
         sync/when_any.h
 
+        net/net.h
+        net/socket.h
+
         # metrics
         metrics/model.h
         metrics/serializer.h
@@ -21,6 +24,16 @@ set(CORE_HEADER_FILES
         metrics/collector.h
         metrics/registry.h
         metrics/server.h
+)
+
+set(CORE_SRC_FILES
+        core/worker.cpp
+        core/worker_pool.cpp
+        core/metrics_collector.cpp
+        net/net.cpp
+        fs/fs.cpp
+        metrics/serializer.cpp
+        metrics/server.cpp
 )
 
 set(TLS_HEADER_FILES
@@ -35,16 +48,12 @@ set(TLS_SRC_FILES
         tls/listener.cpp
 )
 
-set(CORE_SRC_FILES
-        core/worker.cpp
-        core/worker_pool.cpp
-        core/metrics_collector.cpp
-        net/net.h
-        net/socket.h
-        net/net.cpp
-        fs/fs.cpp
-        metrics/serializer.cpp
-        metrics/server.cpp
+set(RESP_HEADER_FILES
+        resp/parser.h
+)
+
+set(RESP_SRC_FILES
+        resp/parser.cpp
 )
 
 add_library(kio_lib
@@ -52,6 +61,8 @@ add_library(kio_lib
         ${CORE_SRC_FILES}
         ${TLS_HEADER_FILES}
         ${TLS_SRC_FILES}
+        ${RESP_HEADER_FILES}
+        ${RESP_SRC_FILES}
 )
 
 target_link_libraries(kio_lib PRIVATE
