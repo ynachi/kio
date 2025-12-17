@@ -80,7 +80,7 @@ namespace kio
         server_fd_ = res.value();
         ALOG_INFO("Metrics server listening on endpoint: {}:{}, FD:{}", bind_addr_, port_, server_fd_);
 
-        worker_ = std::make_unique<io::Worker>(kMetricServerWorkerId, config, [this](io::Worker& w) { accept_loop(w, server_fd_).detach(); });
+        worker_ = std::make_unique<io::Worker>(kMetricServerWorkerId, config, [this](io::Worker& w) { accept_loop(w, server_fd_); });
     }
 
     void MetricsServer::start()
@@ -154,7 +154,7 @@ namespace kio
             }
 
             FDGuard client_fd(res.value());
-            handle_client(worker, std::move(client_fd)).detach();
+            handle_client(worker, std::move(client_fd));
         }
     }
 

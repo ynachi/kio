@@ -123,7 +123,9 @@ namespace kio::io
     void Worker::initialize()
     {
         io_uring_params params{};
-        params.flags |= IORING_SETUP_COOP_TASKRUN | IORING_SETUP_SINGLE_ISSUER;
+        params.flags |= IORING_SETUP_COOP_TASKRUN
+        | IORING_SETUP_SINGLE_ISSUER
+        | IORING_SETUP_DEFER_TASKRUN;
 
         if (const int ret = io_uring_queue_init_params(static_cast<int>(config_.uring_queue_depth), &ring_, &params); ret < 0)
         {
@@ -174,11 +176,18 @@ namespace kio::io
         // event loop (split out to reuse the same logic as before)
         while (!stop_token_.stop_requested())
         {
-            if (auto sqe_num = submit_sqes_wait(); sqe_num > 0)
+            // Non-blocking submit
+            auto ret = io_uring_submit(&ring_);
+            check_syscall_return(ret);
+
+            // Get events with DEFER_TASKRUN
+            ret = io_uring_get_events(&ring_);
+            check_syscall_return(ret);
+            auto count = process_completions();
+            if (count == 0)
             {
-                ALOG_TRACE("Worker {} submitted {} operations", id_, sqe_num);
+                submit_sqes_wait();
             }
-            process_completions();
         }
 
         ALOG_INFO("Worker {} loop shut down completed", this->id_);
@@ -235,7 +244,7 @@ namespace kio::io
         return ret;
     }
 
-    void Worker::process_completions()
+    unsigned Worker::process_completions()
     {
         io_uring_cqe *cqe;
 
@@ -256,6 +265,9 @@ namespace kio::io
                     h.resume();
                 }
 
+                // Mark that we need wakeup for next post
+                needs_wakeup_.store(true, std::memory_order_release);
+
                 // Only re-arm the wakeup read if not stopping
                 // This prevents a pending operation during shutdown
                 if (!stop_token_.stop_requested())
@@ -274,6 +286,8 @@ namespace kio::io
             release_op_id(op_id);
         }
         io_uring_cq_advance(&ring_, count);
+
+        return count;
     }
 
     void Worker::drain_completions() { process_completions(); }
@@ -377,11 +391,10 @@ namespace kio::io
             return;
         }
 
-        // Signal the worker to wake up
-        constexpr uint64_t val = 1;
-        if (const ssize_t ret = ::write(wakeup_fd_, &val, sizeof(val)); ret < 0 && errno != EAGAIN)
-        {
-            ALOG_WARN("Worker {}: Failed to write to eventfd: {}", id_, strerror(errno));
+        // Only wake if worker was idle
+        if (needs_wakeup_.exchange(false, std::memory_order_acq_rel)) {
+            constexpr uint64_t val = 1;
+            ::write(wakeup_fd_, &val, sizeof(val));
         }
     }
 

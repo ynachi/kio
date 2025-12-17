@@ -161,6 +161,7 @@ namespace kio::io
         // to avoid a double shutdown
         std::atomic<bool> stopped_{false};
         WorkerStats stats_{};
+        std::atomic_bool needs_wakeup_{false};
 
         std::function<void(Worker&)> worker_init_callback_;
 
@@ -171,7 +172,7 @@ namespace kio::io
         static void check_kernel_version();
         void check_syscall_return(int ret);
         int submit_sqes_wait();
-        void process_completions();
+        unsigned process_completions();
         // typically used during shutdown. Drain the completion queue
         void drain_completions();
         // used to wake the io uring processing loop up

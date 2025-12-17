@@ -104,7 +104,7 @@ DetachedTask accept_loop(Worker& worker, const int listen_fd)
             continue;
         }
 
-        handle_client(worker, client_fd.value()).detach();
+        handle_client(worker, client_fd.value());
     }
 }
 
@@ -113,7 +113,7 @@ int main(int argc, char** argv)
     gflags::ParseCommandLineFlags(&argc, &argv, true);
 
     signal(SIGPIPE, SIG_IGN);
-    alog::configure(4096, LogLevel::Info);
+    alog::configure(4096, LogLevel::Disabled);
 
     // Create a listening socket
     auto server_fd_exp = net::create_tcp_server_socket(FLAGS_ip, FLAGS_port, static_cast<int>(FLAGS_backlog));
@@ -132,7 +132,7 @@ int main(int argc, char** argv)
     config.default_op_slots = FLAGS_op_slots;
 
     // Create a worker pool
-    IOPool pool(FLAGS_workers, config, [server_fd](Worker& worker) { accept_loop(worker, server_fd).detach(); });
+    IOPool pool(FLAGS_workers, config, [server_fd](Worker& worker) { accept_loop(worker, server_fd); });
 
     ALOG_INFO("Server running with {} workers", FLAGS_workers);
     std::cout << "\nPress Enter to stop...\n";

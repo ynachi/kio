@@ -8,6 +8,7 @@
 #include <string_view>
 
 #include "context.h"
+#include "kio/core/istream.h"
 #include "kio/core/worker.h"
 #include "kio/net/socket.h"
 
@@ -39,7 +40,7 @@ namespace kio::tls
      * - Kernel TLS module is loaded (`sudo modprobe tls`)
      * - A KTLS-compatible cipher is used (AES-GCM or ChaCha20-Poly1305)
      */
-    class TlsStream
+    class TlsStream: public io::IStream
     {
         io::Worker& worker_;
         TlsContext& ctx_;
@@ -61,7 +62,7 @@ namespace kio::tls
         // Takes ownership of the socket
         TlsStream(io::Worker& worker, net::Socket socket, TlsContext& context, TlsRole role);
 
-        ~TlsStream()
+        ~TlsStream() override
         {
             if (ssl_)
             {
@@ -94,21 +95,23 @@ namespace kio::tls
          * @param buf Buffer to read into
          * @return Number of bytes read, or error
          */
-        Task<Result<int>> async_read(std::span<char> buf);
+        Task<Result<int>> async_read(std::span<char> buf) override;
+
+        Task<Result<void>> async_read_exact(std::span<char> buf) override;
 
         /**
          * @brief Async write using kernel TLS
          * @param buf Buffer to write from
          * @return Number of bytes written, or error
          */
-        Task<Result<int>> async_write(std::span<const char> buf);
+        Task<Result<int>> async_write(std::span<const char> buf) override;
 
         /**
          * @brief Async write entire buffer using kernel TLS
          * @param buf Buffer to write completely
          * @return void on success, error on failure
          */
-        Task<Result<void>> async_write_exact(std::span<const char> buf);
+        Task<Result<void>> async_write_exact(std::span<const char> buf) override;
 
         /**
          * @brief Async sendfile using kernel TLS
@@ -128,7 +131,7 @@ namespace kio::tls
          *
          * @return void on success (including if peer already closed)
          */
-        [[nodiscard]] Task<Result<void>> async_shutdown();
+        [[nodiscard]] Task<Result<void>> async_shutdown() override;
 
         /**
          * @brief Shutdown TLS and close the underlying socket

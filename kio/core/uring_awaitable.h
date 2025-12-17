@@ -28,7 +28,9 @@ namespace kio::io
         std::tuple<Args...> args_;
         int immediate_result_{0};
 
-        bool await_ready() noexcept { return false; }  // NOLINT
+        bool await_ready() noexcept {
+            return immediate_result_ != 0;
+        }
 
         bool await_suspend(std::coroutine_handle<> h)  // NOLINT
         {
@@ -52,7 +54,7 @@ namespace kio::io
             internal::WorkerAccess::init_op_slot(worker_, op_id_, h);
 
             // Call prep sqe
-            std::apply([this]<typename... T>(T&&... unpacked_args) { io_uring_prep_(sqe_, std::forward<T>(unpacked_args)...); }, args_);
+            std::apply([this]<typename... T>(T&&... unpacked_args) { io_uring_prep_(sqe_, std::forward<T>(unpacked_args)...); }, std::move(args_));
 
             // save the op_id to the submission entry
             io_uring_sqe_set_data64(sqe_, op_id_);
@@ -69,7 +71,7 @@ namespace kio::io
             return static_cast<int>(internal::WorkerAccess::get_op_result(worker_, op_id_));
         };
 
-        explicit IoUringAwaitable(Worker& worker, Prep prep, Args... args) : worker_(worker), io_uring_prep_(std::move(prep)), args_(std::move(args)...) {}
+        explicit IoUringAwaitable(Worker& worker, Prep prep, Args... args) : worker_(worker), io_uring_prep_(std::move(prep)), args_(args...) {}
     };
 
     template<typename Prep, typename... Args>

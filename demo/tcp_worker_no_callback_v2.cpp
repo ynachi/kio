@@ -97,7 +97,7 @@ int main()
 {
     // 1. Application configuration
     signal(SIGPIPE, SIG_IGN);
-    alog::configure(1024, LogLevel::Info);
+    alog::configure(1024, LogLevel::Disabled);
 
     const std::string ip_address = "127.0.0.1";
     constexpr int port = 8080;

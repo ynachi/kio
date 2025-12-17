@@ -4,6 +4,7 @@
 #include "worker_pool.h"
 
 #include "async_logger.h"
+#include "crc32c/crc32c.h"
 
 namespace kio::io
 {
@@ -48,7 +49,11 @@ namespace kio::io
         return nullptr;
     }
 
-    size_t IOPool::get_worker_id_by_key(std::string_view key) const { return std::hash<std::string_view>{}(key) % workers_.size(); }
+    size_t IOPool::get_worker_id_by_key(std::string_view key) const
+    {
+        const uint32_t hash = crc32c::Crc32c(key.data(), key.size());
+        return hash % workers_.size();
+    }
 
     void IOPool::stop()
     {
@@ -84,8 +89,5 @@ namespace kio::io
             ALOG_DEBUG("WAITING shutdown has been completed", worker->get_id());
         }
         ALOG_INFO("IOPool has stopped.");
-
-        // TODO: do we need to do that ?
-        worker_threads_.clear();
     }
 }  // namespace kio::io

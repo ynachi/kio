@@ -11,6 +11,7 @@
 
 namespace kio
 {
+
     template<typename T>
     struct Task
     {
@@ -206,53 +207,35 @@ namespace kio
         }
     };
 
-
     struct DetachedTask
     {
         struct promise_type
         {
-            DetachedTask get_return_object() noexcept { return DetachedTask{std::coroutine_handle<promise_type>::from_promise(*this)}; }
+            DetachedTask get_return_object() noexcept { return {}; }
 
+            // Start immediately - this is fire-and-forget
             std::suspend_never initial_suspend() noexcept { return {}; }
+
+            // Self-destruct on completion
             std::suspend_never final_suspend() noexcept { return {}; }
 
             void return_void() noexcept {}
 
             void unhandled_exception() noexcept
             {
-                // TODO: better manage this exception
-                try
-                {
+                try {
                     throw;
-                }
-                catch (const std::exception &e)
-                {
+                } catch (const std::exception& e) {
                     ALOG_ERROR("DetachedTask exception: {}", e.what());
-                }
-                catch (...)
-                {
+                } catch (...) {
                     ALOG_ERROR("DetachedTask unknown exception");
                 }
             }
         };
 
-        using handle_t = std::coroutine_handle<promise_type>;
-        handle_t coro;
-
-        explicit DetachedTask(handle_t h) : coro(h) {}
-
-        DetachedTask(DetachedTask &&o) noexcept : coro(std::exchange(o.coro, {})) {}
-
-        ~DetachedTask()
-        {
-            if (coro) coro.destroy();
-        }
-
-        void detach() && noexcept
-        {
-            // Forget the handle → let coroutine run to completion
-            coro = {};
-        }
+        // No handle storage needed - coroutine is truly detached
+        // Constructor does nothing, destructor does nothing
+        DetachedTask() = default;
     };
 }  // namespace kio
 

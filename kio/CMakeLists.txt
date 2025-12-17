@@ -7,6 +7,7 @@ set(CORE_HEADER_FILES
         sync/mpsc_queue.h
         sync/sync_wait.h
         core/errors.h
+        core/istream.h
         fs/fs.h
         core/async_logger.h
         core/bytes_mut.h
@@ -70,6 +71,7 @@ target_link_libraries(kio_lib PRIVATE
         yalantinglibs::yalantinglibs
         OpenSSL::SSL
         OpenSSL::Crypto
+        crc32c
 )
 target_compile_options(kio_lib PRIVATE
         -Wall

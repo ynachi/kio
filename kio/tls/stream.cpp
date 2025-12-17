@@ -2,7 +2,7 @@
 // Created by Yao ACHI on 07/12/2025.
 //
 #include "stream.h"
-
+#include "kio/core/async_logger.h"
 #include "context.h"
 
 namespace kio::tls
@@ -156,6 +156,26 @@ namespace kio::tls
         }
 
         return worker_.async_read(socket_.get(), buf);
+    }
+
+    Task<Result<void>> TlsStream::async_read_exact(std::span<char> buf)
+    {
+        const auto st = worker_.get_stop_token();
+
+        size_t total_bytes_read = 0;
+        const size_t total_to_read = buf.size();
+
+        while (!st.stop_requested() && total_bytes_read < total_to_read)
+        {
+            const int bytes_read = KIO_TRY(co_await this->async_read(buf.subspan(total_bytes_read)));
+
+            if (bytes_read == 0)
+            {
+                co_return std::unexpected(Error{ErrorCategory::File, kIoEof});
+            }
+            total_bytes_read += static_cast<size_t>(bytes_read);
+        }
+        co_return {};
     }
 
     Task<Result<int>> TlsStream::async_write(std::span<const char> buf)
