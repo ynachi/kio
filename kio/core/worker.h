@@ -85,12 +85,23 @@ namespace kio::io
         size_t uring_queue_depth{1024};
         size_t uring_submit_batch_size{128};
         size_t tcp_backlog{128};
+        uint8_t uring_submit_timeout_ms{100};  // Deprecated/Unused in new loop, kept for ABI compat if needed
         int uring_default_flags = 0;
         size_t max_op_slots{1024 * 1024};
         size_t task_queue_capacity{1024};
+
         // The heartbeat interval in microseconds.
         // Controls the max latency for cross-thread task scheduling.
         uint32_t heartbeat_interval_us{100};
+
+        // The hybrid polling duration in microseconds.
+        // The kernel will busy-wait for this long before sleeping.
+        // Helps throughput/latency during bursts.
+        uint32_t busy_wait_us{20};
+
+        // Maximum number of tasks to process from the queue before forcing an IO check.
+        // Higher values = better CPU throughput. Lower values = better IO latency.
+        size_t task_batch_size{64};
 
         void check() const
         {
@@ -101,6 +112,10 @@ namespace kio::io
             if (task_queue_capacity == 0 || (task_queue_capacity & (task_queue_capacity - 1)) != 0)
             {
                 throw std::invalid_argument("task_queue_capacity must be a power of 2.");
+            }
+            if (task_batch_size == 0)
+            {
+                throw std::invalid_argument("task_batch_size must be > 0");
             }
         }
     };

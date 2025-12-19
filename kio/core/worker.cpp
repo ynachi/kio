@@ -53,20 +53,27 @@ namespace kio::io
 
     int Worker::submit_sqes_wait()
     {
-        // Define the heartbeat interval
+        // Define the heartbeat interval (max sleep time)
         __kernel_timespec ts{};
         ts.tv_sec = 0;
         ts.tv_nsec = config_.heartbeat_interval_us * 1000;
 
-        // On Kernel 6.0+, submit_and_wait_timeout + IORING_ENTER_GETEVENTS (which liburing handles)
-        // correctly flushes DEFER_TASKRUN work.
+        // Busy wait in kernel for this many microseconds before sleeping.
+        // This helps maintain high throughput during bursts by avoiding context switches.
+        // Requires Kernel 5.12+ (which we satisfy as we check for 6.0+).
+        const unsigned min_wait = config_.busy_wait_us;
+
         io_uring_cqe *cqe_ptr = nullptr;
-        const int ret = io_uring_submit_and_wait_timeout(&ring_, &cqe_ptr, 1, &ts, nullptr);
+        // sigmask is null
+
+        // io_uring_submit_and_wait_min_timeout is the hybrid poll primitive.
+        // It submits SQEs, then busy loops for 'min_wait' usec looking for completions.
+        // If nothing arrives, it sleeps until 'ts' expires or an event arrives.
+        const int ret = io_uring_submit_and_wait_min_timeout(&ring_, &cqe_ptr, 1, &ts, min_wait, nullptr);
 
         if (ret == -ETIME)
         {
-            // Heartbeat tick. No IO completion arrived, but we wake up to process
-            // the task_queue or other housekeeping.
+            // Heartbeat tick (timeout expired).
             return 0;
         }
 
@@ -129,12 +136,15 @@ namespace kio::io
 
         while (!stop_token_.stop_requested())
         {
-            // 1. Drain Task Queue
+            // 1. Drain Task Queue (with budget)
             // This ensures latency is minimized for tasks posted from other threads.
             std::coroutine_handle<> h;
-            while (task_queue_.try_pop(h))
+            size_t resumed = 0;
+            // Use config-based budget to alternate between tasks and IO
+            while (resumed < config_.task_batch_size && task_queue_.try_pop(h))
             {
                 h.resume();
+                resumed++;
             }
 
             // 2. Submit & Wait (Heartbeat)
