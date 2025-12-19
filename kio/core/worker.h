@@ -121,7 +121,7 @@ namespace kio::io
 
         bool await_suspend(std::coroutine_handle<> h)
         {
-            // assert(worker_.is_on_worker_thread() && "kio::async_* operation was called from the wrong thread.");
+            assert(worker_.is_on_worker_thread() && "kio::async_* operation was called from the wrong thread.");
 
             completion_.handle = h;
             auto& ring = internal::WorkerAccess::get_ring(worker_);
@@ -198,12 +198,14 @@ namespace kio::io
         std::stop_source stop_source_;
         std::stop_token stop_token_;
         std::atomic<bool> stopped_{false};
+        std::atomic<bool> wakeup_pending_{false};
         WorkerStats stats_{};
         std::function<void(Worker&)> worker_init_callback_;
 
         //=====================================
         // PRIVATE METHODS
         //=====================================
+        int submit_sqes_wait();
 
         // Private Stats Updaters
         static void stat_inc_read(Worker& w, const int res)
@@ -222,7 +224,6 @@ namespace kio::io
 
         static void check_kernel_version();
         void check_syscall_return(int ret);
-        int submit_sqes_wait();
         unsigned process_completions();
         // typically used during shutdown. Drain the completion queue
         void drain_completions();

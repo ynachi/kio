@@ -51,6 +51,15 @@ namespace kio::io
         throw std::system_error(-ret, std::system_category());
     }
 
+
+    int Worker::submit_sqes_wait()
+    {
+        const int ret = io_uring_submit_and_wait(&ring_, 1);
+        if (ret < 0) check_syscall_return(ret);
+        return ret;
+    }
+
+
     Worker::Worker(const size_t id, const WorkerConfig &config, std::function<void(Worker &)> worker_init_callback) :
         config_(config), id_(id), task_queue_(config.task_queue_capacity), worker_init_callback_(std::move(worker_init_callback))
     {
@@ -169,13 +178,6 @@ namespace kio::io
         }
     }
 
-    int Worker::submit_sqes_wait()
-    {
-        const int ret = io_uring_submit_and_wait(&ring_, 1);
-        if (ret < 0) check_syscall_return(ret);
-        return ret;
-    }
-
     unsigned Worker::process_completions()
     {
         io_uring_cqe *cqe;
@@ -273,10 +275,10 @@ namespace kio::io
         }
 
         // Signal the worker to wake up
-        constexpr uint64_t val = 1;
-        if (const ssize_t ret = ::write(wakeup_fd_, &val, sizeof(val)); ret < 0 && errno != EAGAIN)
+        if (!wakeup_pending_.exchange(true, std::memory_order_acq_rel))
         {
-            ALOG_WARN("Worker {}: Failed to write to eventfd: {}", id_, strerror(errno));
+            constexpr uint64_t val = 1;
+            ::write(wakeup_fd_, &val, sizeof(val));
         }
     }
 
@@ -293,10 +295,20 @@ namespace kio::io
         }
 
         std::coroutine_handle<> h;
-        while (task_queue_.try_pop(h))
+        constexpr int kMaxResumes = 64;
+        int resumed = 0;
+
+        while (resumed < kMaxResumes && task_queue_.try_pop(h))
         {
-            if (h) h.resume();
+            wakeup_pending_.store(false, std::memory_order_release);
+            ++resumed;
+            h.resume();
         }
+        // while (task_queue_.try_pop(h))
+        // {
+        //     wakeup_pending_.store(false, std::memory_order_release);
+        //     h.resume();
+        // }
 
         // TODO: eventualy stop trying
         if (!stop_token_.stop_requested())
