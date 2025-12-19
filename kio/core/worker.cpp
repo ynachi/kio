@@ -6,7 +6,6 @@
 #include <chrono>
 #include <fcntl.h>
 #include <liburing.h>
-#include <sys/eventfd.h>
 #include <sys/utsname.h>
 #include <utility>
 
@@ -54,8 +53,27 @@ namespace kio::io
 
     int Worker::submit_sqes_wait()
     {
-        const int ret = io_uring_submit_and_wait(&ring_, 1);
-        if (ret < 0) check_syscall_return(ret);
+        // Define the heartbeat interval
+        __kernel_timespec ts{};
+        ts.tv_sec = 0;
+        ts.tv_nsec = config_.heartbeat_interval_us * 1000;
+
+        // On Kernel 6.0+, submit_and_wait_timeout + IORING_ENTER_GETEVENTS (which liburing handles)
+        // correctly flushes DEFER_TASKRUN work.
+        io_uring_cqe *cqe_ptr = nullptr;
+        const int ret = io_uring_submit_and_wait_timeout(&ring_, &cqe_ptr, 1, &ts, nullptr);
+
+        if (ret == -ETIME)
+        {
+            // Heartbeat tick. No IO completion arrived, but we wake up to process
+            // the task_queue or other housekeeping.
+            return 0;
+        }
+
+        if (ret < 0)
+        {
+            check_syscall_return(ret);
+        }
         return ret;
     }
 
@@ -64,12 +82,6 @@ namespace kio::io
         config_(config), id_(id), task_queue_(config.task_queue_capacity), worker_init_callback_(std::move(worker_init_callback))
     {
         config_.check();
-
-        wakeup_fd_ = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
-        if (wakeup_fd_ < 0)
-        {
-            throw std::system_error(errno, std::system_category(), "failed to create eventfd");
-        }
     }
 
     void Worker::initialize()
@@ -106,37 +118,35 @@ namespace kio::io
         {
             ALOG_INFO("Worker {}: io-wq threads pinned to CPU {}", id_, cpu);
         }
-
-        // Submit the first read on the eventfd to listen for wake-ups
-        submit_wakeup_read();
-
-        // Submit immediately so it's pending before loop starts
-        int ret = io_uring_submit(&ring_);
-        if (ret < 0)
-        {
-            throw std::system_error(-ret, std::system_category(), "Failed to submit initial wakeup read");
-        }
-
-        ALOG_DEBUG("Worker {}: Wakeup mechanism initialized ({} ops submitted)", id_, ret);
     }
 
-    // TODO: manage submission errors
     void Worker::loop()
     {
-        // event loop (split out to reuse the same logic as before)
+        // Event Loop Strategy:
+        // 1. Drain the Task Queue (fast, lock-free, from other threads)
+        // 2. Submit pending IO and Wait (Heartbeat)
+        // 3. Process Completions
+
         while (!stop_token_.stop_requested())
         {
-            // Non-blocking submit
-            auto ret = io_uring_submit(&ring_);
-            if (ret < 0) check_syscall_return(ret);
-
-            // Get events with DEFER_TASKRUN
-            ret = io_uring_get_events(&ring_);
-            if (ret < 0) check_syscall_return(ret);
-            if (const auto count = process_completions(); count == 0)
+            // 1. Drain Task Queue
+            // This ensures latency is minimized for tasks posted from other threads.
+            std::coroutine_handle<> h;
+            while (task_queue_.try_pop(h))
             {
-                submit_sqes_wait();
+                h.resume();
             }
+
+            // 2. Submit & Wait (Heartbeat)
+            // If the task queue processing generated SQEs, this submits them.
+            // If nothing happened, we wait for IO or the timeout (Heartbeat).
+            // We ignore the return value here as we process completions below regardless.
+            submit_sqes_wait();
+
+            // 3. Process Completions
+            // We don't need to check the return of submit_sqes_wait because we just
+            // want to drain whatever is in the CQ ring.
+            process_completions();
         }
 
         ALOG_INFO("Worker {} loop shut down completed", this->id_);
@@ -217,8 +227,9 @@ namespace kio::io
         }
 
         const auto stop = stop_source_.request_stop();
-        // submit a wakeup write to wake up the io uring ring
-        wakeup_write();
+        // No need to write to eventfd anymore.
+        // The worker will wake up at the next heartbeat (max 100us latency)
+        // and see the stop_token.
         return stop;
     }
 
@@ -232,37 +243,7 @@ namespace kio::io
             io_uring_queue_exit(&ring_);
         }
 
-        if (wakeup_fd_ >= 0)
-        {
-            ::close(wakeup_fd_);
-            // prevent double close
-            wakeup_fd_ = -1;
-        }
         ALOG_DEBUG("Worker {} destructor finished", id_);
-    }
-
-    bool Worker::submit_wakeup_read()
-    {
-        auto *sqe = io_uring_get_sqe(&ring_);
-        if (!sqe)
-        {
-            ALOG_DEBUG("Io Uring queue full, worker={}", id_);
-            return false;
-        }
-
-        io_uring_prep_read(sqe, wakeup_fd_, &wakeup_buffer_, sizeof(wakeup_buffer_), 0);
-        io_uring_sqe_set_data(sqe, &wakeup_completion_);
-        return true;
-    }
-
-    void Worker::wakeup_write() const
-    {
-        constexpr uint64_t value = 1;
-        const auto ret = ::write(wakeup_fd_, &value, sizeof(value));
-        if (ret != sizeof(value))
-        {
-            ALOG_ERROR("Failed to write to wakeup eventfd: {}", strerror(errno));
-        }
     }
 
     void Worker::post(std::coroutine_handle<> h)
@@ -273,13 +254,8 @@ namespace kio::io
             // TODO: have a different strategy, like growing the queue or blocking the producer.
             return;
         }
-
-        // Signal the worker to wake up
-        if (!wakeup_pending_.exchange(true, std::memory_order_acq_rel))
-        {
-            constexpr uint64_t val = 1;
-            ::write(wakeup_fd_, &val, sizeof(val));
-        }
+        // No syscall. We just push.
+        // The worker will see this on the next Heartbeat or IO completion.
     }
 
     // worker.cpp
@@ -288,36 +264,7 @@ namespace kio::io
         auto *completion = static_cast<IoCompletion *>(io_uring_cqe_get_data(cqe));
         if (completion == nullptr) return;
 
-        if (completion != &wakeup_completion_)
-        {
-            completion->complete(cqe->res);
-            return;
-        }
-
-        std::coroutine_handle<> h;
-        constexpr int kMaxResumes = 64;
-        int resumed = 0;
-
-        while (resumed < kMaxResumes && task_queue_.try_pop(h))
-        {
-            wakeup_pending_.store(false, std::memory_order_release);
-            ++resumed;
-            h.resume();
-        }
-        // while (task_queue_.try_pop(h))
-        // {
-        //     wakeup_pending_.store(false, std::memory_order_release);
-        //     h.resume();
-        // }
-
-        // TODO: eventualy stop trying
-        if (!stop_token_.stop_requested())
-        {
-            while (!submit_wakeup_read())
-            {
-                io_uring_submit(&ring_);
-            }
-        }
+        completion->complete(cqe->res);
     }
 
     bool Worker::is_on_worker_thread() const { return std::this_thread::get_id() == thread_id_; }

@@ -85,10 +85,12 @@ namespace kio::io
         size_t uring_queue_depth{1024};
         size_t uring_submit_batch_size{128};
         size_t tcp_backlog{128};
-        uint8_t uring_submit_timeout_ms{100};
         int uring_default_flags = 0;
         size_t max_op_slots{1024 * 1024};
         size_t task_queue_capacity{1024};
+        // The heartbeat interval in microseconds.
+        // Controls the max latency for cross-thread task scheduling.
+        uint32_t heartbeat_interval_us{100};
 
         void check() const
         {
@@ -189,16 +191,11 @@ namespace kio::io
         std::atomic<std::thread::id> thread_id_{};
         MPSCQueue<std::coroutine_handle<>> task_queue_;
 
-        int wakeup_fd_{-1};
-        IoCompletion wakeup_completion_{.handle = nullptr};
-        uint64_t wakeup_buffer_{0};
-
         std::latch init_latch_{1};
         std::latch shutdown_latch_{1};
         std::stop_source stop_source_;
         std::stop_token stop_token_;
         std::atomic<bool> stopped_{false};
-        std::atomic<bool> wakeup_pending_{false};
         WorkerStats stats_{};
         std::function<void(Worker&)> worker_init_callback_;
 
@@ -227,9 +224,6 @@ namespace kio::io
         unsigned process_completions();
         // typically used during shutdown. Drain the completion queue
         void drain_completions();
-        // used to wake the io uring processing loop up
-        bool submit_wakeup_read();
-        void wakeup_write() const;
 
         void post(std::coroutine_handle<> h);
         io_uring& get_ring() noexcept { return ring_; }
@@ -428,7 +422,7 @@ namespace kio::io
          * @param fd The file descriptor.
          * @param mode The operation mode (e.g., 0 for falloc, FALLOC_FL_PUNCH_HOLE).
          * @param size The number of bytes to allocate (length).
-         *  @return A void Result or an error.
+         * @return A void Result or an error.
          */
         [[nodiscard]] auto async_fallocate(int fd, int mode, off_t size)
         {
@@ -485,9 +479,9 @@ namespace kio::io
          * @param dirfd The directory file descriptor (use AT_FDCWD for the current working directory).
          * @param path The filesystem path to remove.
          * @param flags Removal behavior flags:
-         *             - 0: Remove regular files
-         *             - AT_REMOVEDIR: Remove empty directories
-         *             - AT_SYMLINK_NOFOLLOW: Remove symlinks without following
+         * - 0: Remove regular files
+         * - AT_REMOVEDIR: Remove empty directories
+         * - AT_SYMLINK_NOFOLLOW: Remove symlinks without following
          * @return An IO Result which is void or an error.
          */
         [[nodiscard]] auto async_unlink_at(int dirfd, std::filesystem::path path, int flags)
