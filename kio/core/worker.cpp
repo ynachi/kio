@@ -3,11 +3,12 @@
 //
 #include "worker.h"
 
-#include <fcntl.h>
 #include <chrono>
+#include <fcntl.h>
 #include <liburing.h>
 #include <sys/eventfd.h>
 #include <sys/utsname.h>
+#include <utility>
 
 #include "async_logger.h"
 #include "uring_awaitable.h"
@@ -37,8 +38,6 @@ namespace kio::io
 
     void Worker::check_syscall_return(const int ret)
     {
-        if (ret >= 0) return;
-
         if (-ret == ETIME || -ret == ETIMEDOUT || -ret == EINTR || -ret == EAGAIN || -ret == EBUSY)
         {
             ALOG_DEBUG("Transient error: {}", strerror(-ret));
@@ -52,54 +51,6 @@ namespace kio::io
         throw std::system_error(-ret, std::system_category());
     }
 
-    [[nodiscard]]
-    uint64_t Worker::get_op_id()
-    {
-        if (!free_op_ids.empty())
-        {
-            const auto id = free_op_ids.back();
-            free_op_ids.pop_back();
-            return id;
-        }
-        // TODO: manage the growth better
-        // TODO: add metric for pool growth here
-        // TODO: Log here
-        // Grow pool (simple strategy: double capacity)
-        if (op_data_pool_.size() >= config_.max_op_slots)
-        {
-            ALOG_ERROR("Op slot pool exhausted ({} ops). Consider increasing default_op_slots.", op_data_pool_.size());
-            throw std::runtime_error("Op slot pool exhausted");
-        }
-
-        const auto cur_size = op_data_pool_.size();
-        size_t new_size = std::min(static_cast<size_t>(static_cast<float>(cur_size) * config_.op_slots_growth_factor), config_.max_op_slots);
-        ALOG_DEBUG("Growing op_data_pool_ from {} to {}", cur_size, new_size);
-        op_data_pool_.resize(new_size);
-        for (size_t i = cur_size; i < new_size; ++i)
-        {
-            free_op_ids.push_back(i);
-        }
-
-        stats_.coroutines_pool_resize_total++;
-
-        const auto id = free_op_ids.back();
-        free_op_ids.pop_back();
-        return id;
-    }
-
-    void Worker::release_op_id(const uint64_t op_id) noexcept
-    {
-        if (op_id < op_data_pool_.size())
-        {
-            op_data_pool_[op_id] = {};
-            free_op_ids.push_back(op_id);
-        }
-        else
-        {
-            ALOG_WARN("Tried to release invalid op_id={}", op_id);
-        }
-    }
-
     Worker::Worker(const size_t id, const WorkerConfig &config, std::function<void(Worker &)> worker_init_callback) :
         config_(config), id_(id), task_queue_(config.task_queue_capacity), worker_init_callback_(std::move(worker_init_callback))
     {
@@ -110,22 +61,12 @@ namespace kio::io
         {
             throw std::system_error(errno, std::system_category(), "failed to create eventfd");
         }
-
-        // pre-allocate
-        op_data_pool_.resize(config_.default_op_slots);
-        free_op_ids.reserve(config_.default_op_slots);
-        for (size_t i = 0; i < config_.default_op_slots; ++i)
-        {
-            free_op_ids.push_back(i);
-        }
     }
 
     void Worker::initialize()
     {
         io_uring_params params{};
-        params.flags |= IORING_SETUP_COOP_TASKRUN
-        | IORING_SETUP_SINGLE_ISSUER
-        | IORING_SETUP_DEFER_TASKRUN;
+        params.flags |= IORING_SETUP_COOP_TASKRUN | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN;
 
         if (const int ret = io_uring_queue_init_params(static_cast<int>(config_.uring_queue_depth), &ring_, &params); ret < 0)
         {
@@ -178,13 +119,12 @@ namespace kio::io
         {
             // Non-blocking submit
             auto ret = io_uring_submit(&ring_);
-            check_syscall_return(ret);
+            if (ret < 0) check_syscall_return(ret);
 
             // Get events with DEFER_TASKRUN
             ret = io_uring_get_events(&ring_);
-            check_syscall_return(ret);
-            auto count = process_completions();
-            if (count == 0)
+            if (ret < 0) check_syscall_return(ret);
+            if (const auto count = process_completions(); count == 0)
             {
                 submit_sqes_wait();
             }
@@ -201,17 +141,12 @@ namespace kio::io
     {
         // the calling thread sets the id
         thread_id_.store(std::this_thread::get_id());
-        // save the stop token
         stop_token_ = this->get_stop_token();
 
         try
         {
             check_kernel_version();
-
             initialize();
-
-            // This guarantees that any thread waiting on `wait_ready()` will see
-            // the fully initialized state, including the correct thread_id.
             signal_init_complete();
 
             // Init callback to run inside the worker, respect io_uring single issuer
@@ -221,11 +156,8 @@ namespace kio::io
             }
 
             ALOG_INFO("Worker {} starting event loop", id_);
-
             loop();
-
             ALOG_INFO("Worker {} exited event loop", id_);
-
             drain_completions();
         }
         catch (const std::exception &e)
@@ -240,53 +172,23 @@ namespace kio::io
     int Worker::submit_sqes_wait()
     {
         const int ret = io_uring_submit_and_wait(&ring_, 1);
-        check_syscall_return(ret);
+        if (ret < 0) check_syscall_return(ret);
         return ret;
     }
 
     unsigned Worker::process_completions()
     {
         io_uring_cqe *cqe;
-
         unsigned head;
         unsigned count = 0;
+
         io_uring_for_each_cqe(&ring_, head, cqe)
         {
             count++;
-            const uint64_t op_id = io_uring_cqe_get_data64(cqe);
-
-            if (op_id == kWakeupOpID)
-            {
-                ALOG_TRACE("Worker {} waked up", id_);
-                // This was a wake-up event. Drain the task queue.
-                std::coroutine_handle<> h;
-                while (task_queue_.try_pop(h))
-                {
-                    h.resume();
-                }
-
-                // Mark that we need wakeup for next post
-                needs_wakeup_.store(true, std::memory_order_release);
-
-                // Only re-arm the wakeup read if not stopping
-                // This prevents a pending operation during shutdown
-                if (!stop_token_.stop_requested())
-                {
-                    submit_wakeup_read();
-                }
-                else
-                {
-                    ALOG_DEBUG("Worker {}: Not re-arming wakeup read (shutting down)", id_);
-                }
-                continue;
-            }
-
-            set_op_result(op_id, cqe->res);
-            resume_coro_by_id(op_id);
-            release_op_id(op_id);
+            handle_cqe(cqe);
         }
-        io_uring_cq_advance(&ring_, count);
 
+        io_uring_cq_advance(&ring_, count);
         return count;
     }
 
@@ -308,8 +210,8 @@ namespace kio::io
             ALOG_ERROR("Worker stop called from worker {} thread", id_);
             ALOG_ERROR("This will cause deadlock. Workers cannot stop themselves.");
             ALOG_ERROR("Shutdown must be initiated from main thread or destructor.");
-
-            std::abort();
+            ALOG_ERROR("Shutdown signal ignored.");
+            return false;
         }
 
         const auto stop = stop_source_.request_stop();
@@ -322,12 +224,6 @@ namespace kio::io
     {
         ALOG_DEBUG("Worker {} destructor called", id_);
         // request stop if not already requested
-
-        // worker is shutting down with non resumed coroutines
-        if (op_data_pool_.size() != free_op_ids.size())
-        {
-            ALOG_WARN("Worker {} leaked {} op_ids during shutdown", id_, op_data_pool_.size() - free_op_ids.size());
-        }
 
         if (this->ring_.ring_fd >= 0)
         {
@@ -343,34 +239,21 @@ namespace kio::io
         ALOG_DEBUG("Worker {} destructor finished", id_);
     }
 
-    void Worker::submit_wakeup_read()
+    bool Worker::submit_wakeup_read()
     {
-        io_uring_sqe *sqe = io_uring_get_sqe(&ring_);
-
-        if (sqe == nullptr)
+        auto *sqe = io_uring_get_sqe(&ring_);
+        if (!sqe)
         {
-            // SQ is full - force a submission to make room
-            ALOG_WARN("Worker {}: SQ full, forcing submission to re-arm wakeup", id_);
-            io_uring_submit(&ring_);
-
-            // Try again
-            sqe = io_uring_get_sqe(&ring_);
-            if (sqe == nullptr)
-            {
-                // Still full - this is CRITICAL
-                ALOG_ERROR("Worker {}: Cannot submit wakeup read - SQ exhausted!", id_);
-                ALOG_ERROR("Worker may not wake up on stop signal!");
-                // This is a fatal, we cannot progress anymore
-                throw std::runtime_error("Failed to submit wakeup read");
-            }
+            ALOG_DEBUG("Io Uring queue full, worker={}", id_);
+            return false;
         }
 
         io_uring_prep_read(sqe, wakeup_fd_, &wakeup_buffer_, sizeof(wakeup_buffer_), 0);
-        io_uring_sqe_set_data64(sqe, kWakeupOpID);
-        ALOG_TRACE("Worker {} submitted wakeup read SQE", id_);
+        io_uring_sqe_set_data(sqe, &wakeup_completion_);
+        return true;
     }
 
-    void Worker::wakeup_write()
+    void Worker::wakeup_write() const
     {
         constexpr uint64_t value = 1;
         const auto ret = ::write(wakeup_fd_, &value, sizeof(value));
@@ -378,8 +261,6 @@ namespace kio::io
         {
             ALOG_ERROR("Failed to write to wakeup eventfd: {}", strerror(errno));
         }
-        check_syscall_return(static_cast<int>(ret));
-        ALOG_TRACE("Worker {} wrote to wakeup fd", id_);
     }
 
     void Worker::post(std::coroutine_handle<> h)
@@ -391,45 +272,43 @@ namespace kio::io
             return;
         }
 
-        // Only wake if worker was idle
-        if (needs_wakeup_.exchange(false, std::memory_order_acq_rel)) {
-            constexpr uint64_t val = 1;
-            ::write(wakeup_fd_, &val, sizeof(val));
+        // Signal the worker to wake up
+        constexpr uint64_t val = 1;
+        if (const ssize_t ret = ::write(wakeup_fd_, &val, sizeof(val)); ret < 0 && errno != EAGAIN)
+        {
+            ALOG_WARN("Worker {}: Failed to write to eventfd: {}", id_, strerror(errno));
+        }
+    }
+
+    // worker.cpp
+    void Worker::handle_cqe(io_uring_cqe *cqe)
+    {
+        auto *completion = static_cast<IoCompletion *>(io_uring_cqe_get_data(cqe));
+        if (completion == nullptr) return;
+
+        if (completion != &wakeup_completion_)
+        {
+            completion->complete(cqe->res);
+            return;
+        }
+
+        std::coroutine_handle<> h;
+        while (task_queue_.try_pop(h))
+        {
+            if (h) h.resume();
+        }
+
+        // TODO: eventualy stop trying
+        if (!stop_token_.stop_requested())
+        {
+            while (!submit_wakeup_read())
+            {
+                io_uring_submit(&ring_);
+            }
         }
     }
 
     bool Worker::is_on_worker_thread() const { return std::this_thread::get_id() == thread_id_; }
-
-    Task<Result<int>> Worker::async_accept(int server_fd, sockaddr *addr, socklen_t *addrlen)
-    {
-        auto prep = [](io_uring_sqe *sqe, const int fd, sockaddr *a, socklen_t *al, const int flags) { io_uring_prep_accept(sqe, fd, a, al, flags); };
-        int ret = co_await make_uring_awaitable(*this, prep, server_fd, addr, addrlen, 0);
-        if (ret < 0)
-        {
-            co_return std::unexpected(Error::from_errno(-ret));
-        }
-
-        stats_.connections_accepted_total++;
-
-        co_return ret;
-    }
-
-    Task<Result<int>> Worker::async_read(const int client_fd, std::span<char> buf) { co_return co_await async_read_at(client_fd, buf, static_cast<uint64_t>(-1)); }
-
-    Task<Result<int>> Worker::async_read_at(const int client_fd, std::span<char> buf, const uint64_t offset)
-    {
-        auto prep = [](io_uring_sqe *sqe, const int fd, char *b, const size_t len, const uint64_t off) { io_uring_prep_read(sqe, fd, b, static_cast<int>(len), off); };
-        int ret = co_await make_uring_awaitable(*this, prep, client_fd, buf.data(), buf.size(), offset);
-        if (ret < 0)
-        {
-            co_return std::unexpected(Error::from_errno(-ret));
-        }
-
-        stats_.bytes_read_total += static_cast<uint64_t>(ret);
-        stats_.read_ops_total++;
-
-        co_return ret;
-    }
 
     Task<Result<void>> Worker::async_read_exact(const int client_fd, std::span<char> buf)
     {
@@ -461,31 +340,14 @@ namespace kio::io
             std::span<char> remaining_buf = buf.subspan(total_bytes_read);
 
             const int bytes_read = KIO_TRY(co_await this->async_read_at(fd, remaining_buf, current_offset));
-
             if (bytes_read == 0)
             {
                 co_return std::unexpected(Error{ErrorCategory::File, kIoEof});
             }
             total_bytes_read += static_cast<size_t>(bytes_read);
         }
+
         co_return {};
-    }
-
-    Task<Result<int>> Worker::async_write(const int client_fd, std::span<const char> buf) { co_return co_await async_write_at(client_fd, buf, static_cast<uint64_t>(-1)); }
-
-    Task<Result<int>> Worker::async_write_at(const int client_fd, std::span<const char> buf, const uint64_t offset)
-    {
-        auto prep = [](io_uring_sqe *sqe, const int fd, const char *b, const size_t len, const uint64_t off) { io_uring_prep_write(sqe, fd, b, static_cast<int>(len), off); };
-        int ret = co_await make_uring_awaitable(*this, prep, client_fd, buf.data(), buf.size(), offset);
-        if (ret < 0)
-        {
-            co_return std::unexpected(Error::from_errno(-ret));
-        }
-
-        stats_.bytes_written_total += static_cast<uint64_t>(ret);
-        stats_.write_ops_total++;
-
-        co_return ret;
     }
 
     Task<Result<void>> Worker::async_write_exact(const int client_fd, std::span<const char> buf)
@@ -496,9 +358,7 @@ namespace kio::io
         while (total_bytes_written < total_to_write)
         {
             std::span<const char> remaining_buf = buf.subspan(total_bytes_written);
-
             const int bytes_written = KIO_TRY(co_await this->async_write(client_fd, remaining_buf));
-
             if (bytes_written == 0)
             {
                 co_return std::unexpected(Error{ErrorCategory::File, kIoEof});
@@ -518,14 +378,10 @@ namespace kio::io
         while (total_bytes_written < total_to_write)
         {
             std::span<const char> remaining_buf = buf.subspan(total_bytes_written);
-
             const uint64_t current_offset = offset + total_bytes_written;
-
-            int bytes_written = KIO_TRY(co_await this->async_write_at(client_fd, remaining_buf, current_offset));
-
+            const int bytes_written = KIO_TRY(co_await this->async_write_at(client_fd, remaining_buf, current_offset));
             if (bytes_written == 0)
             {
-                // EOF
                 co_return std::unexpected(Error{ErrorCategory::File, kIoEof});
             }
 
@@ -535,250 +391,72 @@ namespace kio::io
         co_return {};
     }
 
-    Task<Result<int>> Worker::async_readv(const int client_fd, const iovec *iov, int iovcnt, const uint64_t offset)
+    Task<std::expected<void, Error>> Worker::async_sleep(std::chrono::nanoseconds duration)
     {
-        auto prep = [](io_uring_sqe *sqe, const int fd, const iovec *iov_, const int iovcnt_, const uint64_t off) { io_uring_prep_readv(sqe, fd, iov_, iovcnt_, off); };
-        int ret = co_await make_uring_awaitable(*this, prep, client_fd, iov, iovcnt, offset);
-        if (ret < 0)
-        {
-            co_return std::unexpected(Error::from_errno(-ret));
-        }
-
-        stats_.bytes_read_total += static_cast<uint64_t>(ret);
-        stats_.read_ops_total++;
-
-        co_return ret;
-    }
-
-    Task<Result<int>> Worker::async_writev(const int client_fd, const iovec *iov, int iovcnt, const uint64_t offset)
-    {
-        auto prep = [](io_uring_sqe *sqe, const int fd, const iovec *iov_, const int iovcnt_, const uint64_t off) { io_uring_prep_writev(sqe, fd, iov_, iovcnt_, off); };
-        int ret = co_await make_uring_awaitable(*this, prep, client_fd, iov, iovcnt, offset);
-        if (ret < 0)
-        {
-            co_return std::unexpected(Error::from_errno(-ret));
-        }
-
-        stats_.bytes_written_total += static_cast<uint64_t>(ret);
-        stats_.write_ops_total++;
-
-        co_return ret;
-    }
-
-    Task<Result<void>> Worker::async_connect(const int client_fd, const sockaddr *addr, const socklen_t addrlen)
-    {
-        auto prep = [](io_uring_sqe *sqe, const int fd, const sockaddr *a, const socklen_t al) { io_uring_prep_connect(sqe, fd, a, al); };
-        auto ret = co_await make_uring_awaitable(*this, prep, client_fd, addr, addrlen);
-        if (ret < 0)
-        {
-            co_return std::unexpected(Error::from_errno(-ret));
-        }
-
-        stats_.connect_ops_total++;
-
-        co_return {};
-    }
-
-    Task<Result<int>> Worker::async_openat(const std::filesystem::path path, const int flags, const mode_t mode)  // NOLINT on path, we need a copy in the coroutine frame, so a reference won't cut it
-    {
-        auto prep = [](io_uring_sqe *sqe, const int dfd, const char *p, const int f, const mode_t m) { io_uring_prep_openat(sqe, dfd, p, f, m); };
-        int ret = co_await make_uring_awaitable(*this, prep, AT_FDCWD, path.c_str(), flags, mode);
-        if (ret < 0)
-        {
-            co_return std::unexpected(Error::from_errno(-ret));
-        }
-
-        stats_.open_ops_total++;
-
-        co_return ret;
-    }
-
-    Task<Result<void>> Worker::async_fallocate(int fd, int mode, off_t size)
-    {
-        auto prep = [](io_uring_sqe *sqe, const int file_fd, const int p_mode, const off_t offset, const off_t len) { io_uring_prep_fallocate(sqe, file_fd, p_mode, offset, len); };
-        off_t offset = 0;
-        if (const int ret = co_await make_uring_awaitable(*this, prep, fd, mode, offset, size); ret < 0)
-        {
-            co_return std::unexpected(Error::from_errno(-ret));
-        }
-        co_return {};
-    }
-
-    Task<Result<void>> Worker::async_poll(int fd, int events)
-    {
-        auto prep = [](io_uring_sqe *sqe, const int p_fd, const int p_events) { io_uring_prep_poll_add(sqe, p_fd, static_cast<unsigned>(p_events)); };
-
-        if (const int ret = co_await make_uring_awaitable(*this, prep, fd, events); ret < 0)
-        {
-            co_return std::unexpected(Error::from_errno(-ret));
-        }
-        co_return {};
-    }
-
-Task<Result<void>> Worker::async_sendfile(int out_fd, int in_fd, off_t offset, size_t count)
-{
-     //Sendfile is not directly supported by io_uring, so we use splice.
-
-    // Create a local pipe for this specific transfer
-    int raw_pipe[2];
-    if (::pipe(raw_pipe) < 0) {
-        co_return std::unexpected(Error::from_errno(errno));
-    }
-
-    // Use FDGuard to be sure those will always properly be closed
-    const net::FDGuard pipe_read(raw_pipe[0]);
-    const net::FDGuard pipe_write(raw_pipe[1]);
-
-    // Set non-blocking
-    ::fcntl(pipe_read.get(), F_SETFL, O_NONBLOCK);
-    ::fcntl(pipe_write.get(), F_SETFL, O_NONBLOCK);
-
-    size_t remaining = count;
-    off_t current_offset = offset;
-
-    // Prepare io_uring splice operation
-    auto prep_splice = [](io_uring_sqe *sqe, const int in, const off_t off_in, const int out, const off_t off_out, const size_t len) {
-        io_uring_prep_splice(sqe, in, off_in, out, off_out, static_cast<unsigned int>(len), 0);
-    };
-
-    while (remaining > 0)
-    {
-        constexpr size_t kChunkSize = 65536;
-        size_t to_splice = std::min(remaining, kChunkSize);
-
-        // --- STEP A: Splice File -> Pipe (Write End) ---
-        // Result is the number of bytes moved into the pipe
-        const int res_in = co_await make_uring_awaitable(*this, prep_splice,
-                                                   in_fd, current_offset,
-                                                   pipe_write.get(), -1,
-                                                   to_splice);
-
-        if (res_in < 0) co_return std::unexpected(Error::from_errno(-res_in));
-        if (res_in == 0) co_return std::unexpected(Error{ErrorCategory::File, kIoEof});
-
-        // --- STEP B: Splice Pipe (Read End) -> Socket ---
-        // We must drain the pipe completely before looping back to fill it again
-        auto pipe_remaining = static_cast<size_t>(res_in);
-        while (pipe_remaining > 0)
-        {
-            const int res_out = co_await make_uring_awaitable(*this, prep_splice,
-                                                        pipe_read.get(), -1,
-                                                        out_fd, -1,
-                                                        pipe_remaining);
-
-            if (res_out < 0) co_return std::unexpected(Error::from_errno(-res_out));
-            if (res_out == 0) co_return std::unexpected(Error{ErrorCategory::Network, EPIPE});
-
-            pipe_remaining -= res_out;
-        }
-
-        current_offset += res_in;
-        remaining -= res_in;
-
-        // stats
-        stats_.bytes_written_total += res_in;
-    }
-
-    stats_.write_ops_total++;
-    co_return {};
-}
-
-    Task<Result<void>> Worker::async_sendmsg(const int fd, const msghdr *msg, const int flags)
-    {
-        auto prep = [](io_uring_sqe *sqe, const int f, const msghdr *m, const int fl) { io_uring_prep_sendmsg(sqe, f, m, fl); };
-
-        const int ret = co_await make_uring_awaitable(*this, prep, fd, msg, flags);
-
-        if (ret < 0)
-        {
-            co_return std::unexpected(Error::from_errno(-ret));
-        }
-
-        stats_.bytes_written_total += static_cast<uint64_t>(ret);
-        stats_.write_ops_total++;
-
-        co_return {};
-    }
-
-    Task<Result<void>> Worker::async_close(int fd)
-    {
-        auto prep = [](io_uring_sqe *sqe, const int file_fd) { io_uring_prep_close(sqe, file_fd); };
-        if (const int ret = co_await make_uring_awaitable(*this, prep, fd); ret < 0)
-        {
-            co_return std::unexpected(Error::from_errno(-ret));
-        }
-        co_return {};
-    }
-
-    Task<Result<void>> Worker::async_fsync(int fd)
-    {
-        auto prep = [](io_uring_sqe *sqe, const int file_fd) { io_uring_prep_fsync(sqe, file_fd, 0); };
-        if (const int ret = co_await make_uring_awaitable(*this, prep, fd); ret < 0)
-        {
-            co_return std::unexpected(Error::from_errno(-ret));
-        }
-        co_return {};
-    }
-
-    Task<Result<void>> Worker::async_fdatasync(int fd)
-    {
-        auto prep = [](io_uring_sqe *sqe, const int file_fd)
-        {
-            // Use the IORING_FSYNC_DATASYNC flag
-            io_uring_prep_fsync(sqe, file_fd, IORING_FSYNC_DATASYNC);
-        };
-        if (const int ret = co_await make_uring_awaitable(*this, prep, fd); ret < 0)
-        {
-            co_return std::unexpected(Error::from_errno(-ret));
-        }
-        co_return {};
-    }
-
-    Task<Result<void>> Worker::async_unlink_at(const int dirfd, const std::filesystem::path path, const int flags)  // NOLINT path should be passed as value
-    {
-        auto prep = [](io_uring_sqe *sqe, const int dfd, const char *p, const int f) { io_uring_prep_unlinkat(sqe, dfd, p, f); };
-        if (const int ret = co_await make_uring_awaitable(*this, prep, dirfd, path.c_str(), flags); ret < 0)
-        {
-            co_return std::unexpected(Error::from_errno(-ret));
-        }
-        co_return {};
-    }
-
-    Task<Result<void>> Worker::async_sleep(std::chrono::nanoseconds duration)
-    {
-        // We need a place to store the timespec for the duration of the operation.
-        // Storing it on the coroutine's frame by making it a local variable is perfect.
         __kernel_timespec ts{};
         ts.tv_sec = std::chrono::duration_cast<std::chrono::seconds>(duration).count();
         ts.tv_nsec = (duration % std::chrono::seconds(1)).count();
 
-        auto prep = [](io_uring_sqe *sqe, __kernel_timespec *t, unsigned flags)
-        {
-            // Prepare a timeout operation. This doesn't need a file descriptor.
-            io_uring_prep_timeout(sqe, t, 0, flags);
-        };
+        auto prep = [](io_uring_sqe *sqe, __kernel_timespec *t, unsigned flags) { io_uring_prep_timeout(sqe, t, 0, flags); };
 
-        // Await the timeout operation.
-        // The timeout operation returns -ECANCELED if cancelled.
-        // A *successful* timer expiration completes with res = -ETIME.
-        // We must treat -ETIME as a success, not an error.
-        if (const int res = co_await make_uring_awaitable(*this, prep, &ts, 0); res < 0 && res != -ETIME)
+        // We capture the awaitable to inspect the raw result, as await_resume() would
+        // treat -ETIME as an error, but here it indicates successful timeout expiry.
+        auto awaitable = make_uring_awaitable(*this, prep, &ts, 0);
+        (void) co_await awaitable;
+
+        if (const int res = awaitable.completion_.result; res < 0 && res != -ETIME)
         {
-            // This is a real error (e.g. the operation was cancelled)
             co_return std::unexpected(Error::from_errno(-res));
         }
-
-        // Success (res was 0, or res was -ETIME)
         co_return {};
     }
 
-    Task<Result<void>> Worker::async_ftruncate(int fd, off_t length)
+    Task<Result<void>> Worker::async_sendfile(int out_fd, int in_fd, off_t offset, size_t count)
     {
-        auto prep = [](io_uring_sqe *sqe, int file_fd, const off_t off) { io_uring_prep_ftruncate(sqe, file_fd, off); };
-        if (const int ret = co_await make_uring_awaitable(*this, prep, fd, length); ret < 0)
+        int raw_pipe[2];
+        if (::pipe(raw_pipe) < 0)
         {
-            co_return std::unexpected(Error::from_errno(-ret));
+            co_return std::unexpected(Error::from_errno(errno));
         }
+
+        const net::FDGuard pipe_read(raw_pipe[0]);
+        const net::FDGuard pipe_write(raw_pipe[1]);
+
+        ::fcntl(pipe_read.get(), F_SETFL, O_NONBLOCK);
+        ::fcntl(pipe_write.get(), F_SETFL, O_NONBLOCK);
+
+        size_t remaining = count;
+        off_t current_offset = offset;
+
+        auto prep_splice = [](io_uring_sqe *sqe, int in, off_t off_in, int out, off_t off_out, unsigned int len) { io_uring_prep_splice(sqe, in, off_in, out, off_out, len, 0); };
+
+        while (remaining > 0)
+        {
+            constexpr size_t kChunkSize = 65536;
+            const size_t to_splice = std::min(remaining, kChunkSize);
+
+            // Step A: Splice File -> Pipe
+            const int res_in = KIO_TRY(co_await make_uring_awaitable(*this, prep_splice, in_fd, current_offset, pipe_write.get(), static_cast<off_t>(-1), static_cast<unsigned int>(to_splice)));
+
+            if (res_in == 0) co_return std::unexpected(Error{ErrorCategory::File, kIoEof});
+
+            // Step B: Splice Pipe -> Socket
+            auto pipe_remaining = static_cast<size_t>(res_in);
+            while (pipe_remaining > 0)
+            {
+                const int res_out =
+                        KIO_TRY(co_await make_uring_awaitable(*this, prep_splice, pipe_read.get(), static_cast<off_t>(-1), out_fd, static_cast<off_t>(-1), static_cast<unsigned int>(pipe_remaining)));
+
+                if (res_out == 0) co_return std::unexpected(Error{ErrorCategory::Network, EPIPE});
+                pipe_remaining -= res_out;
+            }
+
+            current_offset += res_in;
+            remaining -= res_in;
+            stats_.bytes_written_total += res_in;
+        }
+
+        stats_.write_ops_total++;
         co_return {};
     }
 

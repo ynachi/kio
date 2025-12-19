@@ -12,7 +12,7 @@
 using namespace kio::io;
 using namespace kio;
 
-DetachedTask HandleClientHttp(Worker &worker, const int client_fd)
+DetachedTask HandleClientHttp(Worker& worker, const int client_fd)
 {
     char buffer[8192];
 
@@ -121,7 +121,7 @@ DetachedTask accept_loop(Worker& worker)
 
         // Spawn coroutine to handle this client
         // Each connection runs independently on this worker
-        HandleClientHttp(worker, client_fd.value()).detach();
+        HandleClientHttp(worker, client_fd.value());
     }
     ALOG_INFO("Worker {} stop accepting connexions", worker.get_id());
 }
@@ -136,12 +136,11 @@ int main()
     // Configure workers
     WorkerConfig config{};
     config.uring_queue_depth = 16800;
-    config.default_op_slots = 8096;
 
 
     // Create a pool with 4 workers
     // Each worker will run accept_loop independently
-    IOPool pool(4, config, [](Worker& worker) { accept_loop(worker).detach(); });
+    IOPool pool(4, config, [](Worker& worker) { accept_loop(worker); });
 
     ALOG_INFO("Server running with 4 workers. Press Ctrl+C to stop.");
 

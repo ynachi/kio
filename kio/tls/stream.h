@@ -40,7 +40,7 @@ namespace kio::tls
      * - Kernel TLS module is loaded (`sudo modprobe tls`)
      * - A KTLS-compatible cipher is used (AES-GCM or ChaCha20-Poly1305)
      */
-    class TlsStream: public io::IStream
+    class TlsStream
     {
         io::Worker& worker_;
         TlsContext& ctx_;
@@ -62,7 +62,7 @@ namespace kio::tls
         // Takes ownership of the socket
         TlsStream(io::Worker& worker, net::Socket socket, TlsContext& context, TlsRole role);
 
-        ~TlsStream() override
+        ~TlsStream()
         {
             if (ssl_)
             {
@@ -95,23 +95,23 @@ namespace kio::tls
          * @param buf Buffer to read into
          * @return Number of bytes read, or error
          */
-        Task<Result<int>> async_read(std::span<char> buf) override;
+        Task<Result<int>> async_read(std::span<char> buf);
 
-        Task<Result<void>> async_read_exact(std::span<char> buf) override;
+        Task<Result<void>> async_read_exact(std::span<char> buf);
 
         /**
          * @brief Async write using kernel TLS
          * @param buf Buffer to write from
          * @return Number of bytes written, or error
          */
-        Task<Result<int>> async_write(std::span<const char> buf) override;
+        auto async_write(std::span<const char> buf);
 
         /**
          * @brief Async write entire buffer using kernel TLS
          * @param buf Buffer to write completely
          * @return void on success, error on failure
          */
-        Task<Result<void>> async_write_exact(std::span<const char> buf) override;
+        Task<Result<void>> async_write_exact(std::span<const char> buf);
 
         /**
          * @brief Async sendfile using kernel TLS
@@ -131,7 +131,7 @@ namespace kio::tls
          *
          * @return void on success (including if peer already closed)
          */
-        [[nodiscard]] Task<Result<void>> async_shutdown() override;
+        [[nodiscard]] Task<Result<void>> async_shutdown();
 
         /**
          * @brief Shutdown TLS and close the underlying socket

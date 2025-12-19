@@ -2,18 +2,16 @@
 // Created by Yao ACHI on 07/12/2025.
 //
 #include "stream.h"
-#include "kio/core/async_logger.h"
+
 #include "context.h"
+#include "kio/core/async_logger.h"
 
 namespace kio::tls
 {
     // Helper coroutine: used ONLY when we have buffered OpenSSL data.
     // This ensures we don't pay the coroutine frame cost for the common KTLS path.
     // In another word, this is to avoid something like co_return co_await when its is not absolutely necessary.
-    static Task<Result<int>> buffered_read_task(int result)
-    {
-        co_return result;
-    }
+    static Task<Result<int>> buffered_read_task(int result) { co_return result; }
 
     TlsStream::TlsStream(io::Worker& worker, net::Socket socket, TlsContext& context, const TlsRole role) : worker_(worker), ctx_(context), socket_(std::move(socket)), role_(role)
     {
@@ -151,11 +149,11 @@ namespace kio::tls
             {
                 // Return a helper task that is already "ready" with the result.
                 // This allocates a frame, but only for this edge case.
-                return buffered_read_task(n);
+                co_return n;
             }
         }
 
-        return worker_.async_read(socket_.get(), buf);
+        co_return co_await worker_.async_read(socket_.get(), buf);
     }
 
     Task<Result<void>> TlsStream::async_read_exact(std::span<char> buf)
@@ -178,15 +176,9 @@ namespace kio::tls
         co_return {};
     }
 
-    Task<Result<int>> TlsStream::async_write(std::span<const char> buf)
-    {
-        return worker_.async_write(socket_.get(), buf);
-    }
+    auto TlsStream::async_write(std::span<const char> buf) { return worker_.async_write(socket_.get(), buf); }
 
-    Task<Result<void>> TlsStream::async_write_exact(std::span<const char> buf)
-    {
-        return worker_.async_write_exact(socket_.get(), buf);
-    }
+    Task<Result<void>> TlsStream::async_write_exact(std::span<const char> buf) { return worker_.async_write_exact(socket_.get(), buf); }
 
     Task<Result<void>> TlsStream::do_shutdown_step()
     {
@@ -228,8 +220,8 @@ namespace kio::tls
                     // Peer closed, fine.
                     co_return {};
                 default:
-                     ALOG_WARN("TLS shutdown error: {}", err);
-                     co_return std::unexpected(Error{ErrorCategory::Tls, kTlsShutdownFailed});
+                    ALOG_WARN("TLS shutdown error: {}", err);
+                    co_return std::unexpected(Error{ErrorCategory::Tls, kTlsShutdownFailed});
             }
         }
         co_return {};

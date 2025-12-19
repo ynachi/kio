@@ -113,7 +113,7 @@ int main(int argc, char** argv)
     gflags::ParseCommandLineFlags(&argc, &argv, true);
 
     signal(SIGPIPE, SIG_IGN);
-    alog::configure(4096, LogLevel::Disabled);
+    alog::configure(8192, LogLevel::Disabled);
 
     // Create a listening socket
     auto server_fd_exp = net::create_tcp_server_socket(FLAGS_ip, FLAGS_port, static_cast<int>(FLAGS_backlog));
@@ -129,7 +129,6 @@ int main(int argc, char** argv)
     // Configure workers
     WorkerConfig config{};
     config.uring_queue_depth = FLAGS_uring_queue_depth;
-    config.default_op_slots = FLAGS_op_slots;
 
     // Create a worker pool
     IOPool pool(FLAGS_workers, config, [server_fd](Worker& worker) { accept_loop(worker, server_fd); });

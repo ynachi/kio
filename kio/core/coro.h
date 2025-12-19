@@ -38,14 +38,13 @@ namespace kio
             return *this;
         }
 
-        ~Task()
+        ~Task() noexcept
         {
-            if (h_)
+            if (h_ && !h_.done())
             {
                 h_.destroy();
             }
         }
-
 
         struct promise_type
         {
@@ -147,7 +146,7 @@ namespace kio
 
         ~Task()
         {
-            if (h_)
+            if (h_ && !h_.done())
             {
                 h_.destroy();
             }
