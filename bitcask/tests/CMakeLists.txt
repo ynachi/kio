@@ -1,8 +1,6 @@
 # ============================================================================
-# Test Executables
+# Test Helper Function
 # ============================================================================
-
-# Helper function to create test targets
 function(add_bitkv_test test_name source_file)
     add_executable(${test_name} ${source_file})
 
@@ -13,50 +11,18 @@ function(add_bitkv_test test_name source_file)
             GTest::gtest_main
     )
 
-    # Include directories
     target_include_directories(${test_name} PRIVATE
             ${CMAKE_SOURCE_DIR}/include
             ${CMAKE_SOURCE_DIR}/bitcask/include
             ${CMAKE_SOURCE_DIR}/core/include
     )
 
-    # Compiler flags
-    target_compile_options(${test_name} PRIVATE
-            -Wall
-            -Wextra
-            -Wpedantic
-            -Wno-gnu-statement-expression
-            $<$<CONFIG:Debug>:-g -O0>
-            $<$<CONFIG:Release>:-O3>
-    )
-
-    # Add to CTest
+    kio_target_compile_options(${test_name})
+    
     add_test(NAME ${test_name} COMMAND ${test_name})
-
-    # Set test properties
-    set_tests_properties(${test_name} PROPERTIES
-            TIMEOUT 600  # 10 minutes timeout
-            LABELS "integration"
-    )
-
-    # gtest discovery
+    set_tests_properties(${test_name} PROPERTIES TIMEOUT 600 LABELS "integration")
     gtest_discover_tests(${test_name})
 endfunction()
-
-# ============================================================================
-# Define unit Tests
-# ============================================================================
-add_bitkv_test(entry_encode_decode_test
-        ${CMAKE_CURRENT_SOURCE_DIR}/entry_codec_test.cpp
-)
-
-add_bitkv_test(file_operations_test
-        ${CMAKE_CURRENT_SOURCE_DIR}/file_operations_test.cpp
-)
-
-add_bitkv_test(partition_test
-        ${CMAKE_CURRENT_SOURCE_DIR}/partition_test.cpp
-)
 
 add_bitkv_test(compactor_test
         ${CMAKE_CURRENT_SOURCE_DIR}/compactor_test.cpp

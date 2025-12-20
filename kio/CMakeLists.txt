@@ -1,24 +1,77 @@
-set(CORE_HEADER_FILES
+# ============================================================================
+# Core Runtime Headers
+# ============================================================================
+set(core_runtime_headers
         core/coro.h
         core/uring_awaitable.h
         core/worker.h
         core/worker_pool.h
         core/metrics_collector.h
-        sync/mpsc_queue.h
-        sync/sync_wait.h
         core/errors.h
         core/istream.h
-        fs/fs.h
         core/async_logger.h
         core/bytes_mut.h
+)
+
+set(core_runtime_sources
+        core/worker.cpp
+        core/worker_pool.cpp
+        core/metrics_collector.cpp
+)
+
+# ============================================================================
+# Synchronization Primitives
+# ============================================================================
+set(sync_headers
+        sync/mpsc_queue.h
+        sync/sync_wait.h
         sync/baton.h
         sync/event.h
         sync/when_any.h
+)
 
+# ============================================================================
+# Filesystem
+# ============================================================================
+set(fs_headers
+        fs/fs.h
+)
+
+set(fs_sources
+        fs/fs.cpp
+)
+
+# ============================================================================
+# Networking
+# ============================================================================
+set(net_headers
         net/net.h
         net/socket.h
+)
 
-        # metrics
+set(net_sources
+        net/net.cpp
+)
+
+# ============================================================================
+# TLS Support
+# ============================================================================
+set(tls_headers
+        tls/context.h
+        tls/stream.h
+        tls/listener.h
+)
+
+set(tls_sources
+        tls/context.cpp
+        tls/stream.cpp
+        tls/listener.cpp
+)
+
+# ============================================================================
+# Metrics
+# ============================================================================
+set(metrics_headers
         metrics/model.h
         metrics/serializer.h
         metrics/utils.h
@@ -27,43 +80,39 @@ set(CORE_HEADER_FILES
         metrics/server.h
 )
 
-set(CORE_SRC_FILES
-        core/worker.cpp
-        core/worker_pool.cpp
-        core/metrics_collector.cpp
-        net/net.cpp
-        fs/fs.cpp
+set(metrics_sources
         metrics/serializer.cpp
         metrics/server.cpp
 )
 
-set(TLS_HEADER_FILES
-        tls/context.h
-        tls/stream.h
-        tls/listener.h
-)
-
-set(TLS_SRC_FILES
-        tls/context.cpp
-        tls/stream.cpp
-        tls/listener.cpp
-)
-
-set(RESP_HEADER_FILES
+# ============================================================================
+# Protocol Support - RESP
+# ============================================================================
+set(resp_headers
         resp/parser.h
 )
 
-set(RESP_SRC_FILES
+set(resp_sources
         resp/parser.cpp
 )
 
+# ============================================================================
+# KIO Library Target
+# ============================================================================
 add_library(kio_lib
-        ${CORE_HEADER_FILES}
-        ${CORE_SRC_FILES}
-        ${TLS_HEADER_FILES}
-        ${TLS_SRC_FILES}
-        ${RESP_HEADER_FILES}
-        ${RESP_SRC_FILES}
+        ${core_runtime_headers}
+        ${core_runtime_sources}
+        ${sync_headers}
+        ${fs_headers}
+        ${fs_sources}
+        ${net_headers}
+        ${net_sources}
+        ${tls_headers}
+        ${tls_sources}
+        ${metrics_headers}
+        ${metrics_sources}
+        ${resp_headers}
+        ${resp_sources}
 )
 
 target_link_libraries(kio_lib PRIVATE
@@ -73,13 +122,6 @@ target_link_libraries(kio_lib PRIVATE
         OpenSSL::Crypto
         crc32c
 )
-target_compile_options(kio_lib PRIVATE
-        -Wall
-        -Wextra
-        -Wpedantic
-        -Wno-gnu-statement-expression
-        $<$<CONFIG:Debug>:-g -O0>
-        $<$<CONFIG:Release>:-O3>
-)
-target_compile_definitions(kio_lib PRIVATE _GNU_SOURCE)
 
+kio_target_compile_options(kio_lib)
+target_compile_definitions(kio_lib PRIVATE _GNU_SOURCE)

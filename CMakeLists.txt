@@ -10,6 +10,26 @@ set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 # Cmake find modules
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 
+# -----------------------------------------
+# Common Build Functions
+#------------------------------------------
+function(kio_target_compile_options target_name)
+    target_compile_options(${target_name} PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+        -Wno-gnu-statement-expression
+        $<$<CONFIG:Debug>:-g -O0>
+        $<$<CONFIG:Release>:-O3>
+    )
+endfunction()
+
+function(kio_add_sanitizers target_name)
+    if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+        target_compile_options(${target_name} PRIVATE -fsanitize=thread -g)
+        target_link_options(${target_name} PRIVATE -fsanitize=thread)
+    endif()
+endfunction()
 
 # -----------------------------------------
 # Optional Components
