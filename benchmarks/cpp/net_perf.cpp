@@ -46,12 +46,12 @@ static constexpr std::string_view HTTP_RESPONSE =
 DetachedTask handle_client(Worker& worker, const int client_fd)
 {
     std::vector<char> buf(8192);
-    const auto st = worker.get_stop_token();
+    const auto st = worker.GetStopToken();
 
     while (!st.stop_requested())
     {
         // Read data (maybe partial)
-        auto n = co_await worker.async_read(client_fd, buf);
+        auto n = co_await worker.AsyncRead(client_fd, buf);
         if (!n.has_value() || n.value() == 0)
         {
             break;  // Error or disconnect
@@ -66,8 +66,8 @@ DetachedTask handle_client(Worker& worker, const int client_fd)
             // We have a complete request, send response
             // Use async_write_exact to ensure all bytes are sent (matching Photon behavior)
 
-            if (auto sent = co_await worker.async_write_exact(client_fd,
-                                                              std::span(HTTP_RESPONSE.data(), HTTP_RESPONSE.size()));
+            if (auto sent = co_await worker.AsyncWriteExact(client_fd,
+                                                            std::span(HTTP_RESPONSE.data(), HTTP_RESPONSE.size()));
                 !sent.has_value())
             {
                 break;
@@ -88,14 +88,14 @@ DetachedTask handle_client(Worker& worker, const int client_fd)
 // Accept loop
 DetachedTask accept_loop(Worker& worker, const int listen_fd)
 {
-    const auto st = worker.get_stop_token();
+    const auto st = worker.GetStopToken();
 
     while (!st.stop_requested())
     {
         sockaddr_storage client_addr{};
         socklen_t addr_len = sizeof(client_addr);
 
-        auto client_fd = co_await worker.async_accept(listen_fd, reinterpret_cast<sockaddr*>(&client_addr), &addr_len);
+        auto client_fd = co_await worker.AsyncAccept(listen_fd, reinterpret_cast<sockaddr*>(&client_addr), &addr_len);
 
         if (!client_fd.has_value())
         {
@@ -139,7 +139,7 @@ int main(int argc, char** argv)
     std::cout << "\nPress Enter to stop...\n";
     std::cin.get();
 
-    pool.stop();
+    pool.Stop();
     close(server_fd);
     ALOG_INFO("Server stopped");
 

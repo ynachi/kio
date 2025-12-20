@@ -6,11 +6,12 @@
 #include <cstdio>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <thread>
+
 #include "kio/core/async_logger.h"
 #include "kio/core/worker.h"
 #include "kio/tls/context.h"
 #include "kio/tls/listener.h"
-#include <thread>
 
 using namespace kio;
 using namespace kio::tls;
@@ -86,7 +87,7 @@ DetachedTask accept_loop(Worker& worker, TlsContext& ctx, const char* filepath)
 {
     ListenerConfig cfg{};
     cfg.port = 8080;
-    const auto st = worker.get_stop_token();
+    const auto st = worker.GetStopToken();
 
     const auto listener = TlsListener::bind(worker, cfg, ctx);
     if (!listener)
@@ -136,10 +137,10 @@ int main(int argc, char* argv[])
 
     constexpr WorkerConfig wcfg{};
     Worker worker(0, wcfg, [&ctx, filepath](Worker& worker) { accept_loop(worker, ctx, filepath); });
-    std::jthread t([&] { worker.loop_forever(); });
-    worker.wait_ready();
+    std::jthread t([&] { worker.LoopForever(); });
+    worker.WaitReady();
 
     ALOG_INFO("Press Enter to stop...");
     std::cin.get();
-    (void) worker.request_stop();
+    (void) worker.RequestStop();
 }

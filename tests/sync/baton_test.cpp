@@ -24,17 +24,17 @@ protected:
         worker = std::make_unique<Worker>(0, WorkerConfig{});
 
         // Start a worker thread
-        worker_thread = std::make_unique<std::jthread>([this] { worker->loop_forever(); });
+        worker_thread = std::make_unique<std::jthread>([this] { worker->LoopForever(); });
 
         // Wait for worker to be ready
-        worker->wait_ready();
+        worker->WaitReady();
     }
 
     void TearDown() override
     {
         // Request stop and wait for shutdown
-        (void) worker->request_stop();
-        worker->wait_shutdown();
+        (void) worker->RequestStop();
+        worker->WaitShutdown();
 
         worker_thread.reset();
         worker.reset();

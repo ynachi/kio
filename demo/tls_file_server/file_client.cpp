@@ -28,7 +28,7 @@ Task<Result<void>> run(Worker& worker, TlsContext& ctx)
     while (got < 8)
     {
         auto r = co_await stream.async_read({p + got, 8 - got});
-        if (!r || *r == 0) co_return std::unexpected(Error{ErrorCategory::Network, EIO});
+        if (!r || *r == 0) co_return std::unexpected(Error{ErrorCategory::kNetwork, EIO});
         got += *r;
     }
 
@@ -79,12 +79,12 @@ int main()
 
     constexpr WorkerConfig wcfg{};
     Worker worker(0, wcfg);
-    std::jthread t([&] { worker.loop_forever(); });
-    worker.wait_ready();
+    std::jthread t([&] { worker.LoopForever(); });
+    worker.WaitReady();
 
     auto res = SyncWait(run(worker, *ctx));
     if (!res) ALOG_ERROR("Failed: {}", res.error());
 
-    (void) worker.request_stop();
+    (void) worker.RequestStop();
     return res ? 0 : 1;
 }

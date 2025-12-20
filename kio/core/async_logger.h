@@ -4,28 +4,37 @@
 #define KIO_ASYNC_LOGGER_H
 
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <cstdint>
 #include <cstring>
+#include <exception>
 #include <format>
-#include <functional>
 #include <iostream>
 #include <memory>
 #include <source_location>
 #include <span>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <syncstream>
 #include <sys/eventfd.h>
+#include <sys/syscall.h>
 #include <thread>
 #include <unistd.h>
+#include <utility>
 
 #include "kio/sync/mpsc_queue.h"
 
 namespace kio
 {
+
+constexpr auto kLoggerSleepInterval = std::chrono::milliseconds(50);
+
 inline int64_t GetThreadId() noexcept
 {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
     thread_local const int64_t kTid = syscall(SYS_gettid);
     return kTid;
 }
@@ -74,10 +83,9 @@ struct LogMessage
     }
 
     LogMessage(const LogMessage &) = delete;
-
     LogMessage &operator=(const LogMessage &) = delete;
-
     LogMessage() = default;
+    ~LogMessage() = default;
 
     LogMessage(LogMessage &&other) noexcept :
         timestamp(other.timestamp), level(other.level), file(other.file), function(other.function), line(other.line),
@@ -131,8 +139,8 @@ class Logger
 public:
     explicit Logger(const size_t queue_size = 1024, const LogLevel level = LogLevel::kInfo,
                     std::ostream &output_stream = std::cout) :
-        queue_(queue_size), level_(level), wakeup_fd_(eventfd(0, EFD_CLOEXEC)), output_stream_(output_stream),
-        use_color_(false)
+        queue_(queue_size), level_(level), wakeup_fd_(eventfd(0, EFD_CLOEXEC)), output_stream_(output_stream)
+
     {
         if (wakeup_fd_ < 0)
         {
@@ -144,8 +152,13 @@ public:
             use_color_ = ::isatty(STDOUT_FILENO) != 0;
         }
 
-        consumer_thread_ = std::jthread([this](const std::stop_token &st) { consume_loop(st); });
+        consumer_thread_ = std::jthread([this](const std::stop_token &st) { ConsumeLoop(st); });
     }
+
+    Logger(const Logger &) = delete;
+    Logger &operator=(const Logger &) = delete;
+    Logger(Logger &&) = delete;
+    Logger &operator=(Logger &&) = delete;
 
     ~Logger()
     {
@@ -172,47 +185,49 @@ public:
     void SetLevel(const LogLevel level) { level_.store(level, std::memory_order_relaxed); }
 
     [[nodiscard]]
-    bool should_log(LogLevel lvl) const noexcept
+    bool ShouldLog(LogLevel lvl) const noexcept
     {
         if (const auto current_level = level_.load(std::memory_order_relaxed); current_level == LogLevel::kDisabled)
+        {
             return false;
+        }
         return static_cast<int>(lvl) >= static_cast<int>(level_.load(std::memory_order_relaxed));
     }
 
     template<typename... Args>
-    void trace(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
+    void Trace(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
     {
         log<LogLevel::kTrace>(loc, fmt, std::forward<Args>(args)...);
     }
 
     template<typename... Args>
-    void debug(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
+    void Debug(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
     {
-        log<LogLevel::kDebug>(loc, fmt, std::forward<Args>(args)...);
+        Log<LogLevel::kDebug>(loc, fmt, std::forward<Args>(args)...);
     }
 
     template<typename... Args>
-    void info(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
+    void Info(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
     {
-        log<LogLevel::kInfo>(loc, fmt, std::forward<Args>(args)...);
+        Log<LogLevel::kInfo>(loc, fmt, std::forward<Args>(args)...);
     }
 
     template<typename... Args>
-    void warn(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
+    void Warn(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
     {
-        log<LogLevel::kWarn>(loc, fmt, std::forward<Args>(args)...);
+        Log<LogLevel::kWarn>(loc, fmt, std::forward<Args>(args)...);
     }
 
     template<typename... Args>
-    void error(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
+    void Error(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
     {
-        log<LogLevel::kError>(loc, fmt, std::forward<Args>(args)...);
+        Log<LogLevel::kError>(loc, fmt, std::forward<Args>(args)...);
     }
 
-    void flush()
+    void Flush()
     {
         LogMessage entry;
-        while (queue_.try_pop(entry))
+        while (queue_.TryPop(entry))
         {
             Write(entry);
         }
@@ -220,10 +235,16 @@ public:
 
 private:
     template<LogLevel L, typename... Args>
-    void log(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
+    void Log(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
     {
-        if constexpr (L == LogLevel::kDisabled) return;
-        if (!should_log(L)) return;
+        if constexpr (L == LogLevel::kDisabled)
+        {
+            return;
+        }
+        if (!ShouldLog(L))
+        {
+            return;
+        }
 
         std::array<char, LogMessage::kMsgCapacity> stack_buf{};
 
@@ -250,14 +271,14 @@ private:
                 entry.SetLargeMessage(std::move(large));
             }
 
-            if (queue_.try_push(std::move(entry)))
+            if (queue_.TryPush(std::move(entry)))
             {
                 if (wakeup_fd_ >= 0)
                 {
                     constexpr uint64_t val = 1;
                     if (const ssize_t ret = ::write(wakeup_fd_, &val, sizeof(val)); ret < 0 && errno != EAGAIN)
                     {
-                        std::osyncstream(std::cerr) << "Logger wakeup write() error: " << strerror(errno) << std::endl;
+                        std::osyncstream(std::cerr) << "Logger wakeup write() error: " << strerror(errno) << '\n';
                     }
                 }
             }
@@ -284,31 +305,34 @@ private:
             {
                 entry.SetLargeMessage(std::move(fallback));
             }
-            (void) queue_.try_push(std::move(entry));
+            (void) queue_.TryPush(std::move(entry));
         }
     }
 
-    void consume_loop(const std::stop_token &st)
+    void ConsumeLoop(const std::stop_token &st)
     {
-        uint64_t val;
+        uint64_t val = 0;
         while (!st.stop_requested())
         {
             if (wakeup_fd_ < 0)
             {
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                std::this_thread::sleep_for(std::chrono::milliseconds(kLoggerSleepInterval));
             }
             else
             {
                 if (const ssize_t ret = ::read(wakeup_fd_, &val, sizeof(val)); ret < 0)
                 {
-                    if (errno == EINTR) continue;
-                    std::osyncstream(std::cerr) << "Logger wakeup read() error: " << strerror(errno) << std::endl;
+                    if (errno == EINTR)
+                    {
+                        continue;
+                    }
+                    std::osyncstream(std::cerr) << "Logger wakeup read() error: " << strerror(errno) << '\n';
                     break;
                 }
             }
-            flush();
+            Flush();
         }
-        flush();
+        Flush();
     }
 
     void Write(const LogMessage &msg) const
@@ -385,43 +409,43 @@ private:
     std::jthread consumer_thread_;
     int wakeup_fd_{-1};
     std::ostream &output_stream_;
-    bool use_color_;
+    bool use_color_{false};
 };
 
 /* ──────────────── Core macros (kept as-is) ──────────────── */
 #define KIO_LOG_TRACE(logger_instance, ...)                                        \
     do                                                                             \
     {                                                                              \
-        if ((logger_instance).should_log(::kio::LogLevel::Trace))                  \
-            (logger_instance).trace(std::source_location::current(), __VA_ARGS__); \
+        if ((logger_instance).ShouldLog(::kio::LogLevel::Trace))                   \
+            (logger_instance).Trace(std::source_location::current(), __VA_ARGS__); \
     } while (0)
 
 #define KIO_LOG_DEBUG(logger_instance, ...)                                        \
     do                                                                             \
     {                                                                              \
-        if ((logger_instance).should_log(::kio::LogLevel::Debug))                  \
-            (logger_instance).debug(std::source_location::current(), __VA_ARGS__); \
+        if ((logger_instance).ShouldLog(::kio::LogLevel::Debug))                   \
+            (logger_instance).Debug(std::source_location::current(), __VA_ARGS__); \
     } while (0)
 
 #define KIO_LOG_INFO(logger_instance, ...)                                        \
     do                                                                            \
     {                                                                             \
-        if ((logger_instance).should_log(::kio::LogLevel::Info))                  \
-            (logger_instance).info(std::source_location::current(), __VA_ARGS__); \
+        if ((logger_instance).ShouldLog(::kio::LogLevel::Info))                   \
+            (logger_instance).Info(std::source_location::current(), __VA_ARGS__); \
     } while (0)
 
 #define KIO_LOG_WARN(logger_instance, ...)                                        \
     do                                                                            \
     {                                                                             \
-        if ((logger_instance).should_log(::kio::LogLevel::Warn))                  \
-            (logger_instance).warn(std::source_location::current(), __VA_ARGS__); \
+        if ((logger_instance).ShouldLog(::kio::LogLevel::Warn))                   \
+            (logger_instance).Warn(std::source_location::current(), __VA_ARGS__); \
     } while (0)
 
 #define KIO_LOG_ERROR(logger_instance, ...)                                        \
     do                                                                             \
     {                                                                              \
-        if ((logger_instance).should_log(::kio::LogLevel::Error))                  \
-            (logger_instance).error(std::source_location::current(), __VA_ARGS__); \
+        if ((logger_instance).ShouldLog(::kio::LogLevel::Error))                   \
+            (logger_instance).Error(std::source_location::current(), __VA_ARGS__); \
     } while (0)
 
 #define LOGT(logger_instance, ...) KIO_LOG_TRACE(logger_instance, __VA_ARGS__)
@@ -477,39 +501,39 @@ inline void Configure(size_t queue_size = kDefaultLoggerQueueSize, LogLevel leve
 template<typename... Args>
 void Trace(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
 {
-    Get().trace(loc, fmt, std::forward<Args>(args)...);
+    Get().Trace(loc, fmt, std::forward<Args>(args)...);
 }
 
 template<typename... Args>
 void Debug(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
 {
-    Get().debug(loc, fmt, std::forward<Args>(args)...);
+    Get().Debug(loc, fmt, std::forward<Args>(args)...);
 }
 
 template<typename... Args>
 void Info(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
 {
-    Get().info(loc, fmt, std::forward<Args>(args)...);
+    Get().Info(loc, fmt, std::forward<Args>(args)...);
 }
 
 template<typename... Args>
 void Warn(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
 {
-    Get().warn(loc, fmt, std::forward<Args>(args)...);
+    Get().Warn(loc, fmt, std::forward<Args>(args)...);
 }
 
 template<typename... Args>
 void Error(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
 {
-    Get().error(loc, fmt, std::forward<Args>(args)...);
+    Get().Error(loc, fmt, std::forward<Args>(args)...);
 }
 
 // uses the macros, they are more convenient
-#define ALOG_TRACE(...) ::kio::alog::trace(std::source_location::current(), __VA_ARGS__)
-#define ALOG_DEBUG(...) ::kio::alog::debug(std::source_location::current(), __VA_ARGS__)
-#define ALOG_INFO(...) ::kio::alog::info(std::source_location::current(), __VA_ARGS__)
-#define ALOG_WARN(...) ::kio::alog::warn(std::source_location::current(), __VA_ARGS__)
-#define ALOG_ERROR(...) ::kio::alog::error(std::source_location::current(), __VA_ARGS__)
+#define ALOG_TRACE(...) ::kio::alog::Trace(std::source_location::current(), __VA_ARGS__)
+#define ALOG_DEBUG(...) ::kio::alog::Debug(std::source_location::current(), __VA_ARGS__)
+#define ALOG_INFO(...) ::kio::alog::Info(std::source_location::current(), __VA_ARGS__)
+#define ALOG_WARN(...) ::kio::alog::Warn(std::source_location::current(), __VA_ARGS__)
+#define ALOG_ERROR(...) ::kio::alog::Error(std::source_location::current(), __VA_ARGS__)
 }  // namespace kio::alog
 
 #endif  // KIO_ASYNC_LOGGER_H

@@ -19,7 +19,6 @@
 #include "kio/tls/listener.h"
 #include "kio/tls/stream.h"
 
-
 namespace io = kio::io;
 namespace tls = kio::tls;
 namespace net = kio::net;
@@ -79,7 +78,7 @@ static auto handle_client(tls::TlsStream stream) -> kio::DetachedTask
 DetachedTask accept_loop(Worker& worker, const ListenerConfig& listener_cfg, TlsContext& ctx)
 {
     ALOG_INFO("✅ Starting KTLS-only server");
-    const auto st = worker.get_stop_token();
+    const auto st = worker.GetStopToken();
 
     auto listener_res = TlsListener::bind(worker, listener_cfg, ctx);
     if (!listener_res.has_value())
@@ -162,7 +161,7 @@ int main()
     std::cout << "Server running. Press Enter to stop..." << std::endl;
     // Blocks until user presses Enter
     std::cin.get();
-    pool.stop();
+    pool.Stop();
 
     ALOG_INFO("Server stopped");
 

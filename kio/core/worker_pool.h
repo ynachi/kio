@@ -4,10 +4,12 @@
 
 #ifndef KIO_IO_WORKER_POOL_H
 #define KIO_IO_WORKER_POOL_H
+#include <atomic>
+#include <functional>
 #include <memory>
+#include <thread>
 #include <vector>
 
-#include "coro.h"
 #include "worker.h"
 
 namespace kio::io
@@ -42,6 +44,8 @@ public:
 
     ~IOPool();
 
+    IOPool(IOPool&&) = default;
+    IOPool& operator=(IOPool&&) = default;
     IOPool(const IOPool&) = delete;
     auto operator=(const IOPool&) -> IOPool& = delete;
 
@@ -59,7 +63,7 @@ public:
      * @return Pointer to the worker, or nullptr if the ID is invalid.
      */
     [[nodiscard]]
-    Worker* get_worker(size_t id) const;
+    Worker* GetWorker(size_t id) const;
 
     /**
      * @brief Get a worker ID based on a hash of a key.
@@ -71,12 +75,12 @@ public:
      * @return The ID of the selected worker.
      */
     [[nodiscard]]
-    size_t get_worker_id_by_key(std::string_view key) const;
+    size_t GetWorkerIdByKey(std::string_view key) const;
 
     /**
      * @brief Request all workers to stop and waits for them to shut down.
      */
-    void stop();
+    void Stop();
 };
 }  // namespace kio::io
 

@@ -40,7 +40,7 @@ Task<Result<size_t> > count_chars_in_file(Worker &worker, std::string_view filen
               std::hash<std::thread::id>{}(std::this_thread::get_id()));
 
     // Now that we are on the correct thread, we can safely call async methods.
-    auto fd = KIO_TRY(co_await worker.async_openat(filename, O_RDONLY, 0));
+    auto fd = KIO_TRY(co_await worker.AsyncOpenat(filename, O_RDONLY, 0));
 
     ALOG_INFO("Successfully opened file '{}', fd={}", filename, fd);
 
@@ -51,7 +51,7 @@ Task<Result<size_t> > count_chars_in_file(Worker &worker, std::string_view filen
 
     while (true)
     {
-        auto bytes_read = KIO_TRY(co_await worker.async_read_at(fd, std::span(buffer.data(), buffer.size()), offset));
+        auto bytes_read = KIO_TRY(co_await worker.AsyncReadAt(fd, std::span(buffer.data(), buffer.size()), offset));
 
         if (bytes_read == 0)
         {
@@ -63,7 +63,7 @@ Task<Result<size_t> > count_chars_in_file(Worker &worker, std::string_view filen
         offset += bytes_read;
     }
 
-    co_await worker.async_close(fd);
+    co_await worker.AsyncClose(fd);
     ALOG_INFO("Closed file descriptor {}", fd);
 
     co_return total_count;
@@ -93,12 +93,12 @@ int main()
                 ALOG_INFO("Worker thread starting with ID: {}",
                           std::hash<std::thread::id>{}(std::this_thread::get_id()));
                 //  This thread will now block here, running the I/O event loop.
-                worker.loop_forever();
+                worker.LoopForever();
                 ALOG_INFO("Worker thread finished its loop.");
             });
 
     // Wait for the worker to complete its initialization on the new thread.
-    worker.wait_ready();
+    worker.WaitReady();
     ALOG_INFO("Worker context has been initialized on its thread.");
 
     // --- Run the Coroutine on the Main Thread ---
@@ -112,7 +112,7 @@ int main()
 
     // --- Cleanup ---
     ALOG_INFO("Main thread requesting worker to stop.");
-    (void) worker.request_stop();  // Signals the stop_source and wakes up the loop.
+    (void) worker.RequestStop();  // Signals the stop_source and wakes up the loop.
 
     // The jthread's destructor will automatically call join(), ensuring
     // we wait for the worker thread to finish cleanly.

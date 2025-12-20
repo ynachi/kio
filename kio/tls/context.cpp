@@ -45,14 +45,14 @@ Result<TlsContext> TlsContext::make(const TlsConfig& config, const TlsRole role)
 
     const SSL_METHOD* method = (role == TlsRole::Server) ? TLS_server_method() : TLS_client_method();
     SSL_CTX* ctx = SSL_CTX_new(method);
-    if (ctx == nullptr) return std::unexpected(Error{ErrorCategory::Tls, kTlsContextCreationFailed});
+    if (ctx == nullptr) return std::unexpected(Error{ErrorCategory::kTls, kTlsContextCreationFailed});
 
     // Set minimum TLS version
     if (!SSL_CTX_set_min_proto_version(ctx, detail::tls_version_to_openssl(config.min_version)))
     {
         ALOG_ERROR("Failed to set minimum TLS version: {}", detail::get_openssl_error());
         SSL_CTX_free(ctx);
-        return std::unexpected(Error{ErrorCategory::Tls, kTlsContextCreationFailed});
+        return std::unexpected(Error{ErrorCategory::kTls, kTlsContextCreationFailed});
     }
 
     // KTLS Enable
@@ -91,7 +91,7 @@ Result<TlsContext> TlsContext::make(const TlsConfig& config, const TlsRole role)
             ALOG_ERROR("Failed to load certificate from {}: {}", config.cert_path.string(),
                        detail::get_openssl_error());
             SSL_CTX_free(ctx);
-            return std::unexpected(Error{ErrorCategory::Tls, kTlsCertificateLoadFailed});
+            return std::unexpected(Error{ErrorCategory::kTls, kTlsCertificateLoadFailed});
         }
         ALOG_DEBUG("Loaded certificate chain from {}", config.cert_path.string());
     }
@@ -103,14 +103,14 @@ Result<TlsContext> TlsContext::make(const TlsConfig& config, const TlsRole role)
         {
             ALOG_ERROR("Failed to load private key from {}: {}", config.key_path.string(), detail::get_openssl_error());
             SSL_CTX_free(ctx);
-            return std::unexpected(Error{ErrorCategory::Tls, kTlsPrivateKeyLoadFailed});
+            return std::unexpected(Error{ErrorCategory::kTls, kTlsPrivateKeyLoadFailed});
         }
 
         if (SSL_CTX_check_private_key(ctx) != 1)
         {
             ALOG_ERROR("Private key does not match certificate: {}", detail::get_openssl_error());
             SSL_CTX_free(ctx);
-            return std::unexpected(Error{ErrorCategory::Tls, kTlsPrivateKeyLoadFailed});
+            return std::unexpected(Error{ErrorCategory::kTls, kTlsPrivateKeyLoadFailed});
         }
         ALOG_DEBUG("Loaded private key from {}", config.key_path.string());
     }
@@ -122,7 +122,7 @@ Result<TlsContext> TlsContext::make(const TlsConfig& config, const TlsRole role)
         {
             ALOG_ERROR("Server TLS context requires both certificate and private key");
             SSL_CTX_free(ctx);
-            return std::unexpected(Error{ErrorCategory::Tls, kTlsCertificateLoadFailed});
+            return std::unexpected(Error{ErrorCategory::kTls, kTlsCertificateLoadFailed});
         }
     }
 
@@ -136,7 +136,7 @@ Result<TlsContext> TlsContext::make(const TlsConfig& config, const TlsRole role)
         {
             ALOG_ERROR("Failed to load CA certificates: {}", detail::get_openssl_error());
             SSL_CTX_free(ctx);
-            return std::unexpected(Error{ErrorCategory::Tls, kTlsCertificateLoadFailed});
+            return std::unexpected(Error{ErrorCategory::kTls, kTlsCertificateLoadFailed});
         }
         ALOG_DEBUG("Loaded CA certificates");
     }
@@ -159,7 +159,7 @@ Result<TlsContext> TlsContext::make(const TlsConfig& config, const TlsRole role)
         {
             ALOG_ERROR("Failed to set cipher list: {}", detail::get_openssl_error());
             SSL_CTX_free(ctx);
-            return std::unexpected(Error{ErrorCategory::Tls, kTlsContextCreationFailed});
+            return std::unexpected(Error{ErrorCategory::kTls, kTlsContextCreationFailed});
         }
     }
 
@@ -169,7 +169,7 @@ Result<TlsContext> TlsContext::make(const TlsConfig& config, const TlsRole role)
         {
             ALOG_ERROR("Failed to set TLS 1.3 ciphersuites: {}", detail::get_openssl_error());
             SSL_CTX_free(ctx);
-            return std::unexpected(Error{ErrorCategory::Tls, kTlsContextCreationFailed});
+            return std::unexpected(Error{ErrorCategory::kTls, kTlsContextCreationFailed});
         }
     }
 
@@ -222,7 +222,7 @@ Result<void> require_ktls()
     if (!is_ktls_available())
     {
         ALOG_ERROR("Kernel TLS module not loaded. Run: sudo modprobe tls");
-        return std::unexpected(Error{ErrorCategory::Tls, kTlsKtlsEnableFailed});
+        return std::unexpected(Error{ErrorCategory::kTls, kTlsKtlsEnableFailed});
     }
 
     return {};

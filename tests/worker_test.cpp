@@ -35,15 +35,15 @@ protected:
         worker = std::make_unique<Worker>(0, config);
 
         // Start the worker's event loop on a dedicated thread
-        worker_thread = std::make_unique<std::jthread>([this] { worker->loop_forever(); });
+        worker_thread = std::make_unique<std::jthread>([this] { worker->LoopForever(); });
 
-        worker->wait_ready();
+        worker->WaitReady();
     }
 
     void TearDown() override
     {
         // Request the worker to stop and wait for its thread to join.
-        (void) worker->request_stop();
+        (void) worker->RequestStop();
         worker_thread.reset();
         worker.reset();
         std::filesystem::remove_all(test_dir);
@@ -71,7 +71,7 @@ TEST_F(WorkerTest, AsyncSleep)
         co_await SwitchToWorker(*worker);
 
         const auto start = std::chrono::steady_clock::now();
-        const auto result = co_await worker->async_sleep(std::chrono::milliseconds(20));
+        const auto result = co_await worker->AsyncSleep(std::chrono::milliseconds(20));
         const auto end = std::chrono::steady_clock::now();
 
         EXPECT_TRUE(result.has_value());
@@ -91,7 +91,7 @@ TEST_F(WorkerTest, AsyncReadOnBadFdReturnsError)
         char buffer[10];
 
         // We expect this to fail
-        auto result = co_await worker->async_read(bad_fd, std::span(buffer));
+        auto result = co_await worker->AsyncRead(bad_fd, std::span(buffer));
 
         EXPECT_FALSE(result.has_value());
         // The error must be 'InvalidFileDescriptor' (EBADF)
@@ -114,12 +114,12 @@ TEST_F(WorkerTest, AsyncReadWriteSocketPair)
         co_await SwitchToWorker(*worker);
 
         std::string write_buf = "hello";
-        const auto write_res = co_await worker->async_write(write_fd, std::span(write_buf.data(), write_buf.size()));
+        const auto write_res = co_await worker->AsyncWrite(write_fd, std::span(write_buf.data(), write_buf.size()));
         EXPECT_TRUE(write_res.has_value());
         EXPECT_EQ(*write_res, 5);
 
         char read_buf[10]{};
-        const auto read_res = co_await worker->async_read(read_fd, std::span(read_buf, sizeof(read_buf)));
+        const auto read_res = co_await worker->AsyncRead(read_fd, std::span(read_buf, sizeof(read_buf)));
         EXPECT_TRUE(read_res.has_value());
         EXPECT_EQ(*read_res, 5);
 
@@ -145,12 +145,12 @@ TEST_F(WorkerTest, AsyncReadWriteExactSocketPair)
         co_await SwitchToWorker(*worker);
 
         std::string write_buf = "hello world";
-        auto write_res = co_await worker->async_write_exact(write_fd, std::span(write_buf.data(), write_buf.size()));
+        auto write_res = co_await worker->AsyncWriteExact(write_fd, std::span(write_buf.data(), write_buf.size()));
 
         EXPECT_TRUE(write_res.has_value());
 
         std::vector<char> read_buf(write_buf.size());
-        const auto read_res = co_await worker->async_read_exact(read_fd, std::span(read_buf.data(), read_buf.size()));
+        const auto read_res = co_await worker->AsyncReadExact(read_fd, std::span(read_buf.data(), read_buf.size()));
 
         EXPECT_TRUE(read_res.has_value());
         EXPECT_EQ(std::string(read_buf.data(), read_buf.size()), "hello world");
@@ -175,18 +175,18 @@ TEST_F(WorkerTest, AsyncReadExactEOF)
         co_await SwitchToWorker(*worker);
 
         std::string write_buf = "short";
-        const auto write_res = co_await worker->async_write(write_fd, std::span(write_buf.data(), write_buf.size()));
+        const auto write_res = co_await worker->AsyncWrite(write_fd, std::span(write_buf.data(), write_buf.size()));
         EXPECT_TRUE(write_res.has_value());
 
         // Close the writing end. This will send an EOF to the read end after
         // the initial 5 bytes are read.
         // We use async_close to ensure it happens on the worker thread.
-        const auto close_res = co_await worker->async_close(write_fd);
+        const auto close_res = co_await worker->AsyncClose(write_fd);
         EXPECT_TRUE(close_res.has_value());
 
         // Attempt to read *exactly* 10 bytes. This should fail.
         char read_buf[10];  // Expect 10 bytes
-        auto read_res = co_await worker->async_read_exact(read_fd, std::span(read_buf, sizeof(read_buf)));
+        auto read_res = co_await worker->AsyncReadExact(read_fd, std::span(read_buf, sizeof(read_buf)));
 
         EXPECT_FALSE(read_res.has_value());
         // The error must be due to EOF
@@ -225,7 +225,7 @@ TEST_F(WorkerTest, SingleThreadedExecution)
             {
                 shared_counter++;
                 // Yield control to allow other tasks to run
-                co_await worker->async_sleep(std::chrono::milliseconds(0));
+                co_await worker->AsyncSleep(std::chrono::milliseconds(0));
             }
             detached_task_completed = true;
         };
@@ -242,7 +242,7 @@ TEST_F(WorkerTest, SingleThreadedExecution)
             {
                 shared_counter++;
                 // Yield to allow interleaving
-                co_await worker->async_sleep(std::chrono::milliseconds(0));
+                co_await worker->AsyncSleep(std::chrono::milliseconds(0));
             }
         };
 
@@ -259,7 +259,7 @@ TEST_F(WorkerTest, SingleThreadedExecution)
         // Wait for a detached task to complete by polling
         while (!detached_task_completed)
         {
-            co_await worker->async_sleep(std::chrono::milliseconds(1));
+            co_await worker->AsyncSleep(std::chrono::milliseconds(1));
         }
 
         // Check: All increments should have happened
@@ -277,7 +277,7 @@ TEST_F(WorkerTest, GetOpIdPoolGrowthCorrectness)
         co_await SwitchToWorker(*worker);
 
         const size_t initial_capacity =
-                worker->get_stats().active_coroutines + worker->get_stats().active_coroutines;  // just trigger reading
+                worker->GetStats().active_coroutines + worker->GetStats().active_coroutines;  // just trigger reading
 
         std::unordered_set<uint64_t> ids;
         for (size_t i = 0; i < initial_capacity + 10; ++i)
@@ -287,7 +287,7 @@ TEST_F(WorkerTest, GetOpIdPoolGrowthCorrectness)
             kio::io::internal::WorkerAccess::init_op_slot(*worker, id, {});
         }
 
-        EXPECT_GT(worker->get_stats().active_coroutines, initial_capacity);
+        EXPECT_GT(worker->GetStats().active_coroutines, initial_capacity);
         EXPECT_EQ(ids.size(), initial_capacity + 10);  // all IDs unique
 
         // cleanup
@@ -362,8 +362,8 @@ TEST_F(WorkerTest, AsyncReadAtRealFileOffsetWorks)
 
 TEST_F(WorkerTest, RequestStopIsIdempotentAndWakesLoop)
 {
-    EXPECT_TRUE(worker->request_stop());
-    EXPECT_TRUE(worker->request_stop());
+    EXPECT_TRUE(worker->RequestStop());
+    EXPECT_TRUE(worker->RequestStop());
 }
 
 TEST_F(WorkerTest, AsyncReadExactAtOffsetCorrectness)

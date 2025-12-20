@@ -122,11 +122,11 @@ public:
     // Warning: check if parser has error before in case of nulopt as response
     [[nodiscard]] std::expected<FrameHeader, ParseError> next_frame()
     {
-        return parse_frame_internal(buffer_.readable_span(), 0);
+        return parse_frame_internal(buffer_.ReadableSpan(), 0);
     }
 
     // Consume bytes after processing a frame
-    void consume(const size_t n) { buffer_.advance(n); }
+    void consume(const size_t n) { buffer_.Advance(n); }
     void consume(const FrameHeader& frame) { consume(frame.size); }
 };
 

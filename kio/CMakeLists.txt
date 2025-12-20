@@ -3,12 +3,10 @@
 # ============================================================================
 set(core_runtime_headers
         core/coro.h
-        core/uring_awaitable.h
         core/worker.h
         core/worker_pool.h
         core/metrics_collector.h
         core/errors.h
-        core/istream.h
         core/async_logger.h
         core/bytes_mut.h
 )

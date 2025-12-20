@@ -26,15 +26,15 @@ Task<Result<void>> compact_files(CompactionContext& ctx)
     const auto hint_path = detail::get_hint_file_path(ctx, ctx.dst_file_id);
 
     const int data_fd =
-            KIO_TRY(co_await ctx.io_worker.async_openat(data_path, ctx.config.write_flags, ctx.config.file_mode));
+            KIO_TRY(co_await ctx.io_worker.AsyncOpenat(data_path, ctx.config.write_flags, ctx.config.file_mode));
     const int hint_fd =
-            KIO_TRY(co_await ctx.io_worker.async_openat(hint_path, ctx.config.write_flags, ctx.config.file_mode));
+            KIO_TRY(co_await ctx.io_worker.AsyncOpenat(hint_path, ctx.config.write_flags, ctx.config.file_mode));
 
     FileHandle data_handle(data_fd);
     FileHandle hint_handle(hint_fd);
 
     // Pre-allocate
-    KIO_TRY(co_await ctx.io_worker.async_fallocate(data_fd, 0, static_cast<off_t>(ctx.config.max_file_size)));
+    KIO_TRY(co_await ctx.io_worker.AsyncFallocate(data_fd, 0, static_cast<off_t>(ctx.config.max_file_size)));
 
     // Compact each source file
     for (uint64_t src_file_id: ctx.src_file_ids)
@@ -51,8 +51,8 @@ Task<Result<void>> compact_files(CompactionContext& ctx)
     KIO_TRY(co_await detail::commit_batch(ctx, data_fd, hint_fd));
 
     // Sync
-    KIO_TRY(co_await ctx.io_worker.async_fsync(data_fd));
-    KIO_TRY(co_await ctx.io_worker.async_fsync(hint_fd));
+    KIO_TRY(co_await ctx.io_worker.AsyncFsync(data_fd));
+    KIO_TRY(co_await ctx.io_worker.AsyncFsync(hint_fd));
 
     double reduction =
             ctx.bytes_read > 0
@@ -100,7 +100,7 @@ Task<Result<std::pair<int, uint64_t>>> open_source_file(const CompactionContext&
 {
     const auto src_path = get_data_file_path(ctx, src_file_id);
     const auto src_fd =
-            KIO_TRY(co_await ctx.io_worker.async_openat(src_path, ctx.config.read_flags, ctx.config.file_mode));
+            KIO_TRY(co_await ctx.io_worker.AsyncOpenat(src_path, ctx.config.read_flags, ctx.config.file_mode));
 
     struct stat st{};
     uint64_t file_size = 0;
@@ -124,7 +124,7 @@ Task<Result<void>> stream_and_compact_file(CompactionContext& ctx, const int src
         auto write_span = ctx.decode_buffer.writable_span();
 
         // Read from upstream IO
-        const auto bytes_read = KIO_TRY(co_await ctx.io_worker.async_read_at(src_fd, write_span, file_read_pos));
+        const auto bytes_read = KIO_TRY(co_await ctx.io_worker.AsyncReadAt(src_fd, write_span, file_read_pos));
 
         ctx.decode_buffer.commit_write(bytes_read);
 
@@ -143,7 +143,7 @@ Task<Result<void>> stream_and_compact_file(CompactionContext& ctx, const int src
         if (ctx.decode_buffer.remaining() > ctx.limits.max_decode_buffer)
         {
             ALOG_ERROR("Buffer overflow: {}MB", ctx.decode_buffer.remaining() / 1024 / 1024);
-            co_return std::unexpected(Error{ErrorCategory::Application, kIoDataCorrupted});
+            co_return std::unexpected(Error{ErrorCategory::kApplication, kIoDataCorrupted});
         }
 
         // FIX: Check the result of parsing. If it fails, assume we hit the unsealed tail.
@@ -228,8 +228,8 @@ Task<Result<void>> commit_batch(CompactionContext& ctx, const int dst_data_fd, c
 {
     if (ctx.data_batch.empty()) co_return {};
 
-    KIO_TRY(co_await ctx.io_worker.async_write_exact(dst_data_fd, std::span(ctx.data_batch)));
-    KIO_TRY(co_await ctx.io_worker.async_write_exact(dst_hint_fd, std::span(ctx.hint_batch)));
+    KIO_TRY(co_await ctx.io_worker.AsyncWriteExact(dst_data_fd, std::span(ctx.data_batch)));
+    KIO_TRY(co_await ctx.io_worker.AsyncWriteExact(dst_hint_fd, std::span(ctx.hint_batch)));
 
     ctx.bytes_written += ctx.data_batch.size();
 
@@ -270,8 +270,8 @@ void reset_batches(CompactionContext& ctx)
 
 Task<Result<void>> cleanup_source_files(const CompactionContext& ctx, const uint64_t src_file_id)
 {
-    co_await ctx.io_worker.async_unlink_at(AT_FDCWD, get_data_file_path(ctx, src_file_id), 0);
-    co_await ctx.io_worker.async_unlink_at(AT_FDCWD, get_hint_file_path(ctx, src_file_id), 0);
+    co_await ctx.io_worker.AsyncUnlinkAt(AT_FDCWD, get_data_file_path(ctx, src_file_id), 0);
+    co_await ctx.io_worker.AsyncUnlinkAt(AT_FDCWD, get_hint_file_path(ctx, src_file_id), 0);
     co_return {};
 }
 

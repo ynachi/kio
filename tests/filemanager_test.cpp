@@ -33,7 +33,7 @@ protected:
         // Wait for all workers in the pool to be ready
         for (size_t i = 0; i < fm->pool().num_workers(); ++i)
         {
-            fm->pool().get_worker(i)->wait_ready();
+            fm->pool().GetWorker(i)->WaitReady();
         }
     }
 

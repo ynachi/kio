@@ -132,7 +132,7 @@ Task<Result<int>> Partition::find_fd(const uint64_t file_id)
     // if file id is the active one, flush first
     if (file_id == active_file_->file_id())
     {
-        KIO_TRY(co_await worker_.async_fdatasync(active_file_->handle().get()));
+        KIO_TRY(co_await worker_.AsyncFdatasync(active_file_->handle().get()));
     }
 
     const auto path = get_data_file_path(file_id);
@@ -143,7 +143,7 @@ Task<Result<DataEntry>> Partition::async_read_entry(const int fd, const uint64_t
 {
     ALOG_TRACE("Reading entry from file {} at offset {} with size {}", fd, offset, size);
     std::vector<char> buffer(size);
-    KIO_TRY(co_await worker_.async_read_exact_at(fd, buffer, offset));
+    KIO_TRY(co_await worker_.AsyncReadExactAt(fd, buffer, offset));
     ALOG_TRACE("Read entry from file {} at offset {} with size {}", fd, offset, size);
 
     auto [entry, _] = KIO_TRY(DataEntry::deserialize(buffer));
@@ -160,10 +160,10 @@ Task<Result<void>> Partition::rotate_active_file()
     const int active_fd = active_file_->handle().get();
 
     // Flush
-    KIO_TRY(co_await worker_.async_fsync(active_file_->handle().get()));
+    KIO_TRY(co_await worker_.AsyncFsync(active_file_->handle().get()));
 
     // truncate to the actual used space
-    KIO_TRY(co_await worker_.async_ftruncate(active_fd, static_cast<off_t>(actual_size)));
+    KIO_TRY(co_await worker_.AsyncFtruncate(active_fd, static_cast<off_t>(actual_size)));
 
     // close
     KIO_TRY(co_await active_file_->async_close());
@@ -182,13 +182,13 @@ Task<Result<void>> Partition::create_and_set_active_file()
 {
     uint64_t new_id = file_id_gen_.next();
     int new_fd =
-            KIO_TRY(co_await worker_.async_openat(get_data_file_path(new_id), config_.write_flags, config_.file_mode));
+            KIO_TRY(co_await worker_.AsyncOpenat(get_data_file_path(new_id), config_.write_flags, config_.file_mode));
 
     active_file_ = std::make_unique<DataFile>(new_fd, new_id, worker_, config_);
 
     // Pre-allocate
     // TODO: remove to fix test for now
-    co_await worker_.async_fallocate(new_fd, 0, static_cast<off_t>(config_.max_file_size));
+    co_await worker_.AsyncFallocate(new_fd, 0, static_cast<off_t>(config_.max_file_size));
 
     co_return {};
 }
@@ -242,7 +242,7 @@ DetachedTask Partition::compaction_loop()
 
     ALOG_INFO("Partition {} compaction loop starting", partition_id_);
 
-    const auto st = worker_.get_stop_token();
+    const auto st = worker_.GetStopToken();
     while (!st.stop_requested() && !shutting_down_.load())
     {
         // Wait for event or timer
@@ -346,7 +346,7 @@ Task<Result<void>> Partition::recover_from_hint_file(const FileHandle& fh, const
         if (!res.has_value())
         {
             ALOG_ERROR("Failed to deserialize entry: {}", res.error().message());
-            co_return std::unexpected(Error{ErrorCategory::Serialization, kIoDeserialization});
+            co_return std::unexpected(Error{ErrorCategory::kSerialization, kIoDeserialization});
         }
 
         const auto& entry = res.value();
@@ -384,7 +384,7 @@ Task<Result<void>> Partition::recover_from_data_file(const FileHandle& fh, uint6
 
         const uint64_t bytes_to_read = std::min(writable.size(), file_size - file_offset);
         const auto bytes_read =
-                KIO_TRY(co_await worker_.async_read_at(fd, writable.subspan(0, bytes_to_read), file_offset));
+                KIO_TRY(co_await worker_.AsyncReadAt(fd, writable.subspan(0, bytes_to_read), file_offset));
 
         if (bytes_read == 0)
         {
@@ -496,7 +496,7 @@ Task<Result<void>> Partition::recover()
 
         // Fallback to a data file
         const auto fd = KIO_TRY(
-                co_await worker_.async_openat(get_data_file_path(file_id), config_.read_flags, config_.file_mode));
+                co_await worker_.AsyncOpenat(get_data_file_path(file_id), config_.read_flags, config_.file_mode));
         FileHandle data(fd);
         if (auto res = co_await recover_from_data_file(data, file_id); !res.has_value())
         {
@@ -531,7 +531,7 @@ Task<bool> Partition::try_recover_from_hint(uint64_t file_id)
         co_return false;
     }
 
-    const auto fd = co_await worker_.async_openat(hint_path, config_.read_flags, config_.file_mode);
+    const auto fd = co_await worker_.AsyncOpenat(hint_path, config_.read_flags, config_.file_mode);
     if (!fd.has_value())
     {
         ALOG_ERROR("Failed to open hint file {}", file_id);
@@ -582,9 +582,9 @@ Task<Result<void>> Partition::seal_active_file()
 
     if (active_fd > 0)
     {
-        KIO_TRY(co_await worker_.async_fsync(active_fd));
+        KIO_TRY(co_await worker_.AsyncFsync(active_fd));
 
-        KIO_TRY(co_await worker_.async_ftruncate(active_fd, static_cast<off_t>(actual_size)));
+        KIO_TRY(co_await worker_.AsyncFtruncate(active_fd, static_cast<off_t>(actual_size)));
 
         KIO_TRY(co_await active_file_->async_close());
     }
@@ -594,7 +594,7 @@ Task<Result<void>> Partition::seal_active_file()
         ALOG_DEBUG("The active file is empty, we will remove it, file_id {}", actual_file_id);
         KIO_TRY(co_await active_file_->async_close());
         const auto path = config_.directory / std::format("partition_{}/data_{}.db", partition_id_, actual_file_id);
-        KIO_TRY(co_await worker_.async_unlink_at(active_fd, path, config_.file_mode));
+        KIO_TRY(co_await worker_.AsyncUnlinkAt(active_fd, path, config_.file_mode));
     }
 
     // Remove pointer to prevent double-closing in dtor
@@ -670,7 +670,7 @@ Task<Result<void>> Partition::sync()
     co_await SwitchToWorker(worker_);
     if (active_file_)
     {
-        KIO_TRY(co_await worker_.async_fsync(active_file_->handle().get()));
+        KIO_TRY(co_await worker_.AsyncFsync(active_file_->handle().get()));
     }
     co_return {};
 }
@@ -680,10 +680,10 @@ DetachedTask Partition::background_sync()
     co_await SwitchToWorker(worker_);
     ALOG_INFO("Partition {} background sync loop starting", partition_id_);
 
-    const auto st = worker_.get_stop_token();
+    const auto st = worker_.GetStopToken();
     while (!st.stop_requested() && !shutting_down_.load())
     {
-        co_await worker_.async_sleep(std::chrono::milliseconds(config_.sync_interval));
+        co_await worker_.AsyncSleep(std::chrono::milliseconds(config_.sync_interval));
         // check again after wakeup
         if (shutting_down_.load())
         {

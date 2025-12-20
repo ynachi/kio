@@ -28,7 +28,7 @@ DetachedTask HandleClient(Worker &worker, const int client_fd)
     while (!st.stop_requested())
     {
         // Read from the client - this co_await runs on the worker thread
-        auto n = co_await worker.async_read(client_fd, std::span(buffer, sizeof(buffer)));
+        auto n = co_await worker.AsyncRead(client_fd, std::span(buffer, sizeof(buffer)));
         if (!n.has_value())
         {
             ALOG_DEBUG("Read failed {}", n.error());
@@ -44,7 +44,7 @@ DetachedTask HandleClient(Worker &worker, const int client_fd)
 
         // Write response - this co_await also runs on the worker thread
 
-        if (auto sent = co_await worker.async_write(client_fd, std::span(buffer, n.value())); !sent.has_value())
+        if (auto sent = co_await worker.AsyncWrite(client_fd, std::span(buffer, n.value())); !sent.has_value())
         {
             ALOG_ERROR("Write failed: {}", sent.error());
             break;
@@ -66,7 +66,7 @@ DetachedTask accept_loop(Worker &worker, const int listen_fd)
         socklen_t addr_len = sizeof(client_addr);
 
         // Accept connection - blocks this coroutine until a client connects
-        auto client_fd = co_await worker.async_accept(listen_fd, reinterpret_cast<sockaddr *>(&client_addr), &addr_len);
+        auto client_fd = co_await worker.AsyncAccept(listen_fd, reinterpret_cast<sockaddr *>(&client_addr), &addr_len);
 
         if (!client_fd.has_value())
         {
@@ -80,7 +80,7 @@ DetachedTask accept_loop(Worker &worker, const int listen_fd)
         // Each connection runs independently on this worker
         HandleClient(worker, client_fd.value()).detach();
     }
-    ALOG_INFO("Worker {} stop accepting connexions", worker.get_id());
+    ALOG_INFO("Worker {} stop accepting connexions", worker.GetId());
 }
 
 int main()
@@ -126,7 +126,7 @@ int main()
     // Start the worker in a thread. This is useful because loop_forever is a blocking method.
     // If we want to execute the rest of this code, whose purpose is to control how we stop
     // the worker, we need to do that.
-    std::jthread t([&]() { worker.loop_forever(); });
+    std::jthread t([&]() { worker.LoopForever(); });
 
     ALOG_INFO("Main thread: Worker is ready.");
 
@@ -146,14 +146,14 @@ int main()
     std::cout << std::format("worker metrics: {}", registry.Scrape());
     // Request the worker to stop.
     ALOG_INFO("Main thread: Requesting worker stop...");
-    if (const auto ret = worker.request_stop(); !ret)
+    if (const auto ret = worker.RequestStop(); !ret)
     {
         ALOG_ERROR("failed to request the event loop to stop");
         ::close(server_fd.value());
         std::exit(1);
     }
     // ait for the worker to fully shut down
-    worker.wait_shutdown();
+    worker.WaitShutdown();
     ::close(server_fd.value());
 
     // stop metrics server

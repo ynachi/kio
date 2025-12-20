@@ -14,7 +14,7 @@ namespace bitcask
 using namespace kio;
 
 DataEntry::DataEntry(std::string&& key, std::vector<char>&& value, const uint8_t flag) :
-    timestamp_ns(get_current_timestamp<std::chrono::nanoseconds>()), flag(flag), key(std::move(key)),
+    timestamp_ns(GetCurrentTimestamp<std::chrono::nanoseconds>()), flag(flag), key(std::move(key)),
     value(std::move(value))
 {
 }
@@ -61,7 +61,7 @@ Result<std::pair<DataEntry, uint64_t>> DataEntry::deserialize(std::span<const ch
     // MIN_ON_DISK_SIZE == CRC SZ + PAYLOAD SZ
     if (buffer.size() <= kEntryFixedHeaderSize)
     {
-        return std::unexpected(Error{ErrorCategory::Serialization, kIoNeedMoreData});
+        return std::unexpected(Error{ErrorCategory::kSerialization, kIoNeedMoreData});
     }
 
     const auto crc = read_le<uint32_t>(buffer.data());
@@ -69,19 +69,19 @@ Result<std::pair<DataEntry, uint64_t>> DataEntry::deserialize(std::span<const ch
 
     if (buffer.size() < kEntryFixedHeaderSize + size)
     {
-        return std::unexpected(Error{ErrorCategory::Serialization, kIoNeedMoreData});
+        return std::unexpected(Error{ErrorCategory::kSerialization, kIoNeedMoreData});
     }
 
     const auto payload_span = buffer.subspan(kEntryFixedHeaderSize, size);
     if (crc32c::Crc32c(payload_span.data(), payload_span.size()) != crc)
     {
-        return std::unexpected(Error{ErrorCategory::Serialization, kIoDataCorrupted});
+        return std::unexpected(Error{ErrorCategory::kSerialization, kIoDataCorrupted});
     }
 
     auto entry = struct_pack::deserialize<DataEntry>(payload_span);
     if (!entry.has_value())
     {
-        return std::unexpected(Error{ErrorCategory::Serialization, kIoDeserialization});
+        return std::unexpected(Error{ErrorCategory::kSerialization, kIoDeserialization});
     }
 
     DataEntry recovered = std::move(entry.value());
@@ -101,7 +101,7 @@ Result<HintEntry> HintEntry::deserialize(const std::span<const char> buffer)
     if (!entry.has_value())
     {
         ALOG_ERROR("Failed to deserialize entry: {}", entry.error().message());
-        return std::unexpected(Error{ErrorCategory::Serialization, kIoDeserialization});
+        return std::unexpected(Error{ErrorCategory::kSerialization, kIoDeserialization});
     }
     return entry.value();
 }

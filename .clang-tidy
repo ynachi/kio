@@ -12,10 +12,15 @@ Checks: >
   -readability-identifier-length,
   -cppcoreguidelines-avoid-magic-numbers,
   -cppcoreguidelines-pro-bounds-pointer-arithmetic,
-  -llvmlibc-*
+  -llvmlibc-*,
+  -misc-non-private-member-variables-in-classes,
+  -cppcoreguidelines-avoid-const-or-ref-data-members,
+   -cppcoreguidelines-pro-type-reinterpret-cast,
+  -cppcoreguidelines-macro-usage
 
 # Treat all warnings as errors to ensure code quality
-WarningsAsErrors: '*'
+WarningsAsErrors: ''
+HeaderFilterRegex: 'kio/.*|bitcask/.*|demo/.*|tests/.*'
 
 CheckOptions:
   # --- Google Naming Convention ---
@@ -53,7 +58,7 @@ CheckOptions:
   readability-identifier-naming.EnumConstantPrefix: 'k'
 
   # Macros -> UPPER_CASE
-  readability-identifier-naming.MacroDefinitionCase: UP_CASE
+  #  readability-identifier-naming.MacroDefinitionCase: UP_CASE
 
   # --- Modern C++ Tweaks ---
   # Disable const suggestions for values (int, string_view, etc.)

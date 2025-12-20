@@ -31,7 +31,7 @@ Task<Result<std::unique_ptr<BitKV>>> BitKV::open(const BitcaskConfig& config, co
     catch (const std::exception& e)
     {
         ALOG_ERROR("Failed to initialize BitKV: {}", e.what());
-        co_return std::unexpected(Error{ErrorCategory::Application, 1001});  // Generic error code for init fail
+        co_return std::unexpected(Error{ErrorCategory::kApplication, 1001});  // Generic error code for init fail
     }
 
     InitState state(partition_count);
@@ -43,7 +43,7 @@ Task<Result<std::unique_ptr<BitKV>>> BitKV::open(const BitcaskConfig& config, co
 
     if (state.has_error)
     {
-        io_pool->stop();
+        io_pool->Stop();
         co_return std::unexpected(state.first_error.value());
     }
 
@@ -144,7 +144,7 @@ void BitKV::check_or_create_manifest() const
 
 DetachedTask BitKV::initialize_partition(BitKV& db, Worker& worker, InitState& state)
 {
-    size_t current_id = worker.get_id();
+    size_t current_id = worker.GetId();
     auto res = co_await Partition::open(db.db_config_, worker, current_id);
 
     if (!res)
@@ -256,6 +256,6 @@ BitKV::~BitKV()
     // Partitions should already be closed via close()
     if (io_pool_)
     {
-        io_pool_->stop();
+        io_pool_->Stop();
     }
 }

@@ -26,13 +26,13 @@ IOPool::IOPool(size_t num_workers, const WorkerConfig &config, const std::functi
     // Start threads after all workers are created
     for (const auto &worker: workers_)
     {
-        worker_threads_.emplace_back([&w = *worker] -> void { w.loop_forever(); });
+        worker_threads_.emplace_back([&w = *worker] -> void { w.LoopForever(); });
     }
 
     // Wait for all workers to be fully initialized
     for (const auto &worker: workers_)
     {
-        worker->wait_ready();
+        worker->WaitReady();
     }
 
     ALOG_INFO("IOPool started with {} workers", num_workers);
@@ -40,10 +40,10 @@ IOPool::IOPool(size_t num_workers, const WorkerConfig &config, const std::functi
 
 IOPool::~IOPool()
 {
-    stop();
+    Stop();
 }
 
-auto IOPool::get_worker(const size_t id) const -> Worker *
+auto IOPool::GetWorker(const size_t id) const -> Worker *
 {
     if (id < workers_.size())
     {
@@ -52,13 +52,13 @@ auto IOPool::get_worker(const size_t id) const -> Worker *
     return nullptr;
 }
 
-auto IOPool::get_worker_id_by_key(const std::string_view key) const -> size_t
+auto IOPool::GetWorkerIdByKey(const std::string_view key) const -> size_t
 {
     const uint32_t hash = crc32c::Crc32c(key.data(), key.size());
     return hash % workers_.size();
 }
 
-void IOPool::stop()
+void IOPool::Stop()
 {
     // stop() is idempotent
     if (stopped_.exchange(true))
@@ -72,13 +72,13 @@ void IOPool::stop()
     {
         if (worker)
         {
-            if (worker->request_stop())
+            if (worker->RequestStop())
             {
-                ALOG_INFO("worker {} requested shutdown.", worker->get_id());
+                ALOG_INFO("worker {} requested shutdown.", worker->GetId());
             }
             else
             {
-                ALOG_WARN("worker {} failed to request shutdown", worker->get_id());
+                ALOG_WARN("worker {} failed to request shutdown", worker->GetId());
             }
         }
     }
@@ -86,12 +86,12 @@ void IOPool::stop()
     // Wait for all workers to confirm shutdown
     for (const auto &worker: workers_)
     {
-        ALOG_DEBUG("WAITING for worker {} to shut down", worker->get_id());
+        ALOG_DEBUG("WAITING for worker {} to shut down", worker->GetId());
         if (worker)
         {
-            worker->wait_shutdown();
+            worker->WaitShutdown();
         }
-        ALOG_DEBUG("WAITING shutdown has been completed", worker->get_id());
+        ALOG_DEBUG("WAITING shutdown has been completed", worker->GetId());
     }
     ALOG_INFO("IOPool has stopped.");
 }

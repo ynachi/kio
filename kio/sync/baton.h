@@ -50,7 +50,7 @@ public:
 
             if (const auto handle = waiter_.load(std::memory_order_relaxed))
             {
-                io::internal::WorkerAccess::post(owner_, handle);
+                io::internal::WorkerAccess::Post(owner_, handle);
             }
         }
     }
@@ -166,7 +166,7 @@ public:
                 ts.tv_sec = std::chrono::duration_cast<std::chrono::seconds>(duration).count();
                 ts.tv_nsec = (duration % std::chrono::seconds(1)).count();
 
-                io_uring_sqe* sqe = io_uring_get_sqe(&io::internal::WorkerAccess::get_ring(baton.owner_));
+                io_uring_sqe* sqe = io_uring_get_sqe(&io::internal::WorkerAccess::GetRing(baton.owner_));
                 if (!sqe)
                 {
                     // Failed to get SQE - must unregister from baton
@@ -306,7 +306,7 @@ private:
             ts.tv_sec = std::chrono::duration_cast<std::chrono::seconds>(duration).count();
             ts.tv_nsec = (duration % std::chrono::seconds(1)).count();
 
-            if (io_uring_sqe* sqe = io_uring_get_sqe(&io::internal::WorkerAccess::get_ring(baton.owner_)))
+            if (io_uring_sqe* sqe = io_uring_get_sqe(&io::internal::WorkerAccess::GetRing(baton.owner_)))
             {
                 io_uring_prep_timeout(sqe, &ts, 0, 0);
                 io_uring_sqe_set_data64(sqe, timer_op_id);
@@ -335,7 +335,7 @@ private:
             io::internal::WorkerAccess::init_op_slot(baton.owner_, timer_op_id, std::noop_coroutine());
 
             // Try to remove the timeout from kernel to be clean
-            if (io_uring_sqe* cancel_sqe = io_uring_get_sqe(&io::internal::WorkerAccess::get_ring(baton.owner_)))
+            if (io_uring_sqe* cancel_sqe = io_uring_get_sqe(&io::internal::WorkerAccess::GetRing(baton.owner_)))
             {
                 io_uring_prep_timeout_remove(cancel_sqe, timer_op_id, 0);
                 io_uring_sqe_set_data64(cancel_sqe, io::internal::WorkerAccess::get_op_id(baton.owner_));
@@ -359,7 +359,7 @@ private:
                     io::internal::WorkerAccess::init_op_slot(baton.owner_, timer_op_id, std::noop_coroutine());
 
                     // Request kernel removal
-                    if (io_uring_sqe* sqe = io_uring_get_sqe(&io::internal::WorkerAccess::get_ring(baton.owner_)))
+                    if (io_uring_sqe* sqe = io_uring_get_sqe(&io::internal::WorkerAccess::GetRing(baton.owner_)))
                     {
                         io_uring_prep_timeout_remove(sqe, timer_op_id, 0);
                         // We grab a throwaway op_id for the removal just to keep accounting straight

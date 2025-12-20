@@ -94,7 +94,7 @@ void MetricsServer::start()
     }
 
     // start the event loop in a thread
-    ev_thread_ = std::jthread([&] { worker_->loop_forever(); });
+    ev_thread_ = std::jthread([&] { worker_->LoopForever(); });
 }
 
 void MetricsServer::stop()
@@ -105,7 +105,7 @@ void MetricsServer::stop()
         return;
     }
 
-    if (!worker_->is_running())
+    if (!worker_->IsRunning())
     {
         ALOG_WARN("MetricsServer is not running");
         return;
@@ -114,9 +114,9 @@ void MetricsServer::stop()
     ALOG_INFO("Stopping MetricsServer...");
 
     // Stop worker
-    if (worker_->request_stop())
+    if (worker_->RequestStop())
     {
-        worker_->wait_shutdown();
+        worker_->WaitShutdown();
     }
     else
     {
@@ -137,14 +137,14 @@ void MetricsServer::stop()
 
 DetachedTask MetricsServer::accept_loop(Worker& worker, const int server_fd)
 {
-    const auto st = worker.get_stop_token();
+    const auto st = worker.GetStopToken();
 
     while (!st.stop_requested())
     {
         sockaddr_storage client_addr{};
         socklen_t addr_len = sizeof(client_addr);
 
-        auto res = co_await worker.async_accept(server_fd, reinterpret_cast<sockaddr*>(&client_addr), &addr_len);
+        auto res = co_await worker.AsyncAccept(server_fd, reinterpret_cast<sockaddr*>(&client_addr), &addr_len);
 
         if (!res.has_value())
         {
@@ -168,11 +168,11 @@ DetachedTask MetricsServer::handle_client(Worker& worker, FDGuard fd)
     while (true)
     {
         // Ensure we have space
-        buffer.reserve(1024);
-        auto dst = buffer.writable_span();
+        buffer.Reserve(1024);
+        auto dst = buffer.WritableSpan();
 
         // Read
-        const auto read_res = co_await worker.async_read(fd.get(), dst);
+        const auto read_res = co_await worker.AsyncRead(fd.get(), dst);
 
         if (!read_res.has_value() || read_res.value() == 0)
         {
@@ -180,10 +180,10 @@ DetachedTask MetricsServer::handle_client(Worker& worker, FDGuard fd)
         }
 
         // Update buffer cursor
-        buffer.commit_write(read_res.value());
+        buffer.CommitWrite(read_res.value());
 
         // Try Parse
-        auto req = HttpRequest::parse(buffer.readable_span());
+        auto req = HttpRequest::parse(buffer.ReadableSpan());
 
         if (req.complete)
         {
@@ -220,7 +220,7 @@ DetachedTask MetricsServer::handle_client(Worker& worker, FDGuard fd)
             }
 
             // Send response
-            co_await worker.async_write_exact(fd.get(), std::span(response.data(), response.size()));
+            co_await worker.AsyncWriteExact(fd.get(), std::span(response.data(), response.size()));
 
             // For a simple metrics server, we close after one request (Connection: close)
             // Another option would have been keepalive
@@ -228,7 +228,7 @@ DetachedTask MetricsServer::handle_client(Worker& worker, FDGuard fd)
         }
 
         // If the buffer gets too big without finding a delimiter, kill the connection
-        if (buffer.remaining() > kMaxRequestSize)
+        if (buffer.Remaining() > kMaxRequestSize)
         {
             ALOG_WARN("Metrics request too large, closing connection");
             break;

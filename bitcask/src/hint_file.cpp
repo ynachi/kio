@@ -21,7 +21,7 @@ HintFile::HintFile(const int fd, const uint64_t file_id, Worker& io_worker, Bitc
 Task<Result<void>> HintFile::async_write(const HintEntry&& entry) const
 {
     auto data = struct_pack::serialize(entry);
-    KIO_TRY(co_await io_worker_.async_write_exact(handle_.get(), data));
+    KIO_TRY(co_await io_worker_.AsyncWriteExact(handle_.get(), data));
     co_return {};
 }
 }  // namespace bitcask

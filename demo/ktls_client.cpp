@@ -151,7 +151,7 @@ Task<Result<void>> echo_test(Worker& worker, TlsContext& ctx, std::string_view h
         if (bytes_read == 0)
         {
             ALOG_ERROR("Unexpected EOF from server");
-            co_return std::unexpected(Error{ErrorCategory::Network, ECONNRESET});
+            co_return std::unexpected(Error{ErrorCategory::kNetwork, ECONNRESET});
         }
 
         std::string_view response(buffer, bytes_read);
@@ -162,7 +162,7 @@ Task<Result<void>> echo_test(Worker& worker, TlsContext& ctx, std::string_view h
         if (response != msg)
         {
             ALOG_ERROR("Echo mismatch! Expected '{}', got '{}'", msg, response);
-            co_return std::unexpected(Error{ErrorCategory::Application, kAppUnknown});
+            co_return std::unexpected(Error{ErrorCategory::kApplication, kAppUnknown});
         }
     }
 
@@ -217,7 +217,7 @@ Task<Result<void>> throughput_test(Worker& worker, TlsContext& ctx, std::string_
             if (n == 0)
             {
                 ALOG_ERROR("Unexpected EOF");
-                co_return std::unexpected(Error{ErrorCategory::Network, ECONNRESET});
+                co_return std::unexpected(Error{ErrorCategory::kNetwork, ECONNRESET});
             }
 
             chunk_received += n;
@@ -309,8 +309,8 @@ int main(int argc, char* argv[])
     worker_cfg.default_op_slots = 256;
 
     Worker worker(0, worker_cfg);
-    std::jthread worker_thread([&] { worker.loop_forever(); });
-    worker.wait_ready();
+    std::jthread worker_thread([&] { worker.LoopForever(); });
+    worker.WaitReady();
 
     // Run the test
     Result<void> result;
@@ -330,7 +330,7 @@ int main(int argc, char* argv[])
     else
     {
         ALOG_ERROR("Unknown mode: '{}'. Use 'raw', 'simple', 'echo', 'http', or 'perf'.", FLAGS_mode);
-        (void) worker.request_stop();
+        (void) worker.RequestStop();
         return 1;
     }
 
@@ -343,6 +343,6 @@ int main(int argc, char* argv[])
         ALOG_INFO("✅ Test completed successfully!");
     }
 
-    (void) worker.request_stop();
+    (void) worker.RequestStop();
     return result.has_value() ? 0 : 1;
 }

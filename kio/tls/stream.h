@@ -8,7 +8,6 @@
 #include <string_view>
 
 #include "context.h"
-#include "kio/core/istream.h"
 #include "kio/core/worker.h"
 #include "kio/net/socket.h"
 
@@ -120,7 +119,7 @@ public:
      */
     Task<Result<void>> async_sendfile(const int in_fd, const off_t offset, const size_t count)
     {
-        return worker_.async_sendfile(socket_.get(), in_fd, offset, count);
+        return worker_.AsyncSendfile(socket_.get(), in_fd, offset, count);
     }
 
     /**

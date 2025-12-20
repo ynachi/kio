@@ -4,7 +4,7 @@
 
 #include "metrics_collector.h"
 
-#include "../sync/sync_wait.h"
+#include "kio/sync/sync_wait.h"
 
 namespace kio::io
 {
@@ -18,7 +18,7 @@ void WorkerMetricsCollector::Collect(MetricSnapshot& snapshot)
 
         // Now we are safely on the worker's thread, so we can
         // read its non-atomic WorkerStats struct
-        co_return worker.get_stats();
+        co_return worker.GetStats();
     };
 
     // Run the task on the worker to collect the stats
@@ -26,7 +26,7 @@ void WorkerMetricsCollector::Collect(MetricSnapshot& snapshot)
     // *worker thread*, and safely copies the non-atomic stats
     const WorkerStats stats = SyncWait(get_stats_task(worker_));
 
-    std::string id_str = std::to_string(worker_.get_id());
+    std::string id_str = std::to_string(worker_.GetId());
 
     // Build metric families and populate with worker stats
 

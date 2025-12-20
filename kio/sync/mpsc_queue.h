@@ -6,7 +6,8 @@
 
 #include <atomic>
 #include <cassert>
-#include <new>
+#include <cstddef>
+#include <cstdint>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -24,8 +25,15 @@ namespace kio
 template<typename T>
 class MPSCQueue
 {
-    static constexpr size_t CACHE_LINE_SIZE = 64;
+    static constexpr size_t kCacheLineSize = 64;
 
+    // NOLINTBEGIN(
+    //   misc-non-private-member-variables-in-classes,
+    //   cppcoreguidelines-avoid-c-arrays,
+    //   modernize-avoid-c-arrays,
+    //   cppcoreguidelines-pro-type-reinterpret-cast
+    //   readability-magic-numbers
+    // )
     struct Cell
     {
         std::atomic<size_t> sequence;
@@ -35,22 +43,23 @@ class MPSCQueue
         Cell() noexcept { /* don't construct T */ }
 
         // Access pointer to T in storage
-        T *data_ptr() noexcept { return reinterpret_cast<T *>(storage); }
-        const T *data_ptr() const noexcept { return reinterpret_cast<const T *>(storage); }
+        T *DataPtr() noexcept { return reinterpret_cast<T *>(storage); }
+        const T *DataPtr() const noexcept { return reinterpret_cast<const T *>(storage); }
 
         // Construct T in-place using forwarding args
         template<typename... Args>
-        void construct_in_place(Args &&...args) noexcept(std::is_nothrow_constructible_v<T, Args...>)
+        void ConstructInPlace(Args &&...args) noexcept(std::is_nothrow_constructible_v<T, Args...>)
         {
             ::new (static_cast<void *>(storage)) T(std::forward<Args>(args)...);
         }
 
         // Destroy the T in-place
-        void destroy_in_place() noexcept { data_ptr()->~T(); }
+        void DestroyInPlace() noexcept { DataPtr()->~T(); }
 
         // Note: we intentionally do not define destructor that destroys T,
         // because we only want to destroy when we know an object was constructed.
     };
+    // NOLINTEND
 
 public:
     explicit MPSCQueue(size_t capacity) : buffer_(capacity), mask_(capacity - 1)
@@ -68,13 +77,18 @@ public:
         dequeue_pos_.store(0, std::memory_order_relaxed);
     }
 
+    MPSCQueue(const MPSCQueue &) = delete;
+    MPSCQueue &operator=(const MPSCQueue &) = delete;
+    MPSCQueue(MPSCQueue &&) = delete;
+    MPSCQueue &operator=(MPSCQueue &&) = delete;
+
     ~MPSCQueue()
     {
         // Drain any remaining elements using the normal pop mechanism
         if constexpr (std::is_default_constructible_v<T>)
         {
             T item;
-            while (try_pop(item))
+            while (TryPop(item))
             {
                 // Item is properly moved out and the in-place object is destroyed
             }
@@ -100,14 +114,10 @@ public:
         }
     }
 
-    MPSCQueue(const MPSCQueue &) = delete;
-
-    MPSCQueue &operator=(const MPSCQueue &) = delete;
-
     template<typename U>
-    bool try_push(U &&u)
+    bool TryPush(U &&u)
     {
-        Cell *cell;
+        Cell *cell{nullptr};
         size_t pos = enqueue_pos_.load(std::memory_order_relaxed);
 
         for (;;)
@@ -134,7 +144,7 @@ public:
         }
 
         // Construct directly in cell storage from a forwarded argument
-        cell->construct_in_place(std::forward<U>(u));
+        cell->ConstructInPlace(std::forward<U>(u));
 
         cell->sequence.store(pos + 1, std::memory_order_release);
         return true;
@@ -143,9 +153,9 @@ public:
     /**
      * try_pop for a single consumer. Moves the contained T into 'item' and destroys the in-place object.
      */
-    bool try_pop(T &item)
+    bool TryPop(T &item)
     {
-        Cell *cell;
+        Cell *cell{nullptr};
         size_t pos = dequeue_pos_.load(std::memory_order_relaxed);
 
         for (;;)
@@ -171,10 +181,10 @@ public:
         }
 
         // Move the data out of the cell
-        item = std::move(*cell->data_ptr());
+        item = std::move(*cell->DataPtr());
 
         // Destroy the in-place object now that we've moved it out
-        cell->destroy_in_place();
+        cell->DestroyInPlace();
 
         // Mark the slot as available for producers again:
         cell->sequence.store(pos + mask_ + 1, std::memory_order_release);
@@ -183,13 +193,13 @@ public:
     }
 
     [[nodiscard]]
-    size_t capacity() const noexcept
+    size_t Capacity() const noexcept
     {
         return mask_ + 1;
     }
 
     [[nodiscard]]
-    size_t size_approx() const noexcept
+    size_t SizeApprox() const noexcept
     {
         const size_t head = dequeue_pos_.load(std::memory_order_relaxed);
         const size_t tail = enqueue_pos_.load(std::memory_order_relaxed);
@@ -200,13 +210,17 @@ private:
     std::vector<Cell> buffer_;
     const size_t mask_;
 
-    alignas(CACHE_LINE_SIZE) std::atomic<size_t> dequeue_pos_;
-    alignas(CACHE_LINE_SIZE) std::atomic<size_t> enqueue_pos_;
+    alignas(kCacheLineSize) std::atomic<size_t> dequeue_pos_;
+    alignas(kCacheLineSize) std::atomic<size_t> enqueue_pos_;
 };
 
-constexpr size_t next_power_of_2(size_t n)
+// NOLINTBEGIN(readability-magic-numbers)
+constexpr size_t NextPowerOf2(size_t n)
 {
-    if (n == 0) return 1;
+    if (n == 0)
+    {
+        return 1;
+    };
     n--;
     n |= n >> 1;
     n |= n >> 2;
@@ -218,6 +232,7 @@ constexpr size_t next_power_of_2(size_t n)
         n |= n >> 32;
     }
     return n + 1;
+    // NOLINTEND(readability-magic-numbers)
 }
 }  // namespace kio
 

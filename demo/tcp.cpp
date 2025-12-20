@@ -18,11 +18,11 @@ DetachedTask HandleClientHttp(Worker& worker, const int client_fd)
 
     // Critical! We want any client code to be stopped when the worker exits.
     // So the loop below will be synchronized on the worker's top token.
-    const auto st = worker.get_stop_token();
+    const auto st = worker.GetStopToken();
 
     while (!st.stop_requested())
     {
-        auto n = co_await worker.async_read(client_fd, std::span(buffer, sizeof(buffer)));
+        auto n = co_await worker.AsyncRead(client_fd, std::span(buffer, sizeof(buffer)));
         if (!n.has_value())
         {
             ALOG_DEBUG("Read failed {}", n.error());
@@ -36,7 +36,7 @@ DetachedTask HandleClientHttp(Worker& worker, const int client_fd)
         }
 
         std::string response = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, World!";
-        auto sent = co_await worker.async_write(client_fd, std::span(response.data(), response.size()));
+        auto sent = co_await worker.AsyncWrite(client_fd, std::span(response.data(), response.size()));
 
         if (!sent.has_value())
         {
@@ -52,12 +52,12 @@ DetachedTask HandleClientHttp(Worker& worker, const int client_fd)
 DetachedTask handle_client(Worker& worker, const int client_fd)
 {
     char buffer[8192];
-    const auto st = worker.get_stop_token();
+    const auto st = worker.GetStopToken();
 
     while (!st.stop_requested())
     {
         // Read from the client - this co_await runs on the worker thread
-        auto n = co_await worker.async_read(client_fd, std::span(buffer, sizeof(buffer)));
+        auto n = co_await worker.AsyncRead(client_fd, std::span(buffer, sizeof(buffer)));
         if (!n.has_value())
         {
             ALOG_DEBUG("Read failed: {}", n.error());
@@ -75,7 +75,7 @@ DetachedTask handle_client(Worker& worker, const int client_fd)
 
         // Write response - this co_await also runs on the worker thread
 
-        if (auto sent = co_await worker.async_write(client_fd, std::span(buffer, read_size)); !sent.has_value())
+        if (auto sent = co_await worker.AsyncWrite(client_fd, std::span(buffer, read_size)); !sent.has_value())
         {
             ALOG_ERROR("Write failed: {}", sent.error());
             break;
@@ -89,7 +89,7 @@ DetachedTask handle_client(Worker& worker, const int client_fd)
 DetachedTask accept_loop(Worker& worker)
 {
     ALOG_INFO("Worker accepting connections");
-    const auto st = worker.get_stop_token();
+    const auto st = worker.GetStopToken();
 
     // Create a listening socket
     auto server_fd_exp = net::create_tcp_server_socket("0.0.0.0", 8080, 4096);
@@ -109,7 +109,7 @@ DetachedTask accept_loop(Worker& worker)
         socklen_t addr_len = sizeof(client_addr);
 
         // Accept connection - blocks this coroutine until a client connects
-        auto client_fd = co_await worker.async_accept(server_fd, reinterpret_cast<sockaddr*>(&client_addr), &addr_len);
+        auto client_fd = co_await worker.AsyncAccept(server_fd, reinterpret_cast<sockaddr*>(&client_addr), &addr_len);
 
         if (!client_fd.has_value())
         {
@@ -123,7 +123,7 @@ DetachedTask accept_loop(Worker& worker)
         // Each connection runs independently on this worker
         HandleClientHttp(worker, client_fd.value());
     }
-    ALOG_INFO("Worker {} stop accepting connexions", worker.get_id());
+    ALOG_INFO("Worker {} stop accepting connexions", worker.GetId());
 }
 
 int main()
@@ -131,7 +131,7 @@ int main()
     // ignore
     signal(SIGPIPE, SIG_IGN);
     // Setup logging
-    alog::configure(4096, LogLevel::Disabled);
+    alog::Configure(4096, LogLevel::kDisabled);
 
     // Configure workers
     WorkerConfig config{};
@@ -146,7 +146,7 @@ int main()
     // Main thread waits (or handles signals)
     std::cout << "Server running. Press Enter to stop..." << std::endl;
     std::cin.get();  // Blocks until user presses Enter
-    pool.stop();
+    pool.Stop();
 
     ALOG_INFO("Server stopped from main");
 

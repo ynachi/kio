@@ -26,7 +26,7 @@ kio::Task<kio::Result<int>> FDCache::get_or_open(uint64_t file_id, const std::fi
     }
 
     // Open file
-    int fd = KIO_TRY(co_await worker_.async_openat(path, O_RDONLY, 0));
+    int fd = KIO_TRY(co_await worker_.AsyncOpenat(path, O_RDONLY, 0));
 
     // Add to cache
     lru_list_.push_front(file_id);

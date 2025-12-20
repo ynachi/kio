@@ -40,17 +40,17 @@ protected:
         worker_config.uring_queue_depth = 128;
         worker_ = std::make_unique<Worker>(0, worker_config);
 
-        worker_thread_ = std::thread([this]() { worker_->loop_forever(); });
+        worker_thread_ = std::thread([this]() { worker_->LoopForever(); });
 
-        worker_->wait_ready();
+        worker_->WaitReady();
     }
 
     void TearDown() override
     {
         if (worker_)
         {
-            (void) worker_->request_stop();
-            worker_->wait_shutdown();
+            (void) worker_->RequestStop();
+            worker_->WaitShutdown();
         }
 
         if (worker_thread_.joinable())
@@ -371,7 +371,8 @@ TEST_F(CompactionTest, RecoveryAfterCompaction)
                 std::string key = std::format("key_{}", i);
                 auto get_result = co_await partition->get(key);
 
-                EXPECT_TRUE(get_result.has_value() && get_result.value().has_value()) << "Key " << key << " should exist after recovery";
+                EXPECT_TRUE(get_result.has_value() && get_result.value().has_value())
+                        << "Key " << key << " should exist after recovery";
 
                 if (get_result.value().has_value())
                 {
@@ -384,7 +385,6 @@ TEST_F(CompactionTest, RecoveryAfterCompaction)
 
     SyncWait(test_coro());
 }
-
 
 TEST_F(CompactionTest, MultipleCompactionCycles)
 {
@@ -592,7 +592,8 @@ TEST_F(CompactionTest, ManySmallUpdates)
         {
             std::string expected_prefix = "version_49";
             // Check prefix
-            std::string actual(get_result.value().value().begin(), get_result.value().value().begin() + static_cast<int>(expected_prefix.size()));
+            std::string actual(get_result.value().value().begin(),
+                               get_result.value().value().begin() + static_cast<int>(expected_prefix.size()));
             EXPECT_EQ(actual, expected_prefix);
         }
 
@@ -651,7 +652,6 @@ TEST_F(CompactionTest, StatsTracking)
 // ============================================================================
 // Compactor Unit Tests (Direct API)
 // ============================================================================
-
 
 TEST_F(CompactionTest, DirectCompactorAPI)
 {
@@ -731,7 +731,6 @@ TEST_F(CompactionTest, FragmentationThreshold)
     SyncWait(test_coro());
 }
 
-
 // ----------------------------------------------------------------------------
 // Test: Concurrency Stress (Race Condition Verification)
 // Run Compaction in parallel with intense PUT operations.
@@ -765,7 +764,7 @@ TEST_F(CompactionTest, ConcurrentUpdatesDuringCompaction)
         {
             co_await SwitchToWorker(*worker_);
             // Yield a bit to let the writer start
-            for (int i = 0; i < 10; ++i) co_await worker_->async_sleep(std::chrono::milliseconds(1));
+            for (int i = 0; i < 10; ++i) co_await worker_->AsyncSleep(std::chrono::milliseconds(1));
 
             const auto res = co_await partition->compact();
             EXPECT_TRUE(res.has_value());
@@ -784,7 +783,7 @@ TEST_F(CompactionTest, ConcurrentUpdatesDuringCompaction)
                 co_await partition->put("race_key", std::vector<char>(val.begin(), val.end()));
 
                 // Small delay to interleave execution with compactor
-                if (i % 10 == 0) co_await worker_->async_sleep(std::chrono::milliseconds(1));
+                if (i % 10 == 0) co_await worker_->AsyncSleep(std::chrono::milliseconds(1));
             }
 
             // Final definitive write
@@ -861,7 +860,7 @@ TEST_F(CompactionTest, CompactionLoopTrigger)
         // We put a generous wait here (up to 2 seconds) to allow the loop to wake up.
         for (int i = 0; i < 40; ++i)
         {
-            co_await worker_->async_sleep(std::chrono::milliseconds(50));
+            co_await worker_->AsyncSleep(std::chrono::milliseconds(50));
             if (partition->get_stats().compactions_total > 0) break;
         }
 

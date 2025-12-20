@@ -26,13 +26,13 @@ protected:
     {
         config.uring_submit_timeout_ms = 10;
         worker = std::make_unique<Worker>(0, config);
-        worker_thread = std::make_unique<std::jthread>([this] { worker->loop_forever(); });
-        worker->wait_ready();
+        worker_thread = std::make_unique<std::jthread>([this] { worker->LoopForever(); });
+        worker->WaitReady();
     }
 
     void TearDown() override
     {
-        (void) worker->request_stop();
+        (void) worker->RequestStop();
         worker_thread.reset();
         worker.reset();
     }

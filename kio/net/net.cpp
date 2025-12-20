@@ -54,7 +54,7 @@ Result<SocketAddress> resolve_address(std::string_view host, const uint16_t port
     if (getaddrinfo(host_str.c_str(), port_str.c_str(), &hints, &res) != 0)
     {
         ALOG_ERROR("DNS resolution failed for {}", host);
-        return std::unexpected(Error{ErrorCategory::Network, ENOENT});
+        return std::unexpected(Error{ErrorCategory::kNetwork, ENOENT});
     }
 
     result.family = res->ai_family;
@@ -72,7 +72,7 @@ Result<int> create_tcp_fd(const int family)
     {
         const int err = errno;
         ALOG_ERROR("Failed to create socket: {}", strerror(err));
-        return std::unexpected(Error::from_errno(err));
+        return std::unexpected(Error::FromErrno(err));
     }
     return fd;
 }
@@ -124,7 +124,7 @@ Result<SocketAddress> resolve_endpoint(std::string_view host, uint16_t port)
     hints.ai_socktype = SOCK_STREAM;
 
     addrinfo* res;
-    if (getaddrinfo(host.data(), nullptr, &hints, &res) != 0) return std::unexpected(Error::from_errno(ENOENT));
+    if (getaddrinfo(host.data(), nullptr, &hints, &res) != 0) return std::unexpected(Error::FromErrno(ENOENT));
 
     // Take the first result
     std::memcpy(&out.addr, res->ai_addr, res->ai_addrlen);
@@ -154,7 +154,7 @@ Result<int> create_raw_socket(const int family)
     {
         const int err = errno;
         ALOG_ERROR("socket failed: {}", strerror(err));
-        return std::unexpected(Error::from_errno(err));
+        return std::unexpected(Error::FromErrno(err));
     }
     return server_fd;
 }
@@ -200,19 +200,19 @@ Result<void> listen_on_sock(const int fd, const SocketAddress& addr, const int b
     // Bind
     if (::bind(fd, reinterpret_cast<const sockaddr*>(&addr.addr), addr.addrlen))
     {
-        return std::unexpected(Error::from_errno(errno));
+        return std::unexpected(Error::FromErrno(errno));
     }
 
     // Set non-blocking
     if (::fcntl(fd, F_SETFL, O_NONBLOCK) < 0)
     {
-        return std::unexpected(Error::from_errno(errno));
+        return std::unexpected(Error::FromErrno(errno));
     }
 
     // now listen
     if (::listen(fd, backlog) < 0)
     {
-        return std::unexpected(Error::from_errno(errno));
+        return std::unexpected(Error::FromErrno(errno));
     }
 
     return {};
@@ -224,13 +224,13 @@ Result<void> set_fd_server_options(const int fd)
 
     if (::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &option, sizeof(option)) < 0)
     {
-        return std::unexpected(Error::from_errno(errno));
+        return std::unexpected(Error::FromErrno(errno));
     }
 
 #ifdef SO_REUSEPORT
     if (::setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &option, sizeof(option)) < 0)
     {
-        return std::unexpected(Error::from_errno(errno));
+        return std::unexpected(Error::FromErrno(errno));
     }
 #endif
 

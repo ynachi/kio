@@ -27,8 +27,8 @@ void demo_producer_consumer()
     std::cout << "\n=== Demo 1: Producer-Consumer ===\n";
 
     Worker worker(0, WorkerConfig{});
-    std::jthread worker_thread([&] { worker.loop_forever(); });
-    worker.wait_ready();
+    std::jthread worker_thread([&] { worker.LoopForever(); });
+    worker.WaitReady();
 
     AsyncBaton data_ready(worker);
     AsyncBaton consumer_done(worker);
@@ -67,7 +67,7 @@ void demo_producer_consumer()
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-    (void) worker.request_stop();
+    (void) worker.RequestStop();
 }
 
 // ============================================================================
@@ -78,8 +78,8 @@ void demo_request_response_timeout()
     std::cout << "\n=== Demo 2: Request-Response with Timeout ===\n";
 
     Worker worker(0, WorkerConfig{});
-    std::jthread worker_thread([&] { worker.loop_forever(); });
-    worker.wait_ready();
+    std::jthread worker_thread([&] { worker.LoopForever(); });
+    worker.WaitReady();
 
     AsyncBaton response_ready(worker);
     AsyncBaton request_done(worker);
@@ -149,7 +149,7 @@ void demo_request_response_timeout()
 
     slow_responder.join();
 
-    (void) worker.request_stop();
+    (void) worker.RequestStop();
 }
 
 // ============================================================================
@@ -164,8 +164,8 @@ void demo_pipeline()
     std::cout << "\n=== Demo 3: Multi-Stage Pipeline ===\n";
 
     Worker worker(0, WorkerConfig{});
-    std::jthread worker_thread([&] { worker.loop_forever(); });
-    worker.wait_ready();
+    std::jthread worker_thread([&] { worker.LoopForever(); });
+    worker.WaitReady();
 
     AsyncBaton stage1_done(worker);
     AsyncBaton stage2_done(worker);
@@ -241,7 +241,7 @@ void demo_pipeline()
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-    (void) worker.request_stop();
+    (void) worker.RequestStop();
 }
 
 // ============================================================================
@@ -252,8 +252,8 @@ void demo_event_debouncing()
     std::cout << "\n=== Demo 4: Event Debouncing ===\n";
 
     Worker worker(0, WorkerConfig{});
-    std::jthread worker_thread([&] { worker.loop_forever(); });
-    worker.wait_ready();
+    std::jthread worker_thread([&] { worker.LoopForever(); });
+    worker.WaitReady();
 
     AsyncBaton event_signal(worker);
     AsyncBaton handler_done(worker);
@@ -317,7 +317,7 @@ void demo_event_debouncing()
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-    (void) worker.request_stop();
+    (void) worker.RequestStop();
 }
 
 // ============================================================================
@@ -328,8 +328,8 @@ void demo_barrier()
     std::cout << "\n=== Demo 5: Async Barrier (3 Workers) ===\n";
 
     Worker worker(0, WorkerConfig{});
-    std::jthread worker_thread([&] { worker.loop_forever(); });
-    worker.wait_ready();
+    std::jthread worker_thread([&] { worker.LoopForever(); });
+    worker.WaitReady();
 
     AsyncBaton worker1_ready(worker);
     AsyncBaton worker2_ready(worker);
@@ -407,7 +407,7 @@ void demo_barrier()
     w3.join();
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-    (void) worker.request_stop();
+    (void) worker.RequestStop();
 }
 
 // ============================================================================

@@ -60,11 +60,14 @@ public:
      * @brief Ensures at least `additional` bytes of writable space.
      * May trigger reallocation.
      */
-    void reserve(const size_t additional)
+    void Reserve(const size_t additional)
     {
-        if (writable() >= additional) return;
+        if (Writable() >= additional)
+        {
+            return;
+        }
 
-        const size_t data_len = remaining();
+        const size_t data_len = Remaining();
         const size_t available_total = buffer_.capacity();
 
         // Strategy 1: Compact in place if it fits
@@ -73,7 +76,7 @@ public:
             // Threshold: only compact if significant waste
             if (read_pos_ >= kAutoCompactionThreshold || read_pos_ >= buffer_.size() / 4)
             {
-                compact();
+                Compact();
             }
 
             if (buffer_.size() < write_pos_ + additional)
@@ -102,12 +105,12 @@ public:
     /**
      * @brief Returns current capacity
      */
-    [[nodiscard]] size_t capacity() const { return buffer_.capacity(); }
+    [[nodiscard]] size_t Capacity() const { return buffer_.capacity(); }
 
     /**
      * @brief Returns a span of readable data (not yet consumed)
      */
-    [[nodiscard]] std::span<const char> readable_span() const
+    [[nodiscard]] std::span<const char> ReadableSpan() const
     {
         return {buffer_.data() + read_pos_, write_pos_ - read_pos_};
     }
@@ -115,15 +118,15 @@ public:
     /**
      * @brief Number of bytes available to read
      */
-    [[nodiscard]] size_t remaining() const { return write_pos_ - read_pos_; }
+    [[nodiscard]] size_t Remaining() const { return write_pos_ - read_pos_; }
 
     /**
      * @brief Consumes `n` bytes from the read position
      * @param n Number of bytes to consume
      */
-    void advance(const size_t n)
+    void Advance(const size_t n)
     {
-        if (n > remaining())
+        if (n > Remaining())
         {
             throw std::out_of_range("BytesMut::advance() beyond available data");
         }
@@ -133,9 +136,9 @@ public:
     /**
      * @brief Peek at bytes without consuming
      */
-    [[nodiscard]] std::span<const char> peek(const size_t n) const
+    [[nodiscard]] std::span<const char> Peek(const size_t n) const
     {
-        if (n > remaining())
+        if (n > Remaining())
         {
             throw std::out_of_range("BytesMut::peek() beyond available data");
         }
@@ -145,18 +148,18 @@ public:
     /**
      * @brief Returns a span of writable space
      */
-    [[nodiscard]] std::span<char> writable_span() { return {buffer_.data() + write_pos_, buffer_.size() - write_pos_}; }
+    [[nodiscard]] std::span<char> WritableSpan() { return {buffer_.data() + write_pos_, buffer_.size() - write_pos_}; }
 
     /**
      * @brief Number of bytes available for writing
      */
-    [[nodiscard]] size_t writable() const { return buffer_.size() - write_pos_; }
+    [[nodiscard]] size_t Writable() const { return buffer_.size() - write_pos_; }
 
     /**
      * @brief Commits `n` bytes of written data
      * Call this after writing to writable_span()
      */
-    void commit_write(const size_t n)
+    void CommitWrite(const size_t n)
     {
         if (write_pos_ + n > buffer_.size())
         {
@@ -168,9 +171,9 @@ public:
     /**
      * @brief Appends data to the buffer
      */
-    void extend_from_slice(std::span<const char> data)
+    void ExtendFromSlice(std::span<const char> data)
     {
-        reserve(data.size());
+        Reserve(data.size());
         std::memcpy(buffer_.data() + write_pos_, data.data(), data.size());
         write_pos_ += data.size();
     }
@@ -178,11 +181,14 @@ public:
     /**
      * @brief Moves unconsumed data to the front of the buffer
      */
-    void compact()
+    void Compact()
     {
-        if (read_pos_ == 0) return;
+        if (read_pos_ == 0)
+        {
+            return;
+        }
 
-        const size_t remaining_bytes = remaining();
+        const size_t remaining_bytes = Remaining();
 
         if (remaining_bytes > 0)
         {
@@ -197,13 +203,13 @@ public:
      * @brief Checks if compaction is beneficial
      * Returns true if more than half the buffer is consumed
      */
-    [[nodiscard]] bool should_compact() const { return read_pos_ >= buffer_.size() / 2; }
+    [[nodiscard]] bool ShouldCompact() const { return read_pos_ >= buffer_.size() / 2; }
 
     /**
      * @brief Resets the buffer to an empty state.
      * It does not reallocate. It internally  moves cursors to the initial positions.
      */
-    void clear()
+    void Clear()
     {
         read_pos_ = 0;
         write_pos_ = 0;
@@ -212,22 +218,22 @@ public:
     /**
      * @brief Returns true if no data is available to read
      */
-    [[nodiscard]] bool is_empty() const { return read_pos_ == write_pos_; }
+    [[nodiscard]] bool IsEmpty() const { return read_pos_ == write_pos_; }
 
     /**
      * @brief Returns the number of consumed bytes (wasted space)
      */
-    [[nodiscard]] size_t consumed() const { return read_pos_; }
+    [[nodiscard]] size_t Consumed() const { return read_pos_; }
 
     /**
      * @brief Debug info
      */
-    std::string debug()
+    std::string Debug()
     {
         return std::format(
                 "BytesMut {{ read_pos: {}, write_pos: {}, capacity: {}, "
                 "remaining: {}, writable: {}, consumed: {} }}\n",
-                read_pos_, write_pos_, buffer_.capacity(), remaining(), writable(), consumed());
+                read_pos_, write_pos_, buffer_.capacity(), Remaining(), Writable(), Consumed());
     }
 
 private:

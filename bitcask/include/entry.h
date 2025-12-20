@@ -120,7 +120,7 @@ struct ValueLocation
     uint64_t file_id{};
     uint64_t offset{};
     uint32_t total_size{};
-    uint64_t timestamp_ns = get_current_timestamp();
+    uint64_t timestamp_ns = GetCurrentTimestamp();
 };
 
 /**

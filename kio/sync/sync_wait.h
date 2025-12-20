@@ -3,7 +3,7 @@
 
 #include <latch>
 
-#include "../core/coro.h"
+#include "kio/core/coro.h"
 
 namespace kio::internal
 {

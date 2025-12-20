@@ -46,7 +46,7 @@ TlsStream::TlsStream(TlsStream&& other) noexcept :
 
 Task<Result<void>> TlsStream::do_handshake_step() const
 {
-    const auto st = worker_.get_stop_token();
+    const auto st = worker_.GetStopToken();
 
     while (!st.stop_requested())
     {
@@ -56,31 +56,31 @@ Task<Result<void>> TlsStream::do_handshake_step() const
         switch (int err = SSL_get_error(ssl_, ret))
         {
             case SSL_ERROR_WANT_READ:
-                KIO_TRY(co_await worker_.async_poll(socket_.get(), POLLIN));
+                KIO_TRY(co_await worker_.AsyncPoll(socket_.get(), POLLIN));
                 break;
 
             case SSL_ERROR_WANT_WRITE:
-                KIO_TRY(co_await worker_.async_poll(socket_.get(), POLLOUT));
+                KIO_TRY(co_await worker_.AsyncPoll(socket_.get(), POLLOUT));
                 break;
 
             case SSL_ERROR_ZERO_RETURN:
                 ALOG_ERROR("TLS handshake: peer closed connection");
-                co_return std::unexpected(Error{ErrorCategory::Tls, kTlsHandshakeFailed});
+                co_return std::unexpected(Error{ErrorCategory::kTls, kTlsHandshakeFailed});
 
             case SSL_ERROR_SYSCALL:
             {
                 const int sys_err = errno;
                 ALOG_ERROR("TLS handshake syscall error: {}", sys_err ? strerror(sys_err) : "unexpected EOF");
-                co_return std::unexpected(Error::from_errno(sys_err ? sys_err : ECONNRESET));
+                co_return std::unexpected(Error::FromErrno(sys_err ? sys_err : ECONNRESET));
             }
 
             case SSL_ERROR_SSL:
                 ALOG_ERROR("TLS handshake SSL error: {}", detail::get_openssl_error());
-                co_return std::unexpected(Error{ErrorCategory::Tls, kTlsHandshakeFailed});
+                co_return std::unexpected(Error{ErrorCategory::kTls, kTlsHandshakeFailed});
 
             default:
                 ALOG_ERROR("TLS handshake unknown error: {}", err);
-                co_return std::unexpected(Error{ErrorCategory::Tls, kTlsHandshakeFailed});
+                co_return std::unexpected(Error{ErrorCategory::kTls, kTlsHandshakeFailed});
         }
     }
 
@@ -137,7 +137,7 @@ Result<void> TlsStream::enable_ktls()
     ALOG_ERROR("  - Cipher: {} (need AES-GCM or ChaCha20-Poly1305)", SSL_get_cipher_name(ssl_));
 
     // This is a strict requirement for this implementation
-    return std::unexpected(Error{ErrorCategory::Tls, kTlsKtlsEnableFailed});
+    return std::unexpected(Error{ErrorCategory::kTls, kTlsKtlsEnableFailed});
 #else
     return std::unexpected(Error{ErrorCategory::Tls, kTlsKtlsEnableFailed});
 #endif
@@ -158,12 +158,12 @@ Task<Result<int>> TlsStream::async_read(std::span<char> buf)
         }
     }
 
-    co_return co_await worker_.async_read(socket_.get(), buf);
+    co_return co_await worker_.AsyncRead(socket_.get(), buf);
 }
 
 Task<Result<void>> TlsStream::async_read_exact(std::span<char> buf)
 {
-    const auto st = worker_.get_stop_token();
+    const auto st = worker_.GetStopToken();
 
     size_t total_bytes_read = 0;
     const size_t total_to_read = buf.size();
@@ -174,7 +174,7 @@ Task<Result<void>> TlsStream::async_read_exact(std::span<char> buf)
 
         if (bytes_read == 0)
         {
-            co_return std::unexpected(Error{ErrorCategory::File, kIoEof});
+            co_return std::unexpected(Error{ErrorCategory::kFile, kIoEof});
         }
         total_bytes_read += static_cast<size_t>(bytes_read);
     }
@@ -183,17 +183,17 @@ Task<Result<void>> TlsStream::async_read_exact(std::span<char> buf)
 
 auto TlsStream::async_write(std::span<const char> buf)
 {
-    return worker_.async_write(socket_.get(), buf);
+    return worker_.AsyncWrite(socket_.get(), buf);
 }
 
 Task<Result<void>> TlsStream::async_write_exact(std::span<const char> buf)
 {
-    return worker_.async_write_exact(socket_.get(), buf);
+    return worker_.AsyncWriteExact(socket_.get(), buf);
 }
 
 Task<Result<void>> TlsStream::do_shutdown_step()
 {
-    const auto st = worker_.get_stop_token();
+    const auto st = worker_.GetStopToken();
     constexpr int kMaxShutdownIterations = 10;
     int iterations = 0;
 
@@ -210,7 +210,7 @@ Task<Result<void>> TlsStream::do_shutdown_step()
         if (ret == 0)
         {
             // Wait for peer's close_notify
-            if (const auto poll_res = co_await worker_.async_poll(socket_.get(), POLLIN); !poll_res)
+            if (const auto poll_res = co_await worker_.AsyncPoll(socket_.get(), POLLIN); !poll_res)
             {
                 ALOG_DEBUG("TLS shutdown: poll failed, treating as complete");
                 co_return {};
@@ -221,10 +221,10 @@ Task<Result<void>> TlsStream::do_shutdown_step()
         switch (const int err = SSL_get_error(ssl_, ret))
         {
             case SSL_ERROR_WANT_READ:
-                KIO_TRY(co_await worker_.async_poll(socket_.get(), POLLIN));
+                KIO_TRY(co_await worker_.AsyncPoll(socket_.get(), POLLIN));
                 break;
             case SSL_ERROR_WANT_WRITE:
-                KIO_TRY(co_await worker_.async_poll(socket_.get(), POLLOUT));
+                KIO_TRY(co_await worker_.AsyncPoll(socket_.get(), POLLOUT));
                 break;
             case SSL_ERROR_ZERO_RETURN:
             case SSL_ERROR_SYSCALL:
@@ -232,7 +232,7 @@ Task<Result<void>> TlsStream::do_shutdown_step()
                 co_return {};
             default:
                 ALOG_WARN("TLS shutdown error: {}", err);
-                co_return std::unexpected(Error{ErrorCategory::Tls, kTlsShutdownFailed});
+                co_return std::unexpected(Error{ErrorCategory::kTls, kTlsShutdownFailed});
         }
     }
     co_return {};
@@ -252,7 +252,7 @@ Task<Result<void>> TlsStream::async_close()
 
     if (socket_.is_valid())
     {
-        co_await worker_.async_close(socket_.release());
+        co_await worker_.AsyncClose(socket_.release());
     }
     co_return {};
 }

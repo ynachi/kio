@@ -107,7 +107,7 @@ public:
 
     io::IOPool &pool() { return pool_; }
 
-    ~FileManager() { pool_.stop(); }
+    ~FileManager() { pool_.Stop(); }
 
     /**
      * Creates a file asynchronously. The file gets assigned an io context based on its path hash.

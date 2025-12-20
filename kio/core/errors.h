@@ -56,16 +56,16 @@ constexpr int kTlsShutdownFailed = 4011;
 
 enum class ErrorCategory : int8_t
 {
-    Success = 0,
-    Network,
-    File,
-    SystemResource,
-    Device,
-    Uring,  // For io_uring specific issues
-    Serialization,  // For parsing/encoding issues
-    Application,  // High-level app logic
-    Tls,  // TLS/KTLS errors
-    Unknown
+    kSuccess = 0,
+    kNetwork,
+    kFile,
+    kSystemResource,
+    kDevice,
+    kUring,  // For io_uring specific issues
+    kSerialization,  // For parsing/encoding issues
+    kApplication,  // High-level app logic
+    kTls,  // TLS/KTLS errors
+    kUnknown
 };
 
 // -------------------------------------------------------------------------
@@ -77,25 +77,25 @@ constexpr std::string_view CategoryToString(const ErrorCategory cat)
     using enum ErrorCategory;
     switch (cat)
     {
-        case Success:
+        case kSuccess:
             return "Success";
-        case Network:
+        case kNetwork:
             return "Network";
-        case File:
+        case kFile:
             return "File";
-        case SystemResource:
+        case kSystemResource:
             return "SystemResource";
-        case Device:
+        case kDevice:
             return "Device";
-        case Uring:
+        case kUring:
             return "IOUring";
-        case Serialization:
+        case kSerialization:
             return "Serialization";
-        case Application:
+        case kApplication:
             return "Application";
-        case Tls:
+        case kTls:
             return "TLS";
-        case Unknown:
+        case kUnknown:
             return "Unknown";
     }
     return "Unknown";
@@ -104,13 +104,16 @@ constexpr std::string_view CategoryToString(const ErrorCategory cat)
 constexpr ErrorCategory CategoryFromErrno(const int err)
 {
     using enum ErrorCategory;
-    if (err == 0) return Success;
+    if (err == 0)
+    {
+        return kSuccess;
+    }
 
     // Custom Ranges
-    if (err >= 1000 && err < 2000) return Uring;
-    if (err >= 2000 && err < 3000) return Serialization;
-    if (err >= 3000 && err < 4000) return Application;
-    if (err >= 4000 && err < 5000) return Tls;
+    if (err >= 1000 && err < 2000) return kUring;  // NOLINT
+    if (err >= 2000 && err < 3000) return kSerialization;  // NOLINT
+    if (err >= 3000 && err < 4000) return kApplication;  // NOLINT
+    if (err >= 4000 && err < 5000) return kTls;  // NOLINT
 
     // Standard POSIX mapping
     switch (err)  // NOSONAR on number of switch cases
@@ -141,7 +144,7 @@ constexpr ErrorCategory CategoryFromErrno(const int err)
         case ETIMEDOUT:
         case EHOSTUNREACH:
         case EHOSTDOWN:
-            return Network;
+            return kNetwork;
 
         // File
         case ENOENT:
@@ -158,7 +161,7 @@ constexpr ErrorCategory CategoryFromErrno(const int err)
         case EFBIG:
         case ENOTEMPTY:
         case EXDEV:
-            return File;
+            return kFile;
 
         // System Resource
         case ENOMEM:
@@ -170,16 +173,16 @@ constexpr ErrorCategory CategoryFromErrno(const int err)
         case ECANCELED:
         case EOWNERDEAD:
         case ENOTRECOVERABLE:
-            return SystemResource;
+            return kSystemResource;
 
         // Device
         case ENODEV:
         case ENXIO:
         case EBUSY:
-            return Device;
+            return kDevice;
 
         default:
-            return Unknown;
+            return kUnknown;
     }
 }
 
@@ -265,16 +268,16 @@ struct Error
     int value;  // The specific errno or custom code
 
     // Constructors
-    constexpr Error() : category(ErrorCategory::Success), value(0) {}
+    constexpr Error() : category(ErrorCategory::kSuccess), value(0) {}
     constexpr Error(const ErrorCategory cat, const int val) : category(cat), value(val) {}
 
     // Factories
-    static Error from_errno(int err) { return {CategoryFromErrno(err), err}; }
+    static Error FromErrno(int err) { return {CategoryFromErrno(err), err}; }
 
     // Helper for custom categories with specific values
-    static Error custom(ErrorCategory cat, int val) { return {cat, val}; }
+    static Error Custom(ErrorCategory cat, int val) { return {cat, val}; }
 
-    [[nodiscard]] constexpr bool is_success() const { return category == ErrorCategory::Success; }
+    [[nodiscard]] constexpr bool IsSuccess() const { return category == ErrorCategory::kSuccess; }
 
     constexpr bool operator==(const Error& other) const = default;
 };
@@ -292,10 +295,10 @@ template<>
 struct std::formatter<kio::Error>
 {
     // Parses format specifications
-    static constexpr auto parse(std::format_parse_context const& ctx) { return ctx.begin(); }
+    static constexpr auto parse(std::format_parse_context const& ctx) { return ctx.begin(); }  // NOLINT
 
     // Formats the Error into the context
-    static auto format(const kio::Error& err, std::format_context& ctx)
+    static auto format(const kio::Error& err, std::format_context& ctx)  // NOLINT
     {
         // Example output: "Network: Connection reset by peer (104)"
         // Example output: "IOUring: Submission queue full (1000)"
@@ -312,7 +315,7 @@ struct std::formatter<kio::Error>
 namespace kio_try_internal
 {
 template<typename Exp>
-auto kio_try_unwrap_impl(Exp&& exp)
+auto kio_try_unwrap_impl(Exp&& exp)  // NOLINT
 {
     using ValueT = std::decay_t<Exp>::value_type;
 

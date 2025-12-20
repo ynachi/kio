@@ -16,7 +16,7 @@ Task<Result<std::vector<char>>> read_file_content(Worker& io_worker, const int f
     // Otherwise, do not use it anywhere else as it would block the whole event loop
     if (::fstat(fd, &st) < 0)
     {
-        co_return std::unexpected(Error::from_errno(errno));
+        co_return std::unexpected(Error::FromErrno(errno));
     }
 
     if (st.st_size == 0)
@@ -27,7 +27,7 @@ Task<Result<std::vector<char>>> read_file_content(Worker& io_worker, const int f
     std::vector<char> buffer(st.st_size);
     const std::span buf_span(buffer);
 
-    KIO_TRY(co_await io_worker.async_read_exact_at(fd, buf_span, 0));
+    KIO_TRY(co_await io_worker.AsyncReadExactAt(fd, buf_span, 0));
 
     co_return buffer;
 }

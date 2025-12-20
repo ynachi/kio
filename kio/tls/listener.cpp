@@ -30,7 +30,7 @@ Result<TlsListener> TlsListener::bind(Worker& worker, const ListenerConfig& conf
     {
         if (::setsockopt(socket.get(), SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
         {
-            return std::unexpected(Error::from_errno(errno));
+            return std::unexpected(Error::FromErrno(errno));
         }
     }
 
@@ -59,7 +59,7 @@ Task<Result<TlsStream>> TlsListener::accept() const
 {
     SocketAddress peer_addr;
 
-    const auto client_fd = KIO_TRY(co_await worker_.async_accept(listen_sock_, peer_addr));
+    const auto client_fd = KIO_TRY(co_await worker_.AsyncAccept(listen_sock_, peer_addr));
 
     Socket client(client_fd);
     constexpr int opt = 1;
@@ -91,7 +91,7 @@ Task<Result<TlsStream>> TlsConnector::connect(std::string_view hostname, uint16_
     KIO_TRY(set_tcp_fd_options(fd));
     ALOG_DEBUG("Socket options successfully set on FD {}", fd);
 
-    KIO_TRY(co_await worker_.async_connect(fd, addr.as_sockaddr(), addr.addrlen));
+    KIO_TRY(co_await worker_.AsyncConnect(fd, addr.as_sockaddr(), addr.addrlen));
     ALOG_DEBUG("Connected to server {}:{}", hostname, port);
 
     TlsStream stream(worker_, std::move(socket), ctx_, TlsRole::Client);

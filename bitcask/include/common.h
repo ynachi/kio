@@ -51,7 +51,7 @@ struct Manifest
  * @return The number of T since the UNIX epoch.
  */
 template<typename T = std::chrono::nanoseconds>
-std::uint64_t get_current_timestamp()
+std::uint64_t GetCurrentTimestamp()
 {
     const auto now = std::chrono::steady_clock::now();
     return std::chrono::duration_cast<T>(now.time_since_epoch()).count();
@@ -83,7 +83,7 @@ inline kio::Result<size_t> get_file_size(const int fd)
     struct stat st{};
     if (::fstat(fd, &st) < 0)
     {
-        return std::unexpected(kio::Error::from_errno(errno));
+        return std::unexpected(kio::Error::FromErrno(errno));
     }
     return st.st_size;
 }

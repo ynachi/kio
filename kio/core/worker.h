@@ -8,6 +8,7 @@
 #include <expected>
 #include <fcntl.h>
 #include <filesystem>
+#include <functional>
 #include <latch>
 #include <liburing.h>
 #include <memory>
@@ -19,7 +20,6 @@
 #include "kio/net/net.h"
 #include "kio/net/socket.h"
 #include "kio/sync/mpsc_queue.h"
-#include "uring_awaitable.h"
 
 namespace kio::io
 {
@@ -60,8 +60,8 @@ struct WorkerAccess
      * @param worker The worker to schedule on
      * @param h The coroutine handle to schedule
      */
-    static void post(Worker& worker, std::coroutine_handle<> h);
-    static io_uring& get_ring(Worker& worker) noexcept;
+    static void Post(Worker& worker, std::coroutine_handle<> h);
+    static io_uring& GetRing(Worker& worker) noexcept;
 };
 }  // namespace internal
 
@@ -102,7 +102,7 @@ struct WorkerConfig
     // Higher values = better CPU throughput. Lower values = better IO latency.
     size_t task_batch_size{64};
 
-    void check() const
+    void Check() const
     {
         if (uring_queue_depth == 0 || uring_submit_batch_size == 0 || tcp_backlog == 0)
         {
@@ -140,7 +140,7 @@ struct IoUringAwaitable
         assert(worker_.is_on_worker_thread() && "kio::async_* operation was called from the wrong thread.");
 
         completion_.handle = h;
-        auto& ring = internal::WorkerAccess::get_ring(worker_);
+        auto& ring = internal::WorkerAccess::GetRing(worker_);
         io_uring_sqe* sqe = io_uring_get_sqe(&ring);
 
         if (sqe == nullptr)
@@ -160,9 +160,9 @@ struct IoUringAwaitable
     {
         if (completion_.result < 0)
         {
-            return std::unexpected(Error::from_errno(-completion_.result));
+            return std::unexpected(Error::FromErrno(-completion_.result));
         }
-        if (on_success_)
+        if (on_success_ != nullptr)
         {
             on_success_(worker_, completion_.result);
         }
@@ -176,7 +176,7 @@ struct IoUringAwaitable
 };
 
 template<typename Prep, typename... Args>
-auto make_uring_awaitable(Worker& worker, Prep&& prep, void (*on_success)(Worker&, int), Args&&... args)
+auto MakeUringAwaitable(Worker& worker, Prep&& prep, void (*on_success)(Worker&, int), Args&&... args)
 {
     return IoUringAwaitable<std::decay_t<Prep>, std::decay_t<Args>...>(worker, std::forward<Prep>(prep), on_success,
                                                                        std::forward<Args>(args)...);
@@ -184,7 +184,7 @@ auto make_uring_awaitable(Worker& worker, Prep&& prep, void (*on_success)(Worker
 
 // Overload for no stats callback
 template<typename Prep, typename... Args>
-auto make_uring_awaitable(Worker& worker, Prep&& prep, Args&&... args)
+auto MakeUringAwaitable(Worker& worker, Prep&& prep, Args&&... args)
 {
     return IoUringAwaitable<std::decay_t<Prep>, std::decay_t<Args>...>(worker, std::forward<Prep>(prep), nullptr,
                                                                        std::forward<Args>(args)...);
@@ -222,46 +222,46 @@ class Worker
     //=====================================
     // PRIVATE METHODS
     //=====================================
-    int submit_sqes_wait();
+    int SubmitSqesWait();
 
     // Private Stats Updaters
-    static void stat_inc_read(Worker& w, const int res)
+    static void StatIncRead(Worker& w, const int res)
     {
         w.stats_.bytes_read_total += res;
         w.stats_.read_ops_total++;
     }
-    static void stat_inc_write(Worker& w, const int res)
+    static void StatIncWrite(Worker& w, const int res)
     {
         w.stats_.bytes_written_total += res;
         w.stats_.write_ops_total++;
     }
-    static void stat_inc_accept(Worker& w, int) { w.stats_.connections_accepted_total++; }
-    static void stat_inc_connect(Worker& w, int) { w.stats_.connect_ops_total++; }
-    static void stat_inc_open(Worker& w, int) { w.stats_.open_ops_total++; }
+    static void StatIncAccept(Worker& w, int) { w.stats_.connections_accepted_total++; }
+    static void StatIncConnect(Worker& w, int) { w.stats_.connect_ops_total++; }
+    static void StatIncOpen(Worker& w, int) { w.stats_.open_ops_total++; }
 
-    static void check_kernel_version();
-    void check_syscall_return(int ret);
-    unsigned process_completions();
+    static void CheckKernelVersion();
+    void CheckSyscallReturn(int ret);
+    unsigned ProcessCompletions();
     // typically used during shutdown. Drain the completion queue
-    void drain_completions();
+    void DrainCompletions();
 
-    void post(std::coroutine_handle<> h);
-    io_uring& get_ring() noexcept { return ring_; }
-    void handle_cqe(io_uring_cqe* cqe);
+    void Post(std::coroutine_handle<> h);
+    io_uring& GetRing() noexcept { return ring_; }
+    void HandleCqe(io_uring_cqe* cqe);
 
 public:
-    [[nodiscard]] bool is_on_worker_thread() const;
-    void signal_init_complete() { init_latch_.count_down(); }
-    void signal_shutdown_complete() { shutdown_latch_.count_down(); }
-    [[nodiscard]] std::stop_token get_stop_token() const { return stop_source_.get_token(); }
-    [[nodiscard]] size_t get_id() const noexcept { return id_; }
-    void loop_forever();
-    void wait_ready() const { init_latch_.wait(); }
-    void wait_shutdown() const { shutdown_latch_.wait(); }
-    [[nodiscard]] bool request_stop();
-    void initialize();
-    void loop();
-    [[nodiscard]] bool is_running() const noexcept { return stopped_.load(std::memory_order_acquire) == false; }
+    [[nodiscard]] bool IsOnWorkerThread() const;
+    void SignalInitComplete() { init_latch_.count_down(); }
+    void SignalShutdownComplete() { shutdown_latch_.count_down(); }
+    [[nodiscard]] std::stop_token GetStopToken() const { return stop_source_.get_token(); }
+    [[nodiscard]] size_t GetId() const noexcept { return id_; }
+    void LoopForever();
+    void WaitReady() const { init_latch_.wait(); }
+    void WaitShutdown() const { shutdown_latch_.wait(); }
+    [[nodiscard]] bool RequestStop();
+    void Initialize();
+    void Loop();
+    [[nodiscard]] bool IsRunning() const noexcept { return stopped_.load(std::memory_order_acquire) == false; }
 
     Worker(const Worker&) = delete;
     Worker& operator=(const Worker&) = delete;
@@ -270,22 +270,22 @@ public:
     Worker(size_t id, const WorkerConfig& config, std::function<void(Worker&)> worker_init_callback = {});
     ~Worker();
 
-    [[nodiscard]] const WorkerStats& get_stats() { return stats_; }
+    [[nodiscard]] const WorkerStats& GetStats() { return stats_; }
 
     //==========================================================
     // Io methods
     //=========================================================
 
-    [[nodiscard]] auto async_accept(int server_fd, sockaddr* addr, socklen_t* addrlen)
+    [[nodiscard]] auto AsyncAccept(int server_fd, sockaddr* addr, socklen_t* addrlen)
     {
         auto prep = [](io_uring_sqe* sqe, int fd, sockaddr* a, socklen_t* al, int flags)
         { io_uring_prep_accept(sqe, fd, a, al, flags); };
-        return make_uring_awaitable(*this, prep, &Worker::stat_inc_accept, server_fd, addr, addrlen, 0);
+        return MakeUringAwaitable(*this, prep, &Worker::StatIncAccept, server_fd, addr, addrlen, 0);
     }
 
-    [[nodiscard]] auto async_accept(const net::Socket& socket, net::SocketAddress& addr)
+    [[nodiscard]] auto AsyncAccept(const net::Socket& socket, net::SocketAddress& addr)
     {
-        return async_accept(socket.get(), reinterpret_cast<sockaddr*>(&addr.addr), &addr.addrlen);
+        return AsyncAccept(socket.get(), reinterpret_cast<sockaddr*>(&addr.addr), &addr.addrlen);
     }
 
     /**
@@ -298,12 +298,12 @@ public:
      * @param offset The file offset to read from.
      * @return An IO Result embedding the number of bytes read or an error.
      */
-    [[nodiscard]] auto async_read_at(int client_fd, std::span<char> buf, uint64_t offset)
+    [[nodiscard]] auto AsyncReadAt(int client_fd, std::span<char> buf, uint64_t offset)
     {
         auto prep = [](io_uring_sqe* sqe, const int fd, char* b, const unsigned len, const uint64_t off)
         { io_uring_prep_read(sqe, fd, b, len, off); };
-        return make_uring_awaitable(*this, prep, &Worker::stat_inc_read, client_fd, buf.data(),
-                                    static_cast<unsigned>(buf.size()), offset);
+        return MakeUringAwaitable(*this, prep, &Worker::StatIncRead, client_fd, buf.data(),
+                                  static_cast<unsigned>(buf.size()), offset);
     }
 
     /**
@@ -315,9 +315,9 @@ public:
      * @param buf A span of memory to read data into.
      * @return An IO result with the client FD or an error
      */
-    [[nodiscard]] auto async_read(const int client_fd, std::span<char> buf)
+    [[nodiscard]] auto AsyncRead(const int client_fd, std::span<char> buf)
     {
-        return async_read_at(client_fd, buf, static_cast<uint64_t>(-1));
+        return AsyncReadAt(client_fd, buf, static_cast<uint64_t>(-1));
     }
 
     /**
@@ -331,12 +331,12 @@ public:
      * @param offset
      * @return A void IO result or an error
      */
-    [[nodiscard]] auto async_write_at(const int fd, std::span<const char> buf, const uint64_t offset)
+    [[nodiscard]] auto AsyncWriteAt(const int fd, std::span<const char> buf, const uint64_t offset)
     {
         auto prep = [](io_uring_sqe* sqe, const int fd, const char* b, const unsigned len, const uint64_t off)
         { io_uring_prep_write(sqe, fd, b, len, off); };
-        return make_uring_awaitable(*this, prep, &Worker::stat_inc_write, fd, buf.data(),
-                                    static_cast<unsigned>(buf.size()), offset);
+        return MakeUringAwaitable(*this, prep, &Worker::StatIncWrite, fd, buf.data(), static_cast<unsigned>(buf.size()),
+                                  offset);
     }
 
     /**
@@ -351,11 +351,11 @@ public:
      * @param offset The file offset to read from.
      * @return An IO result of the number of bytes read or an error.
      */
-    [[nodiscard]] auto async_readv(int client_fd, const iovec* iov, int iovcnt, uint64_t offset)
+    [[nodiscard]] auto AsyncReadv(int client_fd, const iovec* iov, int iovcnt, uint64_t offset)
     {
         auto prep = [](io_uring_sqe* sqe, int fd, const iovec* iov_, int iovcnt_, uint64_t off)
         { io_uring_prep_readv(sqe, fd, iov_, iovcnt_, off); };
-        return make_uring_awaitable(*this, prep, &Worker::stat_inc_read, client_fd, iov, iovcnt, offset);
+        return MakeUringAwaitable(*this, prep, &Worker::StatIncRead, client_fd, iov, iovcnt, offset);
     }
 
     /**
@@ -367,9 +367,9 @@ public:
      * @param buf A span of constant memory to write.
      * @return An IO result containing number of bytes writen FD or an error.
      */
-    [[nodiscard]] auto async_write(int client_fd, std::span<const char> buf)
+    [[nodiscard]] auto AsyncWrite(int client_fd, std::span<const char> buf)
     {
-        return async_write_at(client_fd, buf, static_cast<uint64_t>(-1));
+        return AsyncWriteAt(client_fd, buf, static_cast<uint64_t>(-1));
     }
 
     /**
@@ -386,11 +386,11 @@ public:
      * On success: The total number of bytes written from all buffers.
      * On failure: An Error.
      */
-    [[nodiscard]] auto async_writev(int client_fd, const iovec* iov, int iovcnt, uint64_t offset)
+    [[nodiscard]] auto AsyncWritev(int client_fd, const iovec* iov, int iovcnt, uint64_t offset)
     {
         auto prep = [](io_uring_sqe* sqe, const int fd, const iovec* iov_, int iovcnt_, const uint64_t off)
         { io_uring_prep_writev(sqe, fd, iov_, iovcnt_, off); };
-        return make_uring_awaitable(*this, prep, &Worker::stat_inc_write, client_fd, iov, iovcnt, offset);
+        return MakeUringAwaitable(*this, prep, &Worker::StatIncWrite, client_fd, iov, iovcnt, offset);
     }
 
     /**
@@ -404,11 +404,11 @@ public:
      * @return A Task that resumes with a Result<int>.
      * On failure: An Error.
      */
-    [[nodiscard]] auto async_connect(int client_fd, const sockaddr* addr, socklen_t addrlen)
+    [[nodiscard]] auto AsyncConnect(int client_fd, const sockaddr* addr, socklen_t addrlen)
     {
         auto prep = [](io_uring_sqe* sqe, const int fd, const sockaddr* a, const socklen_t al)
         { io_uring_prep_connect(sqe, fd, a, al); };
-        return make_uring_awaitable(*this, prep, &Worker::stat_inc_connect, client_fd, addr, addrlen);
+        return MakeUringAwaitable(*this, prep, &Worker::StatIncConnect, client_fd, addr, addrlen);
     }
 
     /**
@@ -420,10 +420,10 @@ public:
      * @param fd The file descriptor to close.
      * @return A void Result or an error.
      */
-    [[nodiscard]] auto async_close(int fd)
+    [[nodiscard]] auto AsyncClose(int fd)
     {
         auto prep = [](io_uring_sqe* sqe, int file_fd) { io_uring_prep_close(sqe, file_fd); };
-        return make_uring_awaitable(*this, prep, fd);
+        return MakeUringAwaitable(*this, prep, fd);
     }
 
     /**
@@ -432,10 +432,10 @@ public:
      * @param fd The file descriptor to sync.
      * @return A void Result or an error.
      */
-    [[nodiscard]] auto async_fsync(int fd)
+    [[nodiscard]] auto AsyncFsync(int fd)
     {
         auto prep = [](io_uring_sqe* sqe, const int file_fd) { io_uring_prep_fsync(sqe, file_fd, 0); };
-        return make_uring_awaitable(*this, prep, fd);
+        return MakeUringAwaitable(*this, prep, fd);
     }
 
     /**
@@ -444,11 +444,11 @@ public:
      * @param fd The file descriptor to sync.
      * @return A void Result or an error.
      */
-    [[nodiscard]] auto async_fdatasync(int fd)
+    [[nodiscard]] auto AsyncFdatasync(int fd)
     {
         auto prep = [](io_uring_sqe* sqe, const int file_fd)
         { io_uring_prep_fsync(sqe, file_fd, IORING_FSYNC_DATASYNC); };
-        return make_uring_awaitable(*this, prep, fd);
+        return MakeUringAwaitable(*this, prep, fd);
     }
 
     /**
@@ -462,11 +462,11 @@ public:
      * @param size The number of bytes to allocate (length).
      * @return A void Result or an error.
      */
-    [[nodiscard]] auto async_fallocate(int fd, int mode, off_t size)
+    [[nodiscard]] auto AsyncFallocate(int fd, int mode, off_t size)
     {
         auto prep = [](io_uring_sqe* sqe, int file_fd, int p_mode, off_t offset, off_t len)
         { io_uring_prep_fallocate(sqe, file_fd, p_mode, offset, len); };
-        return make_uring_awaitable(*this, prep, fd, mode, static_cast<off_t>(0), size);
+        return MakeUringAwaitable(*this, prep, fd, mode, static_cast<off_t>(0), size);
     }
 
     /**
@@ -476,23 +476,23 @@ public:
      * @param length Size of the truncate.
      * @return
      */
-    [[nodiscard]] auto async_ftruncate(int fd, off_t length)
+    [[nodiscard]] auto AsyncFtruncate(int fd, off_t length)
     {
         auto prep = [](io_uring_sqe* sqe, int file_fd, off_t off) { io_uring_prep_ftruncate(sqe, file_fd, off); };
-        return make_uring_awaitable(*this, prep, fd, length);
+        return MakeUringAwaitable(*this, prep, fd, length);
     }
 
-    [[nodiscard]] auto async_poll(int fd, int events)
+    [[nodiscard]] auto AsyncPoll(int fd, int events)
     {
         auto prep = [](io_uring_sqe* sqe, int p_fd, int p_events)
         { io_uring_prep_poll_add(sqe, p_fd, static_cast<unsigned>(p_events)); };
-        return make_uring_awaitable(*this, prep, fd, events);
+        return MakeUringAwaitable(*this, prep, fd, events);
     }
 
-    [[nodiscard]] auto async_sendmsg(int fd, const msghdr* msg, int flags)
+    [[nodiscard]] auto AsyncSendmsg(int fd, const msghdr* msg, int flags)
     {
         auto prep = [](io_uring_sqe* sqe, int f, const msghdr* m, int fl) { io_uring_prep_sendmsg(sqe, f, m, fl); };
-        return make_uring_awaitable(*this, prep, &Worker::stat_inc_write, fd, msg, flags);
+        return MakeUringAwaitable(*this, prep, &Worker::StatIncWrite, fd, msg, flags);
     }
 
     /**
@@ -507,11 +507,11 @@ public:
      * @param mode The file permissions mode (e.g., 0644) used only if O_CREAT is specified.
      * @return An IO Result which is void or an error.
      */
-    [[nodiscard]] auto async_openat(std::filesystem::path path, int flags, mode_t mode)
+    [[nodiscard]] auto AsyncOpenat(std::filesystem::path path, int flags, mode_t mode)
     {
         auto prep = [](io_uring_sqe* sqe, int dfd, const std::filesystem::path& p, int f, mode_t m)
         { io_uring_prep_openat(sqe, dfd, p.c_str(), f, m); };
-        return make_uring_awaitable(*this, prep, &Worker::stat_inc_open, AT_FDCWD, std::move(path), flags, mode);
+        return MakeUringAwaitable(*this, prep, &Worker::StatIncOpen, AT_FDCWD, std::move(path), flags, mode);
     }
 
     /**
@@ -525,11 +525,11 @@ public:
      * - AT_SYMLINK_NOFOLLOW: Remove symlinks without following
      * @return An IO Result which is void or an error.
      */
-    [[nodiscard]] auto async_unlink_at(int dirfd, std::filesystem::path path, int flags)
+    [[nodiscard]] auto AsyncUnlinkAt(int dirfd, std::filesystem::path path, int flags)
     {
         auto prep = [](io_uring_sqe* sqe, int dfd, const std::filesystem::path& p, int f)
         { io_uring_prep_unlinkat(sqe, dfd, p.c_str(), f); };
-        return make_uring_awaitable(*this, prep, dirfd, std::move(path), flags);
+        return MakeUringAwaitable(*this, prep, dirfd, std::move(path), flags);
     }
 
     /**
@@ -545,7 +545,7 @@ public:
      * @param buf A span of memory to be filled with data.
      * @return An IO Result embedding the number of bytes read or an error.
      */
-    Task<Result<void>> async_read_exact(int client_fd, std::span<char> buf);
+    Task<Result<void>> AsyncReadExact(int client_fd, std::span<char> buf);
     /**
      * @brief Read the exact data size to fill the provided buffer. This method requires
      * the FD to be seekable.
@@ -558,7 +558,7 @@ public:
      * @param offset the offset from which to read from
      * @return A void IO result or an error
      */
-    Task<Result<void>> async_read_exact_at(int fd, std::span<char> buf, uint64_t offset);
+    Task<Result<void>> AsyncReadExactAt(int fd, std::span<char> buf, uint64_t offset);
 
     /**
      * @brief Asynchronously writes the entire contents of a buffer to a file descriptor.
@@ -572,15 +572,15 @@ public:
      * @param buf A span of constant memory to be written in its entirety.
      * @return A void IO result or an error
      */
-    Task<Result<void>> async_write_exact(int client_fd, std::span<const char> buf);
-    Task<Result<void>> async_write_exact_at(int client_fd, std::span<const char> buf, uint64_t offset);
+    Task<Result<void>> AsyncWriteExact(int client_fd, std::span<const char> buf);
+    Task<Result<void>> AsyncWriteExactAt(int client_fd, std::span<const char> buf, uint64_t offset);
 
     /**
      * Asynchronously sleep for `duration`. This is a non-blocking sleep.
      * @param duration
      * @return void or an error
      */
-    Task<std::expected<void, Error>> async_sleep(std::chrono::nanoseconds duration);
+    Task<std::expected<void, Error>> AsyncSleep(std::chrono::nanoseconds duration);
 
     /**
      * @brief Asynchronously transfers data between two file descriptors using a zero-copy pipe buffer.
@@ -606,7 +606,7 @@ public:
      * @param count  The total number of bytes to transfer.
      * @return void on success, or an Error on failure.
      */
-    Task<Result<void>> async_sendfile(int out_fd, int in_fd, off_t offset, size_t count);
+    Task<Result<void>> AsyncSendfile(int out_fd, int in_fd, off_t offset, size_t count);
 };
 
 //==========================================================
@@ -622,8 +622,8 @@ struct SwitchToWorker
 
     explicit SwitchToWorker(Worker& worker) : worker_(worker) {}
 
-    bool await_ready() const noexcept { return worker_.is_on_worker_thread(); }  // NOLINT
-    void await_suspend(std::coroutine_handle<> h) const { internal::WorkerAccess::post(worker_, h); }
+    bool await_ready() const noexcept { return worker_.IsOnWorkerThread(); }  // NOLINT
+    void await_suspend(std::coroutine_handle<> h) const { internal::WorkerAccess::Post(worker_, h); }
     void await_resume() const noexcept {}  // NOLINT
 };
 
@@ -632,14 +632,14 @@ struct SwitchToWorker
 //
 namespace internal
 {
-inline void WorkerAccess::post(Worker& worker, std::coroutine_handle<> h)
+inline void WorkerAccess::Post(Worker& worker, std::coroutine_handle<> h)
 {
-    worker.post(h);
+    worker.Post(h);
 }
 
-inline io_uring& WorkerAccess::get_ring(Worker& worker) noexcept
+inline io_uring& WorkerAccess::GetRing(Worker& worker) noexcept
 {
-    return worker.get_ring();
+    return worker.GetRing();
 }
 }  // namespace internal
 

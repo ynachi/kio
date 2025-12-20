@@ -27,7 +27,7 @@ Task<Result<void>> DataFile::async_close()
         // to avoid double close or just rely on handle destructor (sync close).
         // Given the requirement for async_close, we release the FD.
         const int fd = handle_.release();
-        KIO_TRY(co_await io_worker_.async_close(fd));
+        KIO_TRY(co_await io_worker_.AsyncClose(fd));
     }
     co_return {};
 }
@@ -42,12 +42,12 @@ Task<Result<std::pair<uint64_t, uint32_t>>> DataFile::async_write(const DataEntr
     const auto written_len = static_cast<uint32_t>(serialized_entry.size());
 
     // The file must be opened without O_APPEND for this pwrite-based call to work correctly.
-    KIO_TRY(co_await io_worker_.async_write_exact_at(handle_.get(), serialized_entry, entry_offset));
+    KIO_TRY(co_await io_worker_.AsyncWriteExactAt(handle_.get(), serialized_entry, entry_offset));
 
     if (config_.sync_on_write)
     {
         // After the writing completes, force it to disk if the user configured it
-        KIO_TRY(co_await io_worker_.async_fdatasync(handle_.get()));
+        KIO_TRY(co_await io_worker_.AsyncFdatasync(handle_.get()));
     }
 
     // Atomically update size_ for the next write

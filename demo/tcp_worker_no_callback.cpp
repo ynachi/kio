@@ -22,11 +22,11 @@ DetachedTask HandleClient(Worker &worker, const int client_fd)
 
     // Critical! We want any client code to be stopped when the worker exits.
     // So the loop below will be synchronized on the worker's top token.
-    const auto st = worker.get_stop_token();
+    const auto st = worker.GetStopToken();
 
     while (!st.stop_requested())
     {
-        auto n = co_await worker.async_read(client_fd, std::span(buffer, sizeof(buffer)));
+        auto n = co_await worker.AsyncRead(client_fd, std::span(buffer, sizeof(buffer)));
         if (!n.has_value())
         {
             ALOG_INFO("Read failed {}", n.error());
@@ -40,7 +40,7 @@ DetachedTask HandleClient(Worker &worker, const int client_fd)
         }
 
         std::string response = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, World!";
-        auto sent = co_await worker.async_write(client_fd, std::span(response.data(), response.size()));
+        auto sent = co_await worker.AsyncWrite(client_fd, std::span(response.data(), response.size()));
 
         if (!sent.has_value())
         {
@@ -56,7 +56,7 @@ DetachedTask HandleClient(Worker &worker, const int client_fd)
 Task<void> accept_loop(Worker &worker, int listen_fd)
 {
     ALOG_INFO("Worker accepting connections");
-    const auto st = worker.get_stop_token();
+    const auto st = worker.GetStopToken();
 
     while (!st.stop_requested())
     {
@@ -68,7 +68,7 @@ Task<void> accept_loop(Worker &worker, int listen_fd)
         // would verify this behavior and crash
         co_await SwitchToWorker(worker);
 
-        auto client_fd = co_await worker.async_accept(listen_fd, reinterpret_cast<sockaddr *>(&client_addr), &addr_len);
+        auto client_fd = co_await worker.AsyncAccept(listen_fd, reinterpret_cast<sockaddr *>(&client_addr), &addr_len);
 
         if (!client_fd.has_value())
         {
@@ -87,7 +87,7 @@ Task<void> accept_loop(Worker &worker, int listen_fd)
         HandleClient(worker, client_fd.value()).detach();
     }
 
-    ALOG_INFO("Worker {} stop accepting connexions", worker.get_id());
+    ALOG_INFO("Worker {} stop accepting connexions", worker.GetId());
     co_return;
 }
 
@@ -118,11 +118,11 @@ int main()
 
     // 3. Start the event loop in a background thread, so that
     // the main can run the rest of the code
-    auto thread = std::jthread([&worker] { worker.loop_forever(); });
+    auto thread = std::jthread([&worker] { worker.LoopForever(); });
     ALOG_INFO("Main thread: Waiting for worker to initialize...");
 
     // 4. Important! wait for the worker to fully start
-    worker.wait_ready();
+    worker.WaitReady();
     ALOG_INFO("Main thread: Worker is ready.");
 
     // now start listening to clients
@@ -135,7 +135,7 @@ int main()
     std::cin.get();
 
     ALOG_INFO("Main thread: Requesting worker stop...");
-    if (const auto res = worker.request_stop(); !res)
+    if (const auto res = worker.RequestStop(); !res)
     {
         ALOG_ERROR("failed to request the event loop to stop");
         return 1;
