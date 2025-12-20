@@ -24,51 +24,51 @@
 
 namespace kio
 {
-inline int64_t get_thread_id() noexcept
+inline int64_t GetThreadId() noexcept
 {
-    thread_local const int64_t tid = syscall(SYS_gettid);
-    return tid;
+    thread_local const int64_t kTid = syscall(SYS_gettid);
+    return kTid;
 }
 
 enum class LogLevel : uint8_t
 {
-    Disabled = 0,
-    Trace,
-    Debug,
-    Info,
-    Warn,
-    Error,
+    kDisabled = 0,
+    kTrace,
+    kDebug,
+    kInfo,
+    kWarn,
+    kError,
 };
 
 struct LogMessage
 {
-    static constexpr size_t MSG_CAPACITY = 256;
-    std::chrono::system_clock::time_point timestamp{};
-    LogLevel level{LogLevel::Info};
-    std::string_view file{};
-    std::string_view function{};
-    uint64_t line{};
-    size_t thread_id{};
+    static constexpr size_t kMsgCapacity = 256;
+    std::chrono::system_clock::time_point timestamp;  // NOLINT(misc-non-private-member-variables-in-classes)
+    LogLevel level{LogLevel::kInfo};  // NOLINT(misc-non-private-member-variables-in-classes)
+    std::string_view file;  // NOLINT(misc-non-private-member-variables-in-classes)
+    std::string_view function;  // NOLINT(misc-non-private-member-variables-in-classes)
+    uint64_t line{};  // NOLINT(misc-non-private-member-variables-in-classes)
+    size_t thread_id{};  // NOLINT(misc-non-private-member-variables-in-classes)
 
-    std::array<char, MSG_CAPACITY> buffer{};
-    std::unique_ptr<std::string> heap_msg{};
-    std::span<const char> msg{};
+    std::array<char, kMsgCapacity> buffer{};  // NOLINT(misc-non-private-member-variables-in-classes)
+    std::unique_ptr<std::string> heap_msg;  // NOLINT(misc-non-private-member-variables-in-classes)
+    std::span<const char> msg;  // NOLINT(misc-non-private-member-variables-in-classes)
 
-    void set_small_message(std::span<const char> data)
+    void SetSmallMessage(std::span<const char> data)
     {
         std::memcpy(buffer.data(), data.data(), data.size());
         msg = std::span<const char>(buffer.data(), data.size());
         heap_msg.reset();
     }
 
-    void set_large_message(std::string &&s)
+    void SetLargeMessage(std::string &&s)
     {
         heap_msg = std::make_unique<std::string>(std::move(s));
         msg = std::span<const char>(heap_msg->data(), heap_msg->size());
     }
 
     [[nodiscard]]
-    std::string_view view() const noexcept
+    std::string_view View() const noexcept
     {
         return {msg.data(), msg.size()};
     }
@@ -79,15 +79,10 @@ struct LogMessage
 
     LogMessage() = default;
 
-    LogMessage(LogMessage &&other) noexcept
+    LogMessage(LogMessage &&other) noexcept :
+        timestamp(other.timestamp), level(other.level), file(other.file), function(other.function), line(other.line),
+        thread_id(other.thread_id)
     {
-        timestamp = other.timestamp;
-        level = other.level;
-        file = other.file;
-        function = other.function;
-        line = other.line;
-        thread_id = other.thread_id;
-
         if (other.heap_msg)
         {
             heap_msg = std::move(other.heap_msg);
@@ -103,7 +98,10 @@ struct LogMessage
 
     LogMessage &operator=(LogMessage &&other) noexcept
     {
-        if (this == &other) return *this;
+        if (this == &other)
+        {
+            return *this;
+        }
         timestamp = other.timestamp;
         level = other.level;
         file = other.file;
@@ -131,17 +129,20 @@ struct LogMessage
 class Logger
 {
 public:
-    explicit Logger(const size_t queue_size = 1024, const LogLevel level = LogLevel::Info,
+    explicit Logger(const size_t queue_size = 1024, const LogLevel level = LogLevel::kInfo,
                     std::ostream &output_stream = std::cout) :
-        queue_(queue_size), level_(level), output_stream_(output_stream), use_color_(false)
+        queue_(queue_size), level_(level), wakeup_fd_(eventfd(0, EFD_CLOEXEC)), output_stream_(output_stream),
+        use_color_(false)
     {
-        wakeup_fd_ = eventfd(0, EFD_CLOEXEC);
         if (wakeup_fd_ < 0)
         {
-            std::osyncstream(std::cerr) << "Failed to create logger eventfd: " << strerror(errno) << std::endl;
+            std::osyncstream(std::cerr) << "Failed to create logger eventfd: " << strerror(errno) << '\n';
         }
 
-        if (&output_stream_ == &std::cout) use_color_ = ::isatty(STDOUT_FILENO) != 0;
+        if (&output_stream_ == &std::cout)
+        {
+            use_color_ = ::isatty(STDOUT_FILENO) != 0;
+        }
 
         consumer_thread_ = std::jthread([this](const std::stop_token &st) { consume_loop(st); });
     }
@@ -156,7 +157,10 @@ public:
             [[maybe_unused]] const auto ret = ::write(wakeup_fd_, &val, sizeof(val));
         }
 
-        if (consumer_thread_.joinable()) consumer_thread_.join();
+        if (consumer_thread_.joinable())
+        {
+            consumer_thread_.join();
+        }
 
         if (wakeup_fd_ >= 0)
         {
@@ -165,12 +169,12 @@ public:
         }
     }
 
-    void set_level(LogLevel level) { level_.store(level, std::memory_order_relaxed); }
+    void SetLevel(const LogLevel level) { level_.store(level, std::memory_order_relaxed); }
 
     [[nodiscard]]
     bool should_log(LogLevel lvl) const noexcept
     {
-        if (const auto current_level = level_.load(std::memory_order_relaxed); current_level == LogLevel::Disabled)
+        if (const auto current_level = level_.load(std::memory_order_relaxed); current_level == LogLevel::kDisabled)
             return false;
         return static_cast<int>(lvl) >= static_cast<int>(level_.load(std::memory_order_relaxed));
     }
@@ -178,31 +182,31 @@ public:
     template<typename... Args>
     void trace(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
     {
-        log<LogLevel::Trace>(loc, fmt, std::forward<Args>(args)...);
+        log<LogLevel::kTrace>(loc, fmt, std::forward<Args>(args)...);
     }
 
     template<typename... Args>
     void debug(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
     {
-        log<LogLevel::Debug>(loc, fmt, std::forward<Args>(args)...);
+        log<LogLevel::kDebug>(loc, fmt, std::forward<Args>(args)...);
     }
 
     template<typename... Args>
     void info(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
     {
-        log<LogLevel::Info>(loc, fmt, std::forward<Args>(args)...);
+        log<LogLevel::kInfo>(loc, fmt, std::forward<Args>(args)...);
     }
 
     template<typename... Args>
     void warn(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
     {
-        log<LogLevel::Warn>(loc, fmt, std::forward<Args>(args)...);
+        log<LogLevel::kWarn>(loc, fmt, std::forward<Args>(args)...);
     }
 
     template<typename... Args>
     void error(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
     {
-        log<LogLevel::Error>(loc, fmt, std::forward<Args>(args)...);
+        log<LogLevel::kError>(loc, fmt, std::forward<Args>(args)...);
     }
 
     void flush()
@@ -210,7 +214,7 @@ public:
         LogMessage entry;
         while (queue_.try_pop(entry))
         {
-            write(entry);
+            Write(entry);
         }
     }
 
@@ -218,10 +222,10 @@ private:
     template<LogLevel L, typename... Args>
     void log(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
     {
-        if constexpr (L == LogLevel::Disabled) return;
+        if constexpr (L == LogLevel::kDisabled) return;
         if (!should_log(L)) return;
 
-        std::array<char, LogMessage::MSG_CAPACITY> stack_buf{};
+        std::array<char, LogMessage::kMsgCapacity> stack_buf{};
 
         try
         {
@@ -234,16 +238,16 @@ private:
             entry.file = loc.file_name();
             entry.function = loc.function_name();
             entry.line = loc.line();
-            entry.thread_id = get_thread_id();
+            entry.thread_id = GetThreadId();
 
-            if (result.size >= 0 && static_cast<size_t>(result.size) <= LogMessage::MSG_CAPACITY)
+            if (result.size >= 0 && static_cast<size_t>(result.size) <= LogMessage::kMsgCapacity)
             {
-                entry.set_small_message(std::span<const char>(stack_buf.data(), written));
+                entry.SetSmallMessage(std::span<const char>(stack_buf.data(), written));
             }
             else
             {
                 std::string large = std::format(fmt, std::forward<Args>(args)...);
-                entry.set_large_message(std::move(large));
+                entry.SetLargeMessage(std::move(large));
             }
 
             if (queue_.try_push(std::move(entry)))
@@ -271,14 +275,14 @@ private:
             entry.file = loc.file_name();
             entry.function = loc.function_name();
             entry.line = loc.line();
-            entry.thread_id = get_thread_id();
-            if (fallback.size() <= LogMessage::MSG_CAPACITY)
+            entry.thread_id = GetThreadId();
+            if (fallback.size() <= LogMessage::kMsgCapacity)
             {
-                entry.set_small_message(std::span<const char>(fallback.data(), fallback.size()));
+                entry.SetSmallMessage(std::span<const char>(fallback.data(), fallback.size()));
             }
             else
             {
-                entry.set_large_message(std::move(fallback));
+                entry.SetLargeMessage(std::move(fallback));
             }
             (void) queue_.try_push(std::move(entry));
         }
@@ -307,9 +311,9 @@ private:
         flush();
     }
 
-    void write(const LogMessage &msg) const
+    void Write(const LogMessage &msg) const
     {
-        const char *color = level_color(msg.level);
+        const char *color = LevelColor(msg.level);
         const char *reset = use_color_ ? "\033[0m" : "";
 
         std::string time_str;
@@ -330,43 +334,46 @@ private:
             filename = filename.substr(pos + 1);
         }
 
-        output_stream_ << std::format("{}[{}] [{:<5}] [tid:{}] {}:{} - {}{}\n", color, time_str, level_name(msg.level),
-                                      msg.thread_id, filename, msg.line, msg.view(), reset);
+        output_stream_ << std::format("{}[{}] [{:<5}] [tid:{}] {}:{} - {}{}\n", color, time_str, LevelName(msg.level),
+                                      msg.thread_id, filename, msg.line, msg.View(), reset);
     }
 
-    static const char *level_name(const LogLevel lvl)
+    static const char *LevelName(const LogLevel lvl)
     {
         switch (lvl)
         {
-            case LogLevel::Trace:
+            case LogLevel::kTrace:
                 return "TRACE";
-            case LogLevel::Debug:
+            case LogLevel::kDebug:
                 return "DEBUG";
-            case LogLevel::Info:
+            case LogLevel::kInfo:
                 return "INFO";
-            case LogLevel::Warn:
+            case LogLevel::kWarn:
                 return "WARN";
-            case LogLevel::Error:
+            case LogLevel::kError:
                 return "ERROR";
             default:
                 return "DISA";
         }
     }
 
-    const char *level_color(const LogLevel lvl) const noexcept
+    [[nodiscard]] const char *LevelColor(const LogLevel lvl) const noexcept
     {
-        if (!use_color_) return "";
+        if (!use_color_)
+        {
+            return "";
+        }
         switch (lvl)
         {
-            case LogLevel::Trace:
+            case LogLevel::kTrace:
                 return "\033[37m";
-            case LogLevel::Debug:
+            case LogLevel::kDebug:
                 return "\033[36m";
-            case LogLevel::Info:
+            case LogLevel::kInfo:
                 return "\033[32m";
-            case LogLevel::Warn:
+            case LogLevel::kWarn:
                 return "\033[33m";
-            case LogLevel::Error:
+            case LogLevel::kError:
                 return "\033[31m";
             default:
                 return "\033[0m";
@@ -430,23 +437,25 @@ private:
  * ────────────────────────────────────────────────────────────── */
 namespace kio::alog
 {
+constexpr size_t kDefaultLoggerQueueSize = 1024;
+
 struct Config
 {
-    size_t queue_size = 1024;
-    LogLevel level = LogLevel::Info;
+    size_t queue_size = kDefaultLoggerQueueSize;
+    LogLevel level = LogLevel::kInfo;
     std::ostream *output = &std::cout;
 };
 
-inline std::unique_ptr<Logger> &global_logger_ptr()
+inline std::unique_ptr<Logger> &GlobalLoggerPtr()
 {
     static std::unique_ptr<Logger> instance = nullptr;
     return instance;
 }
 
-inline Logger &get()
+inline Logger &Get()
 {
     // Get the pointer set by configure()
-    if (const auto &ptr = global_logger_ptr())
+    if (const auto &ptr = GlobalLoggerPtr())
     {
         // If configure() was called, return its logger
         return *ptr;
@@ -454,44 +463,45 @@ inline Logger &get()
 
     // Otherwise, if configure() was never called, create
     // and return a default static instance.
-    static Logger default_instance(1024, LogLevel::Info, std::cout);
+    static Logger default_instance(kDefaultLoggerQueueSize, LogLevel::kInfo, std::cout);
     return default_instance;
 }
 
-inline void configure(size_t queue_size = 1024, LogLevel level = LogLevel::Info, std::ostream &os = std::cout)
+inline void Configure(size_t queue_size = kDefaultLoggerQueueSize, LogLevel level = LogLevel::kInfo,
+                      std::ostream &os = std::cout)
 {
-    auto &ptr = global_logger_ptr();
+    auto &ptr = GlobalLoggerPtr();
     ptr = std::make_unique<Logger>(queue_size, level, os);
 }
 
 template<typename... Args>
-void trace(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
+void Trace(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
 {
-    get().trace(loc, fmt, std::forward<Args>(args)...);
+    Get().trace(loc, fmt, std::forward<Args>(args)...);
 }
 
 template<typename... Args>
-void debug(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
+void Debug(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
 {
-    get().debug(loc, fmt, std::forward<Args>(args)...);
+    Get().debug(loc, fmt, std::forward<Args>(args)...);
 }
 
 template<typename... Args>
-void info(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
+void Info(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
 {
-    get().info(loc, fmt, std::forward<Args>(args)...);
+    Get().info(loc, fmt, std::forward<Args>(args)...);
 }
 
 template<typename... Args>
-void warn(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
+void Warn(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
 {
-    get().warn(loc, fmt, std::forward<Args>(args)...);
+    Get().warn(loc, fmt, std::forward<Args>(args)...);
 }
 
 template<typename... Args>
-void error(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
+void Error(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
 {
-    get().error(loc, fmt, std::forward<Args>(args)...);
+    Get().error(loc, fmt, std::forward<Args>(args)...);
 }
 
 // uses the macros, they are more convenient

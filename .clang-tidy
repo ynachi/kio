@@ -1,36 +1,60 @@
 ---
-Checks: '-*,
-bugprone-*,
-cert-*,
-concurrency-*,
-cppcoreguidelines-*,
--cppcoreguidelines-avoid-magic-numbers,
--cppcoreguidelines-pro-bounds-pointer-arithmetic,
--cppcoreguidelines-pro-type-reinterpret-cast,
-google-*,
-hicpp-*,
-misc-*,
-modernize-*,
-performance-*,
-portability-*,
-readability-*,
--readability-magic-numbers,
--readability-identifier-length'
+Checks: >
+  -*,
+  bugprone-*,
+  cert-*,
+  cppcoreguidelines-*,
+  misc-*,
+  modernize-*,
+  performance-*,
+  readability-*,
+  -modernize-use-trailing-return-type,
+  -readability-identifier-length,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -cppcoreguidelines-pro-bounds-pointer-arithmetic,
+  -llvmlibc-*
+
+# Treat all warnings as errors to ensure code quality
+WarningsAsErrors: '*'
 
 CheckOptions:
-  - key: readability-identifier-naming.NamespaceCase
-    value: lower_case
-  - key: readability-identifier-naming.ClassCase
-    value: CamelCase
-  - key: readability-identifier-naming.StructCase
-    value: CamelCase
-  - key: readability-identifier-naming.FunctionCase
-    value: lower_case
-  - key: readability-identifier-naming.VariableCase
-    value: lower_case
-  - key: readability-identifier-naming.MemberCase
-    value: lower_case
-  - key: readability-identifier-naming.PrivateMemberSuffix
-    value: '_'
-  - key: readability-identifier-naming.ConstantCase
-    value: UPPER_CASE
+  # --- Google Naming Convention ---
+  readability-identifier-naming.ClassCase: CamelCase
+  readability-identifier-naming.StructCase: CamelCase
+  readability-identifier-naming.EnumCase: CamelCase
+  readability-identifier-naming.TypedefCase: CamelCase
+  readability-identifier-naming.UnionCase: CamelCase
+  readability-identifier-naming.TemplateParameterCase: CamelCase
+
+  # Functions -> PascalCase
+  readability-identifier-naming.FunctionCase: CamelCase
+  readability-identifier-naming.MethodCase: CamelCase
+
+  # Variables & Parameters -> snake_case
+  readability-identifier-naming.VariableCase: lower_case
+  readability-identifier-naming.ParameterCase: lower_case
+  readability-identifier-naming.LocalVariableCase: lower_case
+
+  # Class Member Variables -> snake_case_ (trailing underscore for private)
+  readability-identifier-naming.MemberCase: lower_case
+  readability-identifier-naming.PrivateMemberSuffix: '_'
+  readability-identifier-naming.ProtectedMemberSuffix: '_'
+  readability-identifier-naming.PublicMemberCase: lower_case
+
+  # Namespaces -> snake_case
+  readability-identifier-naming.NamespaceCase: lower_case
+
+  # Constants -> kPascalCase
+  readability-identifier-naming.GlobalConstantCase: CamelCase
+  readability-identifier-naming.GlobalConstantPrefix: 'k'
+  readability-identifier-naming.StaticConstantCase: CamelCase
+  readability-identifier-naming.StaticConstantPrefix: 'k'
+  readability-identifier-naming.EnumConstantCase: CamelCase
+  readability-identifier-naming.EnumConstantPrefix: 'k'
+
+  # Macros -> UPPER_CASE
+  readability-identifier-naming.MacroDefinitionCase: UP_CASE
+
+  # --- Modern C++ Tweaks ---
+  # Disable const suggestions for values (int, string_view, etc.)
+  misc-const-correctness.AnalyzeValues: false

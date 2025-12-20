@@ -26,7 +26,7 @@ IOPool::IOPool(size_t num_workers, const WorkerConfig &config, const std::functi
     // Start threads after all workers are created
     for (const auto &worker: workers_)
     {
-        worker_threads_.emplace_back([&w = *worker] { w.loop_forever(); });
+        worker_threads_.emplace_back([&w = *worker] -> void { w.loop_forever(); });
     }
 
     // Wait for all workers to be fully initialized
@@ -43,7 +43,7 @@ IOPool::~IOPool()
     stop();
 }
 
-Worker *IOPool::get_worker(const size_t id) const
+auto IOPool::get_worker(const size_t id) const -> Worker *
 {
     if (id < workers_.size())
     {
@@ -52,7 +52,7 @@ Worker *IOPool::get_worker(const size_t id) const
     return nullptr;
 }
 
-size_t IOPool::get_worker_id_by_key(std::string_view key) const
+auto IOPool::get_worker_id_by_key(const std::string_view key) const -> size_t
 {
     const uint32_t hash = crc32c::Crc32c(key.data(), key.size());
     return hash % workers_.size();
@@ -87,7 +87,10 @@ void IOPool::stop()
     for (const auto &worker: workers_)
     {
         ALOG_DEBUG("WAITING for worker {} to shut down", worker->get_id());
-        if (worker) worker->wait_shutdown();
+        if (worker)
+        {
+            worker->wait_shutdown();
+        }
         ALOG_DEBUG("WAITING shutdown has been completed", worker->get_id());
     }
     ALOG_INFO("IOPool has stopped.");

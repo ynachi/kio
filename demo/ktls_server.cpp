@@ -16,16 +16,15 @@
 
 #include "kio/core/async_logger.h"
 #include "kio/core/worker_pool.h"
-#include "kio/net/net.h"
 #include "kio/tls/listener.h"
 #include "kio/tls/stream.h"
 
-using namespace kio;
-using namespace kio::tls;
-using namespace kio::io;
-using namespace kio::net;
 
-DetachedTask handle_client(TlsStream stream)
+namespace io = kio::io;
+namespace tls = kio::tls;
+namespace net = kio::net;
+
+static auto handle_client(tls::TlsStream stream) -> kio::DetachedTask
 {
     ALOG_INFO("✅ Client ready to start sending traffic");
 
@@ -109,7 +108,7 @@ DetachedTask accept_loop(Worker& worker, const ListenerConfig& listener_cfg, Tls
 
         // Spawn coroutine to handle this client
         // Each connection runs independently on this worker
-        handle_client(std::move(stream)).detach();
+        handle_client(std::move(stream));
     }
     ALOG_INFO("Worker {} stopped accepting connections", worker.get_id());
 }
@@ -157,7 +156,7 @@ int main()
     // Main own objects that are shared with the non owning struct and the main thread is the last to go
     // out of scope. See below, it does after the pool is stopped.
     // As a user, you can still create shared ptrs for worker, TLS context, ... but that is not necessary normally.
-    IOPool pool(4, config, [&listener_cfg, &ctx](Worker& worker) { accept_loop(worker, listener_cfg, ctx).detach(); });
+    IOPool pool(4, config, [&listener_cfg, &ctx](Worker& worker) { accept_loop(worker, listener_cfg, ctx); });
 
     // Main thread waits
     std::cout << "Server running. Press Enter to stop..." << std::endl;

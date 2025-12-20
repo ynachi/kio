@@ -6,11 +6,11 @@
 #include <cstdio>
 #include <fcntl.h>
 #include <sys/stat.h>
-
 #include "kio/core/async_logger.h"
 #include "kio/core/worker.h"
 #include "kio/tls/context.h"
 #include "kio/tls/listener.h"
+#include <thread>
 
 using namespace kio;
 using namespace kio::tls;
@@ -101,7 +101,7 @@ DetachedTask accept_loop(Worker& worker, TlsContext& ctx, const char* filepath)
     {
         if (auto conn = co_await listener->accept(); conn.has_value())
         {
-            handle_client(std::move(*conn), filepath).detach();
+            handle_client(std::move(*conn), filepath);
         }
         else
         {
@@ -135,7 +135,7 @@ int main(int argc, char* argv[])
     auto ctx = std::move(ctx_res.value());
 
     constexpr WorkerConfig wcfg{};
-    Worker worker(0, wcfg, [&ctx, filepath](Worker& worker) { accept_loop(worker, ctx, filepath).detach(); });
+    Worker worker(0, wcfg, [&ctx, filepath](Worker& worker) { accept_loop(worker, ctx, filepath); });
     std::jthread t([&] { worker.loop_forever(); });
     worker.wait_ready();
 

@@ -9,16 +9,21 @@ using namespace bitcask;
 using namespace kio;
 
 // Helper to convert string to vector<char>
-std::vector<char> to_vec(const std::string& s) { return std::vector(s.begin(), s.end()); }
+std::vector<char> to_vec(const std::string& s)
+{
+    return std::vector(s.begin(), s.end());
+}
 
 // Helper to convert vector<char> to string
-std::string to_string(const std::vector<char>& v) { return std::string(v.begin(), v.end()); }
+std::string to_string(const std::vector<char>& v)
+{
+    return std::string(v.begin(), v.end());
+}
 
 Task<Result<std::unique_ptr<BitKV>>> simple_example()
 {
     io::WorkerConfig io_config{};
     io_config.uring_queue_depth = 2048;
-    io_config.default_op_slots = 4096;
 
     const BitcaskConfig db_config{
             .directory = "/home/ynachi/data", .max_file_size = 50 * 1024 * 1024, .auto_compact = false
@@ -67,10 +72,7 @@ Task<Result<std::unique_ptr<BitKV>>> simple_example()
     }
 
     // Store binary data (not just strings)
-    std::vector<char> binary_data = {
-        char(0x01), char(0x02), char(0x03),
-        char(0x04), char(0xFF), char(0xFE)
-    };
+    std::vector<char> binary_data = {char(0x01), char(0x02), char(0x03), char(0x04), char(0xFF), char(0xFE)};
     KIO_TRY(co_await db->put("binary:key", std::move(binary_data)));
     ALOG_INFO("Stored binary data");
 

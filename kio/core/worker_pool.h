@@ -43,13 +43,13 @@ public:
     ~IOPool();
 
     IOPool(const IOPool&) = delete;
-    IOPool& operator=(const IOPool&) = delete;
+    auto operator=(const IOPool&) -> IOPool& = delete;
 
     /**
      * @brief Get the number of workers in the pool.
      */
     [[nodiscard]]
-    size_t num_workers() const
+    auto NumWorkers() const -> size_t
     {
         return workers_.size();
     }

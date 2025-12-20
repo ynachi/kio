@@ -2,6 +2,13 @@
 # Test Helper
 # ============================================================================
 
+# Ensure CMAKE_RUNTIME_OUTPUT_DIRECTORY is set to avoid CMP0174 warning
+if (NOT DEFINED CMAKE_RUNTIME_OUTPUT_DIRECTORY OR CMAKE_RUNTIME_OUTPUT_DIRECTORY STREQUAL "")
+    set(TEST_WORKING_DIR ${CMAKE_CURRENT_BINARY_DIR})
+else ()
+    set(TEST_WORKING_DIR ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})
+endif ()
+
 # Helper function to create test targets
 function(add_kio_test test_name source_file)
     add_executable(${test_name} ${source_file})
@@ -37,7 +44,7 @@ function(add_kio_test test_name source_file)
 
     # GTest automatic test discovery
     gtest_discover_tests(${test_name}
-            WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}
+            WORKING_DIRECTORY ${TEST_WORKING_DIR}
             PROPERTIES
             TIMEOUT 600
             LABELS "integration"
