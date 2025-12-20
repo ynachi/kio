@@ -66,7 +66,9 @@ DetachedTask handle_client(Worker& worker, const int client_fd)
             // We have a complete request, send response
             // Use async_write_exact to ensure all bytes are sent (matching Photon behavior)
 
-            if (auto sent = co_await worker.async_write_exact(client_fd, std::span(HTTP_RESPONSE.data(), HTTP_RESPONSE.size())); !sent.has_value())
+            if (auto sent = co_await worker.async_write_exact(client_fd,
+                                                              std::span(HTTP_RESPONSE.data(), HTTP_RESPONSE.size()));
+                !sent.has_value())
             {
                 break;
             }

@@ -69,7 +69,8 @@
 //             }, std::move(args_));
 //
 //             // Call prep sqe
-//             //std::apply([this]<typename... T>(T&&... unpacked_args) { io_uring_prep_(sqe_, std::forward<T>(unpacked_args)...); }, std::move(args_));
+//             //std::apply([this]<typename... T>(T&&... unpacked_args) { io_uring_prep_(sqe_,
+//             std::forward<T>(unpacked_args)...); }, std::move(args_));
 //
 //             // save the op_id to the submission entry
 //             io_uring_sqe_set_data(sqe, &completion_);
@@ -82,13 +83,15 @@
 //             return completion_.result;
 //         }
 //
-//         explicit IoUringAwaitable(Worker& worker, Prep prep, Args... args) : worker_(worker), io_uring_prep_(std::move(prep)), args_(args...) {}
+//         explicit IoUringAwaitable(Worker& worker, Prep prep, Args... args) : worker_(worker),
+//         io_uring_prep_(std::move(prep)), args_(args...) {}
 //     };
 //
 //     template<typename Prep, typename... Args>
 //     auto make_uring_awaitable(Worker& worker, Prep&& prep, Args&&... args)
 //     {
-//         return IoUringAwaitable<std::decay_t<Prep>, std::decay_t<Args>...>(worker, std::forward<Prep>(prep), std::forward<Args>(args)...);
+//         return IoUringAwaitable<std::decay_t<Prep>, std::decay_t<Args>...>(worker, std::forward<Prep>(prep),
+//         std::forward<Args>(args)...);
 //     }
 //
 // }  // namespace kio::io

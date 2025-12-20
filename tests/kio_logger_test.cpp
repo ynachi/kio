@@ -12,18 +12,23 @@
 using namespace kio;
 
 // Helper to count lines in a string
-int count_lines(const std::string &s) {
+int count_lines(const std::string &s)
+{
     int count = 0;
-    for (char c: s) {
-        if (c == '\n') {
+    for (char c: s)
+    {
+        if (c == '\n')
+        {
             count++;
         }
     }
     return count;
 }
 
-TEST(KioLoggerTest, BasicLogging) {
-    std::stringstream ss; {
+TEST(KioLoggerTest, BasicLogging)
+{
+    std::stringstream ss;
+    {
         Logger logger(1024, LogLevel::Info, ss);
         KIO_LOG_INFO(logger, "Hello {}", "World");
     }
@@ -32,7 +37,8 @@ TEST(KioLoggerTest, BasicLogging) {
     EXPECT_NE(output.find("[INFO ]"), std::string::npos);
 }
 
-TEST(KioLoggerTest, MacroFastPathZeroCost) {
+TEST(KioLoggerTest, MacroFastPathZeroCost)
+{
     std::stringstream ss;
     std::atomic function_called = false;
 
@@ -52,8 +58,10 @@ TEST(KioLoggerTest, MacroFastPathZeroCost) {
     EXPECT_TRUE(ss.str().empty());
 }
 
-TEST(KioLoggerTest, LogLevelFiltering) {
-    std::stringstream ss; {
+TEST(KioLoggerTest, LogLevelFiltering)
+{
+    std::stringstream ss;
+    {
         Logger logger(1024, LogLevel::Warn, ss);
         KIO_LOG_INFO(logger, "This should not appear");
         KIO_LOG_WARN(logger, "This should appear");
@@ -65,22 +73,26 @@ TEST(KioLoggerTest, LogLevelFiltering) {
     EXPECT_NE(output.find("This should also appear"), std::string::npos);
 }
 
-TEST(KioLoggerTest, ChangeLogLevelRuntime) {
-    std::stringstream ss; {
+TEST(KioLoggerTest, ChangeLogLevelRuntime)
+{
+    std::stringstream ss;
+    {
         Logger logger(1024, LogLevel::Info, ss);
-        KIO_LOG_DEBUG(logger, "First debug"); // Should not appear
+        KIO_LOG_DEBUG(logger, "First debug");  // Should not appear
         logger.set_level(LogLevel::Debug);
-        KIO_LOG_DEBUG(logger, "Second debug"); // Should appear
+        KIO_LOG_DEBUG(logger, "Second debug");  // Should appear
     }
     std::string output = ss.str();
     EXPECT_EQ(output.find("First debug"), std::string::npos);
     EXPECT_NE(output.find("Second debug"), std::string::npos);
 }
 
-TEST(KioLoggerTest, HeapAllocationForLargeMessage) {
+TEST(KioLoggerTest, HeapAllocationForLargeMessage)
+{
     std::stringstream ss;
     // Create a string larger than the 256-byte stack buffer
-    std::string large_string(300, 'A'); {
+    std::string large_string(300, 'A');
+    {
         Logger logger(1024, LogLevel::Info, ss);
         KIO_LOG_INFO(logger, "Large: {}", large_string);
     }
@@ -89,23 +101,30 @@ TEST(KioLoggerTest, HeapAllocationForLargeMessage) {
     EXPECT_NE(output.find(large_string), std::string::npos);
 }
 
-TEST(KioLoggerTest, MultiThreadedProducerStressTest) {
+TEST(KioLoggerTest, MultiThreadedProducerStressTest)
+{
     std::stringstream ss;
     constexpr int THREADS = 4;
-    constexpr int MSGS_PER_THREAD = 1000; {
+    constexpr int MSGS_PER_THREAD = 1000;
+    {
         Logger logger(8192, LogLevel::Info, ss);
         std::vector<std::thread> producers;
         producers.reserve(THREADS);
 
-        for (int i = 0; i < THREADS; ++i) {
-            producers.emplace_back([&logger, i] {
-                for (int j = 0; j < MSGS_PER_THREAD; ++j) {
-                    KIO_LOG_INFO(logger, "Message from thread {} num {}", i, j);
-                }
-            });
+        for (int i = 0; i < THREADS; ++i)
+        {
+            producers.emplace_back(
+                    [&logger, i]
+                    {
+                        for (int j = 0; j < MSGS_PER_THREAD; ++j)
+                        {
+                            KIO_LOG_INFO(logger, "Message from thread {} num {}", i, j);
+                        }
+                    });
         }
 
-        for (auto &t: producers) {
+        for (auto &t: producers)
+        {
             t.join();
         }
     }
@@ -115,13 +134,15 @@ TEST(KioLoggerTest, MultiThreadedProducerStressTest) {
     EXPECT_EQ(count_lines(output), THREADS * MSGS_PER_THREAD);
 }
 
-struct TestSink {
+struct TestSink
+{
     std::ostringstream out;
     std::string str() const { return out.str(); }
 };
 
 using namespace std::chrono_literals;
-TEST(LoggerTests, DisabledLevelProducesNoOutput) {
+TEST(LoggerTests, DisabledLevelProducesNoOutput)
+{
     TestSink sink;
     Logger logger(1024, kio::LogLevel::Disabled, sink.out);
 
@@ -132,14 +153,14 @@ TEST(LoggerTests, DisabledLevelProducesNoOutput) {
     EXPECT_TRUE(sink.str().empty());
 }
 
-TEST(LoggerTests, QueueOverflowDropsMessages) {
+TEST(LoggerTests, QueueOverflowDropsMessages)
+{
     std::ostringstream oss;
     {
         // Very small queue to force overflow
         Logger logger(4, LogLevel::Info, oss);
 
-        for (int i = 0; i < 100; ++i)
-            KIO_LOG_INFO(logger, "msg {}", i);
+        for (int i = 0; i < 100; ++i) KIO_LOG_INFO(logger, "msg {}", i);
 
         std::this_thread::sleep_for(50ms);
 
@@ -156,22 +177,24 @@ TEST(LoggerTests, QueueOverflowDropsMessages) {
     EXPECT_GT(count, 0);
 }
 
-
-TEST(LoggerTests, GracefulShutdownFlushesRemaining) {
-    std::ostringstream oss; {
+TEST(LoggerTests, GracefulShutdownFlushesRemaining)
+{
+    std::ostringstream oss;
+    {
         Logger logger(1024, LogLevel::Info, oss);
-        for (int i = 0; i < 10; ++i)
-            KIO_LOG_INFO(logger, "shutdown test {}", i);
+        for (int i = 0; i < 10; ++i) KIO_LOG_INFO(logger, "shutdown test {}", i);
         // Logger destructor should flush
     }
 
     auto out = oss.str();
-    for (int i = 0; i < 10; ++i) {
+    for (int i = 0; i < 10; ++i)
+    {
         EXPECT_NE(out.find(std::to_string(i)), std::string::npos);
     }
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char **argv)
+{
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }

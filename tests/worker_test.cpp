@@ -276,7 +276,8 @@ TEST_F(WorkerTest, GetOpIdPoolGrowthCorrectness)
     {
         co_await SwitchToWorker(*worker);
 
-        const size_t initial_capacity = worker->get_stats().active_coroutines + worker->get_stats().active_coroutines;  // just trigger reading
+        const size_t initial_capacity =
+                worker->get_stats().active_coroutines + worker->get_stats().active_coroutines;  // just trigger reading
 
         std::unordered_set<uint64_t> ids;
         for (size_t i = 0; i < initial_capacity + 10; ++i)
@@ -499,7 +500,6 @@ TEST_F(WorkerTest, DISABLED_DirectIO_UnalignedOffset_Fails)
     SyncWait(coro());
     ::close(fd);
 }
-
 
 int main(int argc, char** argv)
 {

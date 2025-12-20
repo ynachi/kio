@@ -29,7 +29,6 @@ Task<std::expected<void, Error>> timer_coroutine(Worker& worker)
 
     ALOG_INFO("...Woke up again! The current time is {:%H:%M:%S}.", std::chrono::system_clock::now());
 
-
     co_return {};
 }
 

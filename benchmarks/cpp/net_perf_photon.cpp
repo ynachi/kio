@@ -71,7 +71,8 @@ int main(int argc, char** argv)
     }
     DEFER(photon::fini());
 
-    if (auto ret = photon_std::work_pool_init(FLAGS_workers, photon::INIT_EVENT_IOURING, photon::INIT_IO_NONE); ret != 0)
+    if (auto ret = photon_std::work_pool_init(FLAGS_workers, photon::INIT_EVENT_IOURING, photon::INIT_IO_NONE);
+        ret != 0)
     {
         LOG_FATAL("Work-pool init failed");
         abort();

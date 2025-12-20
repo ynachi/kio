@@ -137,7 +137,6 @@ int main()
     WorkerConfig config{};
     config.uring_queue_depth = 16800;
 
-
     // Create a pool with 4 workers
     // Each worker will run accept_loop independently
     IOPool pool(4, config, [](Worker& worker) { accept_loop(worker); });

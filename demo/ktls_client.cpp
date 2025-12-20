@@ -39,13 +39,13 @@ DEFINE_uint32(port, 8080, "Server port");
 DEFINE_string(mode, "echo", "Test mode: raw, simple, echo, or perf");
 DEFINE_string(path, "/", "HTTP path for http mode");
 DEFINE_uint64(bytes, 10 * 1024 * 1024, "Bytes to transfer for perf mode");
-DEFINE_string(ca, "/home/ynachi/test_certs/ca.crt", "CA certificate path, optional but must be provided if verify is true");
+DEFINE_string(ca, "/home/ynachi/test_certs/ca.crt",
+              "CA certificate path, optional but must be provided if verify is true");
 DEFINE_bool(verify, false, "Enable certificate verification");
 
 using namespace kio;
 using namespace kio::io;
 using namespace kio::tls;
-
 
 // =========================================================================
 // Simple Demo - Just connect and send one message
@@ -155,7 +155,8 @@ Task<Result<void>> echo_test(Worker& worker, TlsContext& ctx, std::string_view h
         }
 
         std::string_view response(buffer, bytes_read);
-        std::string_view response_trimmed(response.data(), !response.empty() && response.back() == '\n' ? response.size() - 1 : response.size());
+        std::string_view response_trimmed(
+                response.data(), !response.empty() && response.back() == '\n' ? response.size() - 1 : response.size());
         ALOG_INFO("Received: '{}'", response_trimmed);
 
         if (response != msg)
@@ -175,9 +176,10 @@ Task<Result<void>> echo_test(Worker& worker, TlsContext& ctx, std::string_view h
 // Throughput Test - Send large amount of data to measure performance
 // =========================================================================
 
-Task<Result<void>> throughput_test(Worker& worker, TlsContext& ctx, std::string_view host, uint16_t port, size_t total_bytes)
+Task<Result<void>> throughput_test(Worker& worker, TlsContext& ctx, std::string_view host, uint16_t port,
+                                   size_t total_bytes)
 {
-   co_await SwitchToWorker(worker);
+    co_await SwitchToWorker(worker);
     ALOG_INFO("Starting throughput test to {}:{} ({} bytes)", host, port, total_bytes);
 
     TlsConnector connector(worker, ctx);
@@ -229,7 +231,8 @@ Task<Result<void>> throughput_test(Worker& worker, TlsContext& ctx, std::string_
     double throughput_mbps = 0;
     if (duration_ms > 0)
     {
-        throughput_mbps = (static_cast<double>(bytes_sent + bytes_received) / (1024 * 1024)) / (static_cast<double>(duration_ms) / 1000);
+        throughput_mbps = (static_cast<double>(bytes_sent + bytes_received) / (1024 * 1024)) /
+                          (static_cast<double>(duration_ms) / 1000);
     }
 
     ALOG_INFO("✅ Throughput test complete!");
@@ -327,7 +330,7 @@ int main(int argc, char* argv[])
     else
     {
         ALOG_ERROR("Unknown mode: '{}'. Use 'raw', 'simple', 'echo', 'http', or 'perf'.", FLAGS_mode);
-        (void)worker.request_stop();
+        (void) worker.request_stop();
         return 1;
     }
 
@@ -340,6 +343,6 @@ int main(int argc, char* argv[])
         ALOG_INFO("✅ Test completed successfully!");
     }
 
-    (void)worker.request_stop();
+    (void) worker.request_stop();
     return result.has_value() ? 0 : 1;
 }

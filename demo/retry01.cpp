@@ -40,7 +40,8 @@ Task<Result<int>> connect_with_retries(Worker& worker)
         }
 
         // Connection failed. Log it, close the failed fd, and wait.
-        ALOG_WARN("Connect failed: {}. Retrying in {:.1f}s.", connect_result.error(), std::chrono::duration<double>(delay).count());
+        ALOG_WARN("Connect failed: {}. Retrying in {:.1f}s.", connect_result.error(),
+                  std::chrono::duration<double>(delay).count());
 
         close(fd);
 

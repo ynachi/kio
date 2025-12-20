@@ -32,7 +32,7 @@ Task<Result<void>> run(Worker& worker, TlsContext& ctx)
         got += *r;
     }
 
-    ALOG_INFO("Receiving {} bytes ({} MB)...", size, size / (1024*1024));
+    ALOG_INFO("Receiving {} bytes ({} MB)...", size, size / (1024 * 1024));
 
     std::vector<char> buf(65536);
     size_t remaining = size;
@@ -55,7 +55,7 @@ Task<Result<void>> run(Worker& worker, TlsContext& ctx)
 
     auto end = std::chrono::steady_clock::now();
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-    double mbps = ms > 0 ? (static_cast<double>(total) / (1024*1024)) / (static_cast<double>(ms) / 1000) : 0;
+    double mbps = ms > 0 ? (static_cast<double>(total) / (1024 * 1024)) / (static_cast<double>(ms) / 1000) : 0;
 
     ALOG_INFO("✅ Received {} bytes in {} ms ({:.2f} MB/s)", total, ms, mbps);
 
@@ -71,7 +71,11 @@ int main()
     tls.verify_mode = SSL_VERIFY_NONE;
 
     auto ctx = TlsContext::make_client(tls);
-    if (!ctx) { ALOG_ERROR("TLS failed"); return 1; }
+    if (!ctx)
+    {
+        ALOG_ERROR("TLS failed");
+        return 1;
+    }
 
     constexpr WorkerConfig wcfg{};
     Worker worker(0, wcfg);
@@ -81,6 +85,6 @@ int main()
     auto res = SyncWait(run(worker, *ctx));
     if (!res) ALOG_ERROR("Failed: {}", res.error());
 
-    (void)worker.request_stop();
+    (void) worker.request_stop();
     return res ? 0 : 1;
 }

@@ -36,7 +36,8 @@ Task<Result<size_t> > count_chars_in_file(Worker &worker, std::string_view filen
     // Switch execution from the calling thread (main) to the worker's thread.
     co_await SwitchToWorker(worker);
 
-    ALOG_INFO("[main coro] Switched! Now running on worker thread ID: {}", std::hash<std::thread::id>{}(std::this_thread::get_id()));
+    ALOG_INFO("[main coro] Switched! Now running on worker thread ID: {}",
+              std::hash<std::thread::id>{}(std::this_thread::get_id()));
 
     // Now that we are on the correct thread, we can safely call async methods.
     auto fd = KIO_TRY(co_await worker.async_openat(filename, O_RDONLY, 0));
@@ -89,7 +90,8 @@ int main()
     std::jthread worker_thread(
             [&worker]
             {
-                ALOG_INFO("Worker thread starting with ID: {}", std::hash<std::thread::id>{}(std::this_thread::get_id()));
+                ALOG_INFO("Worker thread starting with ID: {}",
+                          std::hash<std::thread::id>{}(std::this_thread::get_id()));
                 //  This thread will now block here, running the I/O event loop.
                 worker.loop_forever();
                 ALOG_INFO("Worker thread finished its loop.");
@@ -116,7 +118,8 @@ int main()
     // we wait for the worker thread to finish cleanly.
 
     std::cout << "\n--- Demo Complete ---\n";
-    std::cout << "Found the character '" << char_to_find << "' " << final_count << " times in " << test_filename << ".\n";
+    std::cout << "Found the character '" << char_to_find << "' " << final_count << " times in " << test_filename
+              << ".\n";
 
     // Clean up the dummy file
     std::remove(test_filename);

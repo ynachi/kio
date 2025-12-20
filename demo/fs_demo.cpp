@@ -7,7 +7,10 @@
 using namespace kio;
 using namespace kio::io;
 
-Task<int64_t> CountLineChar(std::span<const char> view, char c) { co_return std::count(view.begin(), view.end(), c); }
+Task<int64_t> CountLineChar(std::span<const char> view, char c)
+{
+    co_return std::count(view.begin(), view.end(), c);
+}
 
 // File IO demo
 // count the number of characters in a file and the occurrences of a character

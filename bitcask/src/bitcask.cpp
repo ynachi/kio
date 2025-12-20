@@ -15,7 +15,8 @@ BitKV::BitKV(const BitcaskConfig& db_config, const WorkerConfig& io_config, cons
 {
 }
 
-Task<Result<std::unique_ptr<BitKV>>> BitKV::open(const BitcaskConfig& config, const WorkerConfig io_config, size_t partition_count)
+Task<Result<std::unique_ptr<BitKV>>> BitKV::open(const BitcaskConfig& config, const WorkerConfig io_config,
+                                                 size_t partition_count)
 {
     ALOG_INFO("Opening BitKV with part count {}", partition_count);
     std::unique_ptr<BitKV> db(new BitKV(config, io_config, partition_count));
@@ -35,7 +36,8 @@ Task<Result<std::unique_ptr<BitKV>>> BitKV::open(const BitcaskConfig& config, co
 
     InitState state(partition_count);
 
-    auto io_pool = std::make_unique<IOPool>(partition_count, io_config, [db_ptr = db.get(), &state](Worker& worker) { initialize_partition(*db_ptr, worker, state).detach(); });
+    auto io_pool = std::make_unique<IOPool>(partition_count, io_config, [db_ptr = db.get(), &state](Worker& worker)
+                                            { initialize_partition(*db_ptr, worker, state).detach(); });
 
     state.latch.wait();
 
@@ -68,7 +70,8 @@ void BitKV::ensure_directories() const
         // Create partition directories
         for (size_t i = 0; i < partition_count_; ++i)
         {
-            if (auto partition_dir = db_config_.directory / std::format("partition_{}", i); !std::filesystem::exists(partition_dir))
+            if (auto partition_dir = db_config_.directory / std::format("partition_{}", i);
+                !std::filesystem::exists(partition_dir))
             {
                 std::filesystem::create_directories(partition_dir);
                 std::filesystem::permissions(partition_dir, perms);
@@ -84,7 +87,8 @@ void BitKV::ensure_directories() const
 
 void BitKV::check_or_create_manifest() const
 {
-    if (std::filesystem::path manifest_path = db_config_.directory / kManifestFileName; std::filesystem::exists(manifest_path))
+    if (std::filesystem::path manifest_path = db_config_.directory / kManifestFileName;
+        std::filesystem::exists(manifest_path))
     {
         // Read and Verify
         std::ifstream file(manifest_path, std::ios::binary);
@@ -113,7 +117,8 @@ void BitKV::check_or_create_manifest() const
 
         if (manifest.partition_count != partition_count_)
         {
-            ALOG_ERROR("Partition count mismatch! Config: {}, Manifest: {}", partition_count_, manifest.partition_count);
+            ALOG_ERROR("Partition count mismatch! Config: {}, Manifest: {}", partition_count_,
+                       manifest.partition_count);
             throw std::runtime_error("Partition count mismatch");
         }
     }
@@ -136,7 +141,6 @@ void BitKV::check_or_create_manifest() const
         }
     }
 }
-
 
 DetachedTask BitKV::initialize_partition(BitKV& db, Worker& worker, InitState& state)
 {
@@ -188,7 +192,10 @@ Partition& BitKV::get_partition(const size_t partition_id)
     return *partitions_.at(partition_id);
 }
 
-Task<Result<std::optional<std::vector<char>>>> BitKV::get(const std::string& key) { co_return KIO_TRY(co_await get_partition(route_to_partition(key)).get(key)); }
+Task<Result<std::optional<std::vector<char>>>> BitKV::get(const std::string& key)
+{
+    co_return KIO_TRY(co_await get_partition(route_to_partition(key)).get(key));
+}
 
 Task<Result<std::optional<std::string>>> BitKV::get_string(const std::string& key)
 {
@@ -206,7 +213,6 @@ Task<Result<std::optional<std::string>>> BitKV::get_string(const std::string& ke
     const auto& vec = result.value().value();
     co_return std::string(vec.begin(), vec.end());
 }
-
 
 Task<Result<void>> BitKV::del(const std::string& key)
 {

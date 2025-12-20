@@ -2,10 +2,10 @@
 // Quick sendfile test - Server sends a file immediately on connect
 //
 
+#include <chrono>
 #include <cstdio>
 #include <fcntl.h>
 #include <sys/stat.h>
-#include <chrono>
 
 #include "kio/core/async_logger.h"
 #include "kio/core/worker.h"
@@ -22,7 +22,11 @@ void create_test_file(const char* path, const size_t size_mb)
     if (access(path, F_OK) == 0) return;  // Already exists
 
     const int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) { perror("create"); return; }
+    if (fd < 0)
+    {
+        perror("create");
+        return;
+    }
     net::FDGuard guard(fd);
 
     const std::vector buf(1024 * 1024, 'X');  // 1MB of 'X'
@@ -67,7 +71,7 @@ DetachedTask handle_client(TlsStream stream, const char* filepath)
 
     if (res.has_value())
     {
-        double mbps = ms > 0 ? (static_cast<double>(size) / (1024*1024)) / (static_cast<double>(ms) / 1000) : 0;
+        double mbps = ms > 0 ? (static_cast<double>(size) / (1024 * 1024)) / (static_cast<double>(ms) / 1000) : 0;
         ALOG_INFO("✅ Sent {} bytes in {} ms ({:.2f} MB/s)", size, ms, mbps);
     }
     else
@@ -85,7 +89,11 @@ DetachedTask accept_loop(Worker& worker, TlsContext& ctx, const char* filepath)
     const auto st = worker.get_stop_token();
 
     const auto listener = TlsListener::bind(worker, cfg, ctx);
-    if (!listener) { ALOG_ERROR("Bind failed"); co_return; }
+    if (!listener)
+    {
+        ALOG_ERROR("Bind failed");
+        co_return;
+    }
 
     ALOG_INFO("Listening on :8080, will send: {}", filepath);
 
@@ -94,7 +102,8 @@ DetachedTask accept_loop(Worker& worker, TlsContext& ctx, const char* filepath)
         if (auto conn = co_await listener->accept(); conn.has_value())
         {
             handle_client(std::move(*conn), filepath).detach();
-        }  else
+        }
+        else
         {
             ALOG_WARN("Connexion failed with error: {}", conn.error());
         }
@@ -118,15 +127,19 @@ int main(int argc, char* argv[])
     tls.key_path = "/home/ynachi/test_certs/server.key";
 
     auto ctx_res = TlsContext::make_server(tls);
-    if (!ctx_res) { ALOG_ERROR("TLS context failed"); return 1; }
+    if (!ctx_res)
+    {
+        ALOG_ERROR("TLS context failed");
+        return 1;
+    }
     auto ctx = std::move(ctx_res.value());
 
     constexpr WorkerConfig wcfg{};
-    Worker worker(0, wcfg, [&ctx, filepath](Worker &worker) { accept_loop(worker, ctx, filepath).detach(); });
+    Worker worker(0, wcfg, [&ctx, filepath](Worker& worker) { accept_loop(worker, ctx, filepath).detach(); });
     std::jthread t([&] { worker.loop_forever(); });
     worker.wait_ready();
 
     ALOG_INFO("Press Enter to stop...");
     std::cin.get();
-    (void)worker.request_stop();
+    (void) worker.request_stop();
 }

@@ -2,7 +2,8 @@
 
 #include "../kio/core/async_logger.h"
 
-int main() {
+int main()
+{
     kio::alog::configure(4096, kio::LogLevel::Info);
 
     ALOG_INFO("Starting app with PID={}", ::getpid());

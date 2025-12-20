@@ -2,13 +2,11 @@
 // Created by Yao ACHI on 18/10/2025.
 //
 
-
 #include <iostream>
 
 #include "kio/core/coro.h"
 #include "kio/core/worker.h"
 #include "kio/net/net.h"
-
 
 using namespace kio;
 using namespace kio::io;
@@ -52,7 +50,6 @@ DetachedTask HandleClient(Worker &worker, const int client_fd)
 
     close(client_fd);
 }
-
 
 // 2. accept_loop is an awaitable DetachedTask
 DetachedTask accept_loop(Worker &worker, int listen_fd)

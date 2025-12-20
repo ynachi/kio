@@ -1,0 +1,117 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 25,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "dev",
+      "displayName": "Development Build",
+      "description": "Debug build with thread sanitizer",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "KIO_BUILD_TESTS": "ON",
+        "KIO_BUILD_DEMOS": "ON",
+        "KIO_BUILD_BITCASK": "ON",
+        "KIO_BUILD_BENCHMARK": "ON"
+      }
+    },
+    {
+      "name": "dev-tidy",
+      "displayName": "Development with clang-tidy",
+      "description": "Debug build with clang-tidy enabled during compilation",
+      "inherits": "dev",
+      "cacheVariables": {
+        "ENABLE_CLANG_TIDY": "ON"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Release Build",
+      "description": "Optimized release build",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "KIO_BUILD_TESTS": "OFF",
+        "KIO_BUILD_DEMOS": "OFF",
+        "KIO_BUILD_BITCASK": "ON",
+        "KIO_BUILD_BENCHMARK": "OFF"
+      }
+    },
+    {
+      "name": "ci",
+      "displayName": "CI Build",
+      "description": "Build for continuous integration",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "KIO_BUILD_TESTS": "ON",
+        "KIO_BUILD_DEMOS": "OFF",
+        "KIO_BUILD_BITCASK": "ON",
+        "KIO_BUILD_BENCHMARK": "OFF",
+        "ENABLE_CLANG_TIDY": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "dev",
+      "displayName": "Build All (Dev)",
+      "configurePreset": "dev",
+      "jobs": 0
+    },
+    {
+      "name": "dev-tidy",
+      "displayName": "Build with Tidy",
+      "configurePreset": "dev-tidy",
+      "jobs": 0
+    },
+    {
+      "name": "release",
+      "displayName": "Build All (Release)",
+      "configurePreset": "release",
+      "jobs": 0
+    },
+    {
+      "name": "format",
+      "displayName": "Format Code",
+      "configurePreset": "dev",
+      "targets": ["format"]
+    },
+    {
+      "name": "tidy",
+      "displayName": "Run Tidy",
+      "configurePreset": "dev",
+      "targets": ["tidy"]
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "dev",
+      "displayName": "Run All Tests",
+      "configurePreset": "dev",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "dev-verbose",
+      "displayName": "Run All Tests (Verbose)",
+      "configurePreset": "dev",
+      "output": {
+        "verbosity": "verbose"
+      }
+    }
+  ]
+}

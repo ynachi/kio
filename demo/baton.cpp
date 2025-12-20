@@ -67,7 +67,7 @@ void demo_producer_consumer()
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-    (void)worker.request_stop();
+    (void) worker.request_stop();
 }
 
 // ============================================================================
@@ -149,7 +149,7 @@ void demo_request_response_timeout()
 
     slow_responder.join();
 
-    (void)worker.request_stop();
+    (void) worker.request_stop();
 }
 
 // ============================================================================
@@ -241,7 +241,7 @@ void demo_pipeline()
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-    (void)worker.request_stop();
+    (void) worker.request_stop();
 }
 
 // ============================================================================
@@ -317,7 +317,7 @@ void demo_event_debouncing()
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-    (void)worker.request_stop();
+    (void) worker.request_stop();
 }
 
 // ============================================================================
@@ -407,7 +407,7 @@ void demo_barrier()
     w3.join();
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-    (void)worker.request_stop();
+    (void) worker.request_stop();
 }
 
 // ============================================================================

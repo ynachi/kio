@@ -25,7 +25,8 @@ Task<Result<int>> connect_to_server(Worker& worker, std::string_view host, uint1
     int fd = KIO_TRY(net::create_raw_socket(addr.family));
 
     ALOG_INFO("Connecting to {}:{}...", host, port);
-    auto connect_result = co_await worker.async_connect(fd, reinterpret_cast<const sockaddr*>(&addr.addr), addr.addrlen);
+    auto connect_result =
+            co_await worker.async_connect(fd, reinterpret_cast<const sockaddr*>(&addr.addr), addr.addrlen);
 
     if (!connect_result)
     {
@@ -96,7 +97,8 @@ Task<Result<void>> multi_message_test(Worker& worker, std::string_view host, uin
     int fd = KIO_TRY(co_await connect_to_server(worker, host, port));
 
     // Send multiple messages
-    const char* messages[] = {"Message 1: Testing kio framework\n", "Message 2: This is awesome!\n", "Message 3: Echo server works!\n"};
+    const char* messages[] = {"Message 1: Testing kio framework\n", "Message 2: This is awesome!\n",
+                              "Message 3: Echo server works!\n"};
 
     for (const char* msg: messages)
     {
@@ -145,7 +147,8 @@ Task<Result<void>> large_data_test(Worker& worker, std::string_view host, uint16
     ALOG_INFO("Sending large message ({} bytes)...", size);
 
     // Write
-    auto write_result = co_await worker.async_write(fd, std::span<const char>(large_message.data(), large_message.size()));
+    auto write_result =
+            co_await worker.async_write(fd, std::span<const char>(large_message.data(), large_message.size()));
     if (!write_result)
     {
         ALOG_ERROR("Write failed: {}", write_result.error());

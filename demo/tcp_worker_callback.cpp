@@ -11,10 +11,9 @@
 #include "kio/core/async_logger.h"
 #include "kio/core/metrics_collector.h"
 #include "kio/core/worker.h"
-#include "kio/net/net.h"
 #include "kio/metrics/registry.h"
 #include "kio/metrics/server.h"
-
+#include "kio/net/net.h"
 
 using namespace kio;
 using namespace kio::io;
@@ -54,7 +53,6 @@ DetachedTask HandleClient(Worker &worker, const int client_fd)
 
     close(client_fd);
 }
-
 
 // Accept loop - runs on each worker independently
 DetachedTask accept_loop(Worker &worker, const int listen_fd)

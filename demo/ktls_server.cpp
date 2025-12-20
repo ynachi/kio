@@ -64,7 +64,8 @@ DetachedTask handle_client(TlsStream stream)
         total_bytes += bytes_read;
 
         // Echo back
-        if (auto write_result = co_await stream.async_write_exact({buffer, static_cast<size_t>(bytes_read)}); !write_result.has_value())
+        if (auto write_result = co_await stream.async_write_exact({buffer, static_cast<size_t>(bytes_read)});
+            !write_result.has_value())
         {
             ALOG_ERROR("Write error: {}", write_result.error());
             break;

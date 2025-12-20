@@ -26,7 +26,6 @@ protected:
     }
 };
 
-
 TEST_F(ParserTest, ParseSimpleString)
 {
     feed("+OK\r\n");
@@ -137,7 +136,6 @@ TEST_F(ParserTest, ParseBoolean)
     EXPECT_EQ(get_simple_payload(*f), "f");
 }
 
-
 TEST_F(ParserTest, ParseArray)
 {
     // Array of 3 items: [1, 2, 3]
@@ -224,7 +222,6 @@ TEST_F(ParserTest, ParseNestedArray)
     ASSERT_TRUE(subEl.has_value());
     EXPECT_EQ(get_simple_payload(*subEl), "b");
 }
-
 
 TEST_F(ParserTest, NeedMoreDataPartialCommand)
 {
