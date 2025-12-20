@@ -277,7 +277,7 @@ void Worker::HandleCqe(io_uring_cqe *cqe)
     auto *completion = static_cast<IoCompletion *>(io_uring_cqe_get_data(cqe));
     if (completion == nullptr) return;
 
-    completion->complete(cqe->res);
+    completion->Complete(cqe->res);
 }
 
 bool Worker::IsOnWorkerThread() const
@@ -380,7 +380,7 @@ Task<std::expected<void, Error>> Worker::AsyncSleep(std::chrono::nanoseconds dur
     auto awaitable = MakeUringAwaitable(*this, prep, &ts, 0);
     (void) co_await awaitable;
 
-    if (const int res = awaitable.completion_.result; res < 0 && res != -ETIME)
+    if (const int res = awaitable.completion.result; res < 0 && res != -ETIME)
     {
         co_return std::unexpected(Error::FromErrno(-res));
     }

@@ -1,0 +1,5 @@
+if(EXISTS "/home/ynachi/codes/kio/build2/tests/bytes_mut_tests[1]_tests.cmake")
+  include("/home/ynachi/codes/kio/build2/tests/bytes_mut_tests[1]_tests.cmake")
+else()
+  add_test(bytes_mut_tests_NOT_BUILT bytes_mut_tests_NOT_BUILT)
+endif()

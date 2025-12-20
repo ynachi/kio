@@ -1,0 +1,5 @@
+if(EXISTS "/home/ynachi/codes/kio/build2/tests/filemanager_test[1]_tests.cmake")
+  include("/home/ynachi/codes/kio/build2/tests/filemanager_test[1]_tests.cmake")
+else()
+  add_test(filemanager_test_NOT_BUILT filemanager_test_NOT_BUILT)
+endif()

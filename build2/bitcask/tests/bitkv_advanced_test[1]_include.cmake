@@ -1,0 +1,5 @@
+if(EXISTS "/home/ynachi/codes/kio/build2/bitcask/tests/bitkv_advanced_test[1]_tests.cmake")
+  include("/home/ynachi/codes/kio/build2/bitcask/tests/bitkv_advanced_test[1]_tests.cmake")
+else()
+  add_test(bitkv_advanced_test_NOT_BUILT bitkv_advanced_test_NOT_BUILT)
+endif()

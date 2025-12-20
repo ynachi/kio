@@ -1,0 +1,5 @@
+if(EXISTS "/home/ynachi/codes/kio/build2/tests/kio_worker_test[1]_tests.cmake")
+  include("/home/ynachi/codes/kio/build2/tests/kio_worker_test[1]_tests.cmake")
+else()
+  add_test(kio_worker_test_NOT_BUILT kio_worker_test_NOT_BUILT)
+endif()

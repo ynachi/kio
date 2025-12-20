@@ -1,0 +1,5 @@
+if(EXISTS "/home/ynachi/codes/kio/build2/kio/tests/basic_resp_parser[1]_tests.cmake")
+  include("/home/ynachi/codes/kio/build2/kio/tests/basic_resp_parser[1]_tests.cmake")
+else()
+  add_test(basic_resp_parser_NOT_BUILT basic_resp_parser_NOT_BUILT)
+endif()

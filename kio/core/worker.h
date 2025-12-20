@@ -11,7 +11,6 @@
 #include <functional>
 #include <latch>
 #include <liburing.h>
-#include <memory>
 #include <span>
 #include <thread>
 
@@ -28,10 +27,13 @@ struct IoCompletion
     std::coroutine_handle<> handle;
     int result{0};
 
-    void complete(const int res)
+    void Complete(const int res)
     {
         result = res;
-        if (handle) handle.resume();
+        if (handle)
+        {
+            handle.resume();
+        }
     }
 };
 
@@ -131,7 +133,7 @@ struct IoUringAwaitable
     using OnSuccess = void (*)(Worker&, int);
     OnSuccess on_success_;
     std::tuple<Args...> args_;
-    IoCompletion completion_;
+    IoCompletion completion;
 
     bool await_ready() const noexcept { return false; }
 
@@ -139,34 +141,34 @@ struct IoUringAwaitable
     {
         assert(worker_.is_on_worker_thread() && "kio::async_* operation was called from the wrong thread.");
 
-        completion_.handle = h;
+        completion.handle = h;
         auto& ring = internal::WorkerAccess::GetRing(worker_);
         io_uring_sqe* sqe = io_uring_get_sqe(&ring);
 
         if (sqe == nullptr)
         {
-            completion_.result = -EAGAIN;
+            completion.result = -EAGAIN;
             return false;
         }
 
         std::apply([this, sqe]<typename... T>(T&&... unpacked_args)
                    { io_uring_prep_(sqe, std::forward<T>(unpacked_args)...); }, std::move(args_));
 
-        io_uring_sqe_set_data(sqe, &completion_);
+        io_uring_sqe_set_data(sqe, &completion);
         return true;
     }
 
     [[nodiscard]] Result<int> await_resume() const noexcept
     {
-        if (completion_.result < 0)
+        if (completion.result < 0)
         {
-            return std::unexpected(Error::FromErrno(-completion_.result));
+            return std::unexpected(Error::FromErrno(-completion.result));
         }
         if (on_success_ != nullptr)
         {
-            on_success_(worker_, completion_.result);
+            on_success_(worker_, completion.result);
         }
-        return completion_.result;
+        return completion.result;
     }
 
     explicit IoUringAwaitable(Worker& worker, Prep prep, OnSuccess on_success, Args... args) :
