@@ -128,21 +128,21 @@ struct WorkerConfig
 template<typename Prep, typename... Args>
 struct IoUringAwaitable
 {
-    Worker& worker_;
-    Prep io_uring_prep_;
+    Worker& worker;
+    Prep io_uring_prep;
     using OnSuccess = void (*)(Worker&, int);
-    OnSuccess on_success_;
-    std::tuple<Args...> args_;
+    OnSuccess on_success;
+    std::tuple<Args...> io_args;
     IoCompletion completion;
 
     bool await_ready() const noexcept { return false; }
 
     bool await_suspend(std::coroutine_handle<> h)
     {
-        assert(worker_.is_on_worker_thread() && "kio::async_* operation was called from the wrong thread.");
+        assert(worker.is_on_worker_thread() && "kio::async_* operation was called from the wrong thread.");
 
         completion.handle = h;
-        auto& ring = internal::WorkerAccess::GetRing(worker_);
+        auto& ring = internal::WorkerAccess::GetRing(worker);
         io_uring_sqe* sqe = io_uring_get_sqe(&ring);
 
         if (sqe == nullptr)
@@ -152,7 +152,7 @@ struct IoUringAwaitable
         }
 
         std::apply([this, sqe]<typename... T>(T&&... unpacked_args)
-                   { io_uring_prep_(sqe, std::forward<T>(unpacked_args)...); }, std::move(args_));
+                   { io_uring_prep(sqe, std::forward<T>(unpacked_args)...); }, std::move(io_args));
 
         io_uring_sqe_set_data(sqe, &completion);
         return true;
@@ -164,15 +164,15 @@ struct IoUringAwaitable
         {
             return std::unexpected(Error::FromErrno(-completion.result));
         }
-        if (on_success_ != nullptr)
+        if (on_success != nullptr)
         {
-            on_success_(worker_, completion.result);
+            on_success(worker, completion.result);
         }
         return completion.result;
     }
 
     explicit IoUringAwaitable(Worker& worker, Prep prep, OnSuccess on_success, Args... args) :
-        worker_(worker), io_uring_prep_(std::move(prep)), on_success_(on_success), args_(args...)
+        worker(worker), io_uring_prep(std::move(prep)), on_success(on_success), io_args(args...)
     {
     }
 };
@@ -210,7 +210,7 @@ class Worker
     io_uring ring_{};
     WorkerConfig config_;
     size_t id_{0};
-    std::atomic<std::thread::id> thread_id_{};
+    std::atomic<std::thread::id> thread_id_;
     MPSCQueue<std::coroutine_handle<>> task_queue_;
 
     std::latch init_latch_{1};
@@ -249,7 +249,7 @@ class Worker
 
     void Post(std::coroutine_handle<> h);
     io_uring& GetRing() noexcept { return ring_; }
-    void HandleCqe(io_uring_cqe* cqe);
+    static void HandleCqe(io_uring_cqe* cqe);
 
 public:
     [[nodiscard]] bool IsOnWorkerThread() const;
@@ -263,7 +263,7 @@ public:
     [[nodiscard]] bool RequestStop();
     void Initialize();
     void Loop();
-    [[nodiscard]] bool IsRunning() const noexcept { return stopped_.load(std::memory_order_acquire) == false; }
+    [[nodiscard]] bool IsRunning() const noexcept { return !stopped_.load(std::memory_order_acquire); }
 
     Worker(const Worker&) = delete;
     Worker& operator=(const Worker&) = delete;
@@ -355,8 +355,8 @@ public:
      */
     [[nodiscard]] auto AsyncReadv(int client_fd, const iovec* iov, int iovcnt, uint64_t offset)
     {
-        auto prep = [](io_uring_sqe* sqe, int fd, const iovec* iov_, int iovcnt_, uint64_t off)
-        { io_uring_prep_readv(sqe, fd, iov_, iovcnt_, off); };
+        auto prep = [](io_uring_sqe* sqe, int fd, const iovec* iov, int iovcnt, uint64_t off)
+        { io_uring_prep_readv(sqe, fd, iov, iovcnt, off); };
         return MakeUringAwaitable(*this, prep, &Worker::StatIncRead, client_fd, iov, iovcnt, offset);
     }
 
@@ -390,8 +390,8 @@ public:
      */
     [[nodiscard]] auto AsyncWritev(int client_fd, const iovec* iov, int iovcnt, uint64_t offset)
     {
-        auto prep = [](io_uring_sqe* sqe, const int fd, const iovec* iov_, int iovcnt_, const uint64_t off)
-        { io_uring_prep_writev(sqe, fd, iov_, iovcnt_, off); };
+        auto prep = [](io_uring_sqe* sqe, const int fd, const iovec* iov, int iovcnt, const uint64_t off)
+        { io_uring_prep_writev(sqe, fd, iov, iovcnt, off); };
         return MakeUringAwaitable(*this, prep, &Worker::StatIncWrite, client_fd, iov, iovcnt, offset);
     }
 
@@ -620,12 +620,12 @@ public:
  */
 struct SwitchToWorker
 {
-    Worker& worker_;
+    Worker& worker;
 
-    explicit SwitchToWorker(Worker& worker) : worker_(worker) {}
+    explicit SwitchToWorker(Worker& worker) : worker(worker) {}
 
-    bool await_ready() const noexcept { return worker_.IsOnWorkerThread(); }  // NOLINT
-    void await_suspend(std::coroutine_handle<> h) const { internal::WorkerAccess::Post(worker_, h); }
+    bool await_ready() const noexcept { return worker.IsOnWorkerThread(); }  // NOLINT
+    void await_suspend(std::coroutine_handle<> h) const { internal::WorkerAccess::Post(worker, h); }
     void await_resume() const noexcept {}  // NOLINT
 };
 

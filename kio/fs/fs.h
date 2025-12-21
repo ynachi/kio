@@ -4,11 +4,10 @@
 
 #ifndef KIO_FS_H
 #define KIO_FS_H
-#include <expected>
 
-#include "../core/coro.h"
-#include "../core/errors.h"
-#include "../core/worker_pool.h"
+#include "kio/core/coro.h"
+#include "kio/core/errors.h"
+#include "kio/core/worker_pool.h"
 
 namespace kio
 {
@@ -32,7 +31,7 @@ public:
     File(File &&other) noexcept : fd_(other.fd_), pool_(other.pool_), worker_id_(other.worker_id_) { other.fd_ = -1; }
 
     [[nodiscard]]
-    int fd() const noexcept
+    int Fd() const noexcept
     {
         return fd_;
     }
@@ -55,7 +54,7 @@ public:
         if (fd_ != -1) ::close(fd_);
     }
 
-    void close()
+    void Close()
     {
         if (fd_ != -1) ::close(fd_);
         fd_ = -1;
@@ -70,7 +69,7 @@ public:
      * @return The number of bytes read or an error.
      * */
     [[nodiscard]]
-    Task<Result<size_t>> async_read(std::span<char> buf, uint64_t offset) const;
+    Task<Result<size_t>> AsyncRead(std::span<char> buf, uint64_t offset) const;
 
     /**
      *  This method makes a single write() call to the underlined IO. It may or may not write the total of the data.
@@ -80,7 +79,7 @@ public:
      * @return The number of bytes written or an error
      */
     [[nodiscard]]
-    Task<Result<size_t>> async_write(std::span<const char> buf, uint64_t offset) const;
+    Task<Result<size_t>> AsyncWrite(std::span<const char> buf, uint64_t offset) const;
 };
 
 /**
@@ -105,7 +104,7 @@ public:
 
     FileManager &operator=(FileManager &&) = delete;
 
-    io::IOPool &pool() { return pool_; }
+    io::IOPool &Pool() { return pool_; }
 
     ~FileManager() { pool_.Stop(); }
 
@@ -118,7 +117,7 @@ public:
      * @return The file created or an Io error.
      */
     [[nodiscard]]
-    Task<Result<File>> async_open(std::filesystem::path path, int flags, mode_t mode);
+    Task<Result<File>> AsyncOpen(std::filesystem::path path, int flags, mode_t mode);
 };
 }  // namespace kio
 

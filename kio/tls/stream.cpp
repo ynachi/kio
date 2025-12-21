@@ -8,26 +8,17 @@
 
 namespace kio::tls
 {
-// Helper coroutine: used ONLY when we have buffered OpenSSL data.
-// This ensures we don't pay the coroutine frame cost for the common KTLS path.
-// In another word, this is to avoid something like co_return co_await when its is not absolutely necessary.
-static Task<Result<int>> buffered_read_task(int result)
-{
-    co_return result;
-}
-
 TlsStream::TlsStream(io::Worker& worker, net::Socket socket, TlsContext& context, const TlsRole role) :
-    worker_(worker), ctx_(context), socket_(std::move(socket)), role_(role)
+    worker_(worker), ctx_(context), socket_(std::move(socket)), ssl_(SSL_new(ctx_.Get())), role_(role)
 {
-    ssl_ = SSL_new(ctx_.get());
     if (ssl_ == nullptr)
     {
-        throw std::runtime_error("Failed to create SSL object: " + detail::get_openssl_error());
+        throw std::runtime_error("Failed to create SSL object: " + detail::GetOpensslError());
     }
     if (SSL_set_fd(ssl_, socket_.get()) != 1)
     {
         SSL_free(ssl_);
-        throw std::runtime_error("Failed to set SSL fd: " + detail::get_openssl_error());
+        throw std::runtime_error("Failed to set SSL fd: " + detail::GetOpensslError());
     }
     // SSL_MODE_ENABLE_PARTIAL_WRITE is crucial for async
     SSL_set_mode(ssl_, SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
@@ -44,14 +35,17 @@ TlsStream::TlsStream(TlsStream&& other) noexcept :
     other.ktls_active_ = false;
 }
 
-Task<Result<void>> TlsStream::do_handshake_step() const
+Task<Result<void>> TlsStream::DoHandshakeStep() const
 {
     const auto st = worker_.GetStopToken();
 
     while (!st.stop_requested())
     {
-        const int ret = (role_ == TlsRole::Client) ? SSL_connect(ssl_) : SSL_accept(ssl_);
-        if (ret == 1) co_return {};
+        const int ret = (role_ == TlsRole::kClient) ? SSL_connect(ssl_) : SSL_accept(ssl_);
+        if (ret == 1)
+        {
+            co_return {};
+        }
 
         switch (int err = SSL_get_error(ssl_, ret))
         {
@@ -71,11 +65,11 @@ Task<Result<void>> TlsStream::do_handshake_step() const
             {
                 const int sys_err = errno;
                 ALOG_ERROR("TLS handshake syscall error: {}", sys_err ? strerror(sys_err) : "unexpected EOF");
-                co_return std::unexpected(Error::FromErrno(sys_err ? sys_err : ECONNRESET));
+                co_return std::unexpected(Error::FromErrno((sys_err != 0) ? sys_err : ECONNRESET));
             }
 
             case SSL_ERROR_SSL:
-                ALOG_ERROR("TLS handshake SSL error: {}", detail::get_openssl_error());
+                ALOG_ERROR("TLS handshake SSL error: {}", detail::GetOpensslError());
                 co_return std::unexpected(Error{ErrorCategory::kTls, kTlsHandshakeFailed});
 
             default:
@@ -87,11 +81,14 @@ Task<Result<void>> TlsStream::do_handshake_step() const
     co_return {};
 }
 
-Task<Result<void>> TlsStream::async_handshake(std::string_view hostname)
+Task<Result<void>> TlsStream::AsyncHandshake(std::string_view hostname)
 {
-    if (handshake_done_) co_return {};
+    if (handshake_done_)
+    {
+        co_return {};
+    }
 
-    if (role_ == TlsRole::Client && !hostname.empty())
+    if (role_ == TlsRole::kClient && !hostname.empty())
     {
         server_name_ = std::string(hostname);
         SSL_set_tlsext_host_name(ssl_, server_name_.c_str());
@@ -99,7 +96,7 @@ Task<Result<void>> TlsStream::async_handshake(std::string_view hostname)
     }
 
     ALOG_DEBUG("Starting TLS handshake for fd={}", socket_.get());
-    KIO_TRY(co_await do_handshake_step());
+    KIO_TRY(co_await DoHandshakeStep());
     handshake_done_ = true;
     ALOG_DEBUG("TLS handshake completed");
 
@@ -112,12 +109,12 @@ Task<Result<void>> TlsStream::async_handshake(std::string_view hostname)
         ALOG_DEBUG("SSL cipher is {}", cipher);
     }
 
-    KIO_TRY(enable_ktls());
+    KIO_TRY(EnableKtls());
 
     co_return {};
 }
 
-Result<void> TlsStream::enable_ktls()
+Result<void> TlsStream::EnableKtls()
 {
 #if KIO_HAVE_OPENSSL3
     // Check if OpenSSL successfully negotiated KTLS
@@ -143,10 +140,10 @@ Result<void> TlsStream::enable_ktls()
 #endif
 }
 
-Task<Result<int>> TlsStream::async_read(std::span<char> buf)
+Task<Result<int>> TlsStream::AsyncRead(std::span<char> buf)
 {
     // Drain OpenSSL buffer if needed (rare path)
-    if (ssl_ && SSL_pending(ssl_) > 0)
+    if ((ssl_ != nullptr) && SSL_pending(ssl_) > 0)
     {
         // This is a synchronous memory copy from OpenSSL internal buffer
         int n = SSL_read(ssl_, buf.data(), static_cast<int>(buf.size()));
@@ -161,7 +158,7 @@ Task<Result<int>> TlsStream::async_read(std::span<char> buf)
     co_return co_await worker_.AsyncRead(socket_.get(), buf);
 }
 
-Task<Result<void>> TlsStream::async_read_exact(std::span<char> buf)
+Task<Result<void>> TlsStream::AsyncReadExact(std::span<char> buf)
 {
     const auto st = worker_.GetStopToken();
 
@@ -170,7 +167,7 @@ Task<Result<void>> TlsStream::async_read_exact(std::span<char> buf)
 
     while (!st.stop_requested() && total_bytes_read < total_to_read)
     {
-        const int bytes_read = KIO_TRY(co_await this->async_read(buf.subspan(total_bytes_read)));
+        const int bytes_read = KIO_TRY(co_await this->AsyncRead(buf.subspan(total_bytes_read)));
 
         if (bytes_read == 0)
         {
@@ -181,23 +178,13 @@ Task<Result<void>> TlsStream::async_read_exact(std::span<char> buf)
     co_return {};
 }
 
-auto TlsStream::async_write(std::span<const char> buf)
-{
-    return worker_.AsyncWrite(socket_.get(), buf);
-}
-
-Task<Result<void>> TlsStream::async_write_exact(std::span<const char> buf)
-{
-    return worker_.AsyncWriteExact(socket_.get(), buf);
-}
-
-Task<Result<void>> TlsStream::do_shutdown_step()
+Task<Result<void>> TlsStream::DoShutdownStep()
 {
     const auto st = worker_.GetStopToken();
-    constexpr int kMaxShutdownIterations = 10;
+    constexpr int k_max_shutdown_iterations = 10;
     int iterations = 0;
 
-    while (!st.stop_requested() && iterations++ < kMaxShutdownIterations)
+    while (!st.stop_requested() && iterations++ < k_max_shutdown_iterations)
     {
         const int ret = SSL_shutdown(ssl_);
 
@@ -238,17 +225,20 @@ Task<Result<void>> TlsStream::do_shutdown_step()
     co_return {};
 }
 
-Task<Result<void>> TlsStream::async_shutdown()
+Task<Result<void>> TlsStream::AsyncShutdown()
 {
-    if (!ssl_ || !handshake_done_) co_return {};
+    if ((ssl_ == nullptr) || !handshake_done_)
+    {
+        co_return {};
+    }
     ALOG_DEBUG("TLS shutdown initiated for fd={}", socket_.get());
-    co_return co_await do_shutdown_step();
+    co_return co_await DoShutdownStep();
 }
 
-Task<Result<void>> TlsStream::async_close()
+Task<Result<void>> TlsStream::AsyncClose()
 {
     // Best effort shutdown
-    co_await async_shutdown();
+    co_await AsyncShutdown();
 
     if (socket_.is_valid())
     {
@@ -257,22 +247,28 @@ Task<Result<void>> TlsStream::async_close()
     co_return {};
 }
 
-bool TlsStream::is_ktls_active() const
+bool TlsStream::IsKtlsActive() const
 {
     return ktls_active_;
 }
 
-std::string_view TlsStream::get_cipher() const
+std::string_view TlsStream::GetCipher() const
 {
-    if (!ssl_) return {};
+    if (ssl_ == nullptr)
+    {
+        return {};
+    }
     const char* cipher = SSL_get_cipher_name(ssl_);
-    return cipher ? cipher : "";
+    return (cipher != nullptr) ? cipher : "";
 }
 
-std::string_view TlsStream::get_version() const
+std::string_view TlsStream::GetVersion() const
 {
-    if (!ssl_) return {};
+    if (ssl_ == nullptr)
+    {
+        return {};
+    }
     const char* ver = SSL_get_version(ssl_);
-    return ver ? ver : "";
+    return (ver != nullptr) ? ver : "";
 }
 }  // namespace kio::tls

@@ -6,11 +6,13 @@
 
 #include <fstream>
 
+#include "kio/core/async_logger.h"
+
 namespace kio::tls
 {
 namespace detail
 {
-int tls_version_to_openssl(const TlsVersion version)
+int TlsVersionToOpenssl(const TlsVersion version)
 {
     switch (version)
     {
@@ -23,10 +25,10 @@ int tls_version_to_openssl(const TlsVersion version)
     }
 }
 
-std::string get_openssl_error()
+std::string GetOpensslError()
 {
     std::string res;
-    unsigned long err;
+    unsigned long err{0};
     while ((err = ERR_get_error()) != 0)
     {
         char buf[256];
@@ -38,19 +40,22 @@ std::string get_openssl_error()
 }
 }  // namespace detail
 
-Result<TlsContext> TlsContext::make(const TlsConfig& config, const TlsRole role)
+Result<TlsContext> TlsContext::Make(const TlsConfig& config, const TlsRole role)
 {
     // Initialize OpenSSL
     OPENSSL_init_ssl(OPENSSL_INIT_LOAD_SSL_STRINGS | OPENSSL_INIT_LOAD_CRYPTO_STRINGS, nullptr);
 
-    const SSL_METHOD* method = (role == TlsRole::Server) ? TLS_server_method() : TLS_client_method();
+    const SSL_METHOD* method = (role == TlsRole::kServer) ? TLS_server_method() : TLS_client_method();
     SSL_CTX* ctx = SSL_CTX_new(method);
-    if (ctx == nullptr) return std::unexpected(Error{ErrorCategory::kTls, kTlsContextCreationFailed});
+    if (ctx == nullptr)
+    {
+        return std::unexpected(Error{ErrorCategory::kTls, kTlsContextCreationFailed});
+    }
 
     // Set minimum TLS version
-    if (!SSL_CTX_set_min_proto_version(ctx, detail::tls_version_to_openssl(config.min_version)))
+    if (!SSL_CTX_set_min_proto_version(ctx, detail::TlsVersionToOpenssl(config.min_version)))
     {
-        ALOG_ERROR("Failed to set minimum TLS version: {}", detail::get_openssl_error());
+        ALOG_ERROR("Failed to set minimum TLS version: {}", detail::GetOpensslError());
         SSL_CTX_free(ctx);
         return std::unexpected(Error{ErrorCategory::kTls, kTlsContextCreationFailed});
     }
@@ -77,7 +82,7 @@ Result<TlsContext> TlsContext::make(const TlsConfig& config, const TlsRole role)
     // Disabling tickets prevents this issue. Session resumption will still
     // work via session IDs (TLS 1.2) or other mechanisms if configured.
     // =========================================================================
-    if (role == TlsRole::Server)
+    if (role == TlsRole::kServer)
     {
         SSL_CTX_set_num_tickets(ctx, 0);
         ALOG_DEBUG("TLS 1.3 session tickets disabled (required for KTLS)");
@@ -88,8 +93,7 @@ Result<TlsContext> TlsContext::make(const TlsConfig& config, const TlsRole role)
     {
         if (SSL_CTX_use_certificate_chain_file(ctx, config.cert_path.c_str()) != 1)
         {
-            ALOG_ERROR("Failed to load certificate from {}: {}", config.cert_path.string(),
-                       detail::get_openssl_error());
+            ALOG_ERROR("Failed to load certificate from {}: {}", config.cert_path.string(), detail::GetOpensslError());
             SSL_CTX_free(ctx);
             return std::unexpected(Error{ErrorCategory::kTls, kTlsCertificateLoadFailed});
         }
@@ -101,14 +105,14 @@ Result<TlsContext> TlsContext::make(const TlsConfig& config, const TlsRole role)
     {
         if (SSL_CTX_use_PrivateKey_file(ctx, config.key_path.c_str(), SSL_FILETYPE_PEM) != 1)
         {
-            ALOG_ERROR("Failed to load private key from {}: {}", config.key_path.string(), detail::get_openssl_error());
+            ALOG_ERROR("Failed to load private key from {}: {}", config.key_path.string(), detail::GetOpensslError());
             SSL_CTX_free(ctx);
             return std::unexpected(Error{ErrorCategory::kTls, kTlsPrivateKeyLoadFailed});
         }
 
         if (SSL_CTX_check_private_key(ctx) != 1)
         {
-            ALOG_ERROR("Private key does not match certificate: {}", detail::get_openssl_error());
+            ALOG_ERROR("Private key does not match certificate: {}", detail::GetOpensslError());
             SSL_CTX_free(ctx);
             return std::unexpected(Error{ErrorCategory::kTls, kTlsPrivateKeyLoadFailed});
         }
@@ -116,7 +120,7 @@ Result<TlsContext> TlsContext::make(const TlsConfig& config, const TlsRole role)
     }
 
     // Validate server has both cert and key
-    if (role == TlsRole::Server)
+    if (role == TlsRole::kServer)
     {
         if (config.cert_path.empty() || config.key_path.empty())
         {
@@ -134,18 +138,18 @@ Result<TlsContext> TlsContext::make(const TlsConfig& config, const TlsRole role)
 
         if (SSL_CTX_load_verify_locations(ctx, ca_file, ca_dir) != 1)
         {
-            ALOG_ERROR("Failed to load CA certificates: {}", detail::get_openssl_error());
+            ALOG_ERROR("Failed to load CA certificates: {}", detail::GetOpensslError());
             SSL_CTX_free(ctx);
             return std::unexpected(Error{ErrorCategory::kTls, kTlsCertificateLoadFailed});
         }
         ALOG_DEBUG("Loaded CA certificates");
     }
-    else if (role == TlsRole::Client && config.verify_mode != SSL_VERIFY_NONE)
+    else if (role == TlsRole::kClient && config.verify_mode != SSL_VERIFY_NONE)
     {
         // Use system CA store for clients
         if (SSL_CTX_set_default_verify_paths(ctx) != 1)
         {
-            ALOG_WARN("Failed to load system CA certificates: {}", detail::get_openssl_error());
+            ALOG_WARN("Failed to load system CA certificates: {}", detail::GetOpensslError());
         }
     }
 
@@ -157,7 +161,7 @@ Result<TlsContext> TlsContext::make(const TlsConfig& config, const TlsRole role)
     {
         if (SSL_CTX_set_cipher_list(ctx, config.cipher_suites.c_str()) != 1)
         {
-            ALOG_ERROR("Failed to set cipher list: {}", detail::get_openssl_error());
+            ALOG_ERROR("Failed to set cipher list: {}", detail::GetOpensslError());
             SSL_CTX_free(ctx);
             return std::unexpected(Error{ErrorCategory::kTls, kTlsContextCreationFailed});
         }
@@ -167,7 +171,7 @@ Result<TlsContext> TlsContext::make(const TlsConfig& config, const TlsRole role)
     {
         if (SSL_CTX_set_ciphersuites(ctx, config.ciphersuites_tls13.c_str()) != 1)
         {
-            ALOG_ERROR("Failed to set TLS 1.3 ciphersuites: {}", detail::get_openssl_error());
+            ALOG_ERROR("Failed to set TLS 1.3 ciphersuites: {}", detail::GetOpensslError());
             SSL_CTX_free(ctx);
             return std::unexpected(Error{ErrorCategory::kTls, kTlsContextCreationFailed});
         }
@@ -185,10 +189,10 @@ Result<TlsContext> TlsContext::make(const TlsConfig& config, const TlsRole role)
         SSL_CTX_set_alpn_protos(ctx, protos.data(), protos.size());
     }
 
-    return TlsContext{ctx, role == TlsRole::Server};
+    return TlsContext{ctx, role == TlsRole::kServer};
 }
 
-bool is_ktls_available()
+bool IsKtlsAvailable()
 {
     if (std::ifstream modules("/proc/modules"); modules.is_open())
     {
@@ -212,14 +216,14 @@ bool is_ktls_available()
     return false;
 }
 
-Result<void> require_ktls()
+Result<void> RequireKtls()
 {
 #if !KIO_HAVE_OPENSSL3
     ALOG_ERROR("KTLS requires OpenSSL 3.0+, found: {}", OpenSSL_version(OPENSSL_VERSION));
     return std::unexpected(Error{ErrorCategory::Tls, kTlsKtlsEnableFailed});
 #endif
 
-    if (!is_ktls_available())
+    if (!IsKtlsAvailable())
     {
         ALOG_ERROR("Kernel TLS module not loaded. Run: sudo modprobe tls");
         return std::unexpected(Error{ErrorCategory::kTls, kTlsKtlsEnableFailed});
@@ -228,7 +232,7 @@ Result<void> require_ktls()
     return {};
 }
 
-std::string get_ktls_info()
+std::string GetKtlsInfo()
 {
     std::string info;
 
@@ -242,7 +246,7 @@ std::string get_ktls_info()
     info += "OpenSSL 3.0+ KTLS support: No (FATAL: version too old)\n";
 #endif
 
-    if (is_ktls_available())
+    if (IsKtlsAvailable())
     {
         info += "Kernel TLS module: Loaded\n";
     }

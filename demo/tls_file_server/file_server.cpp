@@ -18,9 +18,12 @@ using namespace kio::tls;
 using namespace kio::io;
 
 // Create a test file if it doesn't exist
-void create_test_file(const char* path, const size_t size_mb)
+void CreateTestFile(const char* path, const size_t size_mb)
 {
-    if (access(path, F_OK) == 0) return;  // Already exists
+    if (access(path, F_OK) == 0)
+    {
+        return;  // Already exists
+    }
 
     const int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0)
@@ -35,10 +38,10 @@ void create_test_file(const char* path, const size_t size_mb)
     {
         write(fd, buf.data(), buf.size());
     }
-    std::printf("Created test file: %s (%zu MB)\n", path, size_mb);
+    std::format("Created test file: %s (%zu MB)\n", path, size_mb);
 }
 
-DetachedTask handle_client(TlsStream stream, const char* filepath)
+DetachedTask HandleClient(TlsStream stream, const char* filepath)
 {
     ALOG_INFO("Client connected, sending file via sendfile()...");
 
@@ -62,10 +65,10 @@ DetachedTask handle_client(TlsStream stream, const char* filepath)
 
     // Send file size first (8 bytes)
     uint64_t size = st.st_size;
-    co_await stream.async_write_exact({reinterpret_cast<char*>(&size), sizeof(size)});
+    co_await stream.AsyncWriteExact({reinterpret_cast<char*>(&size), sizeof(size)});
 
     // Send file using sendfile (zero-copy with KTLS!)
-    auto res = co_await stream.async_sendfile(fd, 0, size);
+    auto res = co_await stream.AsyncSendfile(fd, 0, size);
 
     const auto end = std::chrono::steady_clock::now();
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
@@ -80,7 +83,7 @@ DetachedTask handle_client(TlsStream stream, const char* filepath)
         ALOG_ERROR("sendfile failed: {}", res.error());
     }
 
-    co_await stream.async_close();
+    co_await stream.AsyncClose();
 }
 
 DetachedTask accept_loop(Worker& worker, TlsContext& ctx, const char* filepath)
@@ -89,7 +92,7 @@ DetachedTask accept_loop(Worker& worker, TlsContext& ctx, const char* filepath)
     cfg.port = 8080;
     const auto st = worker.GetStopToken();
 
-    const auto listener = TlsListener::bind(worker, cfg, ctx);
+    const auto listener = TlsListener::Bind(worker, cfg, ctx);
     if (!listener)
     {
         ALOG_ERROR("Bind failed");
@@ -100,9 +103,9 @@ DetachedTask accept_loop(Worker& worker, TlsContext& ctx, const char* filepath)
 
     while (!st.stop_requested())
     {
-        if (auto conn = co_await listener->accept(); conn.has_value())
+        if (auto conn = co_await listener->Accept(); conn.has_value())
         {
-            handle_client(std::move(*conn), filepath);
+            HandleClient(std::move(*conn), filepath);
         }
         else
         {
@@ -113,7 +116,7 @@ DetachedTask accept_loop(Worker& worker, TlsContext& ctx, const char* filepath)
 
 int main(int argc, char* argv[])
 {
-    alog::configure(4096, LogLevel::Info);
+    alog::Configure(4096, LogLevel::kInfo);
     signal(SIGPIPE, SIG_IGN);
 
     auto filepath = "/tmp/testfile.bin";
@@ -121,13 +124,13 @@ int main(int argc, char* argv[])
 
     if (argc > 1) size_mb = std::stoull(argv[1]);
 
-    create_test_file(filepath, size_mb);
+    CreateTestFile(filepath, size_mb);
 
     TlsConfig tls{};
     tls.cert_path = "/home/ynachi/test_certs/server.crt";
     tls.key_path = "/home/ynachi/test_certs/server.key";
 
-    auto ctx_res = TlsContext::make_server(tls);
+    auto ctx_res = TlsContext::MakeServer(tls);
     if (!ctx_res)
     {
         ALOG_ERROR("TLS context failed");

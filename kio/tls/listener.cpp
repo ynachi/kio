@@ -13,7 +13,7 @@ using namespace kio::net;
 
 namespace kio::tls
 {
-Result<TlsListener> TlsListener::bind(Worker& worker, const ListenerConfig& config, TlsContext& ctx)
+Result<TlsListener> TlsListener::Bind(Worker& worker, const ListenerConfig& config, TlsContext& ctx)
 {
     auto fd_res = create_tcp_fd(AF_INET);
     if (!fd_res.has_value())
@@ -55,7 +55,7 @@ Result<TlsListener> TlsListener::bind(Worker& worker, const ListenerConfig& conf
     return TlsListener(worker, std::move(socket), ctx);
 }
 
-Task<Result<TlsStream>> TlsListener::accept() const
+Task<Result<TlsStream>> TlsListener::Accept() const
 {
     SocketAddress peer_addr;
 
@@ -67,19 +67,19 @@ Task<Result<TlsStream>> TlsListener::accept() const
     setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
 
     // Create Stream using the Listener's context
-    TlsStream stream(worker_, std::move(client), ctx_, TlsRole::Server);
-    KIO_TRY(co_await stream.async_handshake());
+    TlsStream stream(worker_, std::move(client), ctx_, TlsRole::kServer);
+    KIO_TRY(co_await stream.AsyncHandshake());
 
     // extract client ip and port
     peer_addr.populate_from_storage();
 
     // set peer address
-    stream.set_peer_addr(std::move(peer_addr));
+    stream.SetPeerAddr(std::move(peer_addr));
 
     co_return std::move(stream);
 }
 
-Task<Result<TlsStream>> TlsConnector::connect(std::string_view hostname, uint16_t port)
+Task<Result<TlsStream>> TlsConnector::Connect(std::string_view hostname, uint16_t port)
 {
     auto addr = KIO_TRY(resolve_address(hostname, port));
     ALOG_DEBUG("Performed address resolution");
@@ -94,8 +94,8 @@ Task<Result<TlsStream>> TlsConnector::connect(std::string_view hostname, uint16_
     KIO_TRY(co_await worker_.AsyncConnect(fd, addr.as_sockaddr(), addr.addrlen));
     ALOG_DEBUG("Connected to server {}:{}", hostname, port);
 
-    TlsStream stream(worker_, std::move(socket), ctx_, TlsRole::Client);
-    KIO_TRY(co_await stream.async_handshake(hostname));
+    TlsStream stream(worker_, std::move(socket), ctx_, TlsRole::kClient);
+    KIO_TRY(co_await stream.AsyncHandshake(hostname));
 
     co_return std::move(stream);
 }

@@ -12,14 +12,16 @@ using namespace kio;
 using namespace kio::tls;
 using namespace kio::io;
 
-Task<Result<void>> run(Worker& worker, TlsContext& ctx)
+namespace
+{
+Task<Result<void>> Run(Worker& worker, TlsContext& ctx)
 {
     co_await SwitchToWorker(worker);
 
     TlsConnector connector(worker, ctx);
-    auto stream = KIO_TRY(co_await connector.connect("127.0.0.1", 8080));
+    auto stream = KIO_TRY(co_await connector.Connect("127.0.0.1", 8080));
 
-    ALOG_INFO("Connected! KTLS: {}", stream.is_ktls_active() ? "YES" : "no");
+    ALOG_INFO("Connected! KTLS: {}", stream.IsKtlsActive() ? "YES" : "no");
 
     // Read file size (8 bytes)
     uint64_t size = 0;
@@ -27,8 +29,11 @@ Task<Result<void>> run(Worker& worker, TlsContext& ctx)
     size_t got = 0;
     while (got < 8)
     {
-        auto r = co_await stream.async_read({p + got, 8 - got});
-        if (!r || *r == 0) co_return std::unexpected(Error{ErrorCategory::kNetwork, EIO});
+        auto r = co_await stream.AsyncRead({p + got, 8 - got});
+        if (!r || *r == 0)
+        {
+            co_return std::unexpected(Error{ErrorCategory::kNetwork, EIO});
+        }
         got += *r;
     }
 
@@ -42,13 +47,16 @@ Task<Result<void>> run(Worker& worker, TlsContext& ctx)
 
     while (remaining > 0)
     {
-        auto r = co_await stream.async_read({buf.data(), std::min(buf.size(), remaining)});
+        auto r = co_await stream.AsyncRead({buf.data(), std::min(buf.size(), remaining)});
         if (!r.has_value())
         {
             ALOG_ERROR("Read error: {}", r.error());
             break;
         }
-        if (*r == 0) break;
+        if (*r == 0)
+        {
+            break;
+        }
         remaining -= *r;
         total += *r;
     }
@@ -59,18 +67,19 @@ Task<Result<void>> run(Worker& worker, TlsContext& ctx)
 
     ALOG_INFO("✅ Received {} bytes in {} ms ({:.2f} MB/s)", total, ms, mbps);
 
-    co_await stream.async_close();
+    co_await stream.AsyncClose();
     co_return {};
 }
+}  // namespace
 
 int main()
 {
-    alog::configure(4096, LogLevel::Info);
+    alog::Configure(4096, LogLevel::kInfo);
 
     TlsConfig tls{};
     tls.verify_mode = SSL_VERIFY_NONE;
 
-    auto ctx = TlsContext::make_client(tls);
+    auto ctx = TlsContext::MakeClient(tls);
     if (!ctx)
     {
         ALOG_ERROR("TLS failed");
@@ -82,8 +91,11 @@ int main()
     std::jthread t([&] { worker.LoopForever(); });
     worker.WaitReady();
 
-    auto res = SyncWait(run(worker, *ctx));
-    if (!res) ALOG_ERROR("Failed: {}", res.error());
+    auto res = SyncWait(Run(worker, *ctx));
+    if (!res)
+    {
+        ALOG_ERROR("Failed: {}", res.error());
+    }
 
     (void) worker.RequestStop();
     return res ? 0 : 1;

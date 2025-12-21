@@ -55,7 +55,7 @@ struct Task
         std::coroutine_handle<> continuation;
 
         [[nodiscard]]
-        Task get_return_object() noexcept
+        Task get_return_object() noexcept  // NOLINT
         {
             return Task{std::coroutine_handle<promise_type>::from_promise(*this)};
         }
@@ -167,7 +167,7 @@ struct Task<void>
         std::coroutine_handle<> continuation;
 
         [[nodiscard]]
-        Task get_return_object() noexcept
+        Task get_return_object() noexcept  // NOLINT
         {
             return Task{std::coroutine_handle<promise_type>::from_promise(*this)};
         }

@@ -51,14 +51,14 @@ using namespace kio::tls;
 // Simple Demo - Just connect and send one message
 // =========================================================================
 
-Task<Result<void>> simple_test(Worker& worker, TlsContext& ctx, std::string_view host, uint16_t port)
+Task<Result<void>> SimpleTest(Worker& worker, TlsContext& ctx, std::string_view host, uint16_t port)
 {
     co_await SwitchToWorker(worker);
     ALOG_INFO("Simple test: connecting to {}:{}", host, port);
 
     TlsConnector connector(worker, ctx);
-    ALOG_DEBUG("Created connector, calling connect...");
-    auto connect_result = co_await connector.connect(host, port);
+    ALOG_DEBUG("Created connector, calling Connect...");
+    auto connect_result = co_await connector.Connect(host, port);
     if (!connect_result.has_value())
     {
         ALOG_ERROR("Connect failed: {}", connect_result.error());
@@ -66,14 +66,14 @@ Task<Result<void>> simple_test(Worker& worker, TlsContext& ctx, std::string_view
     }
 
     TlsStream stream = std::move(connect_result.value());
-    ALOG_INFO("✅ Connected! fd={}, KTLS={}", stream.fd(), stream.is_ktls_active());
+    ALOG_INFO("✅ Connected! fd={}, KTLS={}", stream.Fd(), stream.IsKtlsActive());
 
     // Simple message
     auto msg = "PING\n";
     constexpr size_t msg_len = 5;
 
     ALOG_INFO("Sending {} bytes...", msg_len);
-    auto write_result = co_await stream.async_write({msg, msg_len});
+    auto write_result = co_await stream.AsyncWrite({msg, msg_len});
     if (!write_result.has_value())
     {
         ALOG_ERROR("Write failed: {}", write_result.error());
@@ -86,7 +86,7 @@ Task<Result<void>> simple_test(Worker& worker, TlsContext& ctx, std::string_view
 
     ALOG_INFO("Reading response...");
     char buffer[256];
-    auto read_result = co_await stream.async_read(buffer);
+    auto read_result = co_await stream.AsyncRead(buffer);
     if (!read_result.has_value())
     {
         ALOG_ERROR("Read failed: {}", read_result.error());
@@ -101,7 +101,7 @@ Task<Result<void>> simple_test(Worker& worker, TlsContext& ctx, std::string_view
     }
 
     ALOG_INFO("Closing connection...");
-    co_await stream.async_close();
+    co_await stream.AsyncClose();
     ALOG_INFO("✅ Simple test passed!");
 
     co_return {};
@@ -111,18 +111,18 @@ Task<Result<void>> simple_test(Worker& worker, TlsContext& ctx, std::string_view
 // Echo Test - Send messages and verify they come back
 // =========================================================================
 
-Task<Result<void>> echo_test(Worker& worker, TlsContext& ctx, std::string_view host, uint16_t port)
+Task<Result<void>> EchoTest(Worker& worker, TlsContext& ctx, std::string_view host, uint16_t port)
 {
     co_await SwitchToWorker(worker);
     ALOG_INFO("Starting echo test to {}:{}", host, port);
 
     TlsConnector connector(worker, ctx);
-    TlsStream stream = KIO_TRY(co_await connector.connect(host, port));
+    TlsStream stream = KIO_TRY(co_await connector.Connect(host, port));
 
     ALOG_INFO("✅ Connected!");
-    ALOG_INFO("   Version: {}", stream.get_version());
-    ALOG_INFO("   Cipher:  {}", stream.get_cipher());
-    ALOG_INFO("   KTLS:    {}", stream.is_ktls_active() ? "active" : "NOT active");
+    ALOG_INFO("   Version: {}", stream.GetVersion());
+    ALOG_INFO("   Cipher:  {}", stream.GetCipher());
+    ALOG_INFO("   KTLS:    {}", stream.IsKtlsActive() ? "active" : "NOT active");
 
     const std::vector<std::string> messages = {
             "Hello from kio client!\n",
@@ -138,9 +138,9 @@ Task<Result<void>> echo_test(Worker& worker, TlsContext& ctx, std::string_view h
         std::string_view msg_trimmed(msg.data(), !msg.empty() && msg.back() == '\n' ? msg.size() - 1 : msg.size());
         ALOG_INFO("Sending: '{}'", msg_trimmed);
 
-        KIO_TRY(co_await stream.async_write_exact({msg.data(), msg.size()}));
+        KIO_TRY(co_await stream.AsyncWriteExact({msg.data(), msg.size()}));
 
-        auto read_result = co_await stream.async_read(buffer);
+        auto read_result = co_await stream.AsyncRead(buffer);
         if (!read_result.has_value())
         {
             ALOG_ERROR("Read error: {}", read_result.error());
@@ -167,7 +167,7 @@ Task<Result<void>> echo_test(Worker& worker, TlsContext& ctx, std::string_view h
     }
 
     ALOG_INFO("✅ Echo test passed! All {} messages verified.", messages.size());
-    co_await stream.async_close();
+    co_await stream.AsyncClose();
 
     co_return {};
 }
@@ -176,16 +176,16 @@ Task<Result<void>> echo_test(Worker& worker, TlsContext& ctx, std::string_view h
 // Throughput Test - Send large amount of data to measure performance
 // =========================================================================
 
-Task<Result<void>> throughput_test(Worker& worker, TlsContext& ctx, std::string_view host, uint16_t port,
-                                   size_t total_bytes)
+Task<Result<void>> ThroughputTest(Worker& worker, TlsContext& ctx, std::string_view host, uint16_t port,
+                                  size_t total_bytes)
 {
     co_await SwitchToWorker(worker);
     ALOG_INFO("Starting throughput test to {}:{} ({} bytes)", host, port, total_bytes);
 
     TlsConnector connector(worker, ctx);
-    TlsStream stream = KIO_TRY(co_await connector.connect(host, port));
+    TlsStream stream = KIO_TRY(co_await connector.Connect(host, port));
 
-    ALOG_INFO("✅ Connected! KTLS: {}", stream.is_ktls_active() ? "active" : "NOT active");
+    ALOG_INFO("✅ Connected! KTLS: {}", stream.IsKtlsActive() ? "active" : "NOT active");
 
     constexpr size_t kChunkSize = 16384;
     std::vector send_buf(kChunkSize, 'X');
@@ -200,13 +200,13 @@ Task<Result<void>> throughput_test(Worker& worker, TlsContext& ctx, std::string_
     {
         size_t to_send = std::min(kChunkSize, total_bytes - bytes_sent);
 
-        KIO_TRY(co_await stream.async_write_exact({send_buf.data(), to_send}));
+        KIO_TRY(co_await stream.AsyncWriteExact({send_buf.data(), to_send}));
         bytes_sent += to_send;
 
         size_t chunk_received = 0;
         while (chunk_received < to_send)
         {
-            auto read_result = co_await stream.async_read({recv_buf.data(), recv_buf.size()});
+            auto read_result = co_await stream.AsyncRead({recv_buf.data(), recv_buf.size()});
             if (!read_result.has_value())
             {
                 ALOG_ERROR("Read error: {}", read_result.error());
@@ -241,7 +241,7 @@ Task<Result<void>> throughput_test(Worker& worker, TlsContext& ctx, std::string_
     ALOG_INFO("   Duration:   {} ms", duration_ms);
     ALOG_INFO("   Throughput: {:.2f} MB/s", throughput_mbps);
 
-    co_await stream.async_close();
+    co_await stream.AsyncClose();
     co_return {};
 }
 
@@ -251,7 +251,7 @@ Task<Result<void>> throughput_test(Worker& worker, TlsContext& ctx, std::string_
 
 int main(int argc, char* argv[])
 {
-    alog::configure(4096, LogLevel::Debug);
+    alog::Configure(4096, LogLevel::kDebug);
 
     gflags::SetUsageMessage(
             "KTLS Client Demo - Test TLS client with kio framework\n\n"
@@ -271,8 +271,8 @@ int main(int argc, char* argv[])
     ALOG_INFO("OpenSSL: {}", OpenSSL_version(OPENSSL_VERSION));
 
     // Check KTLS availability
-    ALOG_INFO("KTLS Info:\n{}", get_ktls_info());
-    if (auto res = require_ktls(); !res)
+    ALOG_INFO("KTLS Info:\n{}", GetKtlsInfo());
+    if (auto res = RequireKtls(); !res)
     {
         ALOG_ERROR("KTLS not available: {}", res.error());
         return 1;
@@ -295,7 +295,7 @@ int main(int argc, char* argv[])
         ALOG_INFO("Certificate verification: DISABLED (testing mode)");
     }
 
-    auto ctx_res = TlsContext::make_client(tls_cfg);
+    auto ctx_res = TlsContext::MakeClient(tls_cfg);
     if (!ctx_res.has_value())
     {
         ALOG_ERROR("Failed to create TLS context: {}", ctx_res.error());
@@ -306,7 +306,6 @@ int main(int argc, char* argv[])
     // Create worker
     WorkerConfig worker_cfg{};
     worker_cfg.uring_queue_depth = 1024;
-    worker_cfg.default_op_slots = 256;
 
     Worker worker(0, worker_cfg);
     std::jthread worker_thread([&] { worker.LoopForever(); });
@@ -317,15 +316,15 @@ int main(int argc, char* argv[])
 
     if (FLAGS_mode == "simple")
     {
-        result = SyncWait(simple_test(worker, ctx, FLAGS_host, static_cast<uint16_t>(FLAGS_port)));
+        result = SyncWait(SimpleTest(worker, ctx, FLAGS_host, static_cast<uint16_t>(FLAGS_port)));
     }
     else if (FLAGS_mode == "echo")
     {
-        result = SyncWait(echo_test(worker, ctx, FLAGS_host, static_cast<uint16_t>(FLAGS_port)));
+        result = SyncWait(EchoTest(worker, ctx, FLAGS_host, static_cast<uint16_t>(FLAGS_port)));
     }
     else if (FLAGS_mode == "perf")
     {
-        result = SyncWait(throughput_test(worker, ctx, FLAGS_host, static_cast<uint16_t>(FLAGS_port), FLAGS_bytes));
+        result = SyncWait(ThroughputTest(worker, ctx, FLAGS_host, static_cast<uint16_t>(FLAGS_port), FLAGS_bytes));
     }
     else
     {

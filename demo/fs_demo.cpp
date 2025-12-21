@@ -1,4 +1,3 @@
-#include <iostream>
 
 #include "kio/core/async_logger.h"
 #include "kio/fs/fs.h"
@@ -7,6 +6,8 @@
 using namespace kio;
 using namespace kio::io;
 
+namespace
+{
 Task<int64_t> CountLineChar(std::span<const char> view, char c)
 {
     co_return std::count(view.begin(), view.end(), c);
@@ -16,7 +17,7 @@ Task<int64_t> CountLineChar(std::span<const char> view, char c)
 // count the number of characters in a file and the occurrences of a character
 using CountReturn = std::expected<std::pair<int64_t, int64_t>, Error>;
 
-Task<CountReturn> char_count(File &file, const char c)
+Task<CountReturn> CharCount(File &file, const char c)
 {
     constexpr size_t CHUNK_SIZE = 8192;
     char buffer[CHUNK_SIZE];
@@ -26,7 +27,7 @@ Task<CountReturn> char_count(File &file, const char c)
 
     while (true)
     {
-        const auto res = KIO_TRY(co_await file.async_read(std::span(buffer), offset));
+        const auto res = KIO_TRY(co_await file.AsyncRead(std::span(buffer), offset));
 
         if (res == 0)
         {
@@ -39,14 +40,14 @@ Task<CountReturn> char_count(File &file, const char c)
         char_count += co_await CountLineChar(std::span(buffer, res), c);
     }
 
-    file.close();
+    file.Close();
     co_return std::pair{char_count, total_bytes_read};
 }
 
-Task<void> main_coro(FileManager &fm)
+static Task<void> MainCoro(FileManager &fm)
 {
-    const auto file_name = "/home/ynachi/test_data/leipzig1m.txt";
-    auto file = co_await fm.async_open(file_name, O_RDONLY, 0644);
+    const auto *const file_name = "/home/ynachi/test_data/leipzig1m.txt";
+    auto file = co_await fm.AsyncOpen(file_name, O_RDONLY, 0644);
 
     if (!file.has_value())
     {
@@ -54,10 +55,10 @@ Task<void> main_coro(FileManager &fm)
         co_return;
     }
 
-    ALOG_INFO("file opened, fd: {}", file->fd());
+    ALOG_INFO("file opened, fd: {}", file->Fd());
     // Start timing here - after all setup is complete
     const auto start_time = std::chrono::high_resolution_clock::now();
-    auto res = co_await char_count(file.value(), 'a');
+    auto res = co_await CharCount(file.value(), 'a');
     if (!res.has_value())
     {
         ALOG_ERROR("failed to count characters: {}", res.error());
@@ -73,14 +74,13 @@ Task<void> main_coro(FileManager &fm)
     ALOG_INFO("Processing time: {} microseconds ({}ms)", duration.count(), duration.count() / 1000.0);
     co_return;
 }
-
+}  // namespace
 int main()
 {
-    alog::configure(4096, LogLevel::Info);
+    alog::Configure(4096, LogLevel::kInfo);
     WorkerConfig config{};
     config.uring_queue_depth = 2048;
-    config.default_op_slots = 4096;
 
     FileManager fm(4, config);
-    SyncWait(main_coro(fm));
+    SyncWait(MainCoro(fm));
 }

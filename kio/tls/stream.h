@@ -52,9 +52,9 @@ class TlsStream
     bool handshake_done_{false};
     bool ktls_active_{false};
 
-    Result<void> enable_ktls();
-    [[nodiscard]] Task<Result<void>> do_handshake_step() const;
-    [[nodiscard]] Task<Result<void>> do_shutdown_step();
+    Result<void> EnableKtls();
+    [[nodiscard]] Task<Result<void>> DoHandshakeStep() const;
+    [[nodiscard]] Task<Result<void>> DoShutdownStep();
 
 public:
     // Takes ownership of the socket
@@ -62,7 +62,7 @@ public:
 
     ~TlsStream()
     {
-        if (ssl_)
+        if (ssl_ != nullptr)
         {
             if (handshake_done_)
             {
@@ -85,30 +85,30 @@ public:
      * @param hostname Optional hostname for SNI (client-side)
      * @return Result<void> - fails if handshake or KTLS negotiation fails
      */
-    Task<Result<void>> async_handshake(std::string_view hostname = {});
+    Task<Result<void>> AsyncHandshake(std::string_view hostname = {});
 
     /**
      * @brief Async read using kernel TLS
      * @param buf Buffer to read into
      * @return Number of bytes read, or error
      */
-    Task<Result<int>> async_read(std::span<char> buf);
+    Task<Result<int>> AsyncRead(std::span<char> buf);
 
-    Task<Result<void>> async_read_exact(std::span<char> buf);
+    Task<Result<void>> AsyncReadExact(std::span<char> buf);
 
     /**
      * @brief Async write using kernel TLS
      * @param buf Buffer to write from
      * @return Number of bytes written, or error
      */
-    auto async_write(std::span<const char> buf);
+    auto AsyncWrite(std::span<const char> buf) { return worker_.AsyncWrite(socket_.get(), buf); }
 
     /**
      * @brief Async write entire buffer using kernel TLS
      * @param buf Buffer to write completely
      * @return void on success, error on failure
      */
-    Task<Result<void>> async_write_exact(std::span<const char> buf);
+    auto AsyncWriteExact(std::span<const char> buf) { return worker_.AsyncWriteExact(socket_.get(), buf); }
 
     /**
      * @brief Async sendfile using kernel TLS
@@ -117,7 +117,7 @@ public:
      * @param count Number of bytes to send
      * @return void on success, error on failure
      */
-    Task<Result<void>> async_sendfile(const int in_fd, const off_t offset, const size_t count)
+    auto AsyncSendfile(const int in_fd, const off_t offset, const size_t count)
     {
         return worker_.AsyncSendfile(socket_.get(), in_fd, offset, count);
     }
@@ -131,7 +131,7 @@ public:
      *
      * @return void on success (including if peer already closed)
      */
-    [[nodiscard]] Task<Result<void>> async_shutdown();
+    [[nodiscard]] Task<Result<void>> AsyncShutdown();
 
     /**
      * @brief Shutdown TLS and close the underlying socket
@@ -142,20 +142,20 @@ public:
      *
      * @return void (shutdown errors are logged but don't fail the close)
      */
-    Task<Result<void>> async_close();
+    Task<Result<void>> AsyncClose();
 
     // Connection info
-    [[nodiscard]] bool is_ktls_active() const;
-    [[nodiscard]] std::string_view get_cipher() const;
-    [[nodiscard]] std::string_view get_version() const;
-    [[nodiscard]] bool is_handshake_done() const { return handshake_done_; }
-    [[nodiscard]] int fd() const { return socket_.get(); }
+    [[nodiscard]] bool IsKtlsActive() const;
+    [[nodiscard]] std::string_view GetCipher() const;
+    [[nodiscard]] std::string_view GetVersion() const;
+    [[nodiscard]] bool IsHandshakeDone() const { return handshake_done_; }
+    [[nodiscard]] int Fd() const { return socket_.get(); }
 
     // Peer address
-    void set_peer_addr(const net::SocketAddress&& addr) { peer_addr_ = addr; }
-    [[nodiscard]] std::string peer_ip() const { return peer_addr_.ip; }
-    [[nodiscard]] uint16_t peer_port() const { return peer_addr_.port; }
-    [[nodiscard]] const net::SocketAddress& peer_addr() const { return peer_addr_; }
+    void SetPeerAddr(const net::SocketAddress&& addr) { peer_addr_ = addr; }
+    [[nodiscard]] std::string PeerIp() const { return peer_addr_.ip; }
+    [[nodiscard]] uint16_t PeerPort() const { return peer_addr_.port; }
+    [[nodiscard]] const net::SocketAddress& PeerAddr() const { return peer_addr_; }
 };
 
 }  // namespace kio::tls

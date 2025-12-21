@@ -4,6 +4,8 @@
 #include "worker.h"
 
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
 #include <fcntl.h>
 #include <functional>
 #include <liburing.h>
@@ -55,7 +57,7 @@ int Worker::SubmitSqesWait()
     // Define the heartbeat interval (max sleep time)
     __kernel_timespec ts{};
     ts.tv_sec = 0;
-    ts.tv_nsec = config_.heartbeat_interval_us * 1000;
+    ts.tv_nsec = static_cast<uint32_t>(config_.heartbeat_interval_us * 1000);
 
     // Busy wait in kernel for this many microseconds before sleeping.
     // This helps maintain high throughput during bursts by avoiding context switches.
@@ -200,8 +202,8 @@ void Worker::LoopForever()
 
 unsigned Worker::ProcessCompletions()
 {
-    io_uring_cqe *cqe;
-    unsigned head;
+    io_uring_cqe *cqe = nullptr;
+    unsigned head = 0;
     unsigned count = 0;
 
     io_uring_for_each_cqe(&ring_, head, cqe)
@@ -275,7 +277,10 @@ void Worker::Post(std::coroutine_handle<> h)
 void Worker::HandleCqe(io_uring_cqe *cqe)
 {
     auto *completion = static_cast<IoCompletion *>(io_uring_cqe_get_data(cqe));
-    if (completion == nullptr) return;
+    if (completion == nullptr)
+    {
+        return;
+    }
 
     completion->Complete(cqe->res);
 }
@@ -409,15 +414,18 @@ Task<Result<void>> Worker::AsyncSendfile(int out_fd, int in_fd, off_t offset, si
 
     while (remaining > 0)
     {
-        constexpr size_t kChunkSize = 65536;
-        const size_t to_splice = std::min(remaining, kChunkSize);
+        constexpr size_t k_chunk_size = 65536;
+        const size_t to_splice = std::min(remaining, k_chunk_size);
 
         // Step A: Splice File -> Pipe
         const int res_in =
                 KIO_TRY(co_await MakeUringAwaitable(*this, prep_splice, in_fd, current_offset, pipe_write.get(),
                                                     static_cast<off_t>(-1), static_cast<unsigned int>(to_splice)));
 
-        if (res_in == 0) co_return std::unexpected(Error{ErrorCategory::kFile, kIoEof});
+        if (res_in == 0)
+        {
+            co_return std::unexpected(Error{ErrorCategory::kFile, kIoEof});
+        }
 
         // Step B: Splice Pipe -> Socket
         auto pipe_remaining = static_cast<size_t>(res_in);
@@ -427,17 +435,21 @@ Task<Result<void>> Worker::AsyncSendfile(int out_fd, int in_fd, off_t offset, si
                     co_await MakeUringAwaitable(*this, prep_splice, pipe_read.get(), static_cast<off_t>(-1), out_fd,
                                                 static_cast<off_t>(-1), static_cast<unsigned int>(pipe_remaining)));
 
-            if (res_out == 0) co_return std::unexpected(Error{ErrorCategory::kNetwork, EPIPE});
-            pipe_remaining -= res_out;
+            if (res_out == 0)
+            {
+                co_return std::unexpected(Error{ErrorCategory::kNetwork, EPIPE});
+                pipe_remaining -= res_out;
+            }
+
+            current_offset += res_in;
+            remaining -= res_in;
+            stats_.bytes_written_total += res_in;
         }
 
-        current_offset += res_in;
-        remaining -= res_in;
-        stats_.bytes_written_total += res_in;
+        stats_.write_ops_total++;
+        co_return {};
     }
-
-    stats_.write_ops_total++;
     co_return {};
-}
 
+}  // namespace kio::io
 }  // namespace kio::io

@@ -15,8 +15,9 @@ Checks: >
   -llvmlibc-*,
   -misc-non-private-member-variables-in-classes,
   -cppcoreguidelines-avoid-const-or-ref-data-members,
-   -cppcoreguidelines-pro-type-reinterpret-cast,
-  -cppcoreguidelines-macro-usage
+  -cppcoreguidelines-pro-type-reinterpret-cast,
+  -cppcoreguidelines-macro-usage,
+  -cppcoreguidelines-avoid-reference-coroutine-parameters
 
 # Treat all warnings as errors to ensure code quality
 WarningsAsErrors: ''

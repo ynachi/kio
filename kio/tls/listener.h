@@ -12,9 +12,12 @@ namespace kio::tls
 {
 struct ListenerConfig
 {
-    uint16_t port{443};
+    constexpr static uint16_t kDefaultPort = 443;
+    constexpr static int kDefaultBacklog = 128;
+
+    uint16_t port{kDefaultPort};
     std::string bind_address{"0.0.0.0"};
-    int backlog{128};
+    int backlog{kDefaultBacklog};
     bool reuse_port{true};
     bool reuse_addr{true};
     bool tcp_nodelay{true};
@@ -29,9 +32,9 @@ class TlsListener
     TlsContext& ctx_;
 
 public:
-    static Result<TlsListener> bind(io::Worker& worker, const ListenerConfig& config, TlsContext& ctx);
+    static Result<TlsListener> Bind(io::Worker& worker, const ListenerConfig& config, TlsContext& ctx);
 
-    [[nodiscard]] Task<Result<TlsStream>> accept() const;
+    [[nodiscard]] Task<Result<TlsStream>> Accept() const;
 };
 
 class TlsConnector
@@ -39,7 +42,7 @@ class TlsConnector
 public:
     TlsConnector(io::Worker& worker, TlsContext& ctx) : worker_(worker), ctx_(ctx) {}
 
-    Task<Result<TlsStream>> connect(std::string_view hostname, uint16_t port);
+    Task<Result<TlsStream>> Connect(std::string_view hostname, uint16_t port);
 
 private:
     io::Worker& worker_;

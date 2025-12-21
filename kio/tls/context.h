@@ -4,15 +4,14 @@
 #ifndef KIO_TLS_CONTEXT_H
 #define KIO_TLS_CONTEXT_H
 
-#include <memory>
+#include <filesystem>
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 #include <poll.h>
 #include <string>
+#include <vector>
 
-#include "kio/core/coro.h"
 #include "kio/core/errors.h"
-#include "kio/core/worker.h"
 
 // OpenSSL 3.0+ KTLS support
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
@@ -26,38 +25,38 @@ namespace kio::tls
 // -------------------------------------------------------------------------
 // Enums & Config
 // -------------------------------------------------------------------------
-enum class TlsVersion
+enum class TlsVersion : uint8_t
 {
-    TLS_1_2,
-    TLS_1_3
+    TLS_1_2,  // NOLINT
+    TLS_1_3  // NOLINT
 };
-enum class TlsRole
+enum class TlsRole : uint8_t
 {
-    Client,
-    Server
+    kClient,
+    kServer
 };
 
 struct TlsConfig
 {
     // Identity required for Server
-    std::filesystem::path cert_path{};
-    std::filesystem::path key_path{};
+    std::filesystem::path cert_path;
+    std::filesystem::path key_path;
 
     // Trust required for Client
-    std::filesystem::path ca_cert_path{};
-    std::filesystem::path ca_dir_path{};
+    std::filesystem::path ca_cert_path;
+    std::filesystem::path ca_dir_path;
 
     TlsVersion min_version{TlsVersion::TLS_1_2};
     bool verify_hostname{true};
     int verify_mode{SSL_VERIFY_PEER};
-    std::vector<std::string> alpn_protocols{};
+    std::vector<std::string> alpn_protocols;
     // Cipher suites (empty = use OpenSSL defaults)
     // Only KTLS-compatible ciphers will work: AES-GCM, ChaCha20-Poly1305
-    std::string cipher_suites{};
-    std::string ciphersuites_tls13{};
+    std::string cipher_suites;
+    std::string ciphersuites_tls13;
     bool enable_session_cache{true};
     // SNI
-    std::string server_name{};
+    std::string server_name;
 };
 
 /**
@@ -70,12 +69,12 @@ class TlsContext
     SSL_CTX* ctx_{nullptr};
     bool is_server_{true};
     explicit TlsContext(SSL_CTX* ctx, const bool is_server = true) : ctx_(ctx), is_server_(is_server) {}
-    static Result<TlsContext> make(const TlsConfig& config, TlsRole role);
+    static Result<TlsContext> Make(const TlsConfig& config, TlsRole role);
 
 public:
     ~TlsContext()
     {
-        if (ctx_)
+        if (ctx_ != nullptr)
         {
             SSL_CTX_free(ctx_);
         }
@@ -88,7 +87,10 @@ public:
     {
         if (this != &other)
         {
-            if (ctx_) SSL_CTX_free(ctx_);
+            if (ctx_ != nullptr)
+            {
+                SSL_CTX_free(ctx_);
+            }
             ctx_ = std::exchange(other.ctx_, nullptr);
         }
         return *this;
@@ -98,7 +100,7 @@ public:
     TlsContext& operator=(const TlsContext&) = delete;
 
     [[nodiscard]]
-    SSL_CTX* get() const noexcept
+    SSL_CTX* Get() const noexcept
     {
         return ctx_;
     }
@@ -108,27 +110,27 @@ public:
      * @param config TLS configurations
      * @return returns a KIO results containing a tls context
      */
-    static Result<TlsContext> make_client(const TlsConfig& config) { return make(config, TlsRole::Client); }
+    static Result<TlsContext> MakeClient(const TlsConfig& config) { return Make(config, TlsRole::kClient); }
 
     /**
      * Create a TLS context for servers (or listeners).
      * @param config TLS configurations
      * @return returns a KIO results containing a tls context
      */
-    static Result<TlsContext> make_server(const TlsConfig& config) { return make(config, TlsRole::Server); }
+    static Result<TlsContext> MakeServer(const TlsConfig& config) { return Make(config, TlsRole::kServer); }
 };
 
 //
 // KTLS helpers
 //
-bool is_ktls_available();
-Result<void> require_ktls();
-std::string get_ktls_info();
+bool IsKtlsAvailable();
+Result<void> RequireKtls();
+std::string GetKtlsInfo();
 
 namespace detail
 {
-int tls_version_to_openssl(TlsVersion version);
-std::string get_openssl_error();
+int TlsVersionToOpenssl(TlsVersion version);
+std::string GetOpensslError();
 }  // namespace detail
 
 }  // namespace kio::tls
