@@ -5,7 +5,6 @@
 
 #include <chrono>
 #include <cstddef>
-#include <cstdint>
 #include <fcntl.h>
 #include <functional>
 #include <liburing.h>
@@ -438,18 +437,18 @@ Task<Result<void>> Worker::AsyncSendfile(int out_fd, int in_fd, off_t offset, si
             if (res_out == 0)
             {
                 co_return std::unexpected(Error{ErrorCategory::kNetwork, EPIPE});
-                pipe_remaining -= res_out;
             }
 
-            current_offset += res_in;
-            remaining -= res_in;
-            stats_.bytes_written_total += res_in;
+            pipe_remaining -= res_out;
         }
 
+        current_offset += res_in;
+        remaining -= res_in;
+        stats_.bytes_written_total += res_in;
         stats_.write_ops_total++;
-        co_return {};
     }
-    co_return {};
 
-}  // namespace kio::io
+    co_return {};
+}
+
 }  // namespace kio::io

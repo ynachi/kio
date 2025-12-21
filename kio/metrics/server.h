@@ -5,9 +5,10 @@
 #ifndef KIO_SERVER_H
 #define KIO_SERVER_H
 #include <string_view>
+#include <sys/types.h>
 
-#include "../net/net.h"
 #include "kio/core/worker.h"
+#include "kio/net/net.h"
 
 namespace kio
 {
@@ -16,28 +17,28 @@ static constexpr size_t kMaxRequestSize = 8192;
 
 namespace detail
 {
-enum class HttpStatusCode : int
+enum class HttpStatusCode : uint16_t
 {
-    OK = 200,
-    BadRequest = 400,
-    NotFound = 404,
-    MethodNotAllowed = 405,
-    InternalServerError = 500
+    kOk = 200,
+    kBadRequest = 400,
+    kNotFound = 404,
+    kMethodNotAllowed = 405,
+    kInternalServerError = 500
 };
 
-constexpr std::string_view to_string(const HttpStatusCode code)
+constexpr std::string_view ToString(const HttpStatusCode code)
 {
     switch (code)
     {
-        case HttpStatusCode::OK:
+        case HttpStatusCode::kOk:
             return "OK";
-        case HttpStatusCode::BadRequest:
+        case HttpStatusCode::kBadRequest:
             return "Bad Request";
-        case HttpStatusCode::NotFound:
+        case HttpStatusCode::kNotFound:
             return "Not Found";
-        case HttpStatusCode::MethodNotAllowed:
+        case HttpStatusCode::kMethodNotAllowed:
             return "Method Not Allowed";
-        case HttpStatusCode::InternalServerError:
+        case HttpStatusCode::kInternalServerError:
             return "Internal Server Error";
         default:
             return "Unknown";
@@ -68,7 +69,7 @@ public:
      */
     explicit MetricsServer(std::string bind_addr = "127.0.0.1", uint16_t port = 9090, io::WorkerConfig config = {});
 
-    ~MetricsServer() { stop(); }
+    ~MetricsServer() { Stop(); }
 
     // Non-copyable
     MetricsServer(const MetricsServer&) = delete;
@@ -77,20 +78,20 @@ public:
     /**
      * @brief Start the metrics server
      */
-    void start();
+    void Start();
 
     /**
      * @brief Stop the metrics server
      */
-    void stop();
+    void Stop();
 
     /**
      * @brief Get the server address
      */
-    [[nodiscard]] std::string address() const { return std::format("http://{}:{}/metrics", bind_addr_, port_); }
+    [[nodiscard]] std::string Address() const { return std::format("http://{}:{}/metrics", bind_addr_, port_); }
 
 private:
-    static DetachedTask accept_loop(io::Worker& worker, int server_fd);
+    static DetachedTask AcceptLoop(io::Worker& worker, int server_fd);
     std::string bind_addr_;
     uint16_t port_;
     std::unique_ptr<io::Worker> worker_;
@@ -98,11 +99,10 @@ private:
     int server_fd_{-1};
 
     // HTTP request handler
-    static DetachedTask handle_client(io::Worker& worker, net::FDGuard fd);
+    static DetachedTask HandleClient(io::Worker& worker, net::FDGuard fd);
 
     // HTTP response builders
-    static std::string build_response(detail::HttpStatusCode code, std::string_view content_type,
-                                      std::string_view body);
+    static std::string BuildResponse(detail::HttpStatusCode code, std::string_view content_type, std::string_view body);
 };
 }  // namespace kio
 

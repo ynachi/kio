@@ -12,9 +12,9 @@ constexpr const char* ToString(const MetricType type) noexcept
 {
     switch (type)
     {
-        case MetricType::Counter:
+        case MetricType::kCounter:
             return "counter";
-        case MetricType::Gauge:
+        case MetricType::kGauge:
             return "gauge";
     }
     return "untyped";

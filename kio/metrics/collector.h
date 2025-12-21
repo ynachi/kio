@@ -24,7 +24,7 @@ public:
      * This is called by the scraper thread.
      * @param snapshot The transient metrics snapshot for this scrape.
      */
-    virtual void Collect(MetricSnapshot& snapshot) = 0;
+    virtual void Collect(MetricSnapshot &snapshot) = 0;
 };
 }  // namespace kio
 

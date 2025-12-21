@@ -30,48 +30,48 @@ void WorkerMetricsCollector::Collect(MetricSnapshot& snapshot)
 
     // Build metric families and populate with worker stats
 
-    auto& bytes_read_family =
-            snapshot.BuildFamily("kio_worker_bytes_read_total", "Total bytes read by kio workers", MetricType::Counter);
+    auto& bytes_read_family = snapshot.BuildFamily("kio_worker_bytes_read_total", "Total bytes read by kio workers",
+                                                   MetricType::kCounter);
     bytes_read_family.Add({{"worker_id", id_str}}, static_cast<double>(stats.bytes_read_total));
 
     auto& bytes_written_family = snapshot.BuildFamily("kio_worker_bytes_written_total",
-                                                      "Total bytes written by kio workers", MetricType::Counter);
+                                                      "Total bytes written by kio workers", MetricType::kCounter);
     bytes_written_family.Add({{"worker_id", id_str}}, static_cast<double>(stats.bytes_written_total));
 
     // Operation count metrics
     auto& read_ops_family = snapshot.BuildFamily("kio_worker_read_ops_total", "Total read operations by kio workers",
-                                                 MetricType::Counter);
+                                                 MetricType::kCounter);
     read_ops_family.Add({{"worker_id", id_str}}, static_cast<double>(stats.read_ops_total));
 
     auto& write_ops_family = snapshot.BuildFamily("kio_worker_write_ops_total", "Total write operations by kio workers",
-                                                  MetricType::Counter);
+                                                  MetricType::kCounter);
     write_ops_family.Add({{"worker_id", id_str}}, static_cast<double>(stats.write_ops_total));
 
     // Connection metrics
     auto& connections_accepted_family = snapshot.BuildFamily(
-            "kio_worker_connections_accepted_total", "Total connections accepted by kio workers", MetricType::Counter);
+            "kio_worker_connections_accepted_total", "Total connections accepted by kio workers", MetricType::kCounter);
     connections_accepted_family.Add({{"worker_id", id_str}}, static_cast<double>(stats.connections_accepted_total));
 
     auto& connect_ops_family = snapshot.BuildFamily("kio_worker_connect_ops_total",
-                                                    "Total connect operations by kio workers", MetricType::Counter);
+                                                    "Total connect operations by kio workers", MetricType::kCounter);
     connect_ops_family.Add({{"worker_id", id_str}}, static_cast<double>(stats.connect_ops_total));
 
     auto& open_ops_family = snapshot.BuildFamily("kio_worker_open_ops_total", "Total open operations by kio workers",
-                                                 MetricType::Counter);
+                                                 MetricType::kCounter);
     open_ops_family.Add({{"worker_id", id_str}}, static_cast<double>(stats.open_ops_total));
 
     // Coroutine metrics
     auto& coroutine_resizes_family =
             snapshot.BuildFamily("kio_worker_coroutine_pool_resizes_total",
-                                 "Total coroutine pool resizes by kio workers", MetricType::Counter);
+                                 "Total coroutine pool resizes by kio workers", MetricType::kCounter);
     coroutine_resizes_family.Add({{"worker_id", id_str}}, static_cast<double>(stats.coroutines_pool_resize_total));
 
     auto& active_coroutines_family = snapshot.BuildFamily(
-            "kio_worker_active_coroutines", "Number of active coroutines in kio workers", MetricType::Gauge);
+            "kio_worker_active_coroutines", "Number of active coroutines in kio workers", MetricType::kGauge);
     active_coroutines_family.Add({{"worker_id", id_str}}, static_cast<double>(stats.active_coroutines));
 
     auto& errors_family = snapshot.BuildFamily("kio_worker_io_errors_total",
-                                               "Total I/O errors encountered by kio workers", MetricType::Counter);
+                                               "Total I/O errors encountered by kio workers", MetricType::kCounter);
     errors_family.Add({{"worker_id", id_str}}, static_cast<double>(stats.io_errors_total));
 }
 

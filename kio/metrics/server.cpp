@@ -12,7 +12,6 @@
 #include "kio/core/bytes_mut.h"
 #include "kio/core/worker.h"
 #include "kio/metrics/registry.h"
-#include "kio/sync/sync_wait.h"
 
 namespace kio
 {
@@ -32,7 +31,7 @@ struct HttpRequest
 
     // Returns a parsed request object.
     // .complete = true if we found \r\n\r\n
-    static HttpRequest parse(std::span<const char> data)
+    static HttpRequest Parse(std::span<const char> data)
     {
         HttpRequest req;
         std::string_view view(data.data(), data.size());
@@ -53,12 +52,18 @@ struct HttpRequest
 
         // Method
         const auto first_space = line.find(' ');
-        if (first_space == std::string_view::npos) return req;
+        if (first_space == std::string_view::npos)
+        {
+            return req;
+        }
         req.method = line.substr(0, first_space);
 
         // Path
         const auto second_space = line.find(' ', first_space + 1);
-        if (second_space == std::string_view::npos) return req;
+        if (second_space == std::string_view::npos)
+        {
+            return req;
+        }
 
         req.path = line.substr(first_space + 1, second_space - first_space - 1);
         req.valid = true;
@@ -82,10 +87,10 @@ MetricsServer::MetricsServer(std::string bind_addr, const uint16_t port, io::Wor
     ALOG_INFO("Metrics server listening on endpoint: {}:{}, FD:{}", bind_addr_, port_, server_fd_);
 
     worker_ = std::make_unique<io::Worker>(kMetricServerWorkerId, config,
-                                           [this](io::Worker& w) { accept_loop(w, server_fd_); });
+                                           [this](io::Worker& w) { AcceptLoop(w, server_fd_); });
 }
 
-void MetricsServer::start()
+void MetricsServer::Start()
 {
     if (ev_thread_.joinable())
     {
@@ -97,7 +102,7 @@ void MetricsServer::start()
     ev_thread_ = std::jthread([&] { worker_->LoopForever(); });
 }
 
-void MetricsServer::stop()
+void MetricsServer::Stop()
 {
     if (worker_ == nullptr)
     {
@@ -135,7 +140,7 @@ void MetricsServer::stop()
     ALOG_INFO("MetricsServer stopped");
 }
 
-DetachedTask MetricsServer::accept_loop(Worker& worker, const int server_fd)
+DetachedTask MetricsServer::AcceptLoop(Worker& worker, const int server_fd)
 {
     const auto st = worker.GetStopToken();
 
@@ -156,11 +161,11 @@ DetachedTask MetricsServer::accept_loop(Worker& worker, const int server_fd)
         }
 
         FDGuard client_fd(res.value());
-        handle_client(worker, std::move(client_fd));
+        HandleClient(worker, std::move(client_fd));
     }
 }
 
-DetachedTask MetricsServer::handle_client(Worker& worker, FDGuard fd)
+DetachedTask MetricsServer::HandleClient(Worker& worker, FDGuard fd)
 {
     // Use BytesMut for dynamic buffering
     BytesMut buffer(1024);
@@ -183,7 +188,7 @@ DetachedTask MetricsServer::handle_client(Worker& worker, FDGuard fd)
         buffer.CommitWrite(read_res.value());
 
         // Try Parse
-        auto req = HttpRequest::parse(buffer.ReadableSpan());
+        auto req = HttpRequest::Parse(buffer.ReadableSpan());
 
         if (req.complete)
         {
@@ -192,31 +197,31 @@ DetachedTask MetricsServer::handle_client(Worker& worker, FDGuard fd)
 
             if (!req.valid)
             {
-                response = build_response(HttpStatusCode::BadRequest, "text/plain", "Bad Request");
+                response = BuildResponse(HttpStatusCode::kBadRequest, "text/plain", "Bad Request");
             }
             else if (req.method != "GET")
             {
-                response = build_response(HttpStatusCode::MethodNotAllowed, "text/plain", "Method Not Allowed");
+                response = BuildResponse(HttpStatusCode::kMethodNotAllowed, "text/plain", "Method Not Allowed");
             }
             else if (req.path == "/metrics")
             {
                 try
                 {
                     std::string body = MetricsRegistry<>::Instance().Scrape();
-                    response = build_response(HttpStatusCode::OK, "text/plain; version=0.0.4", body);
+                    response = BuildResponse(HttpStatusCode::kOk, "text/plain; version=0.0.4", body);
                 }
                 catch (const std::exception& e)
                 {
-                    response = build_response(HttpStatusCode::InternalServerError, "text/plain", e.what());
+                    response = BuildResponse(HttpStatusCode::kInternalServerError, "text/plain", e.what());
                 }
             }
             else if (req.path == "/health" || req.path == "/")
             {
-                response = build_response(HttpStatusCode::OK, "text/plain", "OK");
+                response = BuildResponse(HttpStatusCode::kOk, "text/plain", "OK");
             }
             else
             {
-                response = build_response(HttpStatusCode::NotFound, "text/plain", "Not Found");
+                response = BuildResponse(HttpStatusCode::kNotFound, "text/plain", "Not Found");
             }
 
             // Send response
@@ -237,7 +242,7 @@ DetachedTask MetricsServer::handle_client(Worker& worker, FDGuard fd)
     // fd destructor closes socket
 }
 
-std::string MetricsServer::build_response(HttpStatusCode code, std::string_view content_type, std::string_view body)
+std::string MetricsServer::BuildResponse(HttpStatusCode code, std::string_view content_type, std::string_view body)
 {
     return std::format(
             "HTTP/1.1 {} {}\r\n"
@@ -246,7 +251,7 @@ std::string MetricsServer::build_response(HttpStatusCode code, std::string_view 
             "Connection: close\r\n"
             "\r\n"
             "{}",
-            static_cast<int>(code), to_string(code), content_type, body.size(), body);
+            static_cast<int>(code), ToString(code), content_type, body.size(), body);
 }
 
 }  // namespace kio

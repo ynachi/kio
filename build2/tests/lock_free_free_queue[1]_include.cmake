@@ -1,5 +1,0 @@
-if(EXISTS "/home/ynachi/codes/kio/build2/tests/lock_free_free_queue[1]_tests.cmake")
-  include("/home/ynachi/codes/kio/build2/tests/lock_free_free_queue[1]_tests.cmake")
-else()
-  add_test(lock_free_free_queue_NOT_BUILT lock_free_free_queue_NOT_BUILT)
-endif()

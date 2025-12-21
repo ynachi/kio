@@ -14,10 +14,10 @@ namespace kio
 {
 constexpr size_t kMetricsMaxSamples = 10000;
 /// The type of metric (for the # TYPE line)
-enum class MetricType
+enum class MetricType : uint8_t
 {
-    Counter,
-    Gauge,
+    kCounter,
+    kGauge,
 };
 
 /// Represents a single data point:
@@ -31,7 +31,7 @@ struct MetricSample
 /// Represents a "family" of metrics (all samples for one metric name)
 struct MetricFamily
 {
-    size_t max_samples_ = kMetricsMaxSamples;
+    size_t max_samples = kMetricsMaxSamples;
     std::string name;
     std::string help;
     MetricType type;
@@ -40,9 +40,9 @@ struct MetricFamily
     // Helper for collectors to add data
     void Add(std::map<std::string, std::string> labels, const double value)
     {
-        if (samples.size() >= max_samples_)
+        if (samples.size() >= max_samples)
         {
-            ALOG_WARN("MetricFamily {} has reached max samples ({})", name, max_samples_);
+            ALOG_WARN("MetricFamily {} has reached max samples ({})", name, max_samples);
             return;
         };
         samples.push_back({std::move(labels), value});
@@ -70,7 +70,11 @@ public:
     MetricFamily& BuildFamily(std::string name, std::string help, const MetricType type,
                               const size_t max_samples = kMetricsMaxSamples)
     {
-        families_.emplace_back(MetricFamily{max_samples, std::move(name), std::move(help), type, {}});
+        families_.emplace_back(MetricFamily{.max_samples = max_samples,
+                                            .name = std::move(name),
+                                            .help = std::move(help),
+                                            .type = type,
+                                            .samples = {}});
         return families_.back();
     }
 

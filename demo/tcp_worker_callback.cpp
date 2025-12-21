@@ -119,7 +119,7 @@ int main()
 
     // Start a metrics server
     MetricsServer metrics_server("0.0.0.0", 9092);
-    metrics_server.start();
+    metrics_server.Start();
 
     ALOG_INFO("Main thread: Waiting for worker to initialize...");
 
@@ -157,7 +157,7 @@ int main()
     ::close(server_fd.value());
 
     // stop metrics server
-    metrics_server.stop();
+    metrics_server.Stop();
 
     ALOG_INFO("Main thread: Worker has shut down. Exiting.");
 

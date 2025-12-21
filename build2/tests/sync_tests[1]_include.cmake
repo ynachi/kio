@@ -1,5 +1,0 @@
-if(EXISTS "/home/ynachi/codes/kio/build2/tests/sync_tests[1]_tests.cmake")
-  include("/home/ynachi/codes/kio/build2/tests/sync_tests[1]_tests.cmake")
-else()
-  add_test(sync_tests_NOT_BUILT sync_tests_NOT_BUILT)
-endif()

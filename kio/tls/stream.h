@@ -92,7 +92,7 @@ public:
      * @param buf Buffer to read into
      * @return Number of bytes read, or error
      */
-    Task<Result<int>> AsyncRead(std::span<char> buf);
+    auto AsyncRead(std::span<char> buf) { return worker_.AsyncRead(socket_.get(), buf); }
 
     Task<Result<void>> AsyncReadExact(std::span<char> buf);
 

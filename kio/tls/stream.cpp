@@ -140,24 +140,6 @@ Result<void> TlsStream::EnableKtls()
 #endif
 }
 
-Task<Result<int>> TlsStream::AsyncRead(std::span<char> buf)
-{
-    // Drain OpenSSL buffer if needed (rare path)
-    if ((ssl_ != nullptr) && SSL_pending(ssl_) > 0)
-    {
-        // This is a synchronous memory copy from OpenSSL internal buffer
-        int n = SSL_read(ssl_, buf.data(), static_cast<int>(buf.size()));
-        if (n > 0)
-        {
-            // Return a helper task that is already "ready" with the result.
-            // This allocates a frame, but only for this edge case.
-            co_return n;
-        }
-    }
-
-    co_return co_await worker_.AsyncRead(socket_.get(), buf);
-}
-
 Task<Result<void>> TlsStream::AsyncReadExact(std::span<char> buf)
 {
     const auto st = worker_.GetStopToken();

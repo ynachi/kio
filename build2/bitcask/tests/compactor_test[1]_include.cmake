@@ -1,5 +1,0 @@
-if(EXISTS "/home/ynachi/codes/kio/build2/bitcask/tests/compactor_test[1]_tests.cmake")
-  include("/home/ynachi/codes/kio/build2/bitcask/tests/compactor_test[1]_tests.cmake")
-else()
-  add_test(compactor_test_NOT_BUILT compactor_test_NOT_BUILT)
-endif()
