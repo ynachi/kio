@@ -86,7 +86,6 @@ struct WorkerConfig
     size_t uring_queue_depth{1024};
     size_t uring_submit_batch_size{128};
     size_t tcp_backlog{128};
-    uint8_t uring_submit_timeout_ms{100};  // Deprecated/Unused in new loop, kept for ABI compat if needed
     int uring_default_flags = 0;
     size_t max_op_slots{1024 * 1024};
     size_t task_queue_capacity{1024};
@@ -139,7 +138,7 @@ struct IoUringAwaitable
 
     bool await_suspend(std::coroutine_handle<> h)
     {
-        assert(worker.is_on_worker_thread() && "kio::async_* operation was called from the wrong thread.");
+        assert(kio::io::Worker::IsOnWorkerThread() && "kio::async_* operation was called from the wrong thread.");
 
         completion.handle = h;
         auto& ring = internal::WorkerAccess::GetRing(worker);
@@ -207,6 +206,7 @@ class Worker
     template<typename, typename...>
     friend struct IoUringAwaitable;
 
+    uint32_t consecutive_idle_ticks_{0};
     io_uring ring_{};
     WorkerConfig config_;
     size_t id_{0};

@@ -29,10 +29,8 @@ TlsStream::TlsStream(io::Worker& worker, net::Socket socket, TlsContext& context
 TlsStream::TlsStream(TlsStream&& other) noexcept :
     worker_(other.worker_), ctx_(other.ctx_), socket_(std::move(other.socket_)),
     ssl_(std::exchange(other.ssl_, nullptr)), role_(other.role_), server_name_(std::exchange(other.server_name_, "")),
-    handshake_done_(other.handshake_done_), ktls_active_(other.ktls_active_)
+    handshake_done_(std::exchange(other.handshake_done_, false)), ktls_active_(std::exchange(other.ktls_active_, false))
 {
-    other.handshake_done_ = false;
-    other.ktls_active_ = false;
 }
 
 Task<Result<void>> TlsStream::DoHandshakeStep() const
@@ -97,8 +95,17 @@ Task<Result<void>> TlsStream::AsyncHandshake(std::string_view hostname)
 
     ALOG_DEBUG("Starting TLS handshake for fd={}", socket_.get());
     KIO_TRY(co_await DoHandshakeStep());
-    handshake_done_ = true;
     ALOG_DEBUG("TLS handshake completed");
+
+    if (role_ == TlsRole::kClient && !server_name_.empty())
+    {
+        const long verify_result = SSL_get_verify_result(ssl_);
+        if (verify_result != X509_V_OK)
+        {
+            ALOG_ERROR("Certificate verification failed: {}", X509_verify_cert_error_string(verify_result));
+            co_return std::unexpected(Error{ErrorCategory::kTls, kTlsVerificationFailed});
+        }
+    }
 
     if (const char* ver = SSL_get_version(ssl_))
     {
@@ -110,6 +117,7 @@ Task<Result<void>> TlsStream::AsyncHandshake(std::string_view hostname)
     }
 
     KIO_TRY(EnableKtls());
+    handshake_done_ = true;
 
     co_return {};
 }

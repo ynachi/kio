@@ -5,6 +5,7 @@
 #include "context.h"
 
 #include <fstream>
+#include <memory>
 
 #include "kio/core/async_logger.h"
 
@@ -60,15 +61,14 @@ Result<TlsContext> TlsContext::Make(const TlsConfig& config, const TlsRole role)
         return std::unexpected(Error{ErrorCategory::kTls, kTlsContextCreationFailed});
     }
 
-    // KTLS Enable
-    // Enable KTLS - mandatory for kio
+    // KTLS Enable - mandatory for kio
 #if KIO_HAVE_OPENSSL3
     SSL_CTX_set_options(ctx, SSL_OP_ENABLE_KTLS);
     ALOG_DEBUG("KTLS option enabled on SSL_CTX");
 #else
     ALOG_ERROR("OpenSSL 3.0+ required for KTLS support");
     SSL_CTX_free(ctx);
-    return std::unexpected(Error{ErrorCategory::Tls, kTlsKtlsEnableFailed});
+    return std::unexpected(Error{ErrorCategory::kTls, kTlsKtlsEnableFailed});
 #endif
 
     // =========================================================================
@@ -177,23 +177,118 @@ Result<TlsContext> TlsContext::Make(const TlsConfig& config, const TlsRole role)
         }
     }
 
-    // ALPN
+    // =========================================================================
+    // ALPN Configuration
+    // Handles both client (advertise protocols) and server (select protocol)
+    // =========================================================================
+    std::unique_ptr<std::vector<unsigned char>> alpn_storage = nullptr;
+
     if (!config.alpn_protocols.empty())
     {
-        std::vector<unsigned char> protos;
-        for (const auto& p: config.alpn_protocols)
+        auto protos = std::make_unique<std::vector<unsigned char>>();
+
+        // Build wire format: each protocol is length-prefixed
+        // Example: ["h2", "http/1.1"] becomes:
+        // [0x02, 'h', '2', 0x08, 'h', 't', 't', 'p', '/', '1', '.', '1']
+        for (const auto& protocol: config.alpn_protocols)
         {
-            protos.push_back(static_cast<unsigned char>(p.length()));
-            protos.insert(protos.end(), p.begin(), p.end());
+            // Validate protocol length (ALPN protocol names must be 1-255 bytes)
+            if (protocol.empty() || protocol.size() > 255)
+            {
+                ALOG_ERROR("Invalid ALPN protocol: '{}' (length must be 1-255 bytes)", protocol);
+                SSL_CTX_free(ctx);
+                return std::unexpected(Error{ErrorCategory::kTls, kTlsContextCreationFailed});
+            }
+
+            // Add length prefix
+            protos->push_back(static_cast<unsigned char>(protocol.length()));
+            // Add protocol string
+            protos->insert(protos->end(), protocol.begin(), protocol.end());
         }
-        SSL_CTX_set_alpn_protos(ctx, protos.data(), protos.size());
+
+        if (role == TlsRole::kServer)
+        {
+            // Server: Install callback to select protocol during handshake
+            // The callback receives a pointer to our protocols vector (protos.get())
+            // This pointer stays valid because we move the unique_ptr into TlsContext below,
+            // and the heap allocation address never changes even when TlsContext is moved.
+            SSL_CTX_set_alpn_select_cb(
+                    ctx,
+                    [](SSL* ssl, const unsigned char** out, unsigned char* outlen, const unsigned char* in,
+                       unsigned int inlen, void* arg) -> int
+                    {
+                        (void) ssl;  // Unused but required by OpenSSL API
+
+                        auto* protocols = static_cast<std::vector<unsigned char>*>(arg);
+
+                        // Sanity check (should never happen if constructed properly)
+                        if (!protocols || protocols->empty())
+                        {
+                            ALOG_WARN("ALPN callback invoked but no server protocols configured");
+                            return SSL_TLSEXT_ERR_NOACK;
+                        }
+
+                        // Use OpenSSL's helper function to find the first match
+                        // It iterates through the client's protocol list and finds the first
+                        // protocol that also appears in the server's list (RFC 7301 compliant)
+                        const int result = SSL_select_next_proto(
+                                const_cast<unsigned char**>(out),  // Output: selected protocol
+                                outlen,  // Output: selected protocol length
+                                protocols->data(),  // Server's supported protocols
+                                static_cast<unsigned int>(protocols->size()),  // Server list length
+                                in,  // Client's advertised protocols
+                                inlen  // Client list length
+                        );
+
+                        if (result == OPENSSL_NPN_NEGOTIATED)
+                        {
+                            // Successfully negotiated a protocol
+                            std::string_view selected(reinterpret_cast<const char*>(*out), *outlen);
+                            ALOG_DEBUG("ALPN negotiated: {}", selected);
+                            return SSL_TLSEXT_ERR_OK;
+                        }
+
+                        // No matching protocol found between client and server
+                        ALOG_WARN("ALPN negotiation failed: no matching protocol");
+
+                        // Return NOACK to continue connection without ALPN (lenient mode)
+                        // Use SSL_TLSEXT_ERR_ALERT_FATAL for strict mode (abort handshake)
+                        return SSL_TLSEXT_ERR_NOACK;
+                    },
+                    protos.get()  // Pass raw pointer - remains valid after move below
+            );
+            ALOG_DEBUG("ALPN server callback configured with {} protocols", config.alpn_protocols.size());
+        }
+        else  // Client
+        {
+            // Client: Advertise supported protocols in ClientHello
+            // OpenSSL copies this data internally, so we don't strictly need to persist it,
+            // but we do for consistency with the server-side storage approach.
+            //
+            // NOTE: SSL_CTX_set_alpn_protos returns 0 on SUCCESS (opposite of most OpenSSL functions!)
+            if (SSL_CTX_set_alpn_protos(ctx, protos->data(), static_cast<unsigned int>(protos->size())) != 0)
+            {
+                ALOG_ERROR("Failed to set ALPN protocols: {}", detail::GetOpensslError());
+                SSL_CTX_free(ctx);
+                return std::unexpected(Error{ErrorCategory::kTls, kTlsContextCreationFailed});
+            }
+
+            ALOG_DEBUG("ALPN client protocols configured: {} protocols", config.alpn_protocols.size());
+        }
+
+        // Move the heap-allocated vector into storage
+        // The pointer passed to the server callback (protos.get()) remains valid
+        // because the heap allocation address is stable - only the unique_ptr moves
+        alpn_storage = std::move(protos);
     }
 
-    return TlsContext{ctx, role == TlsRole::kServer};
+    return TlsContext{ctx, role == TlsRole::kServer, std::move(alpn_storage)};
 }
 
 bool IsKtlsAvailable()
 {
+    // Check if TLS kernel module is loaded
+    // Method 1: Check /proc/modules
     if (std::ifstream modules("/proc/modules"); modules.is_open())
     {
         std::string line;
@@ -206,6 +301,7 @@ bool IsKtlsAvailable()
         }
     }
 
+    // Method 2: Check module state directly
     if (std::ifstream tls_module("/sys/module/tls/initstate"); tls_module.is_open())
     {
         std::string state;
@@ -220,7 +316,7 @@ Result<void> RequireKtls()
 {
 #if !KIO_HAVE_OPENSSL3
     ALOG_ERROR("KTLS requires OpenSSL 3.0+, found: {}", OpenSSL_version(OPENSSL_VERSION));
-    return std::unexpected(Error{ErrorCategory::Tls, kTlsKtlsEnableFailed});
+    return std::unexpected(Error{ErrorCategory::kTls, kTlsKtlsEnableFailed});
 #endif
 
     if (!IsKtlsAvailable())

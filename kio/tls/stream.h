@@ -16,28 +16,22 @@ namespace kio::tls
 /**
  * @brief Async TLS connection with mandatory KTLS offload
  *
- * Features:
- * - Automatic KTLS enablement (OpenSSL 3.0 handles everything)
- * - KTLS is mandatory - connection fails if KTLS cannot be enabled
- * - Zero-copy sendfile when KTLS is active
- * - Async handshake and shutdown using io_uring poll
+ * KTLS REQUIREMENTS:
+ * 1. OpenSSL 3.0+ (checked at compile time)
+ * 2. Kernel TLS module loaded: `sudo modprobe tls`
+ * 3. KTLS-compatible cipher:
+ *    - TLS 1.2: AES-128-GCM, AES-256-GCM
+ *    - TLS 1.3: AES-128-GCM, AES-256-GCM, CHACHA20-POLY1305
+ * 4. Kernel 5.2+ for TX, 5.11+ for RX (we require 6.0+)
  *
- * Usage:
- * @code
- * auto ctx_res = TlsContext::make_server(config);
- * TlsStream stream(worker, std::move(socket), *ctx_res, TlsRole::Server);
+ * KTLS LIMITATIONS:
+ * - Session tickets disabled (TLS 1.3 servers) to prevent post-handshake messages
+ * - No renegotiation support
+ * - Certificate changes require new connection
  *
- * co_await stream.async_handshake();
- * co_await stream.async_write("Hello!");
- * auto n = co_await stream.async_read(buffer);
- * co_await stream.async_close();  // Clean shutdown
- * @endcode
- *
- * @note KTLS Requirement: This stream requires KTLS to be successfully
- * negotiated. Ensure:
- * - OpenSSL 3.0+ is installed
- * - Kernel TLS module is loaded (`sudo modprobe tls`)
- * - A KTLS-compatible cipher is used (AES-GCM or ChaCha20-Poly1305)
+ * FAILURE MODES:
+ * - EnableKtls() returns error if KTLS cannot be negotiated
+ * - Connection MUST be torn down - no fallback to userspace TLS
  */
 class TlsStream
 {

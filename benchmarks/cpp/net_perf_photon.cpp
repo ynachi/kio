@@ -7,7 +7,7 @@
 // Command-line flags
 DEFINE_string(ip, "0.0.0.0", "IP address to bind to");
 DEFINE_uint64(port, 8080, "Port to listen on");
-DEFINE_uint64(workers, 4, "Number of worker threads");
+DEFINE_uint64(workers, 1, "Number of worker threads");
 DEFINE_uint64(backlog, 4096, "Listen backlog");
 DEFINE_uint64(buf_size, 8192, "Buffer size for reading");
 
@@ -105,7 +105,7 @@ int main(int argc, char** argv)
     photon::WorkPool wp(FLAGS_workers, photon::INIT_EVENT_IOURING, photon::INIT_IO_NONE, 128 * 1024);
     while (true)
     {
-        auto stream = server->accept();
+        auto *stream = server->accept();
         if (stream == nullptr)
         {
             LOG_ERRNO_RETURN(0, -1, "failed to accept connection");

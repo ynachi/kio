@@ -4,7 +4,6 @@
 #include "worker.h"
 
 #include <chrono>
-#include <cstddef>
 #include <fcntl.h>
 #include <functional>
 #include <liburing.h>
@@ -53,34 +52,34 @@ void Worker::CheckSyscallReturn(const int ret)
 
 int Worker::SubmitSqesWait()
 {
+    io_uring_cqe *cqe_ptr = nullptr;
+
+    // Calculate adaptive timeout
+    uint32_t timeout_us = std::min(
+        config_.heartbeat_interval_us << consecutive_idle_ticks_,
+        10000u  // Cap at 10ms max sleep
+    );
+
     // Define the heartbeat interval (max sleep time)
     __kernel_timespec ts{};
     ts.tv_sec = 0;
-    ts.tv_nsec = static_cast<uint32_t>(config_.heartbeat_interval_us * 1000);
+    ts.tv_nsec = config_.heartbeat_interval_us * 1000;
 
-    // Busy wait in kernel for this many microseconds before sleeping.
-    // This helps maintain high throughput during bursts by avoiding context switches.
-    // Requires Kernel 5.12+ (which we satisfy as we check for 6.0+).
-    const unsigned min_wait = config_.busy_wait_us;
+    // Only busy-wait when fully active (tick 0)
+    // Once idle, disable busy-wait to save CPU
+    const unsigned min_wait = (consecutive_idle_ticks_ == 0)
+                        ? config_.busy_wait_us
+                        : 0;
 
-    io_uring_cqe *cqe_ptr = nullptr;
     // sigmask is null
 
     // io_uring_submit_and_wait_min_timeout is the hybrid poll primitive.
     // It submits SQEs, then busy loops for 'min_wait' usec looking for completions.
     // If nothing arrives, it sleeps until 'ts' expires or an event arrives.
-    const int ret = io_uring_submit_and_wait_min_timeout(&ring_, &cqe_ptr, 1, &ts, min_wait, nullptr);
+    const int ret = io_uring_submit_and_wait_min_timeout(
+        &ring_, &cqe_ptr, 1, &ts, min_wait, nullptr
+    );
 
-    if (ret == -ETIME)
-    {
-        // Heartbeat tick (timeout expired).
-        return 0;
-    }
-
-    if (ret < 0)
-    {
-        CheckSyscallReturn(ret);
-    }
     return ret;
 }
 
@@ -137,6 +136,8 @@ void Worker::Loop()
 
     while (!stop_token_.stop_requested())
     {
+        bool did_work = false;
+
         // 1. Drain Task Queue (with budget)
         // This ensures latency is minimized for tasks posted from other threads.
         std::coroutine_handle<> h;
@@ -152,12 +153,33 @@ void Worker::Loop()
         // If the task queue processing generated SQEs, this submits them.
         // If nothing happened, we wait for IO or the timeout (Heartbeat).
         // We ignore the return value here as we process completions below regardless.
-        SubmitSqesWait();
+        int ret = SubmitSqesWait();
+        if (ret < 0)
+        {
+            // check for fatal error
+            CheckSyscallReturn(ret);
+        } else if (ret > 0)
+        {
+            did_work = true;
+        }
+
 
         // 3. Process Completions
         // We don't need to check the return of submit_sqes_wait because we just
         // want to drain whatever is in the CQ ring.
-        ProcessCompletions();
+        unsigned processed = ProcessCompletions();
+        if (processed > 0) {
+            did_work = true;
+        }
+
+        // 4. Adjust idle state
+        if (did_work) {
+            // INSTANTLY back to fast mode
+            consecutive_idle_ticks_ = 0;
+        } else {
+            // Gradually slow down
+            consecutive_idle_ticks_++;
+        }
     }
 
     ALOG_INFO("Worker {} loop shut down completed", this->id_);

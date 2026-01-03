@@ -115,7 +115,7 @@ int main(int argc, char** argv)
     gflags::ParseCommandLineFlags(&argc, &argv, true);
 
     signal(SIGPIPE, SIG_IGN);
-    alog::configure(8192, LogLevel::Disabled);
+    alog::Configure(8192, LogLevel::kDisabled);
 
     // Create a listening socket
     auto server_fd_exp = net::create_tcp_server_socket(FLAGS_ip, FLAGS_port, static_cast<int>(FLAGS_backlog));

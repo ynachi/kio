@@ -106,7 +106,8 @@ class Parser
     // Internal: parse frame starting at a given position
     std::expected<FrameHeader, ParseError> parse_frame_internal(std::span<const char> data, size_t depth);
     // helpers
-    std::expected<FrameHeader, ParseError> extract_bulk_header(std::span<const char> data, FrameType type) const;
+    [[nodiscard]] std::expected<FrameHeader, ParseError> extract_bulk_header(std::span<const char> data,
+                                                                             FrameType type) const;
 
 public:
     explicit Parser(const ParserConfig& config) : buffer_(config.initial_buffer), config_(config) {}
