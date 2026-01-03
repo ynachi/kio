@@ -22,16 +22,17 @@ openssl x509 -req -days 365 -in server.csr \
     -out server.crt
  */
 
-#include <format>
-#include <gflags/gflags.h>
-#include <iostream>
-
 #include "kio/core/async_logger.h"
 #include "kio/core/worker.h"
 #include "kio/net/net.h"
 #include "kio/sync/sync_wait.h"
 #include "kio/tls/context.h"
 #include "kio/tls/listener.h"
+
+#include <format>
+#include <iostream>
+
+#include <gflags/gflags.h>
 
 // CLI flags
 DEFINE_string(host, "127.0.0.1", "Server host");
@@ -41,7 +42,7 @@ DEFINE_string(path, "/", "HTTP path for http mode");
 DEFINE_uint64(bytes, 10 * 1024 * 1024, "Bytes to transfer for perf mode");
 DEFINE_string(ca, "/home/ynachi/test_certs/ca.crt",
               "CA certificate path, optional but must be provided if verify is true");
-DEFINE_bool(verify, false, "Enable certificate verification");
+DEFINE_bool(verify, true, "Enable certificate verification");
 
 using namespace kio;
 using namespace kio::io;
@@ -125,15 +126,15 @@ Task<Result<void>> EchoTest(Worker& worker, TlsContext& ctx, std::string_view ho
     ALOG_INFO("   KTLS:    {}", stream.IsKtlsActive() ? "active" : "NOT active");
 
     const std::vector<std::string> messages = {
-            "Hello from kio client!\n",
-            "Testing KTLS echo...\n",
-            "Message number 3\n",
-            "Final message\n",
+        "Hello from kio client!\n",
+        "Testing KTLS echo...\n",
+        "Message number 3\n",
+        "Final message\n",
     };
 
     char buffer[1024];
 
-    for (const auto& msg: messages)
+    for (const auto& msg : messages)
     {
         std::string_view msg_trimmed(msg.data(), !msg.empty() && msg.back() == '\n' ? msg.size() - 1 : msg.size());
         ALOG_INFO("Sending: '{}'", msg_trimmed);
@@ -156,7 +157,7 @@ Task<Result<void>> EchoTest(Worker& worker, TlsContext& ctx, std::string_view ho
 
         std::string_view response(buffer, bytes_read);
         std::string_view response_trimmed(
-                response.data(), !response.empty() && response.back() == '\n' ? response.size() - 1 : response.size());
+            response.data(), !response.empty() && response.back() == '\n' ? response.size() - 1 : response.size());
         ALOG_INFO("Received: '{}'", response_trimmed);
 
         if (response != msg)
@@ -254,15 +255,15 @@ int main(int argc, char* argv[])
     alog::Configure(4096, LogLevel::kDebug);
 
     gflags::SetUsageMessage(
-            "KTLS Client Demo - Test TLS client with kio framework\n\n"
-            "Modes:\n"
-            "  simple - Minimal test (connect, send, receive, close)\n"
-            "  echo   - Send messages and verify echo response\n"
-            "  perf   - Throughput benchmark\n\n"
-            "Examples:\n"
-            "  ktls_client_demo --mode=simple --host=127.0.0.1 --port=8080\n"
-            "  ktls_client_demo --mode=echo --host=127.0.0.1 --port=8080\n"
-            "  ktls_client_demo --mode=perf --bytes=104857600");
+        "KTLS Client Demo - Test TLS client with kio framework\n\n"
+        "Modes:\n"
+        "  simple - Minimal test (connect, send, receive, close)\n"
+        "  echo   - Send messages and verify echo response\n"
+        "  perf   - Throughput benchmark\n\n"
+        "Examples:\n"
+        "  ktls_client_demo --mode=simple --host=127.0.0.1 --port=8080\n"
+        "  ktls_client_demo --mode=echo --host=127.0.0.1 --port=8080\n"
+        "  ktls_client_demo --mode=perf --bytes=104857600");
 
     gflags::ParseCommandLineFlags(&argc, &argv, true);
 
@@ -329,7 +330,7 @@ int main(int argc, char* argv[])
     else
     {
         ALOG_ERROR("Unknown mode: '{}'. Use 'raw', 'simple', 'echo', 'http', or 'perf'.", FLAGS_mode);
-        (void) worker.RequestStop();
+        (void)worker.RequestStop();
         return 1;
     }
 
@@ -342,6 +343,6 @@ int main(int argc, char* argv[])
         ALOG_INFO("✅ Test completed successfully!");
     }
 
-    (void) worker.RequestStop();
+    (void)worker.RequestStop();
     return result.has_value() ? 0 : 1;
 }

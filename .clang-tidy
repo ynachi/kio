@@ -18,6 +18,8 @@ Checks: >
   -cppcoreguidelines-pro-type-union-access,
   -cppcoreguidelines-pro-type-vararg,
   -cppcoreguidelines-avoid-reference-coroutine-parameters,
+  -cppcoreguidelines-coroutine-lambdas-confinement,
+  -cppcoreguidelines-avoid-const-or-ref-data-members,
   google-*,
   -google-readability-todo,
   -google-runtime-references,
@@ -83,6 +85,8 @@ CheckOptions:
   - key: readability-identifier-naming.VariableCase
     value: lower_case
   - key: readability-identifier-naming.ParameterCase
+    value: lower_case
+  - key: readability-identifier-naming.ConstantParameterCase
     value: lower_case
   - key: readability-identifier-naming.LocalVariableCase
     value: lower_case

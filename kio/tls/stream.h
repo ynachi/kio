@@ -4,12 +4,13 @@
 
 #ifndef KIO_TLS_STREAM_H
 #define KIO_TLS_STREAM_H
-#include <openssl/ssl.h>
-#include <string_view>
-
 #include "context.h"
 #include "kio/core/worker.h"
 #include "kio/net/socket.h"
+
+#include <string_view>
+
+#include <openssl/ssl.h>
 
 namespace kio::tls
 {
@@ -20,8 +21,8 @@ namespace kio::tls
  * 1. OpenSSL 3.0+ (checked at compile time)
  * 2. Kernel TLS module loaded: `sudo modprobe tls`
  * 3. KTLS-compatible cipher:
- *    - TLS 1.2: AES-128-GCM, AES-256-GCM
- *    - TLS 1.3: AES-128-GCM, AES-256-GCM, CHACHA20-POLY1305
+ * - TLS 1.2: AES-128-GCM, AES-256-GCM
+ * - TLS 1.3: AES-128-GCM, AES-256-GCM, CHACHA20-POLY1305
  * 4. Kernel 5.2+ for TX, 5.11+ for RX (we require 6.0+)
  *
  * KTLS LIMITATIONS:
@@ -48,7 +49,7 @@ class TlsStream
 
     Result<void> EnableKtls();
     [[nodiscard]] Task<Result<void>> DoHandshakeStep() const;
-    [[nodiscard]] Task<Result<void>> DoShutdownStep();
+    [[nodiscard]] Task<Result<void>> DoShutdownStep() const;
 
 public:
     // Takes ownership of the socket
@@ -125,7 +126,7 @@ public:
      *
      * @return void on success (including if peer already closed)
      */
-    [[nodiscard]] Task<Result<void>> AsyncShutdown();
+    [[nodiscard]] Task<Result<void>> AsyncShutdown() const;
 
     /**
      * @brief Shutdown TLS and close the underlying socket

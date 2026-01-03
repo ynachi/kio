@@ -5,23 +5,24 @@
 #ifndef KIO_WORKER_H
 #define KIO_WORKER_H
 
-#include <cstddef>
-#include <expected>
-#include <fcntl.h>
-#include <filesystem>
-#include <functional>
-#include <latch>
-#include <liburing.h>
-#include <span>
-#include <thread>
-#include <tuple>
-
 #include "coro.h"
 #include "errors.h"
 #include "kio/net/net.h"
 #include "kio/net/socket.h"
 #include "kio/sync/mpsc_queue.h"
 #include "safe_completion.h"
+
+#include <cstddef>
+#include <expected>
+#include <filesystem>
+#include <functional>
+#include <latch>
+#include <span>
+#include <thread>
+#include <tuple>
+
+#include <fcntl.h>
+#include <liburing.h>
 
 namespace kio::io
 {
@@ -84,7 +85,7 @@ struct WorkerConfig
 /**
  * IoUringAwaitable - Using SafeIoCompletion for robust cancellation
  */
-template<typename Prep, typename... Args>
+template <typename Prep, typename... Args>
 struct IoUringAwaitable
 {
     Worker& worker;
@@ -96,18 +97,18 @@ struct IoUringAwaitable
     // Heap-allocated, ref-counted completion state
     SafeIoCompletion* completion_state{nullptr};
 
-    bool await_ready() const noexcept { return false; }
+    bool await_ready() const noexcept { return false; }  // NOLINT
 
-    bool await_suspend(std::coroutine_handle<> h);
+    bool await_suspend(std::coroutine_handle<> h);  // NOLINT
 
-    [[nodiscard]] Result<int> await_resume() noexcept
+    [[nodiscard]] Result<int> await_resume() noexcept  // NOLINT
     {
         // Get result
         int res = completion_state->result;
 
         // We are done with the object on the User side. Release User ref.
         completion_state->Release();
-        completion_state = nullptr; // Clear to prevent dtor from abandoning
+        completion_state = nullptr;  // Clear to prevent dtor from abandoning
 
         if (res < 0)
         {
@@ -120,8 +121,8 @@ struct IoUringAwaitable
         return res;
     }
 
-    explicit IoUringAwaitable(Worker& worker, Prep prep, OnSuccess on_success, Args... args) :
-        worker(worker), io_uring_prep(std::move(prep)), on_success(on_success), io_args(args...)
+    explicit IoUringAwaitable(Worker& worker, Prep prep, OnSuccess on_success, Args... args)
+        : worker(worker), io_uring_prep(std::move(prep)), on_success(on_success), io_args(args...)
     {
     }
 
@@ -141,14 +142,14 @@ struct IoUringAwaitable
     IoUringAwaitable& operator=(IoUringAwaitable&&) = delete;
 };
 
-template<typename Prep, typename... Args>
+template <typename Prep, typename... Args>
 auto MakeUringAwaitable(Worker& worker, Prep&& prep, void (*on_success)(Worker&, int), Args&&... args)
 {
     return IoUringAwaitable<std::decay_t<Prep>, std::decay_t<Args>...>(worker, std::forward<Prep>(prep), on_success,
                                                                        std::forward<Args>(args)...);
 }
 
-template<typename Prep, typename... Args>
+template <typename Prep, typename... Args>
 auto MakeUringAwaitable(Worker& worker, Prep&& prep, Args&&... args)
 {
     return IoUringAwaitable<std::decay_t<Prep>, std::decay_t<Args>...>(worker, std::forward<Prep>(prep), nullptr,
@@ -158,7 +159,7 @@ auto MakeUringAwaitable(Worker& worker, Prep&& prep, Args&&... args)
 class Worker
 {
     friend struct internal::WorkerAccess;
-    template<typename, typename...>
+    template <typename, typename...>
     friend struct IoUringAwaitable;
 
     io_uring ring_{};
@@ -200,6 +201,7 @@ class Worker
     void Post(std::coroutine_handle<> h);
     io_uring& GetRing() noexcept { return ring_; }
     static void HandleCqe(io_uring_cqe* cqe);
+    void Loop();
 
 public:
     [[nodiscard]] bool IsOnWorkerThread() const;
@@ -212,7 +214,6 @@ public:
     void WaitShutdown() const { shutdown_latch_.wait(); }
     [[nodiscard]] bool RequestStop();
     void Initialize();
-    void Loop();
     [[nodiscard]] bool IsRunning() const noexcept { return !stopped_.load(std::memory_order_acquire); }
 
     Worker(const Worker&) = delete;
@@ -304,7 +305,7 @@ public:
 
     [[nodiscard]] auto AsyncFallocate(int fd, int mode, off_t size)
     {
-        auto prep = [](io_uring_sqe* sqe, int file_fd, int p_mode, off_t offset, off_t len)
+        auto prep = [](io_uring_sqe* sqe, const int file_fd, const int p_mode, const off_t offset, const off_t len)
         { io_uring_prep_fallocate(sqe, file_fd, p_mode, offset, len); };
         return MakeUringAwaitable(*this, prep, fd, mode, static_cast<off_t>(0), size);
     }
@@ -356,9 +357,9 @@ struct SwitchToWorker
 
     explicit SwitchToWorker(Worker& worker) : worker(worker) {}
 
-    bool await_ready() const noexcept { return worker.IsOnWorkerThread(); }  // NOLINT
-    void await_suspend(std::coroutine_handle<> h) const { internal::WorkerAccess::Post(worker, h); }
-    void await_resume() const noexcept {}  // NOLINT
+    bool await_ready() const noexcept { return worker.IsOnWorkerThread(); }                           // NOLINT
+    void await_suspend(std::coroutine_handle<> h) const { internal::WorkerAccess::Post(worker, h); }  // NOLINT
+    void await_resume() const noexcept {}                                                             // NOLINT
 };
 
 namespace internal
@@ -374,8 +375,7 @@ inline io_uring& WorkerAccess::GetRing(Worker& worker) noexcept
 }
 }  // namespace internal
 
-
-template<typename Prep, typename... Args>
+template <typename Prep, typename... Args>
 bool IoUringAwaitable<Prep, Args...>::await_suspend(std::coroutine_handle<> h)
 {
     assert(worker.IsOnWorkerThread() && "kio::async_* operation was called from the wrong thread.");
