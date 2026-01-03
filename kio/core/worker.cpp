@@ -262,9 +262,6 @@ bool Worker::IsOnWorkerThread() const
     return std::this_thread::get_id() == thread_id_;
 }
 
-// ... Rest of Async methods are unchanged from previous versions,
-// they use the updated MakeUringAwaitable automatically.
-
 Task<Result<void>> Worker::AsyncReadExact(const int client_fd, std::span<char> buf)
 {
     size_t total_bytes_read = 0;

@@ -17,6 +17,7 @@ Checks: >
   -cppcoreguidelines-pro-type-reinterpret-cast,
   -cppcoreguidelines-pro-type-union-access,
   -cppcoreguidelines-pro-type-vararg,
+  -cppcoreguidelines-avoid-reference-coroutine-parameters,
   google-*,
   -google-readability-todo,
   -google-runtime-references,

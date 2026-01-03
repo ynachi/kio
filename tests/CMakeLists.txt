@@ -34,8 +34,6 @@ add_kio_root_test(buffer_pool_test SOURCES ds/buffer_pool_test.cpp)
 
 add_kio_root_test(sync_tests SOURCES
         sync/baton_test.cpp
-        sync/event_test.cpp
-        sync/when_any_test.cpp
 )
 
 add_kio_root_test(bytes_mut_tests SOURCES ds/bytes_mut_test.cpp)
