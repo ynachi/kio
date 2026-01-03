@@ -1,261 +1,205 @@
-//
-// Created by Yao ACHI on 22/11/2025.
-//
-
 #ifndef KIO_BATON_H
 #define KIO_BATON_H
 
 #include <atomic>
-#include <cassert>
-#include <chrono>
 #include <coroutine>
-#include <liburing.h>
+#include <cassert>
 
-#include "kio/core/coro.h"
 #include "kio/core/worker.h"
 
 namespace kio::sync
 {
 
 /**
- * @brief Lock-free synchronization primitive for Kio coroutines.
- * Allows cross-thread signaling that safely resumes coroutines on their
- * owning Worker thread. This is a 1-to-1 syn primitive.
+ * @brief AsyncBaton - Lock-free multi-waiter coroutine synchronization primitive.
+ *
+ * A synchronization primitive that allows multiple coroutines to wait until
+ * another entity posts.
+ * * CRITICAL: Maintains Thread Affinity.
+ * Waiters are resumed on their original Worker thread to respect 
+ * io_uring SINGLE_ISSUER constraints.
+ *
+ * Architecture:
+ * - Supports MULTIPLE waiting coroutines (Multi-Consumer).
+ * - Waiters form a lock-free LIFO linked list via Awaiter objects.
+ * - Each awaiter captures its current Worker to ensure it is resumed there.
+ *
+ * Usage patterns:
+ *
+ *@code
+ * // One-shot signal
+ * AsyncBaton ready;
+ * co_await ready.Wait(worker);
+ * ready.Post();
+ *
+ * // Broadcast to multiple waiters (on different workers)
+ * AsyncBaton broadcast;
+ * // ... N coroutines await ...
+ * broadcast.Post();  // All wake up on their respective threads
+ *
+ * // Reusable event (manual reset)
+ * ready.Post();
+ * co_await ready.Wait(worker);  // Proceeds immediately
+ * ready.Reset();
+ * co_await ready.Wait(worker);  // Blocks until next Post()
+ * @endcode
  */
 class AsyncBaton
 {
 public:
-    explicit AsyncBaton(io::Worker& owner) : owner_(owner) {}
+    struct Awaiter;
 
+    AsyncBaton() noexcept : state_(nullptr) {}
+
+    // Non-copyable/movable to ensure pointer stability (state_ stores 'this')
     AsyncBaton(const AsyncBaton&) = delete;
     AsyncBaton& operator=(const AsyncBaton&) = delete;
     AsyncBaton(AsyncBaton&&) = delete;
     AsyncBaton& operator=(AsyncBaton&&) = delete;
 
-    /**
-     * @brief Signal the baton from any thread.
-     * If a coroutine is waiting, it will be scheduled on the owner Worker.
-     * Idempotent - multiple calls are safe.
-     */
-    void Notify() noexcept
+    ~AsyncBaton()
     {
-        // Exchange returns the *previous* value.
-        // Acq/Rel ensures the visibility of data protected by this baton.
-        if (const uint8_t prev = state_.exchange(SET, std::memory_order_acq_rel); prev == WAITING)
-        {
-            // We are the one effectively "waking" the waiter.
-            // This fence ensures that the writing to 'waiter_' in wait()
-            // is visible to us now.
-            std::atomic_thread_fence(std::memory_order_acquire);
+        // Debug check: Destroying a baton while coroutines are still suspended
+        // waiting on it is undefined behavior (Use-After-Free risk).
+        // The state must be either Signaled (this) or Empty (nullptr).
+        void* current_state = state_.load(std::memory_order_relaxed);
+        assert((current_state == static_cast<void*>(this) || current_state == nullptr) &&
+               "Destroying AsyncBaton while coroutines are still waiting!");
+    }
 
-            if (const auto handle = waiter_.load(std::memory_order_relaxed))
+    /**
+     * @brief Signals the baton.
+     * Resumes ALL currently waiting coroutines on their respective Worker threads.
+     * Thread-safe, can be called from any thread.
+     * * Any future awaiters will proceed immediately until Reset() is called.
+     */
+    void Post() noexcept
+    {
+        void* const kSignaledState = this;
+
+        // Atomically swap to signaled state
+        void* old_state = state_.exchange(kSignaledState, std::memory_order_acq_rel);
+
+        if (old_state != kSignaledState && old_state != nullptr)
+        {
+            // We are the winner who transitioned to Signaled.
+            // 'old_state' is the head of the linked list of waiters.
+            // Walk the list and resume everyone on their Worker.
+            auto* awaiter = static_cast<Awaiter*>(old_state);
+            while (awaiter != nullptr)
             {
-                io::internal::WorkerAccess::Post(owner_, handle);
+                auto* next = awaiter->next;
+                // Resume on the awaiter's original Worker (thread affinity)
+                io::internal::WorkerAccess::Post(*awaiter->worker, awaiter->handle);
+                awaiter = next;
             }
         }
+        // If old_state == signaled_state: Already signaled, idempotent
+        // If old_state == nullptr: No waiters, just became signaled
     }
 
     /**
-     * @brief Check if notified.
+     * @brief Checks if signaled without suspending.
+     * Thread-safe, can be called from any thread.
      */
-    [[nodiscard]]
-    bool Ready() const noexcept
+    [[nodiscard]] bool IsReady() const noexcept
     {
-        return state_.load(std::memory_order_acquire) == SET;
+        return state_.load(std::memory_order_acquire) == static_cast<const void*>(this);
     }
 
     /**
-     * @brief Reset for reuse.
-     * * MUST be called after notify() completes and waiter has resumed.
-     * Only safe to call from the owner Worker thread.
+     * @brief Resets the baton to not-signaled state.
+     * * Only transitions from Signaled -> Empty.
+     * If concurrent operations are ongoing, this may be a no-op.
+     * * @warning Not thread-safe relative to concurrent Wait() operations.
+     * Should typically be called after all waiters have been resumed
+     * and completed their work.
      */
     void Reset() noexcept
     {
-        const uint8_t current = state_.load(std::memory_order_acquire);
-        assert(current != WAITING && "reset() called while coroutine is suspended!");
-
-        state_.store(NOT_SET, std::memory_order_release);
-        waiter_.store(nullptr, std::memory_order_relaxed);
+        // Use CAS to ensure we only reset from Signaled state
+        void* expected = this;
+        state_.compare_exchange_strong(
+            expected, 
+            nullptr,
+            std::memory_order_acq_rel,   // Success: publish the reset
+            std::memory_order_relaxed);  // Failure: concurrent operation
     }
 
     /**
-     * @brief Suspend until notified.
-     * * MUST be called from owner Worker thread.
+     * @brief Awaitable for suspending until signaled.
+     * * Each awaiter is allocated on the coroutine frame and forms a node
+     * in the intrusive lock-free linked list.
      */
-    [[nodiscard]]
-    auto Wait() noexcept
+    struct Awaiter
     {
-        struct Awaiter
+        AsyncBaton& baton;
+        std::coroutine_handle<> handle;
+        io::Worker* worker;
+        Awaiter* next{nullptr};
+
+        explicit Awaiter(AsyncBaton& b, io::Worker& w) : baton(b), worker(&w) {}
+
+        bool await_ready() const noexcept
         {
-            AsyncBaton& baton_;
+            return baton.IsReady();
+        }
 
-            bool AwaitReady() const noexcept { return baton_.state_.load(std::memory_order_acquire) == SET; }
-
-            bool AwaitSuspend(std::coroutine_handle<> h) noexcept
-            {
-                baton_.waiter_.store(h, std::memory_order_relaxed);
-
-                std::atomic_thread_fence(std::memory_order_release);
-
-                if (uint8_t expected = NOT_SET; baton_.state_.compare_exchange_strong(
-                            expected, WAITING, std::memory_order_acq_rel, std::memory_order_acquire))
-                {
-                    return true;
-                }
-
-                // CAS failed. Since we are the only consumer, this MUST mean
-                // concurrent notify() happened and state is now SET.
-                return false;
-            }
-
-            void await_resume() const noexcept {}
-        };
-
-        return Awaiter{*this};
-    }
-
-    /**
-     * @brief Suspend until notified or timeout expires.
-     *
-     * @param timeout Duration to wait.
-     * @return true if signaled (baton set), false if timeout occurred.
-     */
-    Task<bool> WaitFor(std::chrono::nanoseconds timeout)
-    {
-        co_await io::SwitchToWorker(owner_);
-
-        // 1. Setup stable state on the stack.
-        // Because wait_for is a coroutine, these variables persist across suspension points.
-        io::IoCompletion timer_completion{};
-        timer_completion.result = 1;  // Sentinel value (io_uring returns negative errors)
-
-        __kernel_timespec ts{};
-        ts.tv_sec = std::chrono::duration_cast<std::chrono::seconds>(timeout).count();
-        ts.tv_nsec = (timeout % std::chrono::seconds(1)).count();
-
-        bool timer_submitted = false;
-
-        // 2. Awaiter that initiates both the Baton wait and the Timer
-        struct RaceAwaiter
+        bool await_suspend(std::coroutine_handle<> coro_handle) noexcept
         {
-            AsyncBaton& baton;
-            io::IoCompletion& completion;
-            __kernel_timespec& ts;
-            bool& submitted;
+            handle = coro_handle;
 
-            bool await_ready() const noexcept { return baton.Ready(); }
+            const void* signaled_state = &baton;
+            void* old_head = baton.state_.load(std::memory_order_acquire);
 
-            bool await_suspend(std::coroutine_handle<> h)
+            // CAS loop to push ourselves onto the head of the list
+            while (true)
             {
-                // Register with Baton first
-                baton.waiter_.store(h, std::memory_order_relaxed);
-                std::atomic_thread_fence(std::memory_order_release);
-
-                // Try to transition to WAITING
-                if (uint8_t expected = NOT_SET; !baton.state_.compare_exchange_strong(
-                            expected, WAITING, std::memory_order_acq_rel, std::memory_order_acquire))
+                if (old_head == signaled_state)
                 {
-                    // Baton was already SET, resume immediately
+                    // Became signaled while we were preparing to wait.
+                    // Return false to resume immediately without suspending.
                     return false;
                 }
 
-                // Submit Timer
-                auto& ring = io::internal::WorkerAccess::GetRing(baton.owner_);
-                io_uring_sqe* sqe = io_uring_get_sqe(&ring);
+                // Link to the previous head
+                next = static_cast<Awaiter*>(old_head);
 
-                if (!sqe)
+                if (baton.state_.compare_exchange_weak(
+                        old_head,
+                        this,
+                        std::memory_order_release,   // Success: publish awaiter
+                        std::memory_order_acquire))  // Failure: reload state
                 {
-                    // Ring full. Try to rollback baton state to allow immediate resume (simulate error/ready)
-                    if (uint8_t val = WAITING; baton.state_.compare_exchange_strong(
-                                val, NOT_SET, std::memory_order_acq_rel, std::memory_order_acquire))
-                    {
-                        // Successfully unregistered, treat as immediate timeout due to resource exhaustion
-                        return false;
-                    }
-                    // Baton was set concurrently, treat as success
-                    return false;
-                }
-
-                completion.handle = h;
-                io_uring_prep_timeout(sqe, &ts, 0, 0);
-                io_uring_sqe_set_data(sqe, &completion);
-                submitted = true;
-
-                return true;
-            }
-
-            void await_resume() {}
-        };
-
-        co_await RaceAwaiter{*this, timer_completion, ts, timer_submitted};
-
-        // 3. Handle the Race Result
-        // We are now running again. Check if the timer is what woke us up.
-        // If timer_completion.result is still 1, the timer has NOT run.
-        if (timer_submitted && timer_completion.result == 1)
-        {
-            // The timer is still pending in the io_uring or kernel.
-            // We must cancel it and wait for the cancellation to complete.
-            // This ensures 'timer_completion' (on our stack) is not destroyed while the kernel uses it.
-            struct CancelAwaiter
-            {
-                AsyncBaton& self;
-                io::IoCompletion& tc;
-
-                bool await_ready() { return false; }
-                bool await_suspend(std::coroutine_handle<> h)
-                {
-                    auto& ring = io::internal::WorkerAccess::GetRing(self.owner_);
-                    io_uring_sqe* sqe = io_uring_get_sqe(&ring);
-                    if (sqe)
-                    {
-                        // Cancel the timeout using the pointer as user_data
-                        io_uring_prep_timeout_remove(sqe, reinterpret_cast<__u64>(&tc), 0);
-                        // We don't track the cancel op itself, passing nullptr is safe
-                        io_uring_sqe_set_data(sqe, nullptr);
-                    }
-
-                    // Redirect the TIMER completion to resume us here
-                    tc.handle = h;
+                    // Successfully added to list. Suspend.
                     return true;
                 }
-                void await_resume() {}
-            };
-
-            co_await CancelAwaiter{*this, timer_completion};
+            }
         }
 
-        // 4. Determine final status
-        if (Ready())
-        {
-            co_return true;
-        }
-
-        // If not ready, we timed out.
-        // Try to unregister from baton if we are still marked as waiting.
-        if (uint8_t expected = WAITING;
-            state_.compare_exchange_strong(expected, NOT_SET, std::memory_order_acq_rel, std::memory_order_acquire))
-        {
-            co_return false;
-        }
-
-        // If unregister failed, Baton was set concurrently.
-        co_return true;
-    }
-
-private:
-    enum State : uint8_t
-    {
-        NOT_SET = 0,
-        SET = 1,
-        WAITING = 2
+        void await_resume() noexcept {}
     };
 
-    io::Worker& owner_;
-    std::atomic<uint8_t> state_{NOT_SET};
-    std::atomic<std::coroutine_handle<>> waiter_{nullptr};
+    /**
+     * @brief Create an awaiter bound to a specific Worker.
+     * @param worker The Worker thread this coroutine belongs to.
+     */
+    [[nodiscard]] Awaiter Wait(io::Worker& worker) noexcept
+    {
+        return Awaiter{*this, worker};
+    }
+
+    /**
+     * @brief Convenience operator for single-worker use cases.
+     * @deprecated Use Wait(worker) for explicit worker binding.
+     */
+    [[nodiscard]] auto operator co_await() = delete;
+    // Deleted to force explicit Worker binding via Wait(worker)
+
+private:
+    std::atomic<void*> state_;
 };
 
-}  // namespace kio::sync
+} // namespace kio::sync
 
-#endif  // KIO_BATON_H
+#endif // KIO_BATON_H
