@@ -80,7 +80,7 @@ TEST_F(AsyncBatonTest, WaitBeforePost_BlocksUntilSignaled)
     TestWorker w(0);
     AsyncBaton baton;
 
-    std::atomic<bool> task_completed = false;
+    std::atomic_bool task_completed = false;
 
     // NOLINTNEXTLINE(cppcoreguidelines-avoid-capturing-lambda-coroutines)
     auto task = [&](Worker& worker) -> Task<void>
@@ -176,6 +176,7 @@ TEST_F(AsyncBatonTest, Broadcast_WakesAllWaiters)
     std::vector<std::thread> threads;
     std::latch start_latch(kNumTasks);
 
+    threads.reserve(kNumTasks);
     for (int i = 0; i < kNumTasks; ++i)
     {
         threads.emplace_back(
@@ -187,7 +188,7 @@ TEST_F(AsyncBatonTest, Broadcast_WakesAllWaiters)
                     co_await SwitchToWorker(worker);
                     start_latch.count_down();
                     co_await baton.Wait(worker);
-                    completion_count++;
+                    ++completion_count;
                 }(w.worker);
                 SyncWait(std::move(t));
             });
@@ -202,7 +203,9 @@ TEST_F(AsyncBatonTest, Broadcast_WakesAllWaiters)
     baton.Post();
 
     for (auto& t : threads)
+    {
         t.join();
+    }
 
     EXPECT_EQ(completion_count, kNumTasks);
 }
