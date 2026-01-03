@@ -1,9 +1,10 @@
 #ifndef SYNC_WAIT_H
 #define SYNC_WAIT_H
 
-#include <latch>
-
 #include "kio/core/coro.h"
+#include "kio/core/worker.h"
+
+#include <latch>
 
 namespace kio::internal
 {
@@ -17,7 +18,7 @@ public:
 };
 
 // Wrapper task that stores result and notifies on completion
-template<typename T>
+template <typename T>
 struct sync_wait_task
 {
     struct promise_type
@@ -70,7 +71,8 @@ struct sync_wait_task
 
     ~sync_wait_task()
     {
-        if (h_) h_.destroy();
+        if (h_)
+            h_.destroy();
     }
 
     void start(SyncWaitEvent& event)
@@ -84,7 +86,7 @@ struct sync_wait_task
 };
 
 // Specialization for void
-template<>
+template <>
 struct sync_wait_task<void>
 {
     struct promise_type
@@ -101,9 +103,9 @@ struct sync_wait_task<void>
 
         struct final_awaiter
         {
-            bool await_ready() noexcept { return false; }  // NOLINT
+            bool await_ready() noexcept { return false; }                                                     // NOLINT
             void await_suspend(std::coroutine_handle<promise_type> h) noexcept { h.promise().event->set(); }  // NOLINT
-            void await_resume() noexcept {}  // NOLINT
+            void await_resume() noexcept {}                                                                   // NOLINT
         };
 
         final_awaiter final_suspend() noexcept { return {}; }  // NOLINT
@@ -129,7 +131,8 @@ struct sync_wait_task<void>
 
     ~sync_wait_task()
     {
-        if (h_) h_.destroy();
+        if (h_)
+            h_.destroy();
     }
 
     void start(SyncWaitEvent& event) const
@@ -141,7 +144,7 @@ struct sync_wait_task<void>
     void result() const { h_.promise().result(); }
 };
 
-template<typename T>
+template <typename T>
 auto MakeSyncAwaitTask(Task<T>&& task) -> sync_wait_task<T>
 {
     if constexpr (std::is_void_v<T>)
@@ -159,7 +162,7 @@ auto MakeSyncAwaitTask(Task<T>&& task) -> sync_wait_task<T>
 
 namespace kio
 {
-template<typename T>
+template <typename T>
 auto SyncWait(Task<T> task) -> decltype(auto)
 {
     internal::SyncWaitEvent event;

@@ -9,6 +9,7 @@ set(core_runtime_headers
         core/errors.h
         core/async_logger.h
         core/bytes_mut.h
+        core/safe_completion.h
 )
 
 set(core_runtime_sources
@@ -92,6 +93,7 @@ set(resp_headers
 
 set(resp_sources
         resp/parser.cpp
+        core/safe_completion.h
 )
 
 # ============================================================================

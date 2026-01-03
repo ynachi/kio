@@ -5,63 +5,32 @@
 #ifndef KIO_WORKER_H
 #define KIO_WORKER_H
 
-#include <expected>
-#include <fcntl.h>
-#include <filesystem>
-#include <functional>
-#include <latch>
-#include <liburing.h>
-#include <span>
-#include <thread>
-
 #include "coro.h"
 #include "errors.h"
 #include "kio/net/net.h"
 #include "kio/net/socket.h"
 #include "kio/sync/mpsc_queue.h"
+#include "safe_completion.h"  // <--- Include the new file
+
+#include <expected>
+#include <filesystem>
+#include <functional>
+#include <latch>
+#include <span>
+#include <thread>
+
+#include <fcntl.h>
+#include <liburing.h>
 
 namespace kio::io
 {
-struct IoCompletion
-{
-    std::coroutine_handle<> handle;
-    int result{0};
-
-    void Complete(const int res)
-    {
-        result = res;
-        if (handle)
-        {
-            handle.resume();
-        }
-    }
-};
 
 class Worker;
 
 namespace internal
 {
-/**
- * @brief Attorney for accessing Worker's private scheduling APIs.
- *
- *
- * @warning DO NOT USE DIRECTLY IN APPLICATION CODE.
- *
- * Use high-level abstractions instead, for instance:
- * - SwitchToWorker(worker) for context switching
- * - DetachedTask for fire-and-forget operations
- * - Task<T> for structured concurrency
- *
- * This is intentionally in the 'internal' namespace to signal that it's
- * not part of the public API, even though it's technically accessible.
- */
 struct WorkerAccess
 {
-    /**
-     * @brief Schedule a coroutine handle on the worker's event loop.
-     * @param worker The worker to schedule on
-     * @param h The coroutine handle to schedule
-     */
     static void Post(Worker& worker, std::coroutine_handle<> h);
     static io_uring& GetRing(Worker& worker) noexcept;
 };
@@ -86,21 +55,12 @@ struct WorkerConfig
     size_t uring_queue_depth{1024};
     size_t uring_submit_batch_size{128};
     size_t tcp_backlog{128};
+    uint8_t uring_submit_timeout_ms{100};
     int uring_default_flags = 0;
     size_t max_op_slots{1024 * 1024};
     size_t task_queue_capacity{1024};
-
-    // The heartbeat interval in microseconds.
-    // Controls the max latency for cross-thread task scheduling.
     uint32_t heartbeat_interval_us{100};
-
-    // The hybrid polling duration in microseconds.
-    // The kernel will busy-wait for this long before sleeping.
-    // Helps throughput/latency during bursts.
     uint32_t busy_wait_us{20};
-
-    // Maximum number of tasks to process from the queue before forcing an IO check.
-    // Higher values = better CPU throughput. Lower values = better IO latency.
     size_t task_batch_size{64};
 
     void Check() const
@@ -121,10 +81,9 @@ struct WorkerConfig
 };
 
 /**
- * IoUringAwaitable, c++20 coroutine awaiter, controls the suspension and awaiting of
- * the io_uring operations.
+ * IoUringAwaitable - UPDATED for Safe Cancellation
  */
-template<typename Prep, typename... Args>
+template <typename Prep, typename... Args>
 struct IoUringAwaitable
 {
     Worker& worker;
@@ -132,81 +91,100 @@ struct IoUringAwaitable
     using OnSuccess = void (*)(Worker&, int);
     OnSuccess on_success;
     std::tuple<Args...> io_args;
-    IoCompletion completion;
+
+    // CHANGED: We now hold a pointer to the heap-allocated state
+    SafeIoCompletion* completion_state{nullptr};
 
     bool await_ready() const noexcept { return false; }
 
     bool await_suspend(std::coroutine_handle<> h)
     {
-        assert(kio::io::Worker::IsOnWorkerThread() && "kio::async_* operation was called from the wrong thread.");
+        assert(worker.IsOnWorkerThread() && "kio::async_* operation was called from the wrong thread.");
 
-        completion.handle = h;
+        // Acquire state from pool. RefCount starts at 2.
+        completion_state = CompletionPool::Acquire(h);
+
         auto& ring = internal::WorkerAccess::GetRing(worker);
         io_uring_sqe* sqe = io_uring_get_sqe(&ring);
 
         if (sqe == nullptr)
         {
-            completion.result = -EAGAIN;
+            // Failed to get SQE.            completion_state->result = -EAGAIN;
+            // Drop Kernel ref immediately since we aren't giving it to kernel
+            completion_state->Release();
             return false;
         }
 
         std::apply([this, sqe]<typename... T>(T&&... unpacked_args)
                    { io_uring_prep(sqe, std::forward<T>(unpacked_args)...); }, std::move(io_args));
 
-        io_uring_sqe_set_data(sqe, &completion);
+        // Pass the heap pointer to the kernel
+        io_uring_sqe_set_data(sqe, completion_state);
         return true;
     }
 
-    [[nodiscard]] Result<int> await_resume() const noexcept
+    [[nodiscard]] Result<int> await_resume() noexcept
     {
-        if (completion.result < 0)
+        // 1. Get result
+        int res = completion_state->result;
+
+        // 2. We are done with the object on the User side. Release User ref.
+        completion_state->Release();
+        completion_state = nullptr;  // Clear to prevent dtor from abandoning
+
+        if (res < 0)
         {
-            return std::unexpected(Error::FromErrno(-completion.result));
+            return std::unexpected(Error::FromErrno(-res));
         }
         if (on_success != nullptr)
         {
-            on_success(worker, completion.result);
+            on_success(worker, res);
         }
-        return completion.result;
+        return res;
     }
 
-    explicit IoUringAwaitable(Worker& worker, Prep prep, OnSuccess on_success, Args... args) :
-        worker(worker), io_uring_prep(std::move(prep)), on_success(on_success), io_args(args...)
+    explicit IoUringAwaitable(Worker& worker, Prep prep, OnSuccess on_success, Args... args)
+        : worker(worker), io_uring_prep(std::move(prep)), on_success(on_success), io_args(args...)
     {
     }
+
+    ~IoUringAwaitable()
+    {
+        // If completion_state is still set, it means await_resume() was NEVER called.
+        // This implies the coroutine is being destroyed while suspended (Cancellation).
+        if (completion_state)
+        {
+            completion_state->Abandon();
+        }
+    }
+
+    // Disable copy/move to keep lifetime simple
+    IoUringAwaitable(const IoUringAwaitable&) = delete;
+    IoUringAwaitable& operator=(const IoUringAwaitable&) = delete;
+    IoUringAwaitable(IoUringAwaitable&&) = delete;
+    IoUringAwaitable& operator=(IoUringAwaitable&&) = delete;
 };
 
-template<typename Prep, typename... Args>
+template <typename Prep, typename... Args>
 auto MakeUringAwaitable(Worker& worker, Prep&& prep, void (*on_success)(Worker&, int), Args&&... args)
 {
     return IoUringAwaitable<std::decay_t<Prep>, std::decay_t<Args>...>(worker, std::forward<Prep>(prep), on_success,
                                                                        std::forward<Args>(args)...);
 }
 
-// Overload for no stats callback
-template<typename Prep, typename... Args>
+template <typename Prep, typename... Args>
 auto MakeUringAwaitable(Worker& worker, Prep&& prep, Args&&... args)
 {
     return IoUringAwaitable<std::decay_t<Prep>, std::decay_t<Args>...>(worker, std::forward<Prep>(prep), nullptr,
                                                                        std::forward<Args>(args)...);
 }
 
-/**
- * An IO Worker is a self-contained event loop struct.
- *
- * THREAD SAFETY:
- * - Safe to call async_* methods from ANY thread via submit_cross_thread()
- * - Direct async_* calls must only be made from the worker's own thread
- * - The worker internally uses io_uring SINGLE_ISSUER mode for maximum performance, trading off flexibility vs.
- * performance.
- */
 class Worker
 {
     friend struct internal::WorkerAccess;
-    template<typename, typename...>
+    template <typename, typename...>
     friend struct IoUringAwaitable;
 
-    uint32_t consecutive_idle_ticks_{0};
     io_uring ring_{};
     WorkerConfig config_;
     size_t id_{0};
@@ -221,12 +199,8 @@ class Worker
     WorkerStats stats_{};
     std::function<void(Worker&)> worker_init_callback_;
 
-    //=====================================
-    // PRIVATE METHODS
-    //=====================================
     int SubmitSqesWait();
 
-    // Private Stats Updaters
     static void StatIncRead(Worker& w, const int res)
     {
         w.stats_.bytes_read_total += res;
@@ -244,7 +218,6 @@ class Worker
     static void CheckKernelVersion();
     void CheckSyscallReturn(int ret);
     unsigned ProcessCompletions();
-    // typically used during shutdown. Drain the completion queue
     void DrainCompletions();
 
     void Post(std::coroutine_handle<> h);
@@ -274,10 +247,7 @@ public:
 
     [[nodiscard]] const WorkerStats& GetStats() { return stats_; }
 
-    //==========================================================
-    // Io methods
-    //=========================================================
-
+    // IO Methods (Same as before)
     [[nodiscard]] auto AsyncAccept(int server_fd, sockaddr* addr, socklen_t* addrlen)
     {
         auto prep = [](io_uring_sqe* sqe, int fd, sockaddr* a, socklen_t* al, int flags)
@@ -290,16 +260,6 @@ public:
         return AsyncAccept(socket.get(), reinterpret_cast<sockaddr*>(&addr.addr), &addr.addrlen);
     }
 
-    /**
-     * @brief Asynchronously reads data from a file descriptor at a specific offset.
-     *
-     * @note This is for positional I/O.
-     *
-     * @param client_fd The file descriptor to read from.
-     * @param buf A span of memory to read data into.
-     * @param offset The file offset to read from.
-     * @return An IO Result embedding the number of bytes read or an error.
-     */
     [[nodiscard]] auto AsyncReadAt(int client_fd, std::span<char> buf, uint64_t offset)
     {
         auto prep = [](io_uring_sqe* sqe, const int fd, char* b, const unsigned len, const uint64_t off)
@@ -308,31 +268,11 @@ public:
                                   static_cast<unsigned>(buf.size()), offset);
     }
 
-    /**
-     * @brief Asynchronously reads data from a streaming file descriptor (e.g., socket, pipe).
-     *
-     * @note This is for non-seekable I/O. It reads from the FD's current offset.
-     *
-     * @param client_fd The file descriptor to read from.
-     * @param buf A span of memory to read data into.
-     * @return An IO result with the client FD or an error
-     */
     [[nodiscard]] auto AsyncRead(const int client_fd, std::span<char> buf)
     {
         return AsyncReadAt(client_fd, buf, static_cast<uint64_t>(-1));
     }
 
-    /**
-     * @brief Asynchronously writes data to a positional file descriptor (e.g., file).
-     *
-     * @note This is for positional I/O. It writes at the FD's specified offset. It can be used with streaming
-     * too by specifying -1 or 0 as an offset, but we suggest the dedicated method.
-     *
-     * @param fd The file descriptor to write to.
-     * @param buf A span of constant memory to write.
-     * @param offset
-     * @return A void IO result or an error
-     */
     [[nodiscard]] auto AsyncWriteAt(const int fd, std::span<const char> buf, const uint64_t offset)
     {
         auto prep = [](io_uring_sqe* sqe, const int fd, const char* b, const unsigned len, const uint64_t off)
@@ -341,18 +281,6 @@ public:
                                   offset);
     }
 
-    /**
-     * @brief Asynchronously reads data into a "scatter" array of buffers.
-     *
-     * @note This performs a *single* readv operation. It is not guaranteed to fill
-     * all buffers.
-     *
-     * @param client_fd The file descriptor to read from.
-     * @param iov A pointer to an array of iovec structures.
-     * @param iovcnt The number of iovec structures in the array.
-     * @param offset The file offset to read from.
-     * @return An IO result of the number of bytes read or an error.
-     */
     [[nodiscard]] auto AsyncReadv(int client_fd, const iovec* iov, int iovcnt, uint64_t offset)
     {
         auto prep = [](io_uring_sqe* sqe, int fd, const iovec* iov, int iovcnt, uint64_t off)
@@ -360,34 +288,11 @@ public:
         return MakeUringAwaitable(*this, prep, &Worker::StatIncRead, client_fd, iov, iovcnt, offset);
     }
 
-    /**
-     * @brief Asynchronously writes data to a streaming file descriptor (e.g., socket, pipe).
-     *
-     * @note This is for non-positional I/O. It writes to the FD's current offset.
-     *
-     * @param client_fd The file descriptor to write to.
-     * @param buf A span of constant memory to write.
-     * @return An IO result containing number of bytes writen FD or an error.
-     */
     [[nodiscard]] auto AsyncWrite(int client_fd, std::span<const char> buf)
     {
         return AsyncWriteAt(client_fd, buf, static_cast<uint64_t>(-1));
     }
 
-    /**
-     * @brief Asynchronously writes data from a "gather" array of buffers.
-     *
-     * @note This performs a *single* writev operation. It is not guaranteed to
-     * write the data from all buffers.
-     *
-     * @param client_fd The file descriptor to write to.
-     * @param iov A pointer to an array of iovec structures.
-     * @param iovcnt The number of iovec structures in the array.
-     * @param offset The file offset to write at.
-     * @return A Task that resumes with a Result<int>.
-     * On success: The total number of bytes written from all buffers.
-     * On failure: An Error.
-     */
     [[nodiscard]] auto AsyncWritev(int client_fd, const iovec* iov, int iovcnt, uint64_t offset)
     {
         auto prep = [](io_uring_sqe* sqe, const int fd, const iovec* iov, int iovcnt, const uint64_t off)
@@ -395,17 +300,6 @@ public:
         return MakeUringAwaitable(*this, prep, &Worker::StatIncWrite, client_fd, iov, iovcnt, offset);
     }
 
-    /**
-     * @brief Asynchronously initiates a connection on a socket.
-     *
-     * This is used for non-blocking client sockets.
-     *
-     * @param client_fd The socket file descriptor to connect.
-     * @param addr A pointer to the sockaddr structure containing the peer address.
-     * @param addrlen The length of the sockaddr structure.
-     * @return A Task that resumes with a Result<int>.
-     * On failure: An Error.
-     */
     [[nodiscard]] auto AsyncConnect(int client_fd, const sockaddr* addr, socklen_t addrlen)
     {
         auto prep = [](io_uring_sqe* sqe, const int fd, const sockaddr* a, const socklen_t al)
@@ -413,39 +307,18 @@ public:
         return MakeUringAwaitable(*this, prep, &Worker::StatIncConnect, client_fd, addr, addrlen);
     }
 
-    /**
-     * @brief Asynchronously closes a file descriptor.
-     *
-     * After `co_await`ing this operation, the file descriptor `fd` must be
-     * considered invalid, regardless of the operation's success.
-     *
-     * @param fd The file descriptor to close.
-     * @return A void Result or an error.
-     */
     [[nodiscard]] auto AsyncClose(int fd)
     {
         auto prep = [](io_uring_sqe* sqe, int file_fd) { io_uring_prep_close(sqe, file_fd); };
         return MakeUringAwaitable(*this, prep, fd);
     }
 
-    /**
-     * @brief Asynchronously flushes all modified data and metadata to disk.
-     * Equivalent to fsync(2).
-     * @param fd The file descriptor to sync.
-     * @return A void Result or an error.
-     */
     [[nodiscard]] auto AsyncFsync(int fd)
     {
         auto prep = [](io_uring_sqe* sqe, const int file_fd) { io_uring_prep_fsync(sqe, file_fd, 0); };
         return MakeUringAwaitable(*this, prep, fd);
     }
 
-    /**
-     * @brief Asynchronously flushes all modified data to disk.
-     * Equivalent to fdatasync(2). May not update metadata (like mtime).
-     * @param fd The file descriptor to sync.
-     * @return A void Result or an error.
-     */
     [[nodiscard]] auto AsyncFdatasync(int fd)
     {
         auto prep = [](io_uring_sqe* sqe, const int file_fd)
@@ -453,17 +326,6 @@ public:
         return MakeUringAwaitable(*this, prep, fd);
     }
 
-    /**
-     * @brief Asynchronously pre-allocates or de-allocates storage space for a file.
-     *
-     * @note This implementation internally calls `io_uring_prep_fallocate` with
-     * the offset fixed at 0.
-     *
-     * @param fd The file descriptor.
-     * @param mode The operation mode (e.g., 0 for falloc, FALLOC_FL_PUNCH_HOLE).
-     * @param size The number of bytes to allocate (length).
-     * @return A void Result or an error.
-     */
     [[nodiscard]] auto AsyncFallocate(int fd, int mode, off_t size)
     {
         auto prep = [](io_uring_sqe* sqe, int file_fd, int p_mode, off_t offset, off_t len)
@@ -471,13 +333,6 @@ public:
         return MakeUringAwaitable(*this, prep, fd, mode, static_cast<off_t>(0), size);
     }
 
-    /**
-     * @brief Truncates a file.
-     *
-     * @param fd FD of the file to truncate.
-     * @param length Size of the truncate.
-     * @return
-     */
     [[nodiscard]] auto AsyncFtruncate(int fd, off_t length)
     {
         auto prep = [](io_uring_sqe* sqe, int file_fd, off_t off) { io_uring_prep_ftruncate(sqe, file_fd, off); };
@@ -497,18 +352,6 @@ public:
         return MakeUringAwaitable(*this, prep, &Worker::StatIncWrite, fd, msg, flags);
     }
 
-    /**
-     * @brief Asynchronously opens or creates a file.
-     *
-     * @note This implementation uses `AT_FDCWD` internally,
-     * meaning the `path` is resolved relative to the current working directory.
-     * The coroutine frame will store a copy of the path string.
-     *
-     * @param path The path to the file.
-     * @param flags The file access flags (e.g., O_RDONLY, O_WRONLY, O_CREAT).
-     * @param mode The file permissions mode (e.g., 0644) used only if O_CREAT is specified.
-     * @return An IO Result which is void or an error.
-     */
     [[nodiscard]] auto AsyncOpenat(std::filesystem::path path, int flags, mode_t mode)
     {
         auto prep = [](io_uring_sqe* sqe, int dfd, const std::filesystem::path& p, int f, mode_t m)
@@ -516,17 +359,6 @@ public:
         return MakeUringAwaitable(*this, prep, &Worker::StatIncOpen, AT_FDCWD, std::move(path), flags, mode);
     }
 
-    /**
-     * @brief Asynchronously unlink (remove) a file or directory.
-     *
-     * @param dirfd The directory file descriptor (use AT_FDCWD for the current working directory).
-     * @param path The filesystem path to remove.
-     * @param flags Removal behavior flags:
-     * - 0: Remove regular files
-     * - AT_REMOVEDIR: Remove empty directories
-     * - AT_SYMLINK_NOFOLLOW: Remove symlinks without following
-     * @return An IO Result which is void or an error.
-     */
     [[nodiscard]] auto AsyncUnlinkAt(int dirfd, std::filesystem::path path, int flags)
     {
         auto prep = [](io_uring_sqe* sqe, int dfd, const std::filesystem::path& p, int f)
@@ -534,90 +366,14 @@ public:
         return MakeUringAwaitable(*this, prep, dirfd, std::move(path), flags);
     }
 
-    /**
-     * @brief Asynchronously reads data from a file descriptor until the buffer is full.
-     *
-     * @note This function guarantees that it will not return successfully unless
-     * `buf.size()` bytes have been read. It does this by repeatedly calling
-     * the underlying `async_read` operation internally until the buffer is
-     * filled, automatically handling "short reads". This variant is for non-positional FDs
-     * i.e., streaming like networks, pipes, ...
-     *
-     * @param client_fd The file descriptor to read from.
-     * @param buf A span of memory to be filled with data.
-     * @return An IO Result embedding the number of bytes read or an error.
-     */
     Task<Result<void>> AsyncReadExact(int client_fd, std::span<char> buf);
-    /**
-     * @brief Read the exact data size to fill the provided buffer. This method requires
-     * the FD to be seekable.
-     *
-     * @note Reaching EOF before filling the buffer is considered an error.
-     * In this case, a IoError::IoEoF will be returned.
-     *
-     * @param fd the FD to read from
-     * @param buf a writable std span
-     * @param offset the offset from which to read from
-     * @return A void IO result or an error
-     */
     Task<Result<void>> AsyncReadExactAt(int fd, std::span<char> buf, uint64_t offset);
-
-    /**
-     * @brief Asynchronously writes the entire contents of a buffer to a file descriptor.
-     *
-     * @note This function guarantees that it will not return successfully unless
-     * the *entire* `buf.size()` bytes have been written. It does this by
-     * repeatedly calling the underlying `async_write` operation internally
-     * until the buffer is fully written, automatically handling "short writes".
-     *
-     * @param client_fd The file descriptor to write to.
-     * @param buf A span of constant memory to be written in its entirety.
-     * @return A void IO result or an error
-     */
     Task<Result<void>> AsyncWriteExact(int client_fd, std::span<const char> buf);
     Task<Result<void>> AsyncWriteExactAt(int client_fd, std::span<const char> buf, uint64_t offset);
-
-    /**
-     * Asynchronously sleep for `duration`. This is a non-blocking sleep.
-     * @param duration
-     * @return void or an error
-     */
     Task<std::expected<void, Error>> AsyncSleep(std::chrono::nanoseconds duration);
-
-    /**
-     * @brief Asynchronously transfers data between two file descriptors using a zero-copy pipe buffer.
-     *
-     * This function implements a generic "splice loop" to move data from a source to a destination
-     * entirely within kernel space, avoiding userspace memory copies.
-     *
-     * Implementation Mechanics:
-     * Linux `splice(2)` requires at least one of the file descriptors to be a pipe. To transfer
-     * data between two non-pipe FDs (e.g., File->Socket or File->File), this function creates
-     * a temporary local pipe to act as a kernel-space bridge:
-     * [Source FD] --splice--> [Local Pipe] --splice--> [Destination FD]
-     *
-     * This double-splice technique ensures compatibility with any FD type supported by splice.
-     *
-     * Use Cases:
-     * - **Network Streaming**: Sending files to TCP sockets (supports KTLS offload if enabled).
-     * - **File Copying**: Efficiently copying data between files on disk.
-     *
-     * @param out_fd The destination file descriptor (Socket, File, etc.).
-     * @param in_fd The source file descriptor (must support splice read).
-     * @param offset is The offset in the source file to start reading from.
-     * @param count  The total number of bytes to transfer.
-     * @return void on success, or an Error on failure.
-     */
     Task<Result<void>> AsyncSendfile(int out_fd, int in_fd, off_t offset, size_t count);
 };
 
-//==========================================================
-// Worker context switch
-//=========================================================
-/**
- * @brief An awaitable that switches the execution of a coroutine
- * to the thread of the specified IOWorker.
- */
 struct SwitchToWorker
 {
     Worker& worker;
@@ -629,9 +385,6 @@ struct SwitchToWorker
     void await_resume() const noexcept {}  // NOLINT
 };
 
-//
-// INTERNAL METHODS IMPLEMENTATION
-//
 namespace internal
 {
 inline void WorkerAccess::Post(Worker& worker, std::coroutine_handle<> h)

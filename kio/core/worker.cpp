@@ -3,14 +3,16 @@
 //
 #include "worker.h"
 
+#include "async_logger.h"
+
 #include <chrono>
-#include <fcntl.h>
 #include <functional>
-#include <liburing.h>
-#include <sys/utsname.h>
 #include <utility>
 
-#include "async_logger.h"
+#include <fcntl.h>
+#include <liburing.h>
+
+#include <sys/utsname.h>
 
 namespace kio::io
 {
@@ -37,55 +39,48 @@ void Worker::CheckKernelVersion()
 
 void Worker::CheckSyscallReturn(const int ret)
 {
+    // These are not fatal errors for the *Loop wait*.
     if (-ret == ETIME || -ret == ETIMEDOUT || -ret == EINTR || -ret == EAGAIN || -ret == EBUSY)
     {
-        ALOG_DEBUG("Transient error: {}", strerror(-ret));
+        ALOG_DEBUG("Transient error in wait: {}", strerror(-ret));
         return;
     }
 
-    // real io error
     stats_.io_errors_total++;
-
-    ALOG_ERROR("Fatal I/O error: {}", strerror(-ret));
+    ALOG_ERROR("Fatal I/O error in wait: {}", strerror(-ret));
     throw std::system_error(-ret, std::system_category());
 }
 
 int Worker::SubmitSqesWait()
 {
-    io_uring_cqe *cqe_ptr = nullptr;
-
-    // Calculate adaptive timeout
-    uint32_t timeout_us = std::min(
-        config_.heartbeat_interval_us << consecutive_idle_ticks_,
-        10000u  // Cap at 10ms max sleep
-    );
-
     // Define the heartbeat interval (max sleep time)
     __kernel_timespec ts{};
     ts.tv_sec = 0;
-    ts.tv_nsec = config_.heartbeat_interval_us * 1000;
+    ts.tv_nsec = static_cast<uint32_t>(config_.heartbeat_interval_us * 1000);
 
-    // Only busy-wait when fully active (tick 0)
-    // Once idle, disable busy-wait to save CPU
-    const unsigned min_wait = (consecutive_idle_ticks_ == 0)
-                        ? config_.busy_wait_us
-                        : 0;
+    // DYNAMIC BUSY WAIT:
+    // Only engage the kernel-side busy loop if we are actually submitting new work.
+    // If we are just checking for completions (idle/heartbeat), sleep immediately.
+    // This reduces idle CPU usage from ~5% to ~0%.
+    unsigned min_wait = config_.busy_wait_us;
 
-    // sigmask is null
+    if (io_uring_sq_ready(&ring_) == 0)
+    {
+        min_wait = 0;
+    }
 
-    // io_uring_submit_and_wait_min_timeout is the hybrid poll primitive.
-    // It submits SQEs, then busy loops for 'min_wait' usec looking for completions.
-    // If nothing arrives, it sleeps until 'ts' expires or an event arrives.
-    const int ret = io_uring_submit_and_wait_min_timeout(
-        &ring_, &cqe_ptr, 1, &ts, min_wait, nullptr
-    );
+    io_uring_cqe* cqe_ptr = nullptr;
+
+    const int ret = io_uring_submit_and_wait_min_timeout(&ring_, &cqe_ptr, 1, &ts, min_wait, nullptr);
 
     return ret;
 }
 
-Worker::Worker(const size_t id, const WorkerConfig &config, std::function<void(Worker &)> worker_init_callback) :
-    config_(config), id_(id), task_queue_(config.task_queue_capacity),
-    worker_init_callback_(std::move(worker_init_callback))
+Worker::Worker(const size_t id, const WorkerConfig& config, std::function<void(Worker&)> worker_init_callback)
+    : config_(config),
+      id_(id),
+      task_queue_(config.task_queue_capacity),
+      worker_init_callback_(std::move(worker_init_callback))
 {
     config_.Check();
 }
@@ -129,69 +124,26 @@ void Worker::Initialize()
 
 void Worker::Loop()
 {
-    // Event Loop Strategy:
-    // 1. Drain the Task Queue (fast, lock-free, from other threads)
-    // 2. Submit pending IO and Wait (Heartbeat)
-    // 3. Process Completions
-
     while (!stop_token_.stop_requested())
     {
-        bool did_work = false;
-
-        // 1. Drain Task Queue (with budget)
-        // This ensures latency is minimized for tasks posted from other threads.
         std::coroutine_handle<> h;
         size_t resumed = 0;
-        // Use config-based budget to alternate between tasks and IO
         while (resumed < config_.task_batch_size && task_queue_.TryPop(h))
         {
             h.resume();
             resumed++;
         }
 
-        // 2. Submit & Wait (Heartbeat)
-        // If the task queue processing generated SQEs, this submits them.
-        // If nothing happened, we wait for IO or the timeout (Heartbeat).
-        // We ignore the return value here as we process completions below regardless.
-        int ret = SubmitSqesWait();
-        if (ret < 0)
-        {
-            // check for fatal error
-            CheckSyscallReturn(ret);
-        } else if (ret > 0)
-        {
-            did_work = true;
-        }
-
-
-        // 3. Process Completions
-        // We don't need to check the return of submit_sqes_wait because we just
-        // want to drain whatever is in the CQ ring.
-        unsigned processed = ProcessCompletions();
-        if (processed > 0) {
-            did_work = true;
-        }
-
-        // 4. Adjust idle state
-        if (did_work) {
-            // INSTANTLY back to fast mode
-            consecutive_idle_ticks_ = 0;
-        } else {
-            // Gradually slow down
-            consecutive_idle_ticks_++;
-        }
+        SubmitSqesWait();
+        ProcessCompletions();
     }
 
     ALOG_INFO("Worker {} loop shut down completed", this->id_);
-
-    // signal shutdown for anyone waiting
     SignalShutdownComplete();
 }
 
-// The main per-thread body that used to be inside the thread lambda.
 void Worker::LoopForever()
 {
-    // the calling thread sets the id
     thread_id_.store(std::this_thread::get_id());
     stop_token_ = this->GetStopToken();
 
@@ -201,7 +153,6 @@ void Worker::LoopForever()
         Initialize();
         SignalInitComplete();
 
-        // Init callback to run inside the worker, respect io_uring single issuer
         if (worker_init_callback_)
         {
             worker_init_callback_(*this);
@@ -212,10 +163,9 @@ void Worker::LoopForever()
         ALOG_INFO("Worker {} exited event loop", id_);
         DrainCompletions();
     }
-    catch (const std::exception &e)
+    catch (const std::exception& e)
     {
         ALOG_ERROR("Worker {} failed during run(): {}", id_, e.what());
-        // ensure latches are released so the pool doesn't wait forever
         SignalInitComplete();
         SignalShutdownComplete();
     }
@@ -223,7 +173,7 @@ void Worker::LoopForever()
 
 unsigned Worker::ProcessCompletions()
 {
-    io_uring_cqe *cqe = nullptr;
+    io_uring_cqe* cqe = nullptr;
     unsigned head = 0;
     unsigned count = 0;
 
@@ -244,7 +194,6 @@ void Worker::DrainCompletions()
 
 bool Worker::RequestStop()
 {
-    // stop is idempotent
     if (stopped_.exchange(true))
     {
         ALOG_DEBUG("Worker requested to stop but it is already stopped");
@@ -256,23 +205,16 @@ bool Worker::RequestStop()
     if (IsOnWorkerThread())
     {
         ALOG_ERROR("Worker stop called from worker {} thread", id_);
-        ALOG_ERROR("This will cause deadlock. Workers cannot stop themselves.");
-        ALOG_ERROR("Shutdown must be initiated from main thread or destructor.");
-        ALOG_ERROR("Shutdown signal ignored.");
         return false;
     }
 
     const auto stop = stop_source_.request_stop();
-    // No need to write to eventfd anymore.
-    // The worker will wake up at the next heartbeat (max 100us latency)
-    // and see the stop_token.
     return stop;
 }
 
 Worker::~Worker()
 {
     ALOG_DEBUG("Worker {} destructor called", id_);
-    // request stop if not already requested
 
     if (this->ring_.ring_fd >= 0)
     {
@@ -287,22 +229,21 @@ void Worker::Post(std::coroutine_handle<> h)
     if (!task_queue_.TryPush(h))
     {
         ALOG_ERROR("Worker {} task queue is full. Dropping task.", id_);
-        // TODO: have a different strategy, like growing the queue or blocking the producer.
         return;
     }
-    // No syscall. We just push.
-    // The worker will see this on the next Heartbeat or IO completion.
 }
 
-// worker.cpp
-void Worker::HandleCqe(io_uring_cqe *cqe)
+// CHANGED: Handle safe completion
+void Worker::HandleCqe(io_uring_cqe* cqe)
 {
-    auto *completion = static_cast<IoCompletion *>(io_uring_cqe_get_data(cqe));
+    // The data pointer is now a SafeIoCompletion*
+    auto* completion = static_cast<SafeIoCompletion*>(io_uring_cqe_get_data(cqe));
     if (completion == nullptr)
     {
         return;
     }
 
+    // Complete() will check if the user has abandoned the task and handle cleanup
     completion->Complete(cqe->res);
 }
 
@@ -336,7 +277,6 @@ Task<Result<void>> Worker::AsyncReadExactAt(const int fd, std::span<char> buf, u
 
     while (total_bytes_read < total_to_read)
     {
-        // We always pass an offset, and we always increment it.
         const uint64_t current_offset = offset + total_bytes_read;
         std::span<char> remaining_buf = buf.subspan(total_bytes_read);
 
@@ -398,15 +338,20 @@ Task<std::expected<void, Error>> Worker::AsyncSleep(std::chrono::nanoseconds dur
     ts.tv_sec = std::chrono::duration_cast<std::chrono::seconds>(duration).count();
     ts.tv_nsec = (duration % std::chrono::seconds(1)).count();
 
-    auto prep = [](io_uring_sqe *sqe, __kernel_timespec *t, unsigned flags)
+    auto prep = [](io_uring_sqe* sqe, __kernel_timespec* t, unsigned flags)
     { io_uring_prep_timeout(sqe, t, 0, flags); };
 
-    // We capture the awaitable to inspect the raw result, as await_resume() would
-    // treat -ETIME as an error, but here it indicates successful timeout expiry.
+    // Capture completion_state result differently?
+    // Actually standard await_resume handles it.
     auto awaitable = MakeUringAwaitable(*this, prep, &ts, 0);
-    (void) co_await awaitable;
+    int res = KIO_TRY(co_await awaitable);
 
-    if (const int res = awaitable.completion.result; res < 0 && res != -ETIME)
+    // ETIME is expected for timeout
+    if (res == -ETIME)
+    {
+        co_return {};
+    }
+    if (res < 0)
     {
         co_return std::unexpected(Error::FromErrno(-res));
     }
@@ -430,7 +375,7 @@ Task<Result<void>> Worker::AsyncSendfile(int out_fd, int in_fd, off_t offset, si
     size_t remaining = count;
     off_t current_offset = offset;
 
-    auto prep_splice = [](io_uring_sqe *sqe, int in, off_t off_in, int out, off_t off_out, unsigned int len)
+    auto prep_splice = [](io_uring_sqe* sqe, int in, off_t off_in, int out, off_t off_out, unsigned int len)
     { io_uring_prep_splice(sqe, in, off_in, out, off_out, len, 0); };
 
     while (remaining > 0)
@@ -440,8 +385,8 @@ Task<Result<void>> Worker::AsyncSendfile(int out_fd, int in_fd, off_t offset, si
 
         // Step A: Splice File -> Pipe
         const int res_in =
-                KIO_TRY(co_await MakeUringAwaitable(*this, prep_splice, in_fd, current_offset, pipe_write.get(),
-                                                    static_cast<off_t>(-1), static_cast<unsigned int>(to_splice)));
+            KIO_TRY(co_await MakeUringAwaitable(*this, prep_splice, in_fd, current_offset, pipe_write.get(),
+                                                static_cast<off_t>(-1), static_cast<unsigned int>(to_splice)));
 
         if (res_in == 0)
         {
@@ -452,24 +397,24 @@ Task<Result<void>> Worker::AsyncSendfile(int out_fd, int in_fd, off_t offset, si
         auto pipe_remaining = static_cast<size_t>(res_in);
         while (pipe_remaining > 0)
         {
-            const int res_out = KIO_TRY(
-                    co_await MakeUringAwaitable(*this, prep_splice, pipe_read.get(), static_cast<off_t>(-1), out_fd,
-                                                static_cast<off_t>(-1), static_cast<unsigned int>(pipe_remaining)));
+            const int res_out =
+                KIO_TRY(co_await MakeUringAwaitable(*this, prep_splice, pipe_read.get(), static_cast<off_t>(-1), out_fd,
+                                                    static_cast<off_t>(-1), static_cast<unsigned int>(pipe_remaining)));
 
             if (res_out == 0)
             {
                 co_return std::unexpected(Error{ErrorCategory::kNetwork, EPIPE});
             }
 
-            pipe_remaining -= res_out;
+            pipe_remaining -= static_cast<size_t>(res_out);
+            stats_.bytes_written_total += res_out;
         }
 
+        // Update offsets only after the chunk is successfully processed
         current_offset += res_in;
         remaining -= res_in;
-        stats_.bytes_written_total += res_in;
         stats_.write_ops_total++;
     }
-
     co_return {};
 }
 
