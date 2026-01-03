@@ -43,6 +43,7 @@ DEFINE_uint64(bytes, 10 * 1024 * 1024, "Bytes to transfer for perf mode");
 DEFINE_string(ca, "/home/ynachi/test_certs/ca.crt",
               "CA certificate path, optional but must be provided if verify is true");
 DEFINE_bool(verify, true, "Enable certificate verification");
+DEFINE_string(alpn, "h2,http/1.1", "Comma-separated list of ALPN protocols to advertise (e.g. 'h2,http/1.1')");
 
 using namespace kio;
 using namespace kio::io;
@@ -68,6 +69,16 @@ Task<Result<void>> SimpleTest(Worker& worker, TlsContext& ctx, std::string_view 
 
     TlsStream stream = std::move(connect_result.value());
     ALOG_INFO("✅ Connected! fd={}, KTLS={}", stream.Fd(), stream.IsKtlsActive());
+
+    // Check ALPN result
+    if (auto proto = stream.GetNegotiatedProtocol(); !proto.empty())
+    {
+        ALOG_INFO("🌐 Negotiated ALPN Protocol: '{}'", proto);
+    }
+    else
+    {
+        ALOG_INFO("🌐 No ALPN protocol negotiated");
+    }
 
     // Simple message
     auto msg = "PING\n";
@@ -124,6 +135,15 @@ Task<Result<void>> EchoTest(Worker& worker, TlsContext& ctx, std::string_view ho
     ALOG_INFO("   Version: {}", stream.GetVersion());
     ALOG_INFO("   Cipher:  {}", stream.GetCipher());
     ALOG_INFO("   KTLS:    {}", stream.IsKtlsActive() ? "active" : "NOT active");
+
+    if (auto proto = stream.GetNegotiatedProtocol(); !proto.empty())
+    {
+        ALOG_INFO("   ALPN:    '{}'", proto);
+    }
+    else
+    {
+        ALOG_INFO("   ALPN:    <none>");
+    }
 
     const std::vector<std::string> messages = {
         "Hello from kio client!\n",
@@ -187,6 +207,10 @@ Task<Result<void>> ThroughputTest(Worker& worker, TlsContext& ctx, std::string_v
     TlsStream stream = KIO_TRY(co_await connector.Connect(host, port));
 
     ALOG_INFO("✅ Connected! KTLS: {}", stream.IsKtlsActive() ? "active" : "NOT active");
+    if (auto proto = stream.GetNegotiatedProtocol(); !proto.empty())
+    {
+        ALOG_INFO("   ALPN:    '{}'", proto);
+    }
 
     constexpr size_t kChunkSize = 16384;
     std::vector send_buf(kChunkSize, 'X');
@@ -263,7 +287,8 @@ int main(int argc, char* argv[])
         "Examples:\n"
         "  ktls_client_demo --mode=simple --host=127.0.0.1 --port=8080\n"
         "  ktls_client_demo --mode=echo --host=127.0.0.1 --port=8080\n"
-        "  ktls_client_demo --mode=perf --bytes=104857600");
+        "  ktls_client_demo --mode=perf --bytes=104857600\n"
+        "  ktls_client_demo --mode=simple --alpn=h2,http/1.1 --host=127.0.0.1");
 
     gflags::ParseCommandLineFlags(&argc, &argv, true);
 
@@ -294,6 +319,18 @@ int main(int argc, char* argv[])
     {
         tls_cfg.verify_mode = SSL_VERIFY_NONE;
         ALOG_INFO("Certificate verification: DISABLED (testing mode)");
+    }
+
+    // Parse ALPN flags
+    if (!FLAGS_alpn.empty())
+    {
+        std::stringstream ss(FLAGS_alpn);
+        std::string item;
+        while (std::getline(ss, item, ','))
+        {
+            tls_cfg.alpn_protocols.push_back(item);
+        }
+        ALOG_INFO("ALPN configured: {}", FLAGS_alpn);
     }
 
     auto ctx_res = TlsContext::MakeClient(tls_cfg);

@@ -328,4 +328,9 @@ std::string_view TlsStream::GetVersion() const
     const char* ver = SSL_get_version(ssl_);
     return (ver != nullptr) ? ver : "";
 }
+
+std::string_view TlsStream::GetNegotiatedProtocol() const
+{
+    return TlsContext::GetNegotiatedProtocol(ssl_);
+}
 }  // namespace kio::tls

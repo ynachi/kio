@@ -143,6 +143,7 @@ public:
     [[nodiscard]] bool IsKtlsActive() const;
     [[nodiscard]] std::string_view GetCipher() const;
     [[nodiscard]] std::string_view GetVersion() const;
+    [[nodiscard]] std::string_view GetNegotiatedProtocol() const;
     [[nodiscard]] bool IsHandshakeDone() const { return handshake_done_; }
     [[nodiscard]] int Fd() const { return socket_.get(); }
 

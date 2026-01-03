@@ -10,14 +10,12 @@
  *
  */
 
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <sys/stat.h>
-
 #include "kio/core/async_logger.h"
 #include "kio/core/worker_pool.h"
 #include "kio/tls/listener.h"
 #include "kio/tls/stream.h"
+
+#include <fcntl.h>
 
 namespace io = kio::io;
 namespace tls = kio::tls;
@@ -25,7 +23,15 @@ namespace net = kio::net;
 
 static auto HandleClient(tls::TlsStream stream) -> kio::DetachedTask
 {
-    ALOG_INFO("✅ Client ready to start sending traffic");
+    // Log negotiated protocol
+    if (auto proto = stream.GetNegotiatedProtocol(); !proto.empty())
+    {
+        ALOG_INFO("✅ Client ready (ALPN: '{}')", proto);
+    }
+    else
+    {
+        ALOG_INFO("✅ Client ready (No ALPN)");
+    }
 
     char buffer[8192];
     size_t total_bytes = 0;
@@ -129,6 +135,9 @@ int main()
     tls_cfg.cert_path = "/home/ynachi/test_certs/server.crt";
     tls_cfg.key_path = "/home/ynachi/test_certs/server.key";
 
+    // Add ALPN support to the server (preferred protocols)
+    tls_cfg.alpn_protocols = {"h2", "http/1.1"};
+
     // Create SSL context (reuse for all connections!)
     auto ctx_res = tls::TlsContext::MakeServer(tls_cfg);
     if (!ctx_res.has_value())
@@ -140,6 +149,7 @@ int main()
     ALOG_INFO("🚀 KTLS-Only Server listening on port {}", listener_cfg.port);
     ALOG_INFO("⚡ Zero-copy mode - maximum performance!");
     ALOG_INFO("📝 TLS 1.3 only, no fallback");
+    ALOG_INFO("🌐 ALPN enabled: h2, http/1.1");
 
     auto ctx = std::move(ctx_res.value());
 
