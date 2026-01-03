@@ -43,13 +43,14 @@ protected:
 
 TEST_F(AsyncBatonTest, NotifyBeforeWait)
 {
-    AsyncBaton baton(*worker);
-    baton.notify();  // Notify first
+    AsyncBaton baton;
+    baton.Post();  // signal first
 
     bool completed = false;
     auto task = [&]() -> DetachedTask
     {
-        co_await baton.wait();  // Should not suspend
+        co_await SwitchToWorker(*worker);
+        co_await baton.Wait(*worker);  // Should not suspend
         completed = true;
     };
 
@@ -61,14 +62,14 @@ TEST_F(AsyncBatonTest, NotifyBeforeWait)
 
 TEST_F(AsyncBatonTest, WaitThenNotify)
 {
-    AsyncBaton baton(*worker);
+    AsyncBaton baton;
     std::atomic completed{false};
 
     // Start waiting
     auto task = [&]() -> DetachedTask
     {
         co_await SwitchToWorker(*worker);
-        co_await baton.wait();
+        co_await baton.Wait(*worker);
         completed.store(true);
     };
 
@@ -78,257 +79,59 @@ TEST_F(AsyncBatonTest, WaitThenNotify)
     EXPECT_FALSE(completed.load());
 
     // Notify from another thread
-    baton.notify();
+    baton.Post();
 
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     EXPECT_TRUE(completed.load());
 }
 
-TEST_F(AsyncBatonTest, WaitForTimeout)
+TEST_F(AsyncBatonTest, MultipleWaitersAllResume)
 {
-    AsyncBaton baton(*worker);
-    std::atomic completed{false};
-    std::atomic timed_out{false};
+    AsyncBaton baton;
+    std::atomic<int> completed{0};
 
-    auto task = [&]() -> DetachedTask
+    auto waiter = [&](int id) -> DetachedTask
     {
         co_await SwitchToWorker(*worker);
-        bool signaled = co_await baton.wait_for(std::chrono::milliseconds(100));
-        timed_out.store(!signaled);
-        completed.store(true);
+        co_await baton.Wait(*worker);
+        EXPECT_TRUE(worker->IsOnWorkerThread());
+        completed.fetch_add(1);
     };
 
-    task().detach();
+    waiter(1).detach();
+    waiter(2).detach();
+    waiter(3).detach();
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    EXPECT_FALSE(completed.load());
-
-    // Wait for timeout to occur
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    EXPECT_TRUE(completed.load());
-    EXPECT_TRUE(timed_out.load());
-}
-
-TEST_F(AsyncBatonTest, WaitForSignaledBeforeTimeout)
-{
-    AsyncBaton baton(*worker);
-    std::atomic completed{false};
-    std::atomic signaled{false};
-
-    auto task = [&]() -> DetachedTask
-    {
-        co_await SwitchToWorker(*worker);
-        const bool result = co_await baton.wait_for(std::chrono::milliseconds(500));
-        signaled.store(result);
-        completed.store(true);
-    };
-
-    task().detach();
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    EXPECT_FALSE(completed.load());
-
-    // Notify before timeout
-    baton.notify();
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    EXPECT_TRUE(completed.load());
-    EXPECT_TRUE(signaled.load());
-}
-
-TEST_F(AsyncBatonTest, WaitForAlreadySignaled)
-{
-    AsyncBaton baton(*worker);
-    baton.notify();  // Signal before wait_for
-
-    std::atomic completed{false};
-    std::atomic signaled{false};
-
-    auto task = [&]() -> DetachedTask
-    {
-        co_await SwitchToWorker(*worker);
-        bool result = co_await baton.wait_for(std::chrono::milliseconds(100));
-        signaled.store(result);
-        completed.store(true);
-    };
-
-    task().detach();
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    EXPECT_TRUE(completed.load());
-    EXPECT_TRUE(signaled.load());
-}
-
-TEST_F(AsyncBatonTest, WaitForRaceCondition)
-{
-    // Test the race where notify() happens during timer setup
-    AsyncBaton baton(*worker);
-    std::atomic completed{false};
-    std::atomic signaled{false};
-    std::atomic notify_called{false};
-
-    auto task = [&]() -> DetachedTask
-    {
-        co_await SwitchToWorker(*worker);
-        const bool result = co_await baton.wait_for(std::chrono::milliseconds(200));
-        signaled.store(result);
-        completed.store(true);
-    };
-
-    task().detach();
-
-    // Notify very quickly to create race condition
-    std::this_thread::sleep_for(std::chrono::microseconds(100));
-    baton.notify();
-    notify_called.store(true);
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    EXPECT_TRUE(completed.load());
-    EXPECT_TRUE(notify_called.load());
-    EXPECT_TRUE(signaled.load());
-}
-
-TEST_F(AsyncBatonTest, ResetAndReuse)
-{
-    AsyncBaton baton(*worker);
-    std::atomic iteration{0};
-
-    auto task = [&]() -> DetachedTask
-    {
-        co_await SwitchToWorker(*worker);
-
-        // First use
-        co_await baton.wait();
-        iteration.store(1);
-        baton.reset();
-
-        // Second use
-        bool result = co_await baton.wait_for(std::chrono::milliseconds(100));
-        if (result)
-        {
-            iteration.store(2);
-        }
-        else
-        {
-            iteration.store(3);  // timeout
-        }
-    };
-
-    task().detach();
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    EXPECT_EQ(iteration.load(), 0);
-
-    // First notify
-    baton.notify();
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    EXPECT_EQ(iteration.load(), 1);
-
-    // Second notify before timeout
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    baton.notify();
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    EXPECT_EQ(iteration.load(), 2);
-}
+    EXPECT_EQ(completed.load(), 0);
 
-TEST_F(AsyncBatonTest, MultipleNotifyIdempotent)
-{
-    AsyncBaton baton(*worker);
-    std::atomic completed{false};
-
-    auto task = [&]() -> DetachedTask
-    {
-        co_await SwitchToWorker(*worker);
-        co_await baton.wait();
-        completed.store(true);
-    };
-
-    task().detach();
+    baton.Post();
 
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    EXPECT_FALSE(completed.load());
-
-    // Multiple notifies should be safe
-    baton.notify();
-    baton.notify();
-    baton.notify();
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    EXPECT_TRUE(completed.load());
-}
-
-TEST_F(AsyncBatonTest, WaitForZeroTimeout)
-{
-    AsyncBaton baton(*worker);
-    std::atomic completed{false};
-    std::atomic timed_out{false};
-
-    auto task = [&]() -> DetachedTask
-    {
-        co_await SwitchToWorker(*worker);
-        bool result = co_await baton.wait_for(std::chrono::milliseconds(0));
-        timed_out.store(!result);
-        completed.store(true);
-    };
-
-    task().detach();
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    EXPECT_TRUE(completed.load());
-    EXPECT_TRUE(timed_out.load());
-}
-
-TEST_F(AsyncBatonTest, WaitForConcurrentNotifyDuringTimeout)
-{
-    // Test edge case: notify happens right as timeout is expiring
-    AsyncBaton baton(*worker);
-    std::atomic completed{false};
-    std::atomic result_recorded{false};
-
-    auto task = [&]() -> DetachedTask
-    {
-        co_await SwitchToWorker(*worker);
-        bool result = co_await baton.wait_for(std::chrono::milliseconds(100));
-        result_recorded.store(result);
-        completed.store(true);
-    };
-
-    task().detach();
-
-    // Wait until just before timeout
-    std::this_thread::sleep_for(std::chrono::milliseconds(95));
-
-    // Notify at the last moment
-    baton.notify();
-
-    // Give time to process
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    EXPECT_TRUE(completed.load());
-    // Result could be either true (notify won) or false (timeout won)
-    // Both are acceptable depending on the exact timing
+    EXPECT_EQ(completed.load(), 3);
 }
 
 TEST_F(AsyncBatonTest, ReadyCheck)
 {
-    AsyncBaton baton(*worker);
-    EXPECT_FALSE(baton.ready());
+    AsyncBaton baton;
+    EXPECT_FALSE(baton.IsReady());
 
-    baton.notify();
-    EXPECT_TRUE(baton.ready());
+    baton.Post();
+    EXPECT_TRUE(baton.IsReady());
 
-    baton.reset();
-    EXPECT_FALSE(baton.ready());
+    baton.Reset();
+    EXPECT_FALSE(baton.IsReady());
 }
 
 TEST_F(AsyncBatonTest, CrossThreadNotify)
 {
-    AsyncBaton baton(*worker);
+    AsyncBaton baton;
     std::atomic completed{false};
 
     auto task = [&]() -> DetachedTask
     {
         co_await SwitchToWorker(*worker);
-        co_await baton.wait();
+        co_await baton.Wait(*worker);
         completed.store(true);
     };
 
@@ -336,13 +139,50 @@ TEST_F(AsyncBatonTest, CrossThreadNotify)
 
     // Notify from a different thread
     std::jthread notifier(
-            [&]
-            {
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                baton.notify();
-            });
+        [&]
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            baton.Post();
+        });
 
     notifier.join();
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     EXPECT_TRUE(completed.load());
+}
+
+TEST_F(AsyncBatonTest, ResetAllowsReuse)
+{
+    AsyncBaton baton;
+    std::atomic<int> phase{0};
+
+    auto first = [&]() -> DetachedTask
+    {
+        co_await SwitchToWorker(*worker);
+        co_await baton.Wait(*worker);
+        phase.store(1);
+    };
+
+    auto second = [&]() -> DetachedTask
+    {
+        co_await SwitchToWorker(*worker);
+        co_await baton.Wait(*worker);
+        phase.store(2);
+    };
+
+    first().detach();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    EXPECT_EQ(phase.load(), 0);
+
+    baton.Post();
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    EXPECT_EQ(phase.load(), 1);
+
+    baton.Reset();
+    second().detach();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    EXPECT_EQ(phase.load(), 1);
+
+    baton.Post();
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    EXPECT_EQ(phase.load(), 2);
 }
