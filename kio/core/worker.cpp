@@ -24,14 +24,14 @@ void Worker::CheckKernelVersion()
         throw std::runtime_error("Failed to get kernel version");
     }
 
-    std::string release(buf.release);
-    const size_t dot_pos = release.find('.');
-    if (dot_pos == std::string::npos)
+    std::string const kRelease(buf.release);
+    const size_t kDotPos = kRelease.find('.');
+    if (kDotPos == std::string::npos)
     {
         throw std::runtime_error("Failed to parse kernel version");
     }
 
-    if (const int major = std::stoi(release.substr(0, dot_pos)); major < 6)
+    if (const int kMajor = std::stoi(kRelease.substr(0, kDotPos)); kMajor < 6)
     {
         throw std::runtime_error("Kernel version must be 6.0.0 or higher");
     }
@@ -51,17 +51,16 @@ void Worker::CheckSyscallReturn(const int ret)
     throw std::system_error(-ret, std::system_category());
 }
 
-int Worker::SubmitSqesWait()
+int Worker::SubmitSqesWait(const uint32_t wait_us)
 {
     // Define the heartbeat interval (max sleep time)
     __kernel_timespec ts{};
     ts.tv_sec = 0;
-    ts.tv_nsec = static_cast<uint32_t>(config_.heartbeat_interval_us * 1000);
+    ts.tv_nsec = wait_us * 1000;
 
     // DYNAMIC BUSY WAIT:
     // Only engage the kernel-side busy loop if we are actually submitting new work.
     // If we are just checking for completions (idle/heartbeat), sleep immediately.
-    // This reduces idle CPU usage from ~5% to ~0%.
     unsigned min_wait = config_.busy_wait_us;
 
     if (io_uring_sq_ready(&ring_) == 0)
@@ -71,9 +70,7 @@ int Worker::SubmitSqesWait()
 
     io_uring_cqe* cqe_ptr = nullptr;
 
-    const int ret = io_uring_submit_and_wait_min_timeout(&ring_, &cqe_ptr, 1, &ts, min_wait, nullptr);
-
-    return ret;
+    return io_uring_submit_and_wait_min_timeout(&ring_, &cqe_ptr, 1, &ts, min_wait, nullptr);
 }
 
 Worker::Worker(const size_t id, const WorkerConfig& config, std::function<void(Worker&)> worker_init_callback)
@@ -90,18 +87,18 @@ void Worker::Initialize()
     io_uring_params params{};
     params.flags |= IORING_SETUP_COOP_TASKRUN | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN;
 
-    if (const int ret = io_uring_queue_init_params(static_cast<int>(config_.uring_queue_depth), &ring_, &params);
-        ret < 0)
+    if (const int kRet = io_uring_queue_init_params(static_cast<int>(config_.uring_queue_depth), &ring_, &params);
+        kRet < 0)
     {
-        throw std::system_error(-ret, std::system_category(), "io_uring_queue_init failed");
+        throw std::system_error(-kRet, std::system_category(), "io_uring_queue_init failed");
     }
 
     ALOG_INFO("IO uring initialized with queue size of {}", config_.uring_queue_depth);
 
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
-    const uint cpu = id_ % std::thread::hardware_concurrency();
-    CPU_SET(cpu, &cpuset);
+    const uint kCpu = id_ % std::thread::hardware_concurrency();
+    CPU_SET(kCpu, &cpuset);
 
     if (const int rc = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset); rc != 0)
     {
@@ -109,7 +106,7 @@ void Worker::Initialize()
     }
     else
     {
-        ALOG_INFO("Worker {} pinned to CPU {}", id_, cpu);
+        ALOG_INFO("Worker {} pinned to CPU {}", id_, kCpu);
     }
 
     if (const int ret = io_uring_register_iowq_aff(&ring_, 1, &cpuset); ret < 0)
@@ -118,12 +115,14 @@ void Worker::Initialize()
     }
     else
     {
-        ALOG_INFO("Worker {}: io-wq threads pinned to CPU {}", id_, cpu);
+        ALOG_INFO("Worker {}: io-wq threads pinned to CPU {}", id_, kCpu);
     }
 }
 
 void Worker::Loop()
 {
+    uint32_t current_wait_us = config_.heartbeat_interval_us;
+
     while (!stop_token_.stop_requested())
     {
         std::coroutine_handle<> h;
@@ -134,8 +133,20 @@ void Worker::Loop()
             resumed++;
         }
 
-        SubmitSqesWait();
-        ProcessCompletions();
+        SubmitSqesWait(current_wait_us);
+        unsigned completions = ProcessCompletions();
+
+        // Adaptive Heartbeat:
+        // If we did work (resumed tasks OR processed IO), go fast (100us).
+        // If we did nothing, exponentially back off to save CPU (up to 2ms).
+        if (resumed > 0 || completions > 0)
+        {
+            current_wait_us = config_.heartbeat_interval_us;
+        }
+        else
+        {
+            current_wait_us = std::min(current_wait_us * 2, config_.max_idle_wait_us);
+        }
     }
 
     ALOG_INFO("Worker {} loop shut down completed", this->id_);
@@ -208,8 +219,8 @@ bool Worker::RequestStop()
         return false;
     }
 
-    const auto stop = stop_source_.request_stop();
-    return stop;
+    const auto kStop = stop_source_.request_stop();
+    return kStop;
 }
 
 Worker::~Worker()
@@ -233,7 +244,6 @@ void Worker::Post(std::coroutine_handle<> h)
     }
 }
 
-// CHANGED: Handle safe completion
 void Worker::HandleCqe(io_uring_cqe* cqe)
 {
     // The data pointer is now a SafeIoCompletion*
@@ -252,20 +262,23 @@ bool Worker::IsOnWorkerThread() const
     return std::this_thread::get_id() == thread_id_;
 }
 
+// ... Rest of Async methods are unchanged from previous versions,
+// they use the updated MakeUringAwaitable automatically.
+
 Task<Result<void>> Worker::AsyncReadExact(const int client_fd, std::span<char> buf)
 {
     size_t total_bytes_read = 0;
-    const size_t total_to_read = buf.size();
+    const size_t kTotalToRead = buf.size();
 
-    while (total_bytes_read < total_to_read)
+    while (total_bytes_read < kTotalToRead)
     {
-        const int bytes_read = KIO_TRY(co_await this->AsyncRead(client_fd, buf.subspan(total_bytes_read)));
+        const int kBytesRead = KIO_TRY(co_await this->AsyncRead(client_fd, buf.subspan(total_bytes_read)));
 
-        if (bytes_read == 0)
+        if (kBytesRead == 0)
         {
             co_return std::unexpected(Error{ErrorCategory::kFile, kIoEof});
         }
-        total_bytes_read += static_cast<size_t>(bytes_read);
+        total_bytes_read += static_cast<size_t>(kBytesRead);
     }
     co_return {};
 }
@@ -273,19 +286,19 @@ Task<Result<void>> Worker::AsyncReadExact(const int client_fd, std::span<char> b
 Task<Result<void>> Worker::AsyncReadExactAt(const int fd, std::span<char> buf, uint64_t offset)
 {
     size_t total_bytes_read = 0;
-    const size_t total_to_read = buf.size();
+    const size_t kTotalToRead = buf.size();
 
-    while (total_bytes_read < total_to_read)
+    while (total_bytes_read < kTotalToRead)
     {
-        const uint64_t current_offset = offset + total_bytes_read;
+        const uint64_t kCurrentOffset = offset + total_bytes_read;
         std::span<char> remaining_buf = buf.subspan(total_bytes_read);
 
-        const int bytes_read = KIO_TRY(co_await this->AsyncReadAt(fd, remaining_buf, current_offset));
-        if (bytes_read == 0)
+        const int kBytesRead = KIO_TRY(co_await this->AsyncReadAt(fd, remaining_buf, kCurrentOffset));
+        if (kBytesRead == 0)
         {
             co_return std::unexpected(Error{ErrorCategory::kFile, kIoEof});
         }
-        total_bytes_read += static_cast<size_t>(bytes_read);
+        total_bytes_read += static_cast<size_t>(kBytesRead);
     }
 
     co_return {};
@@ -294,18 +307,18 @@ Task<Result<void>> Worker::AsyncReadExactAt(const int fd, std::span<char> buf, u
 Task<Result<void>> Worker::AsyncWriteExact(const int client_fd, std::span<const char> buf)
 {
     size_t total_bytes_written = 0;
-    const size_t total_to_write = buf.size();
+    const size_t kTotalToWrite = buf.size();
 
-    while (total_bytes_written < total_to_write)
+    while (total_bytes_written < kTotalToWrite)
     {
         std::span<const char> remaining_buf = buf.subspan(total_bytes_written);
-        const int bytes_written = KIO_TRY(co_await this->AsyncWrite(client_fd, remaining_buf));
-        if (bytes_written == 0)
+        const int kBytesWritten = KIO_TRY(co_await this->AsyncWrite(client_fd, remaining_buf));
+        if (kBytesWritten == 0)
         {
             co_return std::unexpected(Error{ErrorCategory::kFile, kIoEof});
         }
 
-        total_bytes_written += static_cast<size_t>(bytes_written);
+        total_bytes_written += static_cast<size_t>(kBytesWritten);
     }
 
     co_return {};
@@ -314,19 +327,19 @@ Task<Result<void>> Worker::AsyncWriteExact(const int client_fd, std::span<const 
 Task<Result<void>> Worker::AsyncWriteExactAt(const int client_fd, std::span<const char> buf, uint64_t offset)
 {
     size_t total_bytes_written = 0;
-    const size_t total_to_write = buf.size();
+    const size_t kTotalToWrite = buf.size();
 
-    while (total_bytes_written < total_to_write)
+    while (total_bytes_written < kTotalToWrite)
     {
         std::span<const char> remaining_buf = buf.subspan(total_bytes_written);
-        const uint64_t current_offset = offset + total_bytes_written;
-        const int bytes_written = KIO_TRY(co_await this->AsyncWriteAt(client_fd, remaining_buf, current_offset));
-        if (bytes_written == 0)
+        const uint64_t kCurrentOffset = offset + total_bytes_written;
+        const int kBytesWritten = KIO_TRY(co_await this->AsyncWriteAt(client_fd, remaining_buf, kCurrentOffset));
+        if (kBytesWritten == 0)
         {
             co_return std::unexpected(Error{ErrorCategory::kFile, kIoEof});
         }
 
-        total_bytes_written += static_cast<size_t>(bytes_written);
+        total_bytes_written += static_cast<size_t>(kBytesWritten);
     }
 
     co_return {};
@@ -341,12 +354,9 @@ Task<std::expected<void, Error>> Worker::AsyncSleep(std::chrono::nanoseconds dur
     auto prep = [](io_uring_sqe* sqe, __kernel_timespec* t, unsigned flags)
     { io_uring_prep_timeout(sqe, t, 0, flags); };
 
-    // Capture completion_state result differently?
-    // Actually standard await_resume handles it.
     auto awaitable = MakeUringAwaitable(*this, prep, &ts, 0);
     int res = KIO_TRY(co_await awaitable);
 
-    // ETIME is expected for timeout
     if (res == -ETIME)
     {
         co_return {};
@@ -366,11 +376,11 @@ Task<Result<void>> Worker::AsyncSendfile(int out_fd, int in_fd, off_t offset, si
         co_return std::unexpected(Error::FromErrno(errno));
     }
 
-    const net::FDGuard pipe_read(raw_pipe[0]);
-    const net::FDGuard pipe_write(raw_pipe[1]);
+    const net::FDGuard kPipeRead(raw_pipe[0]);
+    const net::FDGuard kPipeWrite(raw_pipe[1]);
 
-    ::fcntl(pipe_read.get(), F_SETFL, O_NONBLOCK);
-    ::fcntl(pipe_write.get(), F_SETFL, O_NONBLOCK);
+    ::fcntl(kPipeRead.get(), F_SETFL, O_NONBLOCK);
+    ::fcntl(kPipeWrite.get(), F_SETFL, O_NONBLOCK);
 
     size_t remaining = count;
     off_t current_offset = offset;
@@ -380,25 +390,23 @@ Task<Result<void>> Worker::AsyncSendfile(int out_fd, int in_fd, off_t offset, si
 
     while (remaining > 0)
     {
-        constexpr size_t k_chunk_size = 65536;
-        const size_t to_splice = std::min(remaining, k_chunk_size);
+        constexpr size_t kChunkSize = 65536;
+        const size_t kToSplice = std::min(remaining, kChunkSize);
 
-        // Step A: Splice File -> Pipe
-        const int res_in =
-            KIO_TRY(co_await MakeUringAwaitable(*this, prep_splice, in_fd, current_offset, pipe_write.get(),
-                                                static_cast<off_t>(-1), static_cast<unsigned int>(to_splice)));
+        const int kResIn =
+            KIO_TRY(co_await MakeUringAwaitable(*this, prep_splice, in_fd, current_offset, kPipeWrite.get(),
+                                                static_cast<off_t>(-1), static_cast<unsigned int>(kToSplice)));
 
-        if (res_in == 0)
+        if (kResIn == 0)
         {
             co_return std::unexpected(Error{ErrorCategory::kFile, kIoEof});
         }
 
-        // Step B: Splice Pipe -> Socket
-        auto pipe_remaining = static_cast<size_t>(res_in);
+        auto pipe_remaining = static_cast<size_t>(kResIn);
         while (pipe_remaining > 0)
         {
             const int res_out =
-                KIO_TRY(co_await MakeUringAwaitable(*this, prep_splice, pipe_read.get(), static_cast<off_t>(-1), out_fd,
+                KIO_TRY(co_await MakeUringAwaitable(*this, prep_splice, kPipeRead.get(), static_cast<off_t>(-1), out_fd,
                                                     static_cast<off_t>(-1), static_cast<unsigned int>(pipe_remaining)));
 
             if (res_out == 0)
@@ -410,9 +418,8 @@ Task<Result<void>> Worker::AsyncSendfile(int out_fd, int in_fd, off_t offset, si
             stats_.bytes_written_total += res_out;
         }
 
-        // Update offsets only after the chunk is successfully processed
-        current_offset += res_in;
-        remaining -= res_in;
+        current_offset += kResIn;
+        remaining -= kResIn;
         stats_.write_ops_total++;
     }
     co_return {};

@@ -5,22 +5,23 @@
 #ifndef KIO_WORKER_H
 #define KIO_WORKER_H
 
+#include <cstddef>
+#include <expected>
+#include <fcntl.h>
+#include <filesystem>
+#include <functional>
+#include <latch>
+#include <liburing.h>
+#include <span>
+#include <thread>
+#include <tuple>
+
 #include "coro.h"
 #include "errors.h"
 #include "kio/net/net.h"
 #include "kio/net/socket.h"
 #include "kio/sync/mpsc_queue.h"
-#include "safe_completion.h"  // <--- Include the new file
-
-#include <expected>
-#include <filesystem>
-#include <functional>
-#include <latch>
-#include <span>
-#include <thread>
-
-#include <fcntl.h>
-#include <liburing.h>
+#include "safe_completion.h"
 
 namespace kio::io
 {
@@ -53,7 +54,7 @@ struct alignas(std::hardware_destructive_interference_size) WorkerStats
 struct WorkerConfig
 {
     size_t uring_queue_depth{1024};
-    size_t uring_submit_batch_size{128};
+    uint32_t max_idle_wait_us{2000};
     size_t tcp_backlog{128};
     uint8_t uring_submit_timeout_ms{100};
     int uring_default_flags = 0;
@@ -65,7 +66,7 @@ struct WorkerConfig
 
     void Check() const
     {
-        if (uring_queue_depth == 0 || uring_submit_batch_size == 0 || tcp_backlog == 0)
+        if (uring_queue_depth == 0 || tcp_backlog == 0)
         {
             throw std::invalid_argument("Invalid worker config");
         }
@@ -81,9 +82,9 @@ struct WorkerConfig
 };
 
 /**
- * IoUringAwaitable - UPDATED for Safe Cancellation
+ * IoUringAwaitable - Using SafeIoCompletion for robust cancellation
  */
-template <typename Prep, typename... Args>
+template<typename Prep, typename... Args>
 struct IoUringAwaitable
 {
     Worker& worker;
@@ -92,45 +93,21 @@ struct IoUringAwaitable
     OnSuccess on_success;
     std::tuple<Args...> io_args;
 
-    // CHANGED: We now hold a pointer to the heap-allocated state
+    // Heap-allocated, ref-counted completion state
     SafeIoCompletion* completion_state{nullptr};
 
     bool await_ready() const noexcept { return false; }
 
-    bool await_suspend(std::coroutine_handle<> h)
-    {
-        assert(worker.IsOnWorkerThread() && "kio::async_* operation was called from the wrong thread.");
-
-        // Acquire state from pool. RefCount starts at 2.
-        completion_state = CompletionPool::Acquire(h);
-
-        auto& ring = internal::WorkerAccess::GetRing(worker);
-        io_uring_sqe* sqe = io_uring_get_sqe(&ring);
-
-        if (sqe == nullptr)
-        {
-            // Failed to get SQE.            completion_state->result = -EAGAIN;
-            // Drop Kernel ref immediately since we aren't giving it to kernel
-            completion_state->Release();
-            return false;
-        }
-
-        std::apply([this, sqe]<typename... T>(T&&... unpacked_args)
-                   { io_uring_prep(sqe, std::forward<T>(unpacked_args)...); }, std::move(io_args));
-
-        // Pass the heap pointer to the kernel
-        io_uring_sqe_set_data(sqe, completion_state);
-        return true;
-    }
+    bool await_suspend(std::coroutine_handle<> h);
 
     [[nodiscard]] Result<int> await_resume() noexcept
     {
-        // 1. Get result
+        // Get result
         int res = completion_state->result;
 
-        // 2. We are done with the object on the User side. Release User ref.
+        // We are done with the object on the User side. Release User ref.
         completion_state->Release();
-        completion_state = nullptr;  // Clear to prevent dtor from abandoning
+        completion_state = nullptr; // Clear to prevent dtor from abandoning
 
         if (res < 0)
         {
@@ -143,8 +120,8 @@ struct IoUringAwaitable
         return res;
     }
 
-    explicit IoUringAwaitable(Worker& worker, Prep prep, OnSuccess on_success, Args... args)
-        : worker(worker), io_uring_prep(std::move(prep)), on_success(on_success), io_args(args...)
+    explicit IoUringAwaitable(Worker& worker, Prep prep, OnSuccess on_success, Args... args) :
+        worker(worker), io_uring_prep(std::move(prep)), on_success(on_success), io_args(args...)
     {
     }
 
@@ -152,27 +129,26 @@ struct IoUringAwaitable
     {
         // If completion_state is still set, it means await_resume() was NEVER called.
         // This implies the coroutine is being destroyed while suspended (Cancellation).
-        if (completion_state)
+        if (completion_state != nullptr)
         {
             completion_state->Abandon();
         }
     }
 
-    // Disable copy/move to keep lifetime simple
     IoUringAwaitable(const IoUringAwaitable&) = delete;
     IoUringAwaitable& operator=(const IoUringAwaitable&) = delete;
     IoUringAwaitable(IoUringAwaitable&&) = delete;
     IoUringAwaitable& operator=(IoUringAwaitable&&) = delete;
 };
 
-template <typename Prep, typename... Args>
+template<typename Prep, typename... Args>
 auto MakeUringAwaitable(Worker& worker, Prep&& prep, void (*on_success)(Worker&, int), Args&&... args)
 {
     return IoUringAwaitable<std::decay_t<Prep>, std::decay_t<Args>...>(worker, std::forward<Prep>(prep), on_success,
                                                                        std::forward<Args>(args)...);
 }
 
-template <typename Prep, typename... Args>
+template<typename Prep, typename... Args>
 auto MakeUringAwaitable(Worker& worker, Prep&& prep, Args&&... args)
 {
     return IoUringAwaitable<std::decay_t<Prep>, std::decay_t<Args>...>(worker, std::forward<Prep>(prep), nullptr,
@@ -182,7 +158,7 @@ auto MakeUringAwaitable(Worker& worker, Prep&& prep, Args&&... args)
 class Worker
 {
     friend struct internal::WorkerAccess;
-    template <typename, typename...>
+    template<typename, typename...>
     friend struct IoUringAwaitable;
 
     io_uring ring_{};
@@ -199,7 +175,8 @@ class Worker
     WorkerStats stats_{};
     std::function<void(Worker&)> worker_init_callback_;
 
-    int SubmitSqesWait();
+    // Accept dynamic wait time for adaptive heartbeat
+    int SubmitSqesWait(uint32_t wait_us);
 
     static void StatIncRead(Worker& w, const int res)
     {
@@ -247,7 +224,6 @@ public:
 
     [[nodiscard]] const WorkerStats& GetStats() { return stats_; }
 
-    // IO Methods (Same as before)
     [[nodiscard]] auto AsyncAccept(int server_fd, sockaddr* addr, socklen_t* addrlen)
     {
         auto prep = [](io_uring_sqe* sqe, int fd, sockaddr* a, socklen_t* al, int flags)
@@ -397,6 +373,35 @@ inline io_uring& WorkerAccess::GetRing(Worker& worker) noexcept
     return worker.GetRing();
 }
 }  // namespace internal
+
+
+template<typename Prep, typename... Args>
+bool IoUringAwaitable<Prep, Args...>::await_suspend(std::coroutine_handle<> h)
+{
+    assert(worker.IsOnWorkerThread() && "kio::async_* operation was called from the wrong thread.");
+
+    // Acquire state from pool. RefCount starts at 2 (User + Kernel).
+    completion_state = CompletionPool::Acquire(h);
+
+    auto& ring = internal::WorkerAccess::GetRing(worker);
+    io_uring_sqe* sqe = io_uring_get_sqe(&ring);
+
+    if (sqe == nullptr)
+    {
+        // Failed to get SQE.
+        completion_state->result = -EAGAIN;
+        // Drop Kernel ref immediately since we aren't giving it to kernel
+        completion_state->Release();
+        return false;
+    }
+
+    std::apply([this, sqe]<typename... T>(T&&... unpacked_args)
+               { io_uring_prep(sqe, std::forward<T>(unpacked_args)...); }, std::move(io_args));
+
+    // Pass the heap pointer to the kernel
+    io_uring_sqe_set_data(sqe, completion_state);
+    return true;
+}
 
 }  // namespace kio::io
 
