@@ -18,7 +18,7 @@ class RespWriterTest : public ::testing::Test
 {
 protected:
     ChunkedBuffer buffer_;
-    RespWriter writer{buffer_};
+    RespWriter writer_{buffer_};
 
     // Helper to get the full committed content as a string
     [[nodiscard]] std::string GetContent() const
@@ -37,87 +37,87 @@ protected:
 
 TEST_F(RespWriterTest, WriteSimpleString)
 {
-    writer.WriteSimpleString("OK");
-    writer.Commit();
+    writer_.WriteSimpleString("OK");
+    writer_.Commit();
     EXPECT_EQ(GetContent(), "+OK\r\n");
 }
 
 TEST_F(RespWriterTest, WriteError)
 {
-    writer.WriteError("ERR unknown command");
-    writer.Commit();
+    writer_.WriteError("ERR unknown command");
+    writer_.Commit();
     EXPECT_EQ(GetContent(), "-ERR unknown command\r\n");
 }
 
 TEST_F(RespWriterTest, WriteInteger)
 {
-    writer.WriteInteger(1000);
-    writer.WriteInteger(-42);
-    writer.Commit();
+    writer_.WriteInteger(1000);
+    writer_.WriteInteger(-42);
+    writer_.Commit();
     EXPECT_EQ(GetContent(), ":1000\r\n:-42\r\n");
 }
 
 TEST_F(RespWriterTest, WriteBulkString)
 {
-    writer.WriteBulkString("hello");
-    writer.Commit();
+    writer_.WriteBulkString("hello");
+    writer_.Commit();
     EXPECT_EQ(GetContent(), "$5\r\nhello\r\n");
 }
 
 TEST_F(RespWriterTest, WriteEmptyBulkString)
 {
-    writer.WriteBulkString("");
-    writer.Commit();
+    writer_.WriteBulkString("");
+    writer_.Commit();
     EXPECT_EQ(GetContent(), "$0\r\n\r\n");
 }
 
 TEST_F(RespWriterTest, WriteNullBulkString)
 {
-    writer.WriteNullBulk();
-    writer.Commit();
+    writer_.WriteNullBulk();
+    writer_.Commit();
     EXPECT_EQ(GetContent(), "$-1\r\n");
 }
 
 TEST_F(RespWriterTest, WriteArray)
 {
     // Array of 2 elements: ["foo", "bar"]
-    writer.WriteArrayHeader(2);
-    writer.WriteBulkString("foo");
-    writer.WriteBulkString("bar");
-    writer.Commit();
+    writer_.WriteArrayHeader(2);
+    writer_.WriteBulkString("foo");
+    writer_.WriteBulkString("bar");
+    writer_.Commit();
 
     EXPECT_EQ(GetContent(), "*2\r\n$3\r\nfoo\r\n$3\r\nbar\r\n");
 }
 
 TEST_F(RespWriterTest, WriteNullArray)
 {
-    writer.WriteNullArray();
-    writer.Commit();
+    writer_.WriteNullArray();
+    writer_.Commit();
     EXPECT_EQ(GetContent(), "*-1\r\n");
 }
 
 TEST_F(RespWriterTest, WriteNestedArray)
 {
     // [1, [2, 3]]
-    writer.WriteArrayHeader(2);
-    writer.WriteInteger(1);
+    writer_.WriteArrayHeader(2);
+    writer_.WriteInteger(1);
 
-    writer.WriteArrayHeader(2);
-    writer.WriteInteger(2);
-    writer.WriteInteger(3);
-    writer.Commit();
+    writer_.WriteArrayHeader(2);
+    writer_.WriteInteger(2);
+    writer_.WriteInteger(3);
+    writer_.Commit();
 
     EXPECT_EQ(GetContent(), "*2\r\n:1\r\n*2\r\n:2\r\n:3\r\n");
 }
 
 TEST_F(RespWriterTest, RollbackDiscardsUncommitted)
 {
-    writer.WriteSimpleString("KeepMe");
-    writer.Commit();
+    writer_.WriteSimpleString("KeepMe");
+    writer_.Commit();
 
-    writer.WriteSimpleString("DiscardMe");
+    writer_.WriteSimpleString("DiscardMe");
     // Do NOT commit
-    writer.Rollback();
+    writer_.Rollback();
 
     EXPECT_EQ(GetContent(), "+KeepMe\r\n");
 }
