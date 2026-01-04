@@ -28,25 +28,25 @@ struct ParserConfig
 enum class FrameType : uint8_t
 {
     // Simple types (CRLF-terminated)
-    SimpleString = '+',  // +OK\r\n
-    SimpleError = '-',   // -ERR message\r\n
-    Integer = ':',       // :1000\r\n
-    Null = '_',          // _\r\n
-    Boolean = '#',       // #t\r\n or #f\r\n
-    Double = ',',        // ,3.14\r\n
-    BigNumber = '(',     // (123456789...\r\n
+    kSimpleString = '+',  // +OK\r\n
+    kSimpleError = '-',   // -ERR message\r\n
+    kInteger = ':',       // :1000\r\n
+    kNull = '_',          // _\r\n
+    kBoolean = '#',       // #t\r\n or #f\r\n
+    kDouble = ',',        // ,3.14\r\n
+    kBigNumber = '(',     // (123456789...\r\n
 
     // Bulk types (length-prefixed)
-    BulkString = '$',      // $5\r\nhello\r\n
-    BulkError = '!',       // !21\r\nSYNTAX error\r\n
-    VerbatimString = '=',  // =15\r\ntxt:Some text\r\n
+    kBulkString = '$',      // $5\r\nhello\r\n
+    kBulkError = '!',       // !21\r\nSYNTAX error\r\n
+    kVerbatimString = '=',  // =15\r\ntxt:Some text\r\n
 
     // Aggregates (count + children)
-    Array = '*',      // *2\r\n...
-    Map = '%',        // %2\r\n...
-    Set = '~',        // ~3\r\n...
-    Push = '>',       // >3\r\n...
-    Attribute = '|',  // |1\r\n...
+    kArray = '*',      // *2\r\n...
+    kMap = '%',        // %2\r\n...
+    kSet = '~',        // ~3\r\n...
+    kPush = '>',       // >3\r\n...
+    kAttribute = '|',  // |1\r\n...
 };
 
 struct FrameHeader
@@ -57,15 +57,15 @@ struct FrameHeader
     size_t element_count;  // For aggregates: number of semantic elements
 };
 
-enum class ParseError
+enum class ParseError : uint8_t
 {
-    NeedMoreData,
-    MalformedFrame,
-    Atoi,
-    MaxDepthReached,
-    SizeOverflow,
-    EoIter,
-    Unknown
+    kNeedMoreData,
+    kMalformedFrame,
+    kAtoi,
+    kMaxDepthReached,
+    kSizeOverflow,
+    kEoIter,
+    kUnknown
 };
 
 class Parser;
@@ -74,7 +74,7 @@ class Parser;
 class FrameIterator
 {
 public:
-    explicit FrameIterator(const FrameHeader& parent, Parser& parser);
+    explicit FrameIterator(const FrameHeader& parent, Parser& parser, size_t depth = 0);
 
     // Get the next child frame
     std::expected<FrameHeader, ParseError> Next();
@@ -85,7 +85,7 @@ public:
 private:
     Parser& parser_;
     const char* current_;
-    const char* end_;
+    const char* end_;  // Safety bound
     size_t remaining_;
     // Logic depth for validation context
     size_t depth_;

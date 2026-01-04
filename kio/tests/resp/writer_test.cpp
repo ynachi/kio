@@ -31,6 +31,8 @@ protected:
         }
         return s;
     }
+
+    void SetUp() override { kio::alog::Configure(1024, kio::LogLevel::kDisabled); }
 };
 
 TEST_F(RespWriterTest, WriteSimpleString)

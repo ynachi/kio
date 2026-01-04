@@ -4,6 +4,8 @@
 
 #include "kio/resp/parser.h"
 
+#include "kio/core/async_logger.h"
+
 #include <random>
 #include <string>
 #include <vector>
@@ -22,6 +24,7 @@ protected:
 
     void SetUp() override
     {
+        kio::alog::Configure(1024, kio::LogLevel::kDisabled);
         // Ensure a clean state
         parser_.Buffer().Clear();
     }
@@ -34,7 +37,7 @@ TEST_F(ParserTest, ParseSimpleString)
     ASSERT_TRUE(kResult.has_value());
 
     const auto kFrame = *kResult;
-    EXPECT_EQ(kFrame.type, FrameType::SimpleString);
+    EXPECT_EQ(kFrame.type, FrameType::kSimpleString);
     EXPECT_EQ(kFrame.size, 5);
     EXPECT_EQ(GetSimplePayload(kFrame), "OK");
 
@@ -49,14 +52,14 @@ TEST_F(ParserTest, ParseInteger)
     // First integer
     const auto kRes1 = parser_.NextFrame();
     ASSERT_TRUE(kRes1.has_value());
-    EXPECT_EQ(kRes1->type, FrameType::Integer);
+    EXPECT_EQ(kRes1->type, FrameType::kInteger);
     EXPECT_EQ(GetSimplePayload(*kRes1), "1000");
     parser_.Consume(*kRes1);
 
     // Second integer
     const auto kRes2 = parser_.NextFrame();
     ASSERT_TRUE(kRes2.has_value());
-    EXPECT_EQ(kRes2->type, FrameType::Integer);
+    EXPECT_EQ(kRes2->type, FrameType::kInteger);
     EXPECT_EQ(GetSimplePayload(*kRes2), "-42");
     parser_.Consume(*kRes2);
 }
@@ -68,21 +71,21 @@ TEST_F(ParserTest, ParseDouble)
     // First integer
     const auto kRes1 = parser_.NextFrame();
     ASSERT_TRUE(kRes1.has_value());
-    EXPECT_EQ(kRes1->type, FrameType::Double);
+    EXPECT_EQ(kRes1->type, FrameType::kDouble);
     EXPECT_EQ(GetSimplePayload(*kRes1), "1000");
     parser_.Consume(*kRes1);
 
     // Second integer
     const auto kRes2 = parser_.NextFrame();
     ASSERT_TRUE(kRes2.has_value());
-    EXPECT_EQ(kRes2->type, FrameType::Double);
+    EXPECT_EQ(kRes2->type, FrameType::kDouble);
     EXPECT_EQ(GetSimplePayload(*kRes2), "-42");
     parser_.Consume(*kRes2);
 
     // Fird integer
     const auto res3 = parser_.NextFrame();
     ASSERT_TRUE(res3.has_value());
-    EXPECT_EQ(res3->type, FrameType::Double);
+    EXPECT_EQ(res3->type, FrameType::kDouble);
     EXPECT_EQ(GetSimplePayload(*res3), "34.5");
     parser_.Consume(*res3);
 }
@@ -94,7 +97,7 @@ TEST_F(ParserTest, ParseBulkString)
     ASSERT_TRUE(kResult.has_value());
 
     const auto kFrame = *kResult;
-    EXPECT_EQ(kFrame.type, FrameType::BulkString);
+    EXPECT_EQ(kFrame.type, FrameType::kBulkString);
     EXPECT_EQ(GetBulkPayload(kFrame), "hello");
 }
 
@@ -105,7 +108,7 @@ TEST_F(ParserTest, ParseEmptyBulkString)
     ASSERT_TRUE(kResult.has_value());
 
     const auto kFrame = *kResult;
-    EXPECT_EQ(kFrame.type, FrameType::BulkString);
+    EXPECT_EQ(kFrame.type, FrameType::kBulkString);
     EXPECT_EQ(GetBulkPayload(kFrame), "");
     // Size check: $0\r\n (4) + \r\n (2) = 6
     EXPECT_EQ(kFrame.size, 6);
@@ -118,7 +121,7 @@ TEST_F(ParserTest, ParseNullBulkString)
     ASSERT_TRUE(kResult.has_value());
 
     const auto kFrame = *kResult;
-    EXPECT_EQ(kFrame.type, FrameType::BulkString);
+    EXPECT_EQ(kFrame.type, FrameType::kBulkString);
     EXPECT_TRUE(GetBulkPayload(kFrame).empty());
     EXPECT_EQ(kFrame.size, 5);
 }
@@ -129,7 +132,7 @@ TEST_F(ParserTest, RejectsBadBulkTerminator)
 
     auto res = parser_.NextFrame();
     ASSERT_FALSE(res.has_value());
-    EXPECT_EQ(res.error(), ParseError::MalformedFrame);
+    EXPECT_EQ(res.error(), ParseError::kMalformedFrame);
 }
 
 TEST(RespParserTest, AggregateSizeOverflow)
@@ -143,7 +146,7 @@ TEST(RespParserTest, AggregateSizeOverflow)
 
     auto res = parser.NextFrame();
     ASSERT_FALSE(res.has_value());
-    EXPECT_EQ(res.error(), ParseError::SizeOverflow);
+    EXPECT_EQ(res.error(), ParseError::kSizeOverflow);
 }
 
 TEST_F(ParserTest, ParseBoolean)
@@ -169,7 +172,7 @@ TEST_F(ParserTest, ParseArray)
     ASSERT_TRUE(result.has_value());
     auto frame = *result;
 
-    EXPECT_EQ(frame.type, FrameType::Array);
+    EXPECT_EQ(frame.type, FrameType::kArray);
     EXPECT_EQ(frame.element_count, 3);
 
     // Verify Iterator
@@ -199,7 +202,7 @@ TEST_F(ParserTest, ParseMap)
     ASSERT_TRUE(kResult.has_value());
     const auto kFrame = *kResult;
 
-    EXPECT_EQ(kFrame.type, FrameType::Map);
+    EXPECT_EQ(kFrame.type, FrameType::kMap);
     EXPECT_EQ(kFrame.element_count, 2);  // 2 PAIRS
 
     FrameIterator iter(kFrame, parser_);
@@ -238,7 +241,7 @@ TEST_F(ParserTest, ParseNestedArray)
     // Second element: Nested Array
     const auto el2 = iter.Next();
     ASSERT_TRUE(el2.has_value());
-    EXPECT_EQ(el2->type, FrameType::Array);
+    EXPECT_EQ(el2->type, FrameType::kArray);
 
     // Iterate a nested array
     FrameIterator sub_iter(*el2, parser_);
@@ -253,13 +256,13 @@ TEST_F(ParserTest, NeedMoreDataPartialCommand)
 
     auto result = parser_.NextFrame();
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), ParseError::NeedMoreData);
+    EXPECT_EQ(result.error(), ParseError::kNeedMoreData);
 
     // Feed rest
     Feed("\r\n$3\r\nbar\r\n");
     const auto kRetry = parser_.NextFrame();
     ASSERT_TRUE(kRetry.has_value());
-    EXPECT_EQ(kRetry->type, FrameType::Array);
+    EXPECT_EQ(kRetry->type, FrameType::kArray);
 }
 
 TEST_F(ParserTest, MaxRecursiveDepthExceeded)
@@ -275,7 +278,7 @@ TEST_F(ParserTest, MaxRecursiveDepthExceeded)
     Feed(deep);
     auto result = parser_.NextFrame();
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), ParseError::MaxDepthReached);
+    EXPECT_EQ(result.error(), ParseError::kMaxDepthReached);
 }
 
 TEST_F(ParserTest, WideArrayIsOK)
@@ -299,7 +302,7 @@ TEST_F(ParserTest, MalformedInteger)
     Feed(":abc\r\n");
     auto result = parser_.NextFrame();
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), ParseError::Atoi);
+    EXPECT_EQ(result.error(), ParseError::kAtoi);
 }
 
 TEST_F(ParserTest, BulkStringIncomplete)
@@ -308,7 +311,7 @@ TEST_F(ParserTest, BulkStringIncomplete)
     Feed("$100\r\nshort\r\n");
     auto result = parser_.NextFrame();
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), ParseError::NeedMoreData);
+    EXPECT_EQ(result.error(), ParseError::kNeedMoreData);
 }
 
 TEST_F(ParserTest, BulkStringSizeOverflow)
@@ -317,7 +320,7 @@ TEST_F(ParserTest, BulkStringSizeOverflow)
     Feed("$9223372036854775807\r\n");
     auto result = parser_.NextFrame();
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), ParseError::SizeOverflow);
+    EXPECT_EQ(result.error(), ParseError::kSizeOverflow);
 }
 
 TEST_F(ParserTest, NullArray)
@@ -337,7 +340,7 @@ TEST_F(ParserTest, MixedArrayTypes)
     ASSERT_TRUE(kResult.has_value());
     const auto kFrame = *kResult;
 
-    EXPECT_EQ(kFrame.type, FrameType::Array);
+    EXPECT_EQ(kFrame.type, FrameType::kArray);
     EXPECT_EQ(kFrame.element_count, 5);
 
     FrameIterator iter(kFrame, parser_);
@@ -345,31 +348,31 @@ TEST_F(ParserTest, MixedArrayTypes)
     // 1. Integer
     const auto i = iter.Next();
     ASSERT_TRUE(i.has_value());
-    EXPECT_EQ(i->type, FrameType::Integer);
+    EXPECT_EQ(i->type, FrameType::kInteger);
     EXPECT_EQ(GetSimplePayload(*i), "123");
 
     // 2. Simple String
     const auto s = iter.Next();
     ASSERT_TRUE(s.has_value());
-    EXPECT_EQ(s->type, FrameType::SimpleString);
+    EXPECT_EQ(s->type, FrameType::kSimpleString);
     EXPECT_EQ(GetSimplePayload(*s), "hello");
 
     // 3. Boolean
     const auto b = iter.Next();
     ASSERT_TRUE(b.has_value());
-    EXPECT_EQ(b->type, FrameType::Boolean);
+    EXPECT_EQ(b->type, FrameType::kBoolean);
     EXPECT_EQ(GetSimplePayload(*b), "f");
 
     // 4. Double
     const auto d = iter.Next();
     ASSERT_TRUE(d.has_value());
-    EXPECT_EQ(d->type, FrameType::Double);
+    EXPECT_EQ(d->type, FrameType::kDouble);
     EXPECT_EQ(GetSimplePayload(*d), "12.34");
 
     // 5. Bulk String
     const auto bs = iter.Next();
     ASSERT_TRUE(bs.has_value());
-    EXPECT_EQ(bs->type, FrameType::BulkString);
+    EXPECT_EQ(bs->type, FrameType::kBulkString);
     EXPECT_EQ(GetBulkPayload(*bs), "world");
 
     ASSERT_FALSE(iter.Next());
