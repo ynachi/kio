@@ -16,12 +16,12 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 #------------------------------------------
 function(kio_target_compile_options target_name)
     target_compile_options(${target_name} PRIVATE
-        -Wall
-        -Wextra
-        -Wpedantic
-        -Wno-gnu-statement-expression
-        $<$<CONFIG:Debug>:-g -O0>
-        $<$<CONFIG:Release>:-O3>
+            -Wall
+            -Wextra
+            -Wpedantic
+            -Wno-gnu-statement-expression
+            $<$<CONFIG:Debug>:-g -O0>
+            $<$<CONFIG:Release>:-O3>
     )
 endfunction()
 
@@ -29,7 +29,7 @@ function(kio_add_sanitizers target_name)
     if (CMAKE_BUILD_TYPE STREQUAL "Debug")
         target_compile_options(${target_name} PRIVATE -fsanitize=thread -g)
         target_link_options(${target_name} PRIVATE -fsanitize=thread)
-    endif()
+    endif ()
 endfunction()
 
 # -----------------------------------------
@@ -42,15 +42,15 @@ option(KIO_BUILD_BENCHMARK "Build codes used to benchmark kio against other libs
 option(ENABLE_CLANG_TIDY "Run clang-tidy during compilation" OFF)
 
 # Enable clang-tidy during build if requested
-if(ENABLE_CLANG_TIDY)
+if (ENABLE_CLANG_TIDY)
     find_program(CLANG_TIDY_EXE NAMES clang-tidy)
-    if(CLANG_TIDY_EXE)
+    if (CLANG_TIDY_EXE)
         set(CMAKE_CXX_CLANG_TIDY ${CLANG_TIDY_EXE})
         message(STATUS "clang-tidy enabled: ${CLANG_TIDY_EXE}")
-    else()
+    else ()
         message(WARNING "clang-tidy requested but not found")
-    endif()
-endif()
+    endif ()
+endif ()
 
 #-----------------------------------------
 # Dependencies
@@ -105,25 +105,25 @@ file(GLOB_RECURSE ALL_SOURCE_FILES
 )
 
 # Format target - applies clang-format
-if(CLANG_FORMAT_EXE)
+if (CLANG_FORMAT_EXE)
     add_custom_target(format
             COMMAND ${CLANG_FORMAT_EXE} -i ${ALL_SOURCE_FILES}
             COMMENT "Running clang-format on all source files"
             VERBATIM
     )
-    
+
     add_custom_target(format-check
             COMMAND ${CLANG_FORMAT_EXE} --dry-run --Werror ${ALL_SOURCE_FILES}
             COMMENT "Checking code formatting (no changes)"
             VERBATIM
     )
     message(STATUS "Added targets: format, format-check")
-else()
+else ()
     message(WARNING "clang-format not found - format targets not available")
-endif()
+endif ()
 
 # Tidy target - runs clang-tidy on all sources
-if(CLANG_TIDY_EXE)
+if (CLANG_TIDY_EXE)
     add_custom_target(tidy
             COMMAND ${CLANG_TIDY_EXE}
             -p ${CMAKE_BINARY_DIR}
@@ -131,7 +131,7 @@ if(CLANG_TIDY_EXE)
             COMMENT "Running clang-tidy on all source files"
             VERBATIM
     )
-    
+
     add_custom_target(tidy-fix
             COMMAND ${CLANG_TIDY_EXE}
             -p ${CMAKE_BINARY_DIR}
@@ -141,9 +141,9 @@ if(CLANG_TIDY_EXE)
             VERBATIM
     )
     message(STATUS "Added targets: tidy, tidy-fix")
-else()
+else ()
     message(WARNING "clang-tidy not found - tidy targets not available")
-endif()
+endif ()
 
 #-----------------------------------------------
 # Includes
@@ -168,22 +168,21 @@ if (KIO_BUILD_TESTS)
     include(CTest)
     enable_testing()
     add_subdirectory(kio/tests)
-    add_subdirectory(tests)
-    
+
     # Check target - runs all tests
     add_custom_target(check
             COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
             COMMENT "Running all tests"
             VERBATIM
     )
-    
+
     # Quick check - only fast tests
     add_custom_target(check-quick
             COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -L "unit"
             COMMENT "Running quick unit tests"
             VERBATIM
     )
-    
+
     message(STATUS "Added targets: check, check-quick")
 endif ()
 

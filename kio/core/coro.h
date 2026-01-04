@@ -1,18 +1,18 @@
 #ifndef CORO_H
 #define CORO_H
 
+#include "async_logger.h"
+
 #include <coroutine>
 #include <exception>
 #include <format>
 #include <utility>
 #include <variant>
 
-#include "async_logger.h"
-
 namespace kio
 {
 
-template<typename T>
+template <typename T>
 struct Task
 {
     struct promise_type;  // NOLINT
@@ -21,13 +21,13 @@ struct Task
 
     explicit Task(std::coroutine_handle<promise_type> h) : h(h) {}
 
-    Task(Task &&other) noexcept : h(std::exchange(other.h, {})) {}
+    Task(Task&& other) noexcept : h(std::exchange(other.h, {})) {}
 
-    Task(const Task &) = delete;
+    Task(const Task&) = delete;
 
-    Task &operator=(const Task &) = delete;
+    Task& operator=(const Task&) = delete;
 
-    Task &operator=(Task &&other) noexcept
+    Task& operator=(Task&& other) noexcept
     {
         if (this != &other)
         {
@@ -74,9 +74,9 @@ struct Task
             std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_type> h) noexcept  // NOLINT
             {
                 // Resume the continuation or return to the original caller if there is none.
-                if (auto continuation = h.promise().continuation)
+                if (auto next_handle = h.promise().continuation)
                 {
-                    return continuation;
+                    return next_handle;
                 }
                 return std::noop_coroutine();
             }
@@ -124,7 +124,7 @@ struct Task
 };
 
 // Specialization for Task<void>
-template<>
+template <>
 struct Task<void>
 {
     struct promise_type;  // NOLINT
@@ -133,13 +133,13 @@ struct Task<void>
 
     explicit Task(std::coroutine_handle<promise_type> h) : h(h) {}
 
-    Task(Task &&other) noexcept : h(std::exchange(other.h, {})) {}
+    Task(Task&& other) noexcept : h(std::exchange(other.h, {})) {}
 
-    Task(const Task &) = delete;
+    Task(const Task&) = delete;
 
-    Task &operator=(const Task &) = delete;
+    Task& operator=(const Task&) = delete;
 
-    Task &operator=(Task &&other) noexcept
+    Task& operator=(Task&& other) noexcept
     {
         if (this != &other)
         {
@@ -190,7 +190,7 @@ struct Task<void>
             void await_resume() noexcept {}  // NOLINT
         };
 
-        FinalAwaiter final_suspend() noexcept { return {}; }  // NOLINT
+        FinalAwaiter final_suspend() noexcept { return {}; }               // NOLINT
         void unhandled_exception() { result = std::current_exception(); }  // NOLINT
 
         void return_void() {}  // NOLINT
@@ -238,7 +238,7 @@ struct DetachedTask
             {
                 throw;
             }
-            catch (const std::exception &e)
+            catch (const std::exception& e)
             {
                 ALOG_ERROR("DetachedTask exception: {}", e.what());
             }

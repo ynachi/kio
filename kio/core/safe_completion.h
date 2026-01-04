@@ -15,7 +15,7 @@ struct SpinLock
 {
     std::atomic_flag flag = ATOMIC_FLAG_INIT;
 
-    void lock()
+    void Lock()
     {
         while (flag.test_and_set(std::memory_order_acquire))
         {
@@ -25,7 +25,7 @@ struct SpinLock
         }
     }
 
-    void unlock()
+    void Unlock()
     {
         flag.clear(std::memory_order_release);
 #if defined(__cpp_lib_atomic_wait)
@@ -52,7 +52,7 @@ struct SafeIoCompletion
         handle = h;
         result = 0;
         // Ensure unlocked state
-        lock.unlock();
+        lock.Unlock();
     }
 
     void Release();
@@ -60,10 +60,10 @@ struct SafeIoCompletion
     // Called by IoUringAwaitable destructor (User side)
     void Abandon()
     {
-        lock.lock();
+        lock.Lock();
         // Detach: Coroutine is gone, don't resume!
         handle = nullptr;
-        lock.unlock();
+        lock.Unlock();
         Release();
     }
 
@@ -72,11 +72,11 @@ struct SafeIoCompletion
     {
         std::coroutine_handle<> h_to_resume = nullptr;
 
-        lock.lock();
+        lock.Lock();
         result = res;
         // Copy handle (might be null if Abandon() was called)
         h_to_resume = handle;
-        lock.unlock();
+        lock.Unlock();
 
         // Resume outside lock
         if (h_to_resume)

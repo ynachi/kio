@@ -8,7 +8,7 @@
 
 namespace kio::io
 {
-IOPool::IOPool(size_t num_workers, const WorkerConfig &config, const std::function<void(Worker &)> &worker_init)
+IOPool::IOPool(size_t num_workers, const WorkerConfig& config, const std::function<void(Worker&)>& worker_init)
 {
     if (num_workers == 0)
     {
@@ -24,13 +24,13 @@ IOPool::IOPool(size_t num_workers, const WorkerConfig &config, const std::functi
     }
 
     // Start threads after all workers are created
-    for (const auto &worker: workers_)
+    for (const auto& worker : workers_)
     {
         worker_threads_.emplace_back([&w = *worker] -> void { w.LoopForever(); });
     }
 
     // Wait for all workers to be fully initialized
-    for (const auto &worker: workers_)
+    for (const auto& worker : workers_)
     {
         worker->WaitReady();
     }
@@ -43,7 +43,7 @@ IOPool::~IOPool()
     Stop();
 }
 
-auto IOPool::GetWorker(const size_t id) const -> Worker *
+auto IOPool::GetWorker(const size_t id) const -> Worker*
 {
     if (id < workers_.size())
     {
@@ -54,8 +54,8 @@ auto IOPool::GetWorker(const size_t id) const -> Worker *
 
 auto IOPool::GetWorkerIdByKey(const std::string_view key) const -> size_t
 {
-    const uint32_t hash = crc32c::Crc32c(key.data(), key.size());
-    return hash % workers_.size();
+    const uint32_t kHash = crc32c::Crc32c(key.data(), key.size());
+    return kHash % workers_.size();
 }
 
 void IOPool::Stop()
@@ -68,7 +68,7 @@ void IOPool::Stop()
     }
 
     // Request all workers to stop in parallel
-    for (const auto &worker: workers_)
+    for (const auto& worker : workers_)
     {
         if (worker)
         {
@@ -84,7 +84,7 @@ void IOPool::Stop()
     }
 
     // Wait for all workers to confirm shutdown
-    for (const auto &worker: workers_)
+    for (const auto& worker : workers_)
     {
         ALOG_DEBUG("WAITING for worker {} to shut down", worker->GetId());
         if (worker)

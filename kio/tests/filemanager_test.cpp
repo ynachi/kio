@@ -2,7 +2,7 @@
 // Created by Yao ACHI on 25/10/2025.
 //
 
-#include "../kio/fs/fs.h"
+#include "../fs/fs.h"
 #include "kio/sync/sync_wait.h"
 
 #include <filesystem>
@@ -16,33 +16,33 @@ using namespace kio::io;
 class FileManagerTest : public ::testing::Test
 {
 protected:
-    const char* test_filename = "affinity_test_file.txt";
-    WorkerConfig config;
-    std::unique_ptr<FileManager> fm;
+    const char* test_filename_ = "affinity_test_file.txt";
+    WorkerConfig config_;
+    std::unique_ptr<FileManager> fm_;
 
     void SetUp() override
     {
         // Create a dummy file
-        std::ofstream outfile(test_filename);
+        std::ofstream outfile(test_filename_);
         outfile << "delete me";
         outfile.close();
 
         // Create a FileManager with multiple workers
-        config.uring_submit_timeout_ms = 10;
-        fm = std::make_unique<FileManager>(4, config);
+        config_.uring_submit_timeout_ms = 10;
+        fm_ = std::make_unique<FileManager>(4, config_);
 
         // Wait for all workers in the pool to be ready
-        for (size_t i = 0; i < fm->Pool().NumWorkers(); ++i)
+        for (size_t i = 0; i < fm_->Pool().NumWorkers(); ++i)
         {
-            fm->Pool().GetWorker(i)->WaitReady();
+            fm_->Pool().GetWorker(i)->WaitReady();
         }
     }
 
     void TearDown() override
     {
         // FileManager destructor will stop the pool
-        fm.reset();
-        std::filesystem::remove(test_filename);
+        fm_.reset();
+        std::filesystem::remove(test_filename_);
     }
 };
 
@@ -63,8 +63,8 @@ TEST_F(FileManagerTest, FileAffinity)
     auto test_coro = [&]() -> Task<void>
     {
         // Open the *same file path* twice
-        auto file1_exp = co_await fm->AsyncOpen(test_filename, O_RDONLY, 0);
-        auto file2_exp = co_await fm->AsyncOpen(test_filename, O_RDONLY, 0);
+        auto file1_exp = co_await fm_->AsyncOpen(test_filename_, O_RDONLY, 0);
+        auto file2_exp = co_await fm_->AsyncOpen(test_filename_, O_RDONLY, 0);
 
         EXPECT_TRUE(file1_exp.has_value());
         EXPECT_TRUE(file2_exp.has_value());

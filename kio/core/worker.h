@@ -12,7 +12,6 @@
 #include "kio/sync/mpsc_queue.h"
 #include "safe_completion.h"
 
-#include <cstddef>
 #include <expected>
 #include <filesystem>
 #include <functional>
@@ -223,7 +222,7 @@ public:
     Worker(size_t id, const WorkerConfig& config, std::function<void(Worker&)> worker_init_callback = {});
     ~Worker();
 
-    [[nodiscard]] const WorkerStats& GetStats() { return stats_; }
+    [[nodiscard]] const WorkerStats& GetStats() const { return stats_; }
 
     [[nodiscard]] auto AsyncAccept(int server_fd, sockaddr* addr, socklen_t* addrlen)
     {

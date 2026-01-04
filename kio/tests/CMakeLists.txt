@@ -63,6 +63,14 @@ endfunction()
 # ============================================================================
 # Define unit Tests
 # ============================================================================
+add_kio_test(kio_worker_test worker_test.cpp)
+add_kio_test(filemanager_test filemanager_test.cpp)
+add_kio_test(sync_wait_test sync_wait_test.cpp)
+add_kio_test(kio_logger_test kio_logger_test.cpp)
+add_kio_test(sync_tests sync/baton_test.cpp)
+add_kio_test(lock_free_free_queue ds/mpsc_queue_test.cpp)
+add_kio_test(bytes_mut_tests ds/bytes_mut_test.cpp)
+
 add_kio_test(resp_tests
         ${CMAKE_CURRENT_SOURCE_DIR}/resp/parser_test.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/resp/writer_test.cpp

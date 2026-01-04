@@ -4,13 +4,13 @@
 
 #ifndef KIO_IO_WORKER_POOL_H
 #define KIO_IO_WORKER_POOL_H
+#include "worker.h"
+
 #include <atomic>
 #include <functional>
 #include <memory>
 #include <thread>
 #include <vector>
-
-#include "worker.h"
 
 namespace kio::io
 {
@@ -44,8 +44,8 @@ public:
 
     ~IOPool();
 
-    IOPool(IOPool&&) = default;
-    IOPool& operator=(IOPool&&) = default;
+    IOPool(IOPool&&) = delete;
+    IOPool& operator=(IOPool&&) = delete;
     IOPool(const IOPool&) = delete;
     auto operator=(const IOPool&) -> IOPool& = delete;
 

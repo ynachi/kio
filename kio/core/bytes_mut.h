@@ -67,11 +67,11 @@ public:
             return;
         }
 
-        const size_t data_len = Remaining();
-        const size_t available_total = buffer_.capacity();
+        const size_t kDataLen = Remaining();
+        const size_t kAvailableTotal = buffer_.capacity();
 
         // Strategy 1: Compact in place if it fits
-        if (available_total >= data_len + additional)
+        if (kAvailableTotal >= kDataLen + additional)
         {
             // Threshold: only compact if significant waste
             if (read_pos_ >= kAutoCompactionThreshold || read_pos_ >= buffer_.size() / 4)
@@ -87,19 +87,19 @@ public:
         }
 
         // Strategy 2: Reallocate, copy ONLY live data
-        const size_t new_capacity = std::max(available_total * 2, data_len + additional);
+        const size_t kNewCapacity = std::max(kAvailableTotal * 2, kDataLen + additional);
         std::vector<char> new_buffer;
-        new_buffer.reserve(new_capacity);
-        new_buffer.resize(new_capacity);
+        new_buffer.reserve(kNewCapacity);
+        new_buffer.resize(kNewCapacity);
 
-        if (data_len > 0)
+        if (kDataLen > 0)
         {
-            std::memcpy(new_buffer.data(), buffer_.data() + read_pos_, data_len);
+            std::memcpy(new_buffer.data(), buffer_.data() + read_pos_, kDataLen);
         }
 
         buffer_ = std::move(new_buffer);
         read_pos_ = 0;
-        write_pos_ = data_len;
+        write_pos_ = kDataLen;
     }
 
     /**
@@ -188,15 +188,15 @@ public:
             return;
         }
 
-        const size_t remaining_bytes = Remaining();
+        const size_t kRemainingBytes = Remaining();
 
-        if (remaining_bytes > 0)
+        if (kRemainingBytes > 0)
         {
-            std::memmove(buffer_.data(), buffer_.data() + read_pos_, remaining_bytes);
+            std::memmove(buffer_.data(), buffer_.data() + read_pos_, kRemainingBytes);
         }
 
         read_pos_ = 0;
-        write_pos_ = remaining_bytes;
+        write_pos_ = kRemainingBytes;
     }
 
     /**
@@ -231,9 +231,9 @@ public:
     std::string Debug()
     {
         return std::format(
-                "BytesMut {{ read_pos: {}, write_pos: {}, capacity: {}, "
-                "remaining: {}, writable: {}, consumed: {} }}\n",
-                read_pos_, write_pos_, buffer_.capacity(), Remaining(), Writable(), Consumed());
+            "BytesMut {{ read_pos: {}, write_pos: {}, capacity: {}, "
+            "remaining: {}, writable: {}, consumed: {} }}\n",
+            read_pos_, write_pos_, buffer_.capacity(), Remaining(), Writable(), Consumed());
     }
 
 private:

@@ -3,11 +3,12 @@
 #ifndef KIO_ASYNC_LOGGER_H
 #define KIO_ASYNC_LOGGER_H
 
+#include "kio/sync/mpsc_queue.h"
+
 #include <array>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
-#include <cstdint>
 #include <cstring>
 #include <exception>
 #include <format>
@@ -19,13 +20,12 @@
 #include <string>
 #include <string_view>
 #include <syncstream>
-#include <sys/eventfd.h>
-#include <sys/syscall.h>
 #include <thread>
-#include <unistd.h>
 #include <utility>
 
-#include "kio/sync/mpsc_queue.h"
+#include <unistd.h>
+
+#include <sys/eventfd.h>
 
 namespace kio
 {
@@ -53,15 +53,15 @@ struct LogMessage
 {
     static constexpr size_t kMsgCapacity = 256;
     std::chrono::system_clock::time_point timestamp;  // NOLINT(misc-non-private-member-variables-in-classes)
-    LogLevel level{LogLevel::kInfo};  // NOLINT(misc-non-private-member-variables-in-classes)
-    std::string_view file;  // NOLINT(misc-non-private-member-variables-in-classes)
-    std::string_view function;  // NOLINT(misc-non-private-member-variables-in-classes)
-    uint64_t line{};  // NOLINT(misc-non-private-member-variables-in-classes)
-    size_t thread_id{};  // NOLINT(misc-non-private-member-variables-in-classes)
+    LogLevel level{LogLevel::kInfo};                  // NOLINT(misc-non-private-member-variables-in-classes)
+    std::string_view file;                            // NOLINT(misc-non-private-member-variables-in-classes)
+    std::string_view function;                        // NOLINT(misc-non-private-member-variables-in-classes)
+    uint64_t line{};                                  // NOLINT(misc-non-private-member-variables-in-classes)
+    size_t thread_id{};                               // NOLINT(misc-non-private-member-variables-in-classes)
 
     std::array<char, kMsgCapacity> buffer{};  // NOLINT(misc-non-private-member-variables-in-classes)
-    std::unique_ptr<std::string> heap_msg;  // NOLINT(misc-non-private-member-variables-in-classes)
-    std::span<const char> msg;  // NOLINT(misc-non-private-member-variables-in-classes)
+    std::unique_ptr<std::string> heap_msg;    // NOLINT(misc-non-private-member-variables-in-classes)
+    std::span<const char> msg;                // NOLINT(misc-non-private-member-variables-in-classes)
 
     void SetSmallMessage(std::span<const char> data)
     {
@@ -70,7 +70,7 @@ struct LogMessage
         heap_msg.reset();
     }
 
-    void SetLargeMessage(std::string &&s)
+    void SetLargeMessage(std::string&& s)
     {
         heap_msg = std::make_unique<std::string>(std::move(s));
         msg = std::span<const char>(heap_msg->data(), heap_msg->size());
@@ -82,14 +82,18 @@ struct LogMessage
         return {msg.data(), msg.size()};
     }
 
-    LogMessage(const LogMessage &) = delete;
-    LogMessage &operator=(const LogMessage &) = delete;
+    LogMessage(const LogMessage&) = delete;
+    LogMessage& operator=(const LogMessage&) = delete;
     LogMessage() = default;
     ~LogMessage() = default;
 
-    LogMessage(LogMessage &&other) noexcept :
-        timestamp(other.timestamp), level(other.level), file(other.file), function(other.function), line(other.line),
-        thread_id(other.thread_id)
+    LogMessage(LogMessage&& other) noexcept
+        : timestamp(other.timestamp),
+          level(other.level),
+          file(other.file),
+          function(other.function),
+          line(other.line),
+          thread_id(other.thread_id)
     {
         if (other.heap_msg)
         {
@@ -104,7 +108,7 @@ struct LogMessage
         other.msg = std::span<const char>();
     }
 
-    LogMessage &operator=(LogMessage &&other) noexcept
+    LogMessage& operator=(LogMessage&& other) noexcept
     {
         if (this == &other)
         {
@@ -138,8 +142,8 @@ class Logger
 {
 public:
     explicit Logger(const size_t queue_size = 1024, const LogLevel level = LogLevel::kInfo,
-                    std::ostream &output_stream = std::cout) :
-        queue_(queue_size), level_(level), wakeup_fd_(eventfd(0, EFD_CLOEXEC)), output_stream_(output_stream)
+                    std::ostream& output_stream = std::cout)
+        : queue_(queue_size), level_(level), wakeup_fd_(eventfd(0, EFD_CLOEXEC)), output_stream_(output_stream)
 
     {
         if (wakeup_fd_ < 0)
@@ -152,13 +156,13 @@ public:
             use_color_ = ::isatty(STDOUT_FILENO) != 0;
         }
 
-        consumer_thread_ = std::jthread([this](const std::stop_token &st) { ConsumeLoop(st); });
+        consumer_thread_ = std::jthread([this](const std::stop_token& st) { ConsumeLoop(st); });
     }
 
-    Logger(const Logger &) = delete;
-    Logger &operator=(const Logger &) = delete;
-    Logger(Logger &&) = delete;
-    Logger &operator=(Logger &&) = delete;
+    Logger(const Logger&) = delete;
+    Logger& operator=(const Logger&) = delete;
+    Logger(Logger&&) = delete;
+    Logger& operator=(Logger&&) = delete;
 
     ~Logger()
     {
@@ -187,39 +191,39 @@ public:
     [[nodiscard]]
     bool ShouldLog(LogLevel lvl) const noexcept
     {
-        if (const auto current_level = level_.load(std::memory_order_relaxed); current_level == LogLevel::kDisabled)
+        if (const auto kCurrentLevel = level_.load(std::memory_order_relaxed); kCurrentLevel == LogLevel::kDisabled)
         {
             return false;
         }
         return static_cast<int>(lvl) >= static_cast<int>(level_.load(std::memory_order_relaxed));
     }
 
-    template<typename... Args>
-    void Trace(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
+    template <typename... Args>
+    void Trace(const std::source_location& loc, std::format_string<Args...> fmt, Args&&... args)
     {
         log<LogLevel::kTrace>(loc, fmt, std::forward<Args>(args)...);
     }
 
-    template<typename... Args>
-    void Debug(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
+    template <typename... Args>
+    void Debug(const std::source_location& loc, std::format_string<Args...> fmt, Args&&... args)
     {
         Log<LogLevel::kDebug>(loc, fmt, std::forward<Args>(args)...);
     }
 
-    template<typename... Args>
-    void Info(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
+    template <typename... Args>
+    void Info(const std::source_location& loc, std::format_string<Args...> fmt, Args&&... args)
     {
         Log<LogLevel::kInfo>(loc, fmt, std::forward<Args>(args)...);
     }
 
-    template<typename... Args>
-    void Warn(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
+    template <typename... Args>
+    void Warn(const std::source_location& loc, std::format_string<Args...> fmt, Args&&... args)
     {
         Log<LogLevel::kWarn>(loc, fmt, std::forward<Args>(args)...);
     }
 
-    template<typename... Args>
-    void Error(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
+    template <typename... Args>
+    void Error(const std::source_location& loc, std::format_string<Args...> fmt, Args&&... args)
     {
         Log<LogLevel::kError>(loc, fmt, std::forward<Args>(args)...);
     }
@@ -234,8 +238,8 @@ public:
     }
 
 private:
-    template<LogLevel L, typename... Args>
-    void Log(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
+    template <LogLevel L, typename... Args>
+    void Log(const std::source_location& loc, std::format_string<Args...> fmt, Args&&... args)
     {
         if constexpr (L == LogLevel::kDisabled)
         {
@@ -287,7 +291,7 @@ private:
                 std::osyncstream(std::cerr) << "Logger queue full. Dropping message.\n";
             }
         }
-        catch (const std::exception &e)
+        catch (const std::exception& e)
         {
             std::string fallback = std::string("<log format error: ") + e.what() + ">";
             LogMessage entry{};
@@ -305,11 +309,11 @@ private:
             {
                 entry.SetLargeMessage(std::move(fallback));
             }
-            (void) queue_.TryPush(std::move(entry));
+            (void)queue_.TryPush(std::move(entry));
         }
     }
 
-    void ConsumeLoop(const std::stop_token &st)
+    void ConsumeLoop(const std::stop_token& st)
     {
         uint64_t val = 0;
         while (!st.stop_requested())
@@ -320,7 +324,7 @@ private:
             }
             else
             {
-                if (const ssize_t ret = ::read(wakeup_fd_, &val, sizeof(val)); ret < 0)
+                if (const ssize_t kRet = ::read(wakeup_fd_, &val, sizeof(val)); kRet < 0)
                 {
                     if (errno == EINTR)
                     {
@@ -335,17 +339,17 @@ private:
         Flush();
     }
 
-    void Write(const LogMessage &msg) const
+    void Write(const LogMessage& msg) const
     {
-        const char *color = LevelColor(msg.level);
-        const char *reset = use_color_ ? "\033[0m" : "";
+        const char* color = LevelColor(msg.level);
+        const char* reset = use_color_ ? "\033[0m" : "";
 
         std::string time_str;
         try
         {
-            const auto ms =
-                    std::chrono::duration_cast<std::chrono::milliseconds>(msg.timestamp.time_since_epoch()) % 1000;
-            time_str = std::format("{:%Y-%m-%d %H:%M:%S}.{:03d}", msg.timestamp, ms.count());
+            const auto kMs =
+                std::chrono::duration_cast<std::chrono::milliseconds>(msg.timestamp.time_since_epoch()) % 1000;
+            time_str = std::format("{:%Y-%m-%d %H:%M:%S}.{:03d}", msg.timestamp, kMs.count());
         }
         catch (...)
         {
@@ -353,16 +357,16 @@ private:
         }
 
         std::string_view filename = msg.file;
-        if (const auto pos = filename.find_last_of("/\\"); pos != std::string_view::npos)
+        if (const auto kPos = filename.find_last_of("/\\"); kPos != std::string_view::npos)
         {
-            filename = filename.substr(pos + 1);
+            filename = filename.substr(kPos + 1);
         }
 
         output_stream_ << std::format("{}[{}] [{:<5}] [tid:{}] {}:{} - {}{}\n", color, time_str, LevelName(msg.level),
                                       msg.thread_id, filename, msg.line, msg.View(), reset);
     }
 
-    static const char *LevelName(const LogLevel lvl)
+    static const char* LevelName(const LogLevel lvl)
     {
         switch (lvl)
         {
@@ -381,7 +385,7 @@ private:
         }
     }
 
-    [[nodiscard]] const char *LevelColor(const LogLevel lvl) const noexcept
+    [[nodiscard]] const char* LevelColor(const LogLevel lvl) const noexcept
     {
         if (!use_color_)
         {
@@ -408,7 +412,7 @@ private:
     std::atomic<LogLevel> level_;
     std::jthread consumer_thread_;
     int wakeup_fd_{-1};
-    std::ostream &output_stream_;
+    std::ostream& output_stream_;
     bool use_color_{false};
 };
 
@@ -416,35 +420,35 @@ private:
 #define KIO_LOG_TRACE(logger_instance, ...)                                        \
     do                                                                             \
     {                                                                              \
-        if ((logger_instance).ShouldLog(::kio::LogLevel::Trace))                   \
+        if ((logger_instance).ShouldLog(::kio::LogLevel::kTrace))                  \
             (logger_instance).Trace(std::source_location::current(), __VA_ARGS__); \
     } while (0)
 
 #define KIO_LOG_DEBUG(logger_instance, ...)                                        \
     do                                                                             \
     {                                                                              \
-        if ((logger_instance).ShouldLog(::kio::LogLevel::Debug))                   \
+        if ((logger_instance).ShouldLog(::kio::LogLevel::kDebug))                  \
             (logger_instance).Debug(std::source_location::current(), __VA_ARGS__); \
     } while (0)
 
 #define KIO_LOG_INFO(logger_instance, ...)                                        \
     do                                                                            \
     {                                                                             \
-        if ((logger_instance).ShouldLog(::kio::LogLevel::Info))                   \
+        if ((logger_instance).ShouldLog(::kio::LogLevel::kInfo))                  \
             (logger_instance).Info(std::source_location::current(), __VA_ARGS__); \
     } while (0)
 
 #define KIO_LOG_WARN(logger_instance, ...)                                        \
     do                                                                            \
     {                                                                             \
-        if ((logger_instance).ShouldLog(::kio::LogLevel::Warn))                   \
+        if ((logger_instance).ShouldLog(::kio::LogLevel::kWarn))                  \
             (logger_instance).Warn(std::source_location::current(), __VA_ARGS__); \
     } while (0)
 
 #define KIO_LOG_ERROR(logger_instance, ...)                                        \
     do                                                                             \
     {                                                                              \
-        if ((logger_instance).ShouldLog(::kio::LogLevel::Error))                   \
+        if ((logger_instance).ShouldLog(::kio::LogLevel::kError))                  \
             (logger_instance).Error(std::source_location::current(), __VA_ARGS__); \
     } while (0)
 
@@ -467,19 +471,19 @@ struct Config
 {
     size_t queue_size = kDefaultLoggerQueueSize;
     LogLevel level = LogLevel::kInfo;
-    std::ostream *output = &std::cout;
+    std::ostream* output = &std::cout;
 };
 
-inline std::unique_ptr<Logger> &GlobalLoggerPtr()
+inline std::unique_ptr<Logger>& GlobalLoggerPtr()
 {
     static std::unique_ptr<Logger> instance = nullptr;
     return instance;
 }
 
-inline Logger &Get()
+inline Logger& Get()
 {
     // Get the pointer set by configure()
-    if (const auto &ptr = GlobalLoggerPtr())
+    if (const auto& ptr = GlobalLoggerPtr())
     {
         // If configure() was called, return its logger
         return *ptr;
@@ -492,38 +496,38 @@ inline Logger &Get()
 }
 
 inline void Configure(size_t queue_size = kDefaultLoggerQueueSize, LogLevel level = LogLevel::kInfo,
-                      std::ostream &os = std::cout)
+                      std::ostream& os = std::cout)
 {
-    auto &ptr = GlobalLoggerPtr();
+    auto& ptr = GlobalLoggerPtr();
     ptr = std::make_unique<Logger>(queue_size, level, os);
 }
 
-template<typename... Args>
-void Trace(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
+template <typename... Args>
+void Trace(const std::source_location& loc, std::format_string<Args...> fmt, Args&&... args)
 {
     Get().Trace(loc, fmt, std::forward<Args>(args)...);
 }
 
-template<typename... Args>
-void Debug(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
+template <typename... Args>
+void Debug(const std::source_location& loc, std::format_string<Args...> fmt, Args&&... args)
 {
     Get().Debug(loc, fmt, std::forward<Args>(args)...);
 }
 
-template<typename... Args>
-void Info(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
+template <typename... Args>
+void Info(const std::source_location& loc, std::format_string<Args...> fmt, Args&&... args)
 {
     Get().Info(loc, fmt, std::forward<Args>(args)...);
 }
 
-template<typename... Args>
-void Warn(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
+template <typename... Args>
+void Warn(const std::source_location& loc, std::format_string<Args...> fmt, Args&&... args)
 {
     Get().Warn(loc, fmt, std::forward<Args>(args)...);
 }
 
-template<typename... Args>
-void Error(const std::source_location &loc, std::format_string<Args...> fmt, Args &&...args)
+template <typename... Args>
+void Error(const std::source_location& loc, std::format_string<Args...> fmt, Args&&... args)
 {
     Get().Error(loc, fmt, std::forward<Args>(args)...);
 }
@@ -531,8 +535,8 @@ void Error(const std::source_location &loc, std::format_string<Args...> fmt, Arg
 // uses the macros, they are more convenient
 #define ALOG_TRACE(...) ::kio::alog::Trace(std::source_location::current(), __VA_ARGS__)
 #define ALOG_DEBUG(...) ::kio::alog::Debug(std::source_location::current(), __VA_ARGS__)
-#define ALOG_INFO(...) ::kio::alog::Info(std::source_location::current(), __VA_ARGS__)
-#define ALOG_WARN(...) ::kio::alog::Warn(std::source_location::current(), __VA_ARGS__)
+#define ALOG_INFO(...)  ::kio::alog::Info(std::source_location::current(), __VA_ARGS__)
+#define ALOG_WARN(...)  ::kio::alog::Warn(std::source_location::current(), __VA_ARGS__)
 #define ALOG_ERROR(...) ::kio::alog::Error(std::source_location::current(), __VA_ARGS__)
 }  // namespace kio::alog
 
