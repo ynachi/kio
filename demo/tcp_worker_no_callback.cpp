@@ -2,12 +2,12 @@
 // Created by Yao ACHI on 18/10/2025.
 //
 
-#include <iostream>
-
 #include "kio/core/coro.h"
 #include "kio/core/worker.h"
 #include "kio/net/net.h"
 #include "kio/sync/sync_wait.h"
+
+#include <iostream>
 
 using namespace kio;
 using namespace kio::io;
@@ -16,7 +16,7 @@ using namespace kio::net;
 // Client processing code, which will run in the background on the same thread as the worker.
 // Thus, there is no need to context switch as we are already on the right thread.
 // The loop is sync to the worker's stop signal for a coordinated shutdown.
-DetachedTask HandleClient(Worker &worker, const int client_fd)
+DetachedTask HandleClient(Worker& worker, const int client_fd)
 {
     char buffer[8192];
 
@@ -53,7 +53,7 @@ DetachedTask HandleClient(Worker &worker, const int client_fd)
 }
 
 // 2. accept_loop is an awaitable Task<void>.
-Task<void> accept_loop(Worker &worker, int listen_fd)
+Task<void> accept_loop(Worker& worker, int listen_fd)
 {
     ALOG_INFO("Worker accepting connections");
     const auto st = worker.GetStopToken();
@@ -68,7 +68,7 @@ Task<void> accept_loop(Worker &worker, int listen_fd)
         // would verify this behavior and crash
         co_await SwitchToWorker(worker);
 
-        auto client_fd = co_await worker.AsyncAccept(listen_fd, reinterpret_cast<sockaddr *>(&client_addr), &addr_len);
+        auto client_fd = co_await worker.AsyncAccept(listen_fd, reinterpret_cast<sockaddr*>(&client_addr), &addr_len);
 
         if (!client_fd.has_value())
         {
@@ -84,7 +84,7 @@ Task<void> accept_loop(Worker &worker, int listen_fd)
         ALOG_DEBUG("Accepted connection on fd {}", client_fd.value());
 
         // This is still "fire and forget"
-        HandleClient(worker, client_fd.value()).detach();
+        HandleClient(worker, client_fd.value());
     }
 
     ALOG_INFO("Worker {} stop accepting connexions", worker.GetId());
@@ -95,7 +95,7 @@ int main()
 {
     // 1. Application configuration
     signal(SIGPIPE, SIG_IGN);
-    alog::configure(1024, LogLevel::Info);
+    alog::Configure(1024, LogLevel::kInfo);
 
     const std::string ip_address = "127.0.0.1";
     constexpr int port = 8080;
@@ -112,7 +112,6 @@ int main()
     // 2. Worker setup
     WorkerConfig config{};
     config.uring_queue_depth = 2048;
-    config.default_op_slots = 4096;
 
     Worker worker(0, config);
 

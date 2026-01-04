@@ -1,10 +1,10 @@
-#include <unistd.h>
-
 #include "../kio/core/async_logger.h"
+
+#include <unistd.h>
 
 int main()
 {
-    kio::alog::configure(4096, kio::LogLevel::Info);
+    kio::alog::Configure(4096, kio::LogLevel::kInfo);
 
     ALOG_INFO("Starting app with PID={}", ::getpid());
     ALOG_DEBUG("This is a debug message");

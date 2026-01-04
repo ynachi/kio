@@ -1,19 +1,20 @@
 //
 // Created by Yao ACHI on 19/10/2025.
 //
-#include <algorithm>
-#include <expected>
-#include <fcntl.h>
-#include <fstream>
-#include <iostream>
-#include <latch>
-#include <thread>
-
 #include "kio/core/async_logger.h"
 #include "kio/core/coro.h"
 #include "kio/core/errors.h"
 #include "kio/core/worker.h"
 #include "kio/sync/sync_wait.h"
+
+#include <algorithm>
+#include <expected>
+#include <fstream>
+#include <iostream>
+#include <latch>
+#include <thread>
+
+#include <fcntl.h>
 
 using namespace kio;
 using namespace kio::io;
@@ -29,7 +30,7 @@ using namespace kio::io;
  * @param target_char The character to count.
  * @return A Task containing the final count.
  */
-Task<Result<size_t> > count_chars_in_file(Worker &worker, std::string_view filename, char target_char)
+Task<Result<size_t>> count_chars_in_file(Worker& worker, std::string_view filename, char target_char)
 {
     ALOG_INFO("[main coro] Starting on thread ID: {}", std::hash<std::thread::id>{}(std::this_thread::get_id()));
 
@@ -71,10 +72,10 @@ Task<Result<size_t> > count_chars_in_file(Worker &worker, std::string_view filen
 
 int main()
 {
-    alog::configure(4096, LogLevel::Info);
+    alog::Configure(4096, LogLevel::kInfo);
 
     // Create a dummy file for the demo
-    const char *test_filename = "test_file.txt";
+    const char* test_filename = "test_file.txt";
     std::ofstream test_file(test_filename);
     test_file << "Hello world, this is a test file for our coroutine worker.\n";
     test_file << "Let's test switching threads and reading files asynchronously.\n";
@@ -88,14 +89,13 @@ int main()
 
     // Manually create a thread and assign the worker's event loop to it.
     std::jthread worker_thread(
-            [&worker]
-            {
-                ALOG_INFO("Worker thread starting with ID: {}",
-                          std::hash<std::thread::id>{}(std::this_thread::get_id()));
-                //  This thread will now block here, running the I/O event loop.
-                worker.LoopForever();
-                ALOG_INFO("Worker thread finished its loop.");
-            });
+        [&worker]
+        {
+            ALOG_INFO("Worker thread starting with ID: {}", std::hash<std::thread::id>{}(std::this_thread::get_id()));
+            //  This thread will now block here, running the I/O event loop.
+            worker.LoopForever();
+            ALOG_INFO("Worker thread finished its loop.");
+        });
 
     // Wait for the worker to complete its initialization on the new thread.
     worker.WaitReady();
@@ -112,7 +112,7 @@ int main()
 
     // --- Cleanup ---
     ALOG_INFO("Main thread requesting worker to stop.");
-    (void) worker.RequestStop();  // Signals the stop_source and wakes up the loop.
+    (void)worker.RequestStop();  // Signals the stop_source and wakes up the loop.
 
     // The jthread's destructor will automatically call join(), ensuring
     // we wait for the worker thread to finish cleanly.

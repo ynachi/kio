@@ -1,10 +1,10 @@
-#include <chrono>
-
 #include "kio/core/async_logger.h"
 #include "kio/core/errors.h"
 #include "kio/core/worker.h"
 #include "kio/net/net.h"
 #include "kio/sync/sync_wait.h"
+
+#include <chrono>
 
 using namespace kio;
 using namespace io;
@@ -58,7 +58,7 @@ Task<Result<int>> connect_with_retries(Worker& worker)
 
 int main()
 {
-    alog::configure(4096, LogLevel::Info);
+    alog::Configure(4096, LogLevel::kInfo);
     Worker worker(0, {});
     std::jthread t([&] { worker.LoopForever(); });
     worker.WaitReady();
@@ -69,6 +69,6 @@ int main()
     }
 
     // Cast to (void) to suppress the nodiscard warning
-    (void) worker.RequestStop();
+    (void)worker.RequestStop();
     return 0;
 }
