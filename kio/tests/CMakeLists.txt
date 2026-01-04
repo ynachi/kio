@@ -10,8 +10,17 @@ else ()
 endif ()
 
 # Helper function to create test targets
-function(add_kio_test test_name source_file)
-    add_executable(${test_name} ${source_file})
+# Usage:
+#   add_kio_test(test_name source_file1 [source_file2 ...])
+function(add_kio_test test_name)
+    # All arguments after test_name are source files
+    set(source_files ${ARGN})
+
+    if (NOT source_files)
+        message(FATAL_ERROR "add_kio_test: No source files specified for test ${test_name}")
+    endif ()
+
+    add_executable(${test_name} ${source_files})
 
     # Link required libraries
     target_link_libraries(${test_name} PRIVATE
@@ -54,6 +63,12 @@ endfunction()
 # ============================================================================
 # Define unit Tests
 # ============================================================================
-add_kio_test(basic_resp_parser
+add_kio_test(resp_tests
         ${CMAKE_CURRENT_SOURCE_DIR}/resp/parser_test.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/resp/writer_test.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/resp/integration_test.cpp
+)
+
+add_kio_test(chunked_buffer_basic
+        ${CMAKE_CURRENT_SOURCE_DIR}/chunked_buffer_test.cpp
 )

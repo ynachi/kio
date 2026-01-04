@@ -3,22 +3,22 @@
 # ============================================================================
 function(add_kio_root_test test_name)
     cmake_parse_arguments(ARG "" "" "SOURCES" ${ARGN})
-    
-    if(NOT ARG_SOURCES)
+
+    if (NOT ARG_SOURCES)
         set(ARG_SOURCES ${test_name}.cpp)
-    endif()
-    
+    endif ()
+
     add_executable(${test_name} ${ARG_SOURCES})
-    
+
     target_link_libraries(${test_name} PRIVATE
             kio_lib
             GTest::gtest
             GTest::gtest_main
     )
-    
+
     target_include_directories(${test_name} PRIVATE ${CMAKE_SOURCE_DIR}/src)
     kio_target_compile_options(${test_name})
-    
+
     gtest_discover_tests(${test_name})
 endfunction()
 

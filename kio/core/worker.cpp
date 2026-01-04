@@ -352,16 +352,17 @@ Task<std::expected<void, Error>> Worker::AsyncSleep(std::chrono::nanoseconds dur
     { io_uring_prep_timeout(sqe, t, 0, flags); };
 
     auto awaitable = MakeUringAwaitable(*this, prep, &ts, 0);
-    int res = KIO_TRY(co_await awaitable);
+    auto res = co_await awaitable;
 
-    if (res == -ETIME)
+    if (!res)
     {
-        co_return {};
+        if (res.error().value == ETIME)
+        {
+            co_return {};
+        }
+        co_return std::unexpected(res.error());
     }
-    if (res < 0)
-    {
-        co_return std::unexpected(Error::FromErrno(-res));
-    }
+
     co_return {};
 }
 

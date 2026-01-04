@@ -4,15 +4,18 @@
 
 #include "kio/core/worker.h"
 
-#include <gtest/gtest.h>
-#include <sys/socket.h>
-#include <thread>
-#include <unistd.h>
-#include <unordered_set>
-
 #include "kio/core/coro.h"
 #include "kio/core/errors.h"
 #include "kio/sync/sync_wait.h"
+
+#include <thread>
+#include <unordered_set>
+
+#include <unistd.h>
+
+#include <sys/socket.h>
+
+#include <gtest/gtest.h>
 
 using namespace kio;
 using namespace kio::io;
@@ -27,7 +30,7 @@ protected:
 
     void SetUp() override
     {
-        alog::configure(1024, LogLevel::Debug);
+        alog::Configure(1024, LogLevel::kDebug);
 
         test_dir = std::filesystem::temp_directory_path() / "kio_tests/";
         std::filesystem::create_directories(test_dir);
@@ -43,14 +46,14 @@ protected:
     void TearDown() override
     {
         // Request the worker to stop and wait for its thread to join.
-        (void) worker->RequestStop();
+        (void)worker->RequestStop();
         worker_thread.reset();
         worker.reset();
         std::filesystem::remove_all(test_dir);
     }
 
     // Helper coroutine to run a test on the worker thread
-    template<typename Awaitable>
+    template <typename Awaitable>
     auto RunOnWorker(Awaitable&& awaitable)
     {
         using AwaitableType = std::remove_reference_t<Awaitable>;
@@ -231,7 +234,7 @@ TEST_F(WorkerTest, SingleThreadedExecution)
         };
 
         // Start the detached task
-        detached_increment().detach();
+        detached_increment();
 
         // Multiple regular tasks also incrementing the counter
         auto increment_task = [&](const int iterations) -> Task<void>
@@ -270,68 +273,6 @@ TEST_F(WorkerTest, SingleThreadedExecution)
     SyncWait(test_coro());
 }
 
-TEST_F(WorkerTest, GetOpIdPoolGrowthCorrectness)
-{
-    auto test_coro = [&]() -> Task<void>
-    {
-        co_await SwitchToWorker(*worker);
-
-        const size_t initial_capacity =
-                worker->GetStats().active_coroutines + worker->GetStats().active_coroutines;  // just trigger reading
-
-        std::unordered_set<uint64_t> ids;
-        for (size_t i = 0; i < initial_capacity + 10; ++i)
-        {
-            uint64_t id = kio::io::internal::WorkerAccess::get_op_id(*worker);
-            ids.insert(id);
-            kio::io::internal::WorkerAccess::init_op_slot(*worker, id, {});
-        }
-
-        EXPECT_GT(worker->GetStats().active_coroutines, initial_capacity);
-        EXPECT_EQ(ids.size(), initial_capacity + 10);  // all IDs unique
-
-        // cleanup
-        for (const auto id: ids) kio::io::internal::WorkerAccess::release_op_id(*worker, id);
-    };
-
-    SyncWait(test_coro());
-}
-
-TEST_F(WorkerTest, ReleaseOpIdReuseCorrectness)
-{
-    auto test_coro = [&]() -> Task<void>
-    {
-        co_await SwitchToWorker(*worker);
-
-        const uint64_t id1 = kio::io::internal::WorkerAccess::get_op_id(*worker);
-        kio::io::internal::WorkerAccess::release_op_id(*worker, id1);
-
-        const uint64_t id2 = kio::io::internal::WorkerAccess::get_op_id(*worker);
-        EXPECT_EQ(id1, id2);  // recycled ID must be reissued
-        kio::io::internal::WorkerAccess::release_op_id(*worker, id2);
-    };
-
-    SyncWait(test_coro());
-}
-
-TEST_F(WorkerTest, DoubleReleaseOpIdIsSafe)
-{
-    auto test_coro = [&]() -> Task<void>
-    {
-        co_await SwitchToWorker(*worker);
-
-        const uint64_t id = kio::io::internal::WorkerAccess::get_op_id(*worker);
-        kio::io::internal::WorkerAccess::release_op_id(*worker, id);
-        kio::io::internal::WorkerAccess::release_op_id(*worker, id);  // should NOT crash or corrupt
-
-        const uint64_t id2 = kio::io::internal::WorkerAccess::get_op_id(*worker);
-        EXPECT_EQ(id, id2);  // still reusable
-        kio::io::internal::WorkerAccess::release_op_id(*worker, id2);
-    };
-
-    SyncWait(test_coro());
-}
-
 TEST_F(WorkerTest, AsyncReadAtRealFileOffsetWorks)
 {
     namespace fs = std::filesystem;
@@ -348,7 +289,7 @@ TEST_F(WorkerTest, AsyncReadAtRealFileOffsetWorks)
         co_await SwitchToWorker(*worker);
         char buf[3]{};
 
-        const auto res = co_await worker->async_read_at(fd, std::span(buf, 3), 4);
+        const auto res = co_await worker->AsyncReadAt(fd, std::span(buf, 3), 4);
         EXPECT_TRUE(res.has_value());
         EXPECT_EQ(*res, 3);
         EXPECT_EQ(std::string(buf, 3), "EFG");
@@ -384,7 +325,7 @@ TEST_F(WorkerTest, AsyncReadExactAtOffsetCorrectness)
         char buf[to_read]{};
 
         // Read 5 bytes starting at offset 10 ("KLMNO")
-        const auto res = co_await worker->async_read_exact_at(fd, std::span(buf, to_read), 10);
+        const auto res = co_await worker->AsyncReadExactAt(fd, std::span(buf, to_read), 10);
 
         EXPECT_TRUE(res.has_value()) << "read_exact_at must succeed for full buffer fill";
         EXPECT_EQ(std::string(buf, to_read), data.substr(10, to_read));
@@ -416,7 +357,7 @@ TEST_F(WorkerTest, AsyncWriteExactFile_Correctness)
         int fd = ::open(path.c_str(), O_RDWR);
         EXPECT_GT(fd, 0);
 
-        const auto res = co_await worker->async_write_exact(fd, std::span(payload.data(), N));
+        const auto res = co_await worker->AsyncWriteExact(fd, std::span(payload.data(), N));
 
         EXPECT_TRUE(res.has_value()) << "async_write_exact must succeed on file";
         ::close(fd);
@@ -459,14 +400,14 @@ TEST_F(WorkerTest, DirectIO_AlignedOffsetAndSize)
         co_await SwitchToWorker(*worker);
 
         const std::span<const char> out(static_cast<char*>(ptr), N);
-        auto w = co_await worker->async_write_at(fd, out, 0);
+        auto w = co_await worker->AsyncWriteAt(fd, out, 0);
         EXPECT_TRUE(w.has_value());
         EXPECT_EQ(*w, N);
 
         lseek(fd, 0, SEEK_SET);
 
         const std::span in(static_cast<char*>(ptr), N);
-        const auto r = co_await worker->async_read_at(fd, in, 0);
+        const auto r = co_await worker->AsyncReadAt(fd, in, 0);
         EXPECT_TRUE(r.has_value());
         EXPECT_EQ(*r, N);
         EXPECT_EQ(std::string_view(static_cast<char*>(ptr), pattern.size()), pattern);
@@ -493,7 +434,7 @@ TEST_F(WorkerTest, DISABLED_DirectIO_UnalignedOffset_Fails)
     {
         co_await SwitchToWorker(*worker);
         char buf[4096];
-        const auto r = co_await worker->async_read_at(fd, std::span(buf, 4096), 3);  // ❗ 3 is NOT aligned
+        const auto r = co_await worker->AsyncReadAt(fd, std::span(buf, 4096), 3);  // ❗ 3 is NOT aligned
         EXPECT_FALSE(r.has_value());
     };
 

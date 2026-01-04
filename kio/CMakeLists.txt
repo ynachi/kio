@@ -10,12 +10,14 @@ set(core_runtime_headers
         core/async_logger.h
         core/bytes_mut.h
         core/safe_completion.h
+        core/chunked_buffer.h
 )
 
 set(core_runtime_sources
         core/worker.cpp
         core/worker_pool.cpp
         core/metrics_collector.cpp
+        core/chunked_buffer.cpp
 )
 
 # ============================================================================
@@ -87,11 +89,11 @@ set(metrics_sources
 # ============================================================================
 set(resp_headers
         resp/parser.h
+        resp/writer.h
 )
 
 set(resp_sources
         resp/parser.cpp
-        core/safe_completion.h
 )
 
 # ============================================================================

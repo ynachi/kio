@@ -20,6 +20,8 @@ Checks: >
   -cppcoreguidelines-avoid-reference-coroutine-parameters,
   -cppcoreguidelines-coroutine-lambdas-confinement,
   -cppcoreguidelines-avoid-const-or-ref-data-members,
+  -cppcoreguidelines-non-private-member-variables-in-classes,
+  -misc-non-private-member-variables-in-classes,
   google-*,
   -google-readability-todo,
   -google-runtime-references,
