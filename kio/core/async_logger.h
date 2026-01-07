@@ -201,7 +201,7 @@ public:
     template <typename... Args>
     void Trace(const std::source_location& loc, std::format_string<Args...> fmt, Args&&... args)
     {
-        log<LogLevel::kTrace>(loc, fmt, std::forward<Args>(args)...);
+        Log<LogLevel::kTrace>(loc, fmt, std::forward<Args>(args)...);
     }
 
     template <typename... Args>
