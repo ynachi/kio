@@ -1,29 +1,32 @@
+
 //
 // Created by Yao ACHI on 08/11/2025.
 //
 
 #ifndef KIO_ENTRY_H
 #define KIO_ENTRY_H
+#include "common.h"
+#include "kio/core/errors.h"
+
 #include <chrono>
 #include <expected>
 #include <memory_resource>
 #include <span>
 #include <string>
 #include <vector>
-#include <ylt/struct_pack.hpp>
-
-#include "common.h"
-#include "kio/core/errors.h"
 
 namespace bitcask
 {
 // On-disk entry format:
-// +----------+--------------+-------------------------------+
-// | CRC (4B) | SIZE (8B) | PAYLOAD (struct_pack serialized) |
-// +----------+--------------+-------------------------------+
-// CRC: CRC32C of PAYLOAD only
-// SIZE: Length of PAYLOAD in bytes (does NOT include CRC or SIZE)
-// Total entry size = 4 + 8 + SIZE
+// ---------------------------------------------------------
+// DISK LAYOUT (21 Bytes Header + Data)
+// [0-3] CRC32 (checksum of everything that follows)
+// [4-11] Timestamp
+// [12]   Flag
+// [13-16] Key Length
+// [17-20] Value Length
+// [21...] Key Bytes
+// [...  ] Value Bytes
 
 // Hint Entry, fully serialize/deserialize by struct_pack:
 // +----------------+--------+-----------+----------------+
@@ -47,60 +50,79 @@ namespace bitcask
 // +-----------+       +-----------+       +-----------+
 // | Data File | ----> | Hint File | ----> |  KeyDir   |
 // +-----------+       +-----------+       +-----------+
-//   [CRC|SIZE|PAYLOAD]    key→(file_id, offset, sz, ts)   in-memory map
+//   [CRC|SIZE|PAYLOAD] key→(file_id, offset, sz, ts)   in-memory map
 // - Data files: append-only log of serialized entries
 // - Hint files: lightweight summaries for quick startup
 // - KeyDir: fast in-memory lookup for the latest key location
 
-struct DataEntry
+class DataEntry
 {
-    std::uint64_t timestamp_ns{};
-    uint8_t flag = kFlagNone;
-    std::string key;
-    std::vector<char> value;
+    // This holds: [crc(4)][Timestamp(8)][Flag(1)][KeyLen(4)][KeyBytes...][ValueLen(4)][ValueBytes...]
+    std::vector<char> payload_;
 
-    // struct_pack need this
-    DataEntry() = default;
+    std::string_view key_view_;
+    std::span<const char> value_view_;
 
-    DataEntry(std::string&& key, std::vector<char>&& value, uint8_t flag = kFlagNone);
+public:
+    /**
+     * @brief
+     * @warning Protect yourself from DDOS; the caller must ensure the buffer is a reasonable size
+     * @param buffer
+     * @return
+     */
+    static kio::Result<DataEntry> Deserialize(std::span<const char> buffer);
+    DataEntry(std::string_view key, std::span<const char> value, uint8_t flag, uint64_t timestamp);
+
+    [[nodiscard]] uint32_t GetCrc() const { return ReadLe<uint32_t>(payload_.data()); }
+
+    [[nodiscard]] uint64_t GetTimestamp() const { return ReadLe<uint64_t>(payload_.data() + 4); }
+
+    [[nodiscard]] uint8_t GetFlag() const { return ReadLe<uint8_t>(payload_.data() + 12); }
+
+    [[nodiscard]] std::string_view GetKeyView() const { return key_view_; }
+    [[nodiscard]] std::span<const char> GetValueView() const { return value_view_; }
+    [[nodiscard]] std::vector<char> GetValueOwned() const { return {value_view_.begin(), value_view_.end()}; }
 
     // Tombstone marker (for deletions)
-    [[nodiscard]]
-    bool is_tombstone() const
-    {
-        return flag & kFlagTombstone;
-    }
+    [[nodiscard]] bool IsTombstone() const { return (GetFlag() & kFlagTombstone) != 0; }
 
-    // Serialize to buffer
-    [[nodiscard]]
-    std::vector<char> serialize() const;
+    void SetKeyView(std::string_view key) { key_view_ = key; }
+    void SetValueView(std::span<const char> value) { value_view_ = value; }
 
-    // Deserialize from the buffer, also return the next position in the buffer to deserialize another entry
-    static kio::Result<std::pair<DataEntry, uint64_t>> deserialize(std::span<const char> buffer);
-
-    [[nodiscard]] std::string& get_key() { return key; }
+    [[nodiscard]] std::span<const char> GetPayload() const { return payload_; }
+    [[nodiscard]] uint32_t Size() const { return payload_.size(); }
 };
 
 struct HintEntry
 {
+    // Disk Layout (Little Endian):
+    // [0-7]   Timestamp (ns)
+    // [8-11]  Offset
+    // [12-15] Size
+    // [16-19] Key Length
+    // [20...] Key Bytes
+
+    uint32_t offset{};
+    uint32_t size{};
     uint64_t timestamp_ns{};
-    uint64_t entry_pos{};
-    uint32_t total_sz{};
     std::string key;
+
+    [[nodiscard]] size_t Size() const { return kHintHeaderSize + key.size(); }
 
     HintEntry() = default;
 
-    HintEntry(const uint64_t timestamp_ns, const uint64_t entry_pos, const uint32_t total_sz, std::string&& key) :
-        timestamp_ns(timestamp_ns), entry_pos(entry_pos), total_sz(total_sz), key(std::move(key))
+    HintEntry(const uint64_t timestamp_ns, const uint64_t offset, const uint32_t size, std::string&& key)
+        : offset(offset), size(size), timestamp_ns(timestamp_ns), key(std::move(key))
     {
     }
 
     // Serialize to buffer
     [[nodiscard]]
-    std::vector<char> serialize() const;
+    std::vector<char> Serialize() const;
 
-    // Deserialize from buffer
-    static kio::Result<HintEntry> deserialize(std::span<const char> buffer);
+    /// Deserialize from buffer, returns the entry and its serialized size
+    /// Deserializing give access to that size returning it makes sense to not have to recompute it
+    static kio::Result<std::pair<HintEntry, size_t>> Deserialize(std::span<const char> buffer);
 };
 
 // KeyDir entry (in-memory index):
@@ -128,15 +150,10 @@ struct ValueLocation
  * Uses std::pmr::unordered_map which allows us to back the hash map nodes
  * with a memory pool (unsynchronized_pool_resource) instead of the global heap.
  * This significantly reduces fragmentation for long-running DBs.
- * * Note: We still use std::string for keys (not pmr::string) to maintain
- * compatibility with the DataEntry struct and avoid excessive copying at API boundaries.
- * The map nodes themselves (the biggest source of fragmentation) are pooled.
+ * * Note: We store the hash instead of the key unlike the original bitcask paper.
  */
-using SimpleKeydir = std::pmr::unordered_map<std::string, ValueLocation>;
+using Keydir = std::pmr::unordered_map<uint64_t, ValueLocation>;
 
-// for struct_pack
-YLT_REFL(DataEntry, timestamp_ns, flag, key, value);
-YLT_REFL(HintEntry, timestamp_ns, entry_pos, total_sz, key)
 }  // namespace bitcask
 
 #endif  // KIO_ENTRY_H

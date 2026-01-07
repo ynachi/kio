@@ -46,7 +46,7 @@ protected:
     // Helper to safely open DB on the main thread
     [[nodiscard]] std::unique_ptr<BitKV> open_db(size_t partitions = 4) const
     {
-        auto res = SyncWait(BitKV::open(db_config_, io_config_, partitions));
+        auto res = SyncWait(BitKV::Open(db_config_, io_config_, partitions));
         if (!res.has_value())
         {
             throw std::runtime_error(std::format("{}", res.error()));
@@ -58,7 +58,7 @@ protected:
     {
         if (db)
         {
-            const auto res = SyncWait(db->close());
+            const auto res = SyncWait(db->Close());
             EXPECT_TRUE(res.has_value());
             db.reset();  // Destructor runs here on main thread
         }
@@ -89,7 +89,7 @@ TEST_F(BitKVAdvancedTest, ConcurrentReadsWritesDifferentKeys)
             for (size_t i = start; i < end; ++i)
             {
                 std::string value = std::format("value_{}", i);
-                auto res = co_await ptr->put(keys[i], value);
+                auto res = co_await ptr->Put(keys[i], value);
                 EXPECT_TRUE(res.has_value());
             }
         };
@@ -99,7 +99,7 @@ TEST_F(BitKVAdvancedTest, ConcurrentReadsWritesDifferentKeys)
         {
             for (size_t i = start; i < end; ++i)
             {
-                auto result = co_await ptr->get_string(keys[i]);
+                auto result = co_await ptr->GetString(keys[i]);
                 // Just exercise the path, result depends on race
             }
         };
@@ -127,7 +127,7 @@ TEST_F(BitKVAdvancedTest, ConcurrentReadsWritesDifferentKeys)
         // Verify all keys written
         for (size_t i = 0; i < 100; ++i)
         {
-            auto value = co_await ptr->get_string(keys[i]);
+            auto value = co_await ptr->GetString(keys[i]);
             EXPECT_TRUE(value.has_value() && value.value().has_value()) << "Key missing: " << keys[i];
         }
     };
@@ -153,7 +153,7 @@ TEST_F(BitKVAdvancedTest, ConcurrentUpdatesSameKeys)
                 {
                     std::string key = std::format("shared_key_{}", i);
                     std::string value = std::format("task{}_{}", task_id, update);
-                    auto res = co_await ptr->put(key, value);
+                    auto res = co_await ptr->Put(key, value);
                     EXPECT_TRUE(res.has_value());
                 }
             }
@@ -175,7 +175,7 @@ TEST_F(BitKVAdvancedTest, ConcurrentUpdatesSameKeys)
         for (size_t i = 0; i < num_keys; ++i)
         {
             std::string key = std::format("shared_key_{}", i);
-            auto value = co_await ptr->get_string(key);
+            auto value = co_await ptr->GetString(key);
             EXPECT_TRUE(value.has_value() && value.value().has_value());
         }
     };
@@ -195,10 +195,10 @@ TEST_F(BitKVAdvancedTest, ReadYourWrites)
             std::string key = std::format("key_{}", i);
             std::string value = std::format("value_{}", i);
 
-            auto put_res = co_await ptr->put(key, value);
+            auto put_res = co_await ptr->Put(key, value);
             EXPECT_TRUE(put_res.has_value());
 
-            auto get_res = co_await ptr->get_string(key);
+            auto get_res = co_await ptr->GetString(key);
             EXPECT_TRUE(get_res.has_value());
             EXPECT_TRUE(get_res.value().has_value());
             EXPECT_EQ(get_res.value().value(), value);
@@ -227,14 +227,14 @@ TEST_F(BitKVAdvancedTest, FileRotationUnderLoad)
         {
             std::string key = std::format("rotate_key_{:06}", i);
             std::string value = std::format("value_{}_padding_to_make_it_bigger", i);
-            auto res = co_await ptr->put(key, value);
+            auto res = co_await ptr->Put(key, value);
             EXPECT_TRUE(res.has_value());
         }
 
         for (size_t i = 0; i < num_entries; ++i)
         {
             std::string key = std::format("rotate_key_{:06}", i);
-            auto result = co_await ptr->get_string(key);
+            auto result = co_await ptr->GetString(key);
             EXPECT_TRUE(result.has_value() && result.value().has_value());
         }
     };
@@ -284,13 +284,13 @@ TEST_F(BitKVAdvancedTest, MixedReadWriteDelete)
             if (op == 0)
             {  // Put
                 std::string value = std::format("value_{}", i);
-                auto res = co_await ptr->put(key, value);
+                auto res = co_await ptr->Put(key, value);
                 EXPECT_TRUE(res.has_value());
                 ground_truth[key] = value;
             }
             else if (op == 1)
             {  // Get
-                auto result = co_await ptr->get_string(key);
+                auto result = co_await ptr->GetString(key);
                 EXPECT_TRUE(result.has_value());
 
                 if (ground_truth.contains(key))
@@ -308,7 +308,7 @@ TEST_F(BitKVAdvancedTest, MixedReadWriteDelete)
             }
             else
             {  // Delete
-                auto res = co_await ptr->del(key);
+                auto res = co_await ptr->Del(key);
                 EXPECT_TRUE(res.has_value());
                 ground_truth.erase(key);
             }
@@ -337,7 +337,7 @@ TEST_F(BitKVAdvancedTest, RepeatedOpenClose)
             {
                 std::string key = std::format("cycle_{}_key_{}", cycle, i);
                 std::string value = std::format("value_{}", i);
-                auto res = co_await ptr->put(key, value);
+                auto res = co_await ptr->Put(key, value);
                 EXPECT_TRUE(res.has_value());
             }
         };
@@ -358,7 +358,7 @@ TEST_F(BitKVAdvancedTest, RepeatedOpenClose)
             {
                 std::string key = std::format("cycle_{}_key_{}", cycle, i);
                 // EXPECT_TRUE only if the value actually exists (robustness check)
-                if (auto value = co_await ptr->get_string(key); value.has_value() && value.value().has_value())
+                if (auto value = co_await ptr->GetString(key); value.has_value() && value.value().has_value())
                 {
                     EXPECT_FALSE(value.value().value().empty());
                 }
@@ -382,7 +382,7 @@ TEST_F(BitKVAdvancedTest, HighVolumeWrites)
         {
             const std::string key = std::format("key_{:06}", i);
             const std::string value = std::format("value_data_{}", i);
-            auto res = co_await ptr->put(key, value);
+            auto res = co_await ptr->Put(key, value);
             EXPECT_TRUE(res.has_value());
         }
         const auto end = std::chrono::steady_clock::now();

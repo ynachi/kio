@@ -6,23 +6,27 @@
 
 #ifndef KIO_CONST_H
 #define KIO_CONST_H
-#include <bit>
-#include <cstring>
-#include <expected>
-#include <sys/stat.h>
-#include <vector>
-#include <ylt/struct_pack.hpp>
-
 #include "kio/core/coro.h"
 #include "kio/core/errors.h"
 #include "kio/core/worker.h"
+#include "kio/third_party/xxhash/xxhash.h"
+
+#include <bit>
+#include <cstring>
+#include <expected>
+#include <vector>
+
+#include <sys/stat.h>
+
+#include <ylt/struct_pack.hpp>
 
 namespace bitcask
 {
 constexpr std::uint8_t kFlagNone = 0x00;
 constexpr uint8_t kFlagTombstone = 0x01;
-constexpr std::size_t kEntryFixedHeaderSize = 12;  // at least CRC + PAYLOAD SIZE
-constexpr std::size_t kHintHeaderSize = 24;
+// [crc(4)][Timestamp(8)][Flag(1)][KeyLen(4)][ValueLen(4)]
+constexpr std::size_t kEntryFixedHeaderSize = 21;
+constexpr std::size_t kHintHeaderSize = 20;
 constexpr std::size_t kFSReadChunkSize = 32 * 1024;
 constexpr std::size_t kKeydirDefaultShardCount = 2;
 
@@ -50,24 +54,35 @@ struct Manifest
  * @brief Gets the current time as a 64-bit integer.
  * @return The number of T since the UNIX epoch.
  */
-template<typename T = std::chrono::nanoseconds>
+template <typename T = std::chrono::nanoseconds>
 std::uint64_t GetCurrentTimestamp()
 {
-    const auto now = std::chrono::steady_clock::now();
-    return std::chrono::duration_cast<T>(now.time_since_epoch()).count();
+    const auto kNow = std::chrono::steady_clock::now();
+    return std::chrono::duration_cast<T>(kNow.time_since_epoch()).count();
 }
 
-/**
- * @brief Reads a Little-Endian integer from a raw buffer.
- */
-template<typename T>
-constexpr T read_le(const char* buffer)
+// Helper: ByteSwap (Uses std::byteswap in C++23, or a C++20 fallback)
+template <typename T>
+constexpr T ByteSwap(T value) noexcept
+{
+#if __cpp_lib_byteswap
+    return std::byteswap(value);
+#else
+    auto value_representation = std::bit_cast<std::array<std::byte, sizeof(T)>>(value);
+    std::ranges::reverse(value_representation);
+    return std::bit_cast<T>(value_representation);
+#endif
+}
+
+// Read Little Endian from the buffer
+template <typename T>
+constexpr T ReadLe(const char* buffer)
 {
     T val;
     std::memcpy(&val, buffer, sizeof(T));
     if constexpr (std::endian::native == std::endian::big)
     {
-        return std::byteswap(val);
+        return ByteSwap(val);
     }
     else
     {
@@ -75,10 +90,21 @@ constexpr T read_le(const char* buffer)
     }
 }
 
-/// Read the hint file entirely, they are small
-kio::Task<kio::Result<std::vector<char>>> read_file_content(kio::io::Worker& io_worker, int fd);
+// Write Little Endian to buffer
+template <typename T>
+constexpr void WriteLe(char* buffer, T value)
+{
+    if constexpr (std::endian::native == std::endian::big)
+    {
+        value = ByteSwap(value);
+    }
+    std::memcpy(buffer, &value, sizeof(T));
+}
 
-inline kio::Result<size_t> get_file_size(const int fd)
+/// Read the hint file entirely, they are small
+kio::Task<kio::Result<std::vector<char>>> ReadFileContent(kio::io::Worker& io_worker, int fd);
+
+inline kio::Result<size_t> GetFileSize(const int fd)
 {
     struct stat st{};
     if (::fstat(fd, &st) < 0)
@@ -86,6 +112,21 @@ inline kio::Result<size_t> get_file_size(const int fd)
         return std::unexpected(kio::Error::FromErrno(errno));
     }
     return st.st_size;
+}
+
+inline uint64_t Hash(std::string_view data)
+{
+    return XXH3_64bits(data.data(), data.size());
+}
+
+inline uint64_t Hash(std::span<char> data)
+{
+    return XXH3_64bits(data.data(), data.size());
+}
+
+inline uint64_t Hash(std::span<const char> data)
+{
+    return XXH3_64bits(data.data(), data.size());
 }
 
 // Reflection for struct_pack

@@ -46,6 +46,8 @@ HeaderFilterRegex: '.*'
 FormatStyle: google
 CheckOptions:
   # Naming conventions - Google style
+  - key: readability-identifier-naming.LocalConstantCase
+    value: lower_case
   - key: readability-identifier-naming.NamespaceCase
     value: lower_case
   - key: readability-identifier-naming.ClassCase

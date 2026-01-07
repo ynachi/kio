@@ -34,11 +34,14 @@ public:
 
     ~HintFile() = default;
 
-    [[nodiscard]] uint64_t file_id() const { return file_id_; }
+    [[nodiscard]] uint64_t FileId() const { return file_id_; }
     // Add this getter so tests can access the fd
-    [[nodiscard]] int fd() const { return handle_.get(); }
+    [[nodiscard]] int Fd() const { return handle_.Get(); }
 
-    kio::Task<kio::Result<void>> async_write(const HintEntry&& entry) const;  // NOLINT on [[no_discard]]
+    [[nodiscard]] kio::Task<kio::Result<void>> AsyncWrite(const HintEntry&& entry) const
+    {
+        return io_worker_.AsyncWriteExact(handle_.Get(), entry.Serialize());
+    }
 };
 
 }  // namespace bitcask

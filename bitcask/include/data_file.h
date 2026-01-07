@@ -4,7 +4,6 @@
 
 #ifndef KIO_DATAFILE_H
 #define KIO_DATAFILE_H
-#include <filesystem>
 
 #include "config.h"
 #include "entry.h"
@@ -32,15 +31,15 @@ public:
 
     ~DataFile() = default;
 
-    // Write entry and return the offset and size of the total bytes written (as serialized by the serializer lib)
-    kio::Task<kio::Result<std::pair<uint64_t, uint32_t>>> async_write(const DataEntry& entry);
-    kio::Task<kio::Result<void>> async_close();
+    // Write an entry and return the offset
+    kio::Task<kio::Result<uint64_t>> AsyncWrite(const DataEntry& entry);
+    kio::Task<kio::Result<void>> AsyncClose();
 
     // Getters
-    [[nodiscard]] uint64_t file_id() const { return file_id_; }
-    [[nodiscard]] FileHandle& handle() { return handle_; }
-    [[nodiscard]] uint64_t size() const { return size_; }
-    [[nodiscard]] bool should_rotate(size_t max_file_size) const;
+    [[nodiscard]] uint64_t FileId() const { return file_id_; }
+    [[nodiscard]] FileHandle& Handle() { return handle_; }
+    [[nodiscard]] uint64_t Size() const { return size_; }
+    [[nodiscard]] bool ShouldRotate(size_t max_file_size) const;
 
 private:
     // timestamp_s based id

@@ -18,12 +18,12 @@ struct PartitionStats
         uint64_t live_bytes{0};
         uint64_t live_entries{0};
 
-        [[nodiscard]] double fragmentation() const
+        [[nodiscard]] double Fragmentation() const
         {
-            return total_bytes > 0 ? 1.0 - static_cast<double>(live_bytes) / static_cast<double>(total_bytes) : 0.0;
+            return total_bytes > 0 ? 1.0 - (static_cast<double>(live_bytes) / static_cast<double>(total_bytes)) : 0.0;
         }
 
-        [[nodiscard]] uint64_t reclaimable_bytes() const { return total_bytes - live_bytes; }
+        [[nodiscard]] uint64_t ReclaimableBytes() const { return total_bytes - live_bytes; }
     };
 
     // Per-file stats
@@ -47,27 +47,27 @@ struct PartitionStats
     // File lifecycle
     uint64_t file_rotations_total{0};
 
-    [[nodiscard]] uint64_t total_reclaimable_bytes() const
+    [[nodiscard]] uint64_t TotalReclaimableBytes() const
     {
         uint64_t total = 0;
-        for (const auto& stats: data_files | std::views::values)
+        for (const auto& stats : data_files | std::views::values)
         {
-            total += stats.reclaimable_bytes();
+            total += stats.ReclaimableBytes();
         }
         return total;
     }
 
-    [[nodiscard]] double overall_fragmentation() const
+    [[nodiscard]] double OverallFragmentation() const
     {
         uint64_t total_bytes = 0;
         uint64_t live_bytes = 0;
-        for (const auto& stats: data_files | std::views::values)
+        for (const auto& stats : data_files | std::views::values)
         {
             total_bytes += stats.total_bytes;
             live_bytes += stats.live_bytes;
         }
 
-        return total_bytes > 0 ? 1.0 - static_cast<double>(live_bytes) / static_cast<double>(total_bytes) : 0.0;
+        return total_bytes > 0 ? 1.0 - (static_cast<double>(live_bytes) / static_cast<double>(total_bytes)) : 0.0;
     }
 };
 }  // namespace bitcask

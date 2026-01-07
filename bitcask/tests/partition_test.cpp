@@ -127,7 +127,7 @@ TEST_F(PartitionTest, BasicGet) {
         // Put
         co_await partition->put(std::string(key), std::vector(value));
         const DataEntry d{std::string(key), std::vector(value)};
-        const auto check = d.serialize();
+        const auto check = d.Serialize();
         std::cout << "serialized data size " << check.size() << std::endl;
         ALOG_INFO("Data content from test: {}", std::string_view(check.data(), check.size()));
 

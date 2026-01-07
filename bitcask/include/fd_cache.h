@@ -4,10 +4,10 @@
 
 #ifndef KIO_FD_CACHE_H
 #define KIO_FD_CACHE_H
-#include <list>
-
 #include "file_handle.h"
 #include "kio/core/worker.h"
+
+#include <list>
 
 namespace bitcask
 {
@@ -27,15 +27,15 @@ public:
     /**
      * @brief Get FD for file_id, opening if not cached
      */
-    kio::Task<kio::Result<int>> get_or_open(uint64_t file_id, const std::filesystem::path& path);
+    kio::Task<kio::Result<int>> GetOrOpen(uint64_t file_id, const std::filesystem::path& path);
     /**
      * @brief Remove file from cache (e.g., after compaction)
      */
-    void remove(uint64_t file_id);
+    void Remove(uint64_t file_id);
     /**
      * @brief Clear all cached FDs
      */
-    void clear()
+    void Clear()
     {
         cache_.clear();
         lru_list_.clear();
@@ -47,14 +47,14 @@ public:
         uint64_t misses = 0;
         uint64_t evictions = 0;
 
-        [[nodiscard]] double hit_rate() const
+        [[nodiscard]] double HitRate() const
         {
             return hits + misses > 0 ? static_cast<double>(hits) / static_cast<double>(hits + misses) : 0.0;
         }
     };
 
-    [[nodiscard]] const Stats& get_stats() const { return stats_; }
-    [[nodiscard]] size_t size() const { return cache_.size(); }
+    [[nodiscard]] const Stats& GetStats() const { return stats_; }
+    [[nodiscard]] size_t Size() const { return cache_.size(); }
 
 private:
     struct CacheEntry
@@ -70,8 +70,8 @@ private:
     std::list<uint64_t> lru_list_;
     Stats stats_;
 
-    void touch(uint64_t file_id);
-    void evict_oldest();
+    void Touch(uint64_t file_id);
+    void EvictOldest();
 };
 }  // namespace bitcask
 

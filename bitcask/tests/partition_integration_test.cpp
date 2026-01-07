@@ -110,7 +110,7 @@ TEST_F(IntegrationTest, EcommerceSessionStore)
     {
         co_await SwitchToWorker(*worker_);
 
-        auto partition = (co_await Partition::open(config_, *worker_, 0)).value();
+        auto partition = (co_await Partition::Open(config_, *worker_, 0)).value();
 
         // Simulate 1000 user sessions
         constexpr int num_sessions = 1000;
@@ -127,7 +127,7 @@ TEST_F(IntegrationTest, EcommerceSessionStore)
                                                    GetCurrentTimestamp());
             std::vector value(session_data.begin(), session_data.end());
 
-            auto result = co_await partition->put(std::move(session_id), std::move(value));
+            auto result = co_await partition->Put(std::move(session_id), std::move(value));
             EXPECT_TRUE(result.has_value());
         }
 
@@ -144,24 +144,24 @@ TEST_F(IntegrationTest, EcommerceSessionStore)
                                 activity, GetCurrentTimestamp());
             std::vector value(updated_data.begin(), updated_data.end());
 
-            co_await partition->put(std::string(session_id), std::move(value));
+            co_await partition->Put(std::string(session_id), std::move(value));
         }
 
         // Phase 3: Expire old sessions (simulate TTL)
         for (int i = 0; i < num_sessions / 2; ++i)
         {
-            co_await partition->del(session_ids[i]);
+            co_await partition->Del(session_ids[i]);
         }
 
         // Phase 4: Compact to reclaim space
-        auto compact_result = co_await partition->compact();
+        auto compact_result = co_await partition->Compact();
         EXPECT_TRUE(compact_result.has_value());
 
         // Phase 5: Verify active sessions
         int active_sessions = 0;
         for (int i = num_sessions / 2; i < num_sessions; ++i)
         {
-            if (auto get_result = co_await partition->get(session_ids[i]);
+            if (auto get_result = co_await partition->Get(session_ids[i]);
                 get_result.has_value() && get_result.value().has_value())
             {
                 active_sessions++;
@@ -171,15 +171,15 @@ TEST_F(IntegrationTest, EcommerceSessionStore)
         EXPECT_EQ(active_sessions, num_sessions / 2);
 
         // Phase 6: Crash simulation - restart and verify
-        auto stats_before = partition->get_stats();
+        auto stats_before = partition->GetStats();
         partition.reset();
 
-        partition = (co_await Partition::open(config_, *worker_, 0)).value();
+        partition = (co_await Partition::Open(config_, *worker_, 0)).value();
 
         // Verify sessions survived restart
         for (int i = num_sessions / 2; i < num_sessions; ++i)
         {
-            auto get_result = co_await partition->get(session_ids[i]);
+            auto get_result = co_await partition->Get(session_ids[i]);
             EXPECT_TRUE(get_result.has_value() && get_result.value().has_value())
                     << "Session " << session_ids[i] << " should survive restart";
         }
@@ -187,7 +187,7 @@ TEST_F(IntegrationTest, EcommerceSessionStore)
         // Expired sessions should still be deleted
         for (int i = 0; i < num_sessions / 2; ++i)
         {
-            auto get_result = co_await partition->get(session_ids[i]);
+            auto get_result = co_await partition->Get(session_ids[i]);
             EXPECT_TRUE(get_result.has_value());
             EXPECT_FALSE(get_result.value().has_value()) << "Session " << session_ids[i] << " should stay deleted";
         }
@@ -206,7 +206,7 @@ TEST_F(IntegrationTest, TimeSeriesMetrics)
     {
         co_await SwitchToWorker(*worker_);
 
-        auto partition = (co_await Partition::open(config_, *worker_, 0)).value();
+        auto partition = (co_await Partition::Open(config_, *worker_, 0)).value();
 
         // Simulate metrics from 10 servers over time
         constexpr int num_servers = 10;
@@ -224,12 +224,12 @@ TEST_F(IntegrationTest, TimeSeriesMetrics)
                                                  60 + (server % 40), 70 + (ts % 30), 80 + (server % 20));
                 std::vector<char> value(metric.begin(), metric.end());
 
-                auto result = co_await partition->put(std::move(key), std::move(value));
+                auto result = co_await partition->Put(std::move(key), std::move(value));
                 EXPECT_TRUE(result.has_value());
             }
         }
 
-        auto stats_after_write = partition->get_stats();
+        auto stats_after_write = partition->GetStats();
         EXPECT_EQ(stats_after_write.puts_total, num_servers * num_timestamps);
 
         // Phase 2: Query recent metrics (read hot data)
@@ -241,7 +241,7 @@ TEST_F(IntegrationTest, TimeSeriesMetrics)
             {
                 std::string key = std::format("metrics:server_{}:ts_{}", server, ts);
 
-                if (auto get_result = co_await partition->get(key);
+                if (auto get_result = co_await partition->Get(key);
                     get_result.has_value() && get_result.value().has_value())
                 {
                     successful_reads++;
@@ -258,15 +258,15 @@ TEST_F(IntegrationTest, TimeSeriesMetrics)
             for (int server = 0; server < num_servers; ++server)
             {
                 std::string key = std::format("metrics:server_{}:ts_{}", server, ts);
-                co_await partition->del(key);
+                co_await partition->Del(key);
             }
         }
 
         // Phase 4: Compact
-        auto compact_result = co_await partition->compact();
+        auto compact_result = co_await partition->Compact();
         EXPECT_TRUE(compact_result.has_value());
 
-        auto stats_after_compact = partition->get_stats();
+        auto stats_after_compact = partition->GetStats();
         EXPECT_GT(stats_after_compact.bytes_reclaimed_total, 0);
 
         // Phase 5: Verify only recent data exists
@@ -275,7 +275,7 @@ TEST_F(IntegrationTest, TimeSeriesMetrics)
             for (int ts = num_timestamps - retention_window; ts < num_timestamps; ++ts)
             {
                 std::string key = std::format("metrics:server_{}:ts_{}", server, ts);
-                auto get_result = co_await partition->get(key);
+                auto get_result = co_await partition->Get(key);
                 EXPECT_TRUE(get_result.has_value() && get_result.value().has_value())
                         << "Recent metric " << key << " should exist";
             }
@@ -295,7 +295,7 @@ TEST_F(IntegrationTest, HighUpdateRateCache)
     {
         co_await SwitchToWorker(*worker_);
 
-        auto partition = (co_await Partition::open(config_, *worker_, 0)).value();
+        auto partition = (co_await Partition::Open(config_, *worker_, 0)).value();
 
         // Simulate cache with 100 hot keys
         constexpr int num_hot_keys = 100;
@@ -312,7 +312,7 @@ TEST_F(IntegrationTest, HighUpdateRateCache)
         for (const auto& key: hot_keys)
         {
             std::vector<char> value = random_value(100, 500);
-            co_await partition->put(std::string(key), std::move(value));
+            co_await partition->Put(std::string(key), std::move(value));
         }
 
         // Phase 2: Simulate high update rate (cache invalidations)
@@ -325,39 +325,39 @@ TEST_F(IntegrationTest, HighUpdateRateCache)
 
             // New cache value
             std::vector<char> value = random_value(100, 500);
-            co_await partition->put(std::move(key), std::move(value));
+            co_await partition->Put(std::move(key), std::move(value));
 
             // Occasionally compact
             if (update % 1000 == 0 && update > 0)
             {
-                if (auto stats = partition->get_stats();
-                    stats.overall_fragmentation() > config_.fragmentation_threshold)
+                if (auto stats = partition->GetStats();
+                    stats.OverallFragmentation() > config_.fragmentation_threshold)
                 {
-                    co_await partition->compact();
+                    co_await partition->Compact();
                 }
             }
         }
 
-        auto stats_final = partition->get_stats();
+        auto stats_final = partition->GetStats();
 
         // Should have significant fragmentation or compaction activity
-        EXPECT_TRUE(stats_final.overall_fragmentation() > 0.3 || stats_final.compactions_total > 0);
+        EXPECT_TRUE(stats_final.OverallFragmentation() > 0.3 || stats_final.compactions_total > 0);
 
         // Phase 3: Verify all hot keys are accessible with latest values
         for (const auto& key: hot_keys)
         {
-            auto get_result = co_await partition->get(key);
+            auto get_result = co_await partition->Get(key);
             EXPECT_TRUE(get_result.has_value() && get_result.value().has_value())
                     << "Hot key " << key << " should be accessible";
         }
 
         // Phase 4: Recovery test
         partition.reset();
-        partition = (co_await Partition::open(config_, *worker_, 0)).value();
+        partition = (co_await Partition::Open(config_, *worker_, 0)).value();
 
         for (const auto& key: hot_keys)
         {
-            auto get_result = co_await partition->get(key);
+            auto get_result = co_await partition->Get(key);
             EXPECT_TRUE(get_result.has_value() && get_result.value().has_value())
                     << "Hot key " << key << " should survive restart";
         }
@@ -376,7 +376,7 @@ TEST_F(IntegrationTest, MixedCRUDWorkload)
     {
         co_await SwitchToWorker(*worker_);
 
-        auto partition = (co_await Partition::open(config_, *worker_, 0)).value();
+        auto partition = (co_await Partition::Open(config_, *worker_, 0)).value();
 
         constexpr int num_operations = 2000;
         std::unordered_set<std::string> live_keys;
@@ -394,7 +394,7 @@ TEST_F(IntegrationTest, MixedCRUDWorkload)
                 std::string key = std::format("key_{}", key_counter++);
                 std::vector<char> value = random_value(50, 300);
 
-                auto result = co_await partition->put(std::string(key), std::vector<char>(value));
+                auto result = co_await partition->Put(std::string(key), std::vector<char>(value));
                 EXPECT_TRUE(result.has_value());
 
                 live_keys.insert(key);
@@ -408,7 +408,7 @@ TEST_F(IntegrationTest, MixedCRUDWorkload)
                 std::string key = *it;
 
                 std::vector<char> new_value = random_value(50, 300);
-                co_await partition->put(std::string(key), std::vector(new_value));
+                co_await partition->Put(std::string(key), std::vector(new_value));
 
                 expected_values[key] = new_value;
             }
@@ -419,7 +419,7 @@ TEST_F(IntegrationTest, MixedCRUDWorkload)
                 std::advance(it, rng_() % live_keys.size());
                 std::string key = *it;
 
-                auto get_result = co_await partition->get(key);
+                auto get_result = co_await partition->Get(key);
                 EXPECT_TRUE(get_result.has_value() && get_result.value().has_value());
 
                 if (get_result.has_value() && get_result.value().has_value())
@@ -434,7 +434,7 @@ TEST_F(IntegrationTest, MixedCRUDWorkload)
                 std::advance(it, rng_() % live_keys.size());
                 std::string key = *it;
 
-                co_await partition->del(key);
+                co_await partition->Del(key);
                 live_keys.erase(it);
                 expected_values.erase(key);
             }
@@ -442,10 +442,10 @@ TEST_F(IntegrationTest, MixedCRUDWorkload)
             // Periodic compaction
             if (op % 500 == 0 && op > 0)
             {
-                if (auto stats = partition->get_stats();
-                    stats.overall_fragmentation() > config_.fragmentation_threshold)
+                if (auto stats = partition->GetStats();
+                    stats.OverallFragmentation() > config_.fragmentation_threshold)
                 {
-                    co_await partition->compact();
+                    co_await partition->Compact();
                 }
             }
         }
@@ -453,7 +453,7 @@ TEST_F(IntegrationTest, MixedCRUDWorkload)
         // Final verification
         for (const auto& key: live_keys)
         {
-            auto get_result = co_await partition->get(key);
+            auto get_result = co_await partition->Get(key);
             EXPECT_TRUE(get_result.has_value() && get_result.value().has_value())
                     << "Live key " << key << " should exist";
 
@@ -463,7 +463,7 @@ TEST_F(IntegrationTest, MixedCRUDWorkload)
             }
         }
 
-        auto stats = partition->get_stats();
+        auto stats = partition->GetStats();
         EXPECT_GT(stats.puts_total, 0);
         EXPECT_GT(stats.gets_total, 0);
         EXPECT_GT(stats.deletes_total, 0);
@@ -482,7 +482,7 @@ TEST_F(IntegrationTest, LargeDocumentStore)
     {
         co_await SwitchToWorker(*worker_);
 
-        const auto partition = (co_await Partition::open(config_, *worker_, 0)).value();
+        const auto partition = (co_await Partition::Open(config_, *worker_, 0)).value();
 
         // Simulate document store with varying document sizes
         constexpr int num_documents = 100;
@@ -496,11 +496,11 @@ TEST_F(IntegrationTest, LargeDocumentStore)
 
             std::vector<char> document = random_value(1024, 10 * 1024);
 
-            auto result = co_await partition->put(std::move(doc_id), std::move(document));
+            auto result = co_await partition->Put(std::move(doc_id), std::move(document));
             EXPECT_TRUE(result.has_value());
         }
 
-        auto stats_after_write = partition->get_stats();
+        auto stats_after_write = partition->GetStats();
 
         // Should have multiple files due to large values (100 docs * avg 5KB = 500KB > 50KB max file)
         EXPECT_GE(stats_after_write.data_files.size(), 2);
@@ -512,27 +512,27 @@ TEST_F(IntegrationTest, LargeDocumentStore)
             std::string doc_id = doc_ids[i];
             std::vector<char> updated_doc = random_value(2 * 1024, 15 * 1024);
 
-            co_await partition->put(std::move(doc_id), std::move(updated_doc));
+            co_await partition->Put(std::move(doc_id), std::move(updated_doc));
         }
 
         // Phase 3: Delete some documents
         for (int i = num_documents * 2 / 3; i < num_documents; ++i)
         {
-            co_await partition->del(doc_ids[i]);
+            co_await partition->Del(doc_ids[i]);
         }
 
         // Phase 4: Compact
-        auto compact_result = co_await partition->compact();
+        auto compact_result = co_await partition->Compact();
         EXPECT_TRUE(compact_result.has_value());
 
-        auto stats_after_compact = partition->get_stats();
+        auto stats_after_compact = partition->GetStats();
         // Compaction should happen because updating 33% + deleting 33% = 66% dead data in old files
         EXPECT_GT(stats_after_compact.bytes_reclaimed_total, 0);
 
         // Phase 5: Verify documents
         for (int i = 0; i < num_documents * 2 / 3; ++i)
         {
-            auto get_result = co_await partition->get(doc_ids[i]);
+            auto get_result = co_await partition->Get(doc_ids[i]);
             EXPECT_TRUE(get_result.has_value() && get_result.value().has_value())
                     << "Document " << doc_ids[i] << " should exist";
         }
@@ -540,26 +540,26 @@ TEST_F(IntegrationTest, LargeDocumentStore)
         // Deleted documents should not exist
         for (int i = num_documents * 2 / 3; i < num_documents; ++i)
         {
-            auto get_result = co_await partition->get(doc_ids[i]);
+            auto get_result = co_await partition->Get(doc_ids[i]);
             EXPECT_TRUE(get_result.has_value());
             EXPECT_FALSE(get_result.value().has_value());
         }
 
         // Phase 6: Recovery test with large values
-        co_await partition->async_close();
+        co_await partition->AsyncClose();
 
-        auto recovery_res = co_await Partition::open(config_, *worker_, 0);
+        auto recovery_res = co_await Partition::Open(config_, *worker_, 0);
         EXPECT_TRUE(recovery_res.has_value());
         auto partition_rec = std::move(recovery_res.value());
 
         for (int i = 0; i < num_documents * 2 / 3; ++i)
         {
-            auto get_result = co_await partition_rec->get(doc_ids[i]);
+            auto get_result = co_await partition_rec->Get(doc_ids[i]);
             EXPECT_TRUE(get_result.has_value() && get_result.value().has_value())
                     << "Document " << doc_ids[i] << " should survive restart";
         }
 
-        co_await partition_rec->async_close();
+        co_await partition_rec->AsyncClose();
     };
 
     SyncWait(test_coro());
@@ -575,7 +575,7 @@ TEST_F(IntegrationTest, RapidFireOperations)
     {
         co_await SwitchToWorker(*worker_);
 
-        auto partition = (co_await Partition::open(config_, *worker_, 0)).value();
+        auto partition = (co_await Partition::Open(config_, *worker_, 0)).value();
 
         constexpr int num_rapid_ops = 5000;
         std::vector<std::string> keys;
@@ -598,17 +598,17 @@ TEST_F(IntegrationTest, RapidFireOperations)
             if (op % 2 == 0)
             {
                 std::vector<char> value = random_value(50, 200);
-                auto result = co_await partition->put(std::string(key), std::move(value));
+                auto result = co_await partition->Put(std::string(key), std::move(value));
                 EXPECT_TRUE(result.has_value());
             }
             else
             {
-                auto result = co_await partition->get(key);
+                auto result = co_await partition->Get(key);
                 EXPECT_TRUE(result.has_value());
             }
         }
 
-        auto stats = partition->get_stats();
+        auto stats = partition->GetStats();
 
         // Verify high throughput was achieved
         EXPECT_EQ(stats.puts_total + stats.gets_total, num_rapid_ops);
@@ -616,7 +616,7 @@ TEST_F(IntegrationTest, RapidFireOperations)
         // All keys should be accessible
         for (const auto& key: keys)
         {
-            auto get_result = co_await partition->get(key);
+            auto get_result = co_await partition->Get(key);
             // Key might not exist if never written, but operation should succeed
             EXPECT_TRUE(get_result.has_value());
         }

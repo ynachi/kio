@@ -5,12 +5,12 @@
 #ifndef KIO_FILE_ID_H
 #define KIO_FILE_ID_H
 
+#include "kio/core/async_logger.h"
+
 #include <chrono>
 #include <cstdint>
 #include <format>
 #include <string>
-
-#include "kio/core/async_logger.h"
 
 namespace bitcask
 {
@@ -34,7 +34,7 @@ struct FileID
     /**
      * @brief Encode to 64-bit file ID
      */
-    [[nodiscard]] uint64_t encode() const
+    [[nodiscard]] uint64_t Encode() const
     {
         return (static_cast<uint64_t>(partition) << 48) | (static_cast<uint64_t>(timestamp_sec) << 16) |
                static_cast<uint64_t>(sequence);
@@ -43,17 +43,17 @@ struct FileID
     /**
      * @brief Decode 64-bit file ID
      */
-    static FileID decode(uint64_t id)
+    static FileID Decode(uint64_t id)
     {
         return FileID{.partition = static_cast<uint16_t>(id >> 48),
-                      .timestamp_sec = static_cast<uint32_t>((id >> 16) & 0xFFFFFFFF),
+                      .timestamp_sec = static_cast<uint32_t>(id >> 16 & 0xFFFFFFFF),
                       .sequence = static_cast<uint16_t>(id & 0xFFFF)};
     }
 
     /**
      * @brief Human-readable format for debugging
      */
-    [[nodiscard]] std::string debug() const
+    [[nodiscard]] std::string Debug() const
     {
         return std::format("FileId(partition={}, timestamp={}, seq={})", partition, timestamp_sec, sequence);
     }
@@ -67,18 +67,15 @@ struct FileID
 class FileIdGenerator
 {
 public:
-    explicit FileIdGenerator(const uint16_t partition_id) :
-        partition_id_(partition_id), last_timestamp_(0), sequence_(0)
-    {
-    }
+    explicit FileIdGenerator(const uint16_t partition_id) : partition_id_(partition_id) {}
 
     /**
      * @brief Generate next file ID
      * Monotonically increasing. Handles clock skew.
      */
-    uint64_t next()
+    uint64_t Next()
     {
-        auto now = get_current_timestamp_sec();
+        auto now = GetCurrentTimestampSec();
 
         if (now > last_timestamp_)
         {
@@ -88,7 +85,7 @@ public:
         }
         else
         {
-            // Same second OR clock went backwards (skew).
+            // The same second OR a clock went backwards (skew).
             // Treat clock skew as "same second" to enforce monotonicity.
             now = last_timestamp_;
 
@@ -104,41 +101,44 @@ public:
             }
         }
 
-        return FileID{partition_id_, now, sequence_}.encode();
+        return FileID{.partition = partition_id_, .timestamp_sec = now, .sequence = sequence_}.Encode();
     }
 
-    [[nodiscard]] uint32_t current_timestamp() const { return last_timestamp_; }
+    [[nodiscard]] uint32_t CurrentTimestamp() const { return last_timestamp_; }
 
-    [[nodiscard]] uint16_t partition_id() const { return partition_id_; }
+    [[nodiscard]] uint16_t PartitionId() const { return partition_id_; }
 
 private:
     uint16_t partition_id_;
-    uint32_t last_timestamp_;
-    uint16_t sequence_;
+    uint32_t last_timestamp_{0};
+    uint16_t sequence_{0};
 
-    static uint32_t get_current_timestamp_sec()
+    static uint32_t GetCurrentTimestampSec()
     {
         return static_cast<uint32_t>(
-                std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch())
-                        .count());
+            std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch())
+                .count());
     }
 };
 
 /**
  * @brief Compare file IDs by timestamp (for sorting during recovery)
  */
-inline bool file_id_compare_by_time(uint64_t a, uint64_t b)
+inline bool FileIdCompareByTime(uint64_t a, uint64_t b)
 {
     // Since the layout is Partition(16) | Time(32) | Seq(16),
     // direct integer comparison sorts by Partition, THEN Time, THEN Seq.
     // If we want to sort purely by Time (ignoring Partition), we need decoding, but why would we want that ?
 
-    const auto id_a = FileID::decode(a);
-    const auto id_b = FileID::decode(b);
+    const auto kIdA = FileID::Decode(a);
+    const auto kIdB = FileID::Decode(b);
 
-    if (id_a.timestamp_sec != id_b.timestamp_sec) return id_a.timestamp_sec < id_b.timestamp_sec;
+    if (kIdA.timestamp_sec != kIdB.timestamp_sec)
+    {
+        return kIdA.timestamp_sec < kIdB.timestamp_sec;
+    }
 
-    return id_a.sequence < id_b.sequence;
+    return kIdA.sequence < kIdB.sequence;
 }
 
 }  // namespace bitcask

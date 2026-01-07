@@ -9,7 +9,9 @@ using namespace kio::io;
 
 namespace bitcask
 {
-Task<Result<std::vector<char>>> read_file_content(Worker& io_worker, const int fd)
+namespace
+{
+Task<Result<std::vector<char>>> ReadFileContent(Worker& io_worker, const int fd)
 {
     struct stat st{};
     // this is a blocking system call, but it's ok. We call this method only during database init.
@@ -31,5 +33,5 @@ Task<Result<std::vector<char>>> read_file_content(Worker& io_worker, const int f
 
     co_return buffer;
 }
-
+}
 }  // namespace bitcask

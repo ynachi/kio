@@ -105,6 +105,58 @@ TEST_F(AsyncBatonTest, WaitBeforePost_BlocksUntilSignaled)
     ASSERT_TRUE(task_completed);
 }
 
+TEST_F(AsyncBatonTest, WaitFor_SignaledBeforeTimeout)
+{
+    TestWorker w(0);
+    AsyncBaton baton;
+
+    std::atomic_bool task_completed = false;
+    std::atomic_bool signaled = false;
+
+    // NOLINTNEXTLINE(cppcoreguidelines-avoid-capturing-lambda-coroutines)
+    auto task = [&](Worker& worker) -> Task<void>
+    {
+        co_await SwitchToWorker(worker);
+        signaled = co_await baton.WaitFor(worker, std::chrono::milliseconds(50));
+        task_completed = true;
+    }(w.worker);
+
+    std::thread poster(
+        [&]()
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            baton.Post();
+        });
+
+    SyncWait(std::move(task));
+
+    poster.join();
+    ASSERT_TRUE(task_completed);
+    EXPECT_TRUE(signaled);
+}
+
+TEST_F(AsyncBatonTest, WaitFor_TimesOut)
+{
+    TestWorker w(0);
+    AsyncBaton baton;
+
+    std::atomic_bool task_completed = false;
+    std::atomic_bool signaled = true;
+
+    // NOLINTNEXTLINE(cppcoreguidelines-avoid-capturing-lambda-coroutines)
+    auto task = [&](Worker& worker) -> Task<void>
+    {
+        co_await SwitchToWorker(worker);
+        signaled = co_await baton.WaitFor(worker, std::chrono::milliseconds(10));
+        task_completed = true;
+    }(w.worker);
+
+    SyncWait(std::move(task));
+
+    ASSERT_TRUE(task_completed);
+    EXPECT_FALSE(signaled);
+}
+
 // -----------------------------------------------------------------------------
 // 2. Thread Affinity & Architecture Compliance (CRITICAL)
 // -----------------------------------------------------------------------------

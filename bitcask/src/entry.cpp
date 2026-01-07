@@ -4,106 +4,121 @@
 
 #include "bitcask/include/entry.h"
 
-#include <ylt/struct_pack.hpp>
-
 #include "crc32c/crc32c.h"
-#include "kio/core/async_logger.h"
 
 namespace bitcask
 {
 using namespace kio;
 
-DataEntry::DataEntry(std::string&& key, std::vector<char>&& value, const uint8_t flag) :
-    timestamp_ns(GetCurrentTimestamp<std::chrono::nanoseconds>()), flag(flag), key(std::move(key)),
-    value(std::move(value))
+DataEntry::DataEntry(std::string_view key, std::span<const char> value, const uint8_t flag, const uint64_t timestamp)
 {
+    const auto kLen = static_cast<uint32_t>(key.size());
+    const auto kVLen = static_cast<uint32_t>(value.size());
+
+    payload_.resize(kEntryFixedHeaderSize + kLen + kVLen);
+    char* base = payload_.data();
+
+    // Write header (leave CRC blank for now)
+    WriteLe(base, static_cast<uint32_t>(0));  // CRC Placeholder
+    WriteLe(base + 4, timestamp);
+    WriteLe(base + 12, flag);
+    WriteLe(base + 13, kLen);
+    WriteLe(base + 17, kVLen);
+
+    // Write key/value
+    std::memcpy(base + kEntryFixedHeaderSize, key.data(), kLen);
+    std::memcpy(base + kEntryFixedHeaderSize + kLen, value.data(), kVLen);
+
+    // Compute CRC over everything except the CRC field itself
+    const uint32_t kCrc = crc32c::Crc32c(base + 4, payload_.size() - 4);
+    std::memcpy(base, &kCrc, sizeof(kCrc));
+
+    // Views into payload
+    key_view_ = std::string_view(base + kEntryFixedHeaderSize, kLen);
+    value_view_ = std::span<const char>(base + kEntryFixedHeaderSize + kLen, kVLen);
 }
 
-std::vector<char> DataEntry::serialize() const
+Result<DataEntry> DataEntry::Deserialize(std::span<const char> buffer)
 {
-    // 1. Serialize the payload first to a temporary buffer.
-    const auto payload_buffer = struct_pack::serialize(*this);
-    const auto payload_size = payload_buffer.size();
-    const auto total_size = kEntryFixedHeaderSize + payload_size;
-
-    // 2. Calculate CRC.
-    const uint32_t crc = crc32c::Crc32c(payload_buffer.data(), payload_buffer.size());
-
-    // 3. Prepare header values for little-endian storage.
-    uint32_t crc_le = crc;
-    uint64_t size_le = payload_size;
-    if constexpr (std::endian::native == std::endian::big)
+    if (buffer.size() < kEntryFixedHeaderSize)
     {
-        crc_le = std::byteswap(crc_le);
-        size_le = std::byteswap(size_le);
+        return std::unexpected(Error(ErrorCategory::kSerialization, kIoNeedMoreData));
+    }
+    const char* base = buffer.data();
+
+    // Decode Lengths to validate size
+    const auto kLen = ReadLe<uint32_t>(base + 13);
+    const auto kVLen = ReadLe<uint32_t>(base + 17);
+
+    if (buffer.size() < kEntryFixedHeaderSize + kLen + kVLen)
+    {
+        return std::unexpected(Error(ErrorCategory::kSerialization, kIoNeedMoreData));
     }
 
-    // 4. Construct the final buffer: [CRC|SIZE|PAYLOAD] directly.
-    std::vector<char> buffer;
-    buffer.reserve(total_size);
+    // crc check
+    auto stored_crc = ReadLe<uint32_t>(base);
+    auto computed_crc = crc32c::Crc32c(base + 4, kEntryFixedHeaderSize - 4 + kLen + kVLen);
 
-    // Append CRC (4 bytes)
-    const char* crc_ptr = reinterpret_cast<const char*>(&crc_le);
-    buffer.insert(buffer.end(), crc_ptr, crc_ptr + sizeof(crc_le));
-
-    // Append SIZE (8 bytes)
-    const char* size_ptr = reinterpret_cast<const char*>(&size_le);
-    buffer.insert(buffer.end(), size_ptr, size_ptr + sizeof(size_le));
-
-    // Append payload
-    buffer.insert(buffer.end(), payload_buffer.begin(), payload_buffer.end());
-
-    return buffer;
-}
-
-Result<std::pair<DataEntry, uint64_t>> DataEntry::deserialize(std::span<const char> buffer)
-{
-    // MIN_ON_DISK_SIZE == CRC SZ + PAYLOAD SZ
-    if (buffer.size() <= kEntryFixedHeaderSize)
-    {
-        return std::unexpected(Error{ErrorCategory::kSerialization, kIoNeedMoreData});
-    }
-
-    const auto crc = read_le<uint32_t>(buffer.data());
-    const auto size = read_le<uint64_t>(buffer.data() + 4);
-
-    if (buffer.size() < kEntryFixedHeaderSize + size)
-    {
-        return std::unexpected(Error{ErrorCategory::kSerialization, kIoNeedMoreData});
-    }
-
-    const auto payload_span = buffer.subspan(kEntryFixedHeaderSize, size);
-    if (crc32c::Crc32c(payload_span.data(), payload_span.size()) != crc)
+    if (computed_crc != stored_crc)
     {
         return std::unexpected(Error{ErrorCategory::kSerialization, kIoDataCorrupted});
     }
 
-    auto entry = struct_pack::deserialize<DataEntry>(payload_span);
-    if (!entry.has_value())
-    {
-        return std::unexpected(Error{ErrorCategory::kSerialization, kIoDeserialization});
-    }
+    // Decode Metadata
+    auto timestamp = ReadLe<uint64_t>(base + 4);
+    auto flag = ReadLe<uint8_t>(base + 12);
 
-    DataEntry recovered = std::move(entry.value());
-    const auto entry_packed_size = struct_pack::get_needed_size(recovered);
-    return std::make_pair(std::move(recovered), kEntryFixedHeaderSize + entry_packed_size);
+    // Create Entry
+    std::string_view key(base + kEntryFixedHeaderSize, kLen);
+    std::span value(base + kEntryFixedHeaderSize + kLen, kVLen);
+
+    return DataEntry(key, value, flag, timestamp);
 }
 
-std::vector<char> HintEntry::serialize() const
+std::vector<char> HintEntry::Serialize() const
 {
-    return struct_pack::serialize(*this);
+    const auto kLen = static_cast<uint32_t>(key.size());
+    std::vector<char> buffer(kHintHeaderSize + kLen);
+    char* ptr = buffer.data();
+
+    WriteLe(ptr, timestamp_ns);
+    WriteLe(ptr + 8, offset);
+    WriteLe(ptr + 12, size);
+    WriteLe(ptr + 16, kLen);
+
+    if (kLen > 0)
+    {
+        std::memcpy(ptr + kHintHeaderSize, key.data(), kLen);
+    }
+    return buffer;
 }
 
-Result<HintEntry> HintEntry::deserialize(const std::span<const char> buffer)
+Result<std::pair<HintEntry, size_t>> HintEntry::Deserialize(const std::span<const char> buffer)
 {
-    // let struct_pack manage the error
-    auto entry = struct_pack::deserialize<HintEntry>(buffer);
-    if (!entry.has_value())
+    if (buffer.size() < kHintHeaderSize)
     {
-        ALOG_ERROR("Failed to deserialize entry: {}", entry.error().message());
-        return std::unexpected(Error{ErrorCategory::kSerialization, kIoDeserialization});
+        return std::unexpected(Error(ErrorCategory::kSerialization, kIoNeedMoreData));
     }
-    return entry.value();
+
+    const char* ptr = buffer.data();
+
+    HintEntry entry;
+    entry.timestamp_ns = ReadLe<uint64_t>(ptr);
+    entry.offset = ReadLe<uint32_t>(ptr + 8);
+    entry.size = ReadLe<uint32_t>(ptr + 12);
+
+    const auto kLen = ReadLe<uint32_t>(ptr + 16);
+    if (buffer.size() < kHintHeaderSize + kLen)
+    {
+        return std::unexpected(Error(ErrorCategory::kSerialization, kIoNeedMoreData));
+    }
+
+    if (kLen > 0)
+    {
+        entry.key.assign(ptr + kHintHeaderSize, kLen);
+    }
+
+    return std::make_pair(entry, kHintHeaderSize + kLen);
 }
 
 }  // namespace bitcask

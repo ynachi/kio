@@ -4,11 +4,11 @@
 
 #ifndef KIO_BITCASK_H
 #define KIO_BITCASK_H
-#include <memory>
-
 #include "bitcask/include/partition.h"
 #include "config.h"
 #include "kio/core/worker_pool.h"
+
+#include <memory>
 
 namespace bitcask
 {
@@ -39,9 +39,11 @@ public:
      * 6. Start compaction loops
      *
      * @param config Database configuration
+     * @param io_config
+     * @param partition_count
      * @return Initialized BitKV instance or error
      */
-    static kio::Task<kio::Result<std::unique_ptr<BitKV>>> open(const BitcaskConfig& config,
+    static kio::Task<kio::Result<std::unique_ptr<BitKV>>> Open(const BitcaskConfig& config,
                                                                kio::io::WorkerConfig io_config, size_t partition_count);
 
     // ====================================================================
@@ -52,32 +54,32 @@ public:
      * @brief Put key-value pair
      * Routes to partition based on key hash
      */
-    kio::Task<kio::Result<void>> put(std::string&& key, std::vector<char>&& value);
+    kio::Task<kio::Result<void>> Put(std::string&& key, std::vector<char>&& value) const;
 
     /**
      * @brief Get value for key
      * Routes to partition based on key hash
      */
-    kio::Task<kio::Result<std::optional<std::vector<char>>>> get(const std::string& key);
+    kio::Task<kio::Result<std::optional<std::vector<char>>>> Get(const std::string& key) const;
     /**
      * Get returns the value converted to string
      * @param key
      * @return
      */
-    kio::Task<kio::Result<std::optional<std::string>>> get_string(const std::string& key);
+    kio::Task<kio::Result<std::optional<std::string>>> GetString(const std::string& key) const;
     /**
      * Put a string. Internally converts the string to a vector of char.
      * @param key
      * @param value
      * @return
      */
-    kio::Task<kio::Result<void>> put(std::string key, std::string value);
+    kio::Task<kio::Result<void>> Put(std::string key, std::string value) const;
 
     /**
      * @brief Delete key
      * Routes to partition based on key hash
      */
-    kio::Task<kio::Result<void>> del(const std::string& key);
+    kio::Task<kio::Result<void>> Del(const std::string& key) const;
 
     // ====================================================================
     // MANAGEMENT OPERATIONS
@@ -86,12 +88,12 @@ public:
     /**
      * @brief Force sync all partitions to disk
      */
-    kio::Task<kio::Result<void>> sync() const;
+    kio::Task<kio::Result<void>> Sync() const;
 
     /**
      * @brief Force compaction on all partitions
      */
-    kio::Task<kio::Result<void>> compact() const;
+    kio::Task<kio::Result<void>> Compact() const;
 
     /**
      * @brief Graceful shutdown
@@ -105,7 +107,7 @@ public:
      * 3. Stop compaction loops
      * 4. Close all partitions
      */
-    kio::Task<kio::Result<void>> close() const;
+    kio::Task<kio::Result<void>> Close() const;
 
     /**
      * @brief Destructor
@@ -132,14 +134,14 @@ private:
     // INITIALIZATION & RECOVERY
     // ====================================================================
 
-    static kio::DetachedTask initialize_partition(BitKV& db, kio::io::Worker&, InitState& state);
+    static kio::DetachedTask InitializePartition(BitKV& db, kio::io::Worker&, InitState& state);
 
     /**
      * @brief Ensure directory structure exists
      * Creates: data/partition_0/, data/partition_1/, etc.
      */
-    void ensure_directories() const;
-    void check_or_create_manifest() const;
+    void EnsureDirectories() const;
+    void CheckOrCreateManifest() const;
 
     // ====================================================================
     // ROUTING
@@ -149,12 +151,12 @@ private:
      * @brief Map key to partition ID
      * Uses consistent hashing: hash(key) % partition_count
      */
-    [[nodiscard]] size_t route_to_partition(std::string_view key) const;
+    [[nodiscard]] size_t RouteToPartition(std::string_view key) const;
 
     /**
      * @brief Get partition by ID
      */
-    Partition& get_partition(size_t partition_id);
+    Partition& GetPartition(size_t partition_id) const;
 
     // ====================================================================
     // MEMBERS

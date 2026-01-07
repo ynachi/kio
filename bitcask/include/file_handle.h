@@ -18,7 +18,7 @@ class FileHandle
 public:
     explicit FileHandle(int fd = -1) : fd_(fd) {}
 
-    ~FileHandle() { close_fd(); }
+    ~FileHandle() { CloseFd(); }
 
     // Non-copyable
     FileHandle(const FileHandle&) = delete;
@@ -31,33 +31,33 @@ public:
     {
         if (this != &other)
         {
-            close_fd();
+            CloseFd();
             fd_ = other.fd_;
             other.fd_ = -1;
         }
         return *this;
     }
 
-    [[nodiscard]] int get() const { return fd_; }
-    [[nodiscard]] bool is_valid() const { return fd_ >= 0; }
+    [[nodiscard]] int Get() const { return fd_; }
+    [[nodiscard]] bool IsValid() const { return fd_ >= 0; }
 
-    void reset(const int new_fd = -1)
+    void Reset(const int new_fd = -1)
     {
-        close_fd();
+        CloseFd();
         fd_ = new_fd;
     }
 
-    int release()
+    int Release()
     {
-        const int temp = fd_;
+        const int kTemp = fd_;
         fd_ = -1;
-        return temp;
+        return kTemp;
     }
 
 private:
     int fd_;
 
-    void close_fd()
+    void CloseFd()
     {
         if (fd_ >= 0)
         {
