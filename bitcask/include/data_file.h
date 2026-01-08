@@ -33,6 +33,11 @@ public:
 
     // Write an entry and return the offset
     kio::Task<kio::Result<uint64_t>> AsyncWrite(const DataEntry& entry);
+
+    // Write an entry, use scatter gater for optimization
+    kio::Task<kio::Result<uint64_t>> AsyncWrite(std::string_view key, std::span<const char> value, uint64_t timestamp,
+                                                uint8_t flag);
+
     kio::Task<kio::Result<void>> AsyncClose();
 
     // Getters

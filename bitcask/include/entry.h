@@ -5,6 +5,7 @@
 
 #ifndef KIO_ENTRY_H
 #define KIO_ENTRY_H
+#include "absl/container/flat_hash_map.h"
 #include "common.h"
 #include "kio/core/errors.h"
 
@@ -145,14 +146,10 @@ struct ValueLocation
     uint64_t timestamp_ns = GetCurrentTimestamp();
 };
 
-/**
- * @brief PMR-optimized KeyDir.
- * Uses std::pmr::unordered_map which allows us to back the hash map nodes
- * with a memory pool (unsynchronized_pool_resource) instead of the global heap.
- * This significantly reduces fragmentation for long-running DBs.
- * * Note: We store the hash instead of the key unlike the original bitcask paper.
- */
-using Keydir = std::pmr::unordered_map<uint64_t, ValueLocation>;
+// Use Abseil's flat_hash_map with full strings for keys.
+// This handles collisions correctly and is cache-friendly.
+// Abseil supports heterogeneous lookup (string_view for std::string keys) automatically.
+using KeyDir = absl::flat_hash_map<std::string, ValueLocation>;
 
 }  // namespace bitcask
 

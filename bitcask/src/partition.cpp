@@ -1,12 +1,14 @@
 #include "bitcask/include/partition.h"
 
+#include <algorithm>
+#include <memory>
+
 using namespace bitcask;
 using namespace kio;
 using namespace kio::io;
 
 Partition::Partition(const BitcaskConfig& config, Worker& worker, const size_t partition_id)
-    : keydir_(&mem_pool_),
-      worker_(worker),
+    : worker_(worker),
       fd_cache_(worker, config.max_open_sealed_files),
       file_id_gen_(partition_id),
       config_(config),
@@ -27,33 +29,25 @@ Task<Result<void>> Partition::Put(std::string&& key, std::vector<char>&& value)
         KIO_TRY(co_await RotateActiveFile());
     }
 
-    DataEntry const entry{std::move(key), std::move(value), kFlagNone, GetCurrentTimestamp()};
-    auto offset = KIO_TRY(co_await active_file_->AsyncWrite(entry));
-    ALOG_TRACE("Wrote entry to file {} at offset {} with size {}", active_file_->FileId(), offset, entry.Size());
+    uint64_t const ts = GetCurrentTimestamp();
+    uint32_t const total_size = kEntryFixedHeaderSize + key.size() + value.size();
 
-    const ValueLocation new_loc{.file_id = active_file_->FileId(),
-                                .offset = offset,
-                                .total_size = entry.Size(),
-                                .timestamp_ns = entry.GetTimestamp()};
+    const auto offset = KIO_TRY(co_await active_file_->AsyncWrite(key, value, ts, kFlagNone));
+
+    const ValueLocation new_loc{
+        .file_id = active_file_->FileId(), .offset = offset, .total_size = total_size, .timestamp_ns = ts};
 
     auto& dst_stats = stats_.data_files[new_loc.file_id];
-    const auto key_hash = Hash(entry.GetKeyView());
-    if (const auto it = keydir_.find(key_hash); it != keydir_.end())
-    {
-        // Overwrite: decrement old file stats
-        auto& old_stats = stats_.data_files[it->second.file_id];
-        old_stats.live_bytes -= it->second.total_size;
-        old_stats.live_entries--;
 
+    if (auto [it, inserted] = keydir_.try_emplace(key, new_loc); !inserted)
+    {
+        const auto& old_loc = it->second;
+        auto& old_stats = stats_.data_files[old_loc.file_id];
+        old_stats.live_bytes -= old_loc.total_size;
+        old_stats.live_entries--;
         it->second = new_loc;
     }
-    else
-    {
-        // New key
-        keydir_[key_hash] = new_loc;
-    }
 
-    // Increment new file stats
     dst_stats.live_bytes += new_loc.total_size;
     dst_stats.live_entries++;
     dst_stats.total_bytes += new_loc.total_size;
@@ -71,9 +65,8 @@ Task<Result<std::optional<std::vector<char>>>> Partition::Get(const std::string_
     co_await SwitchToWorker(worker_);
     stats_.gets_total++;
 
-    const auto key_hash = Hash(key);
+    const auto it = keydir_.find(key);
 
-    const auto it = keydir_.find(key_hash);
     if (it == keydir_.end())
     {
         stats_.gets_miss_total++;
@@ -84,7 +77,15 @@ Task<Result<std::optional<std::vector<char>>>> Partition::Get(const std::string_
     const int fd = KIO_TRY(co_await FindFd(loc.file_id));
 
     ALOG_TRACE("Reading entry from file {} at offset {} with size {}", loc.file_id, loc.offset, loc.total_size);
-    DataEntry const entry = KIO_TRY(co_await AsyncReadEntry(fd, loc.offset, loc.total_size));
+    const DataEntry entry = KIO_TRY(co_await AsyncReadEntry(fd, loc.offset, loc.total_size));
+
+    if (entry.GetKeyView() != key)
+    {
+        ALOG_ERROR("CORRUPTION/LOGIC ERROR in Partition {}: Map points to key '{}' at {}:{}, but disk has '{}'",
+                   partition_id_, key, loc.file_id, loc.offset, entry.GetKeyView());
+        stats_.gets_miss_total++;
+        co_return std::nullopt;
+    }
 
     if (entry.IsTombstone())
     {
@@ -97,40 +98,31 @@ Task<Result<std::optional<std::vector<char>>>> Partition::Get(const std::string_
 
 Task<Result<void>> Partition::Del(const std::string_view key)
 {
-    // Assert partition is initialized
-    assert(active_file_ && "Partition not initialized - active_file_ is null");
+    assert(active_file_);
 
     co_await SwitchToWorker(worker_);
-
     stats_.deletes_total++;
 
-    const auto key_hash = Hash(key);
-
-    const auto it = keydir_.find(key_hash);
+    const auto it = keydir_.find(key);
     if (it == keydir_.end())
     {
         co_return {};
     }
 
-    // Update stats for old location
     auto& old_stats = stats_.data_files[it->second.file_id];
     old_stats.live_bytes -= it->second.total_size;
     old_stats.live_entries--;
 
     const uint64_t old_file_id = it->second.file_id;
 
-    // Remove from KeyDir first as it's our source of truth
     keydir_.erase(it);
 
-    // Write tombstone
     const DataEntry tombstone(std::string(key), std::vector<char>{}, kFlagTombstone, GetCurrentTimestamp());
     const auto size = KIO_TRY(co_await active_file_->AsyncWrite(tombstone));
 
-    // Update active file stats (tombstone adds to total_bytes)
     auto& active_stats = stats_.data_files[active_file_->FileId()];
     active_stats.total_bytes += size;
 
-    // Check if a file needs compaction
     if (ShouldCompactFile(old_file_id))
     {
         SignalCompaction(old_file_id);
@@ -141,52 +133,35 @@ Task<Result<void>> Partition::Del(const std::string_view key)
 
 Task<Result<int>> Partition::FindFd(const uint64_t file_id)
 {
-    // if file id is the active one, flush first
     if (file_id == active_file_->FileId())
     {
         KIO_TRY(co_await worker_.AsyncFdatasync(active_file_->Handle().Get()));
     }
-
     const auto path = GetDataFilePath(file_id);
     co_return co_await fd_cache_.GetOrOpen(file_id, path);
 }
 
 Task<Result<DataEntry>> Partition::AsyncReadEntry(const int fd, const uint64_t offset, const uint32_t size) const
 {
-    ALOG_TRACE("Reading entry from file {} at offset {} with size {}", fd, offset, size);
     std::vector<char> buffer(size);
     KIO_TRY(co_await worker_.AsyncReadExactAt(fd, buffer, offset));
-    ALOG_TRACE("Read entry from file {} at offset {} with size {}", fd, offset, size);
-
     auto entry = KIO_TRY(DataEntry::Deserialize(buffer));
     co_return entry;
 }
 
 Task<Result<void>> Partition::RotateActiveFile()
 {
-    // Assert partition is initialized
-    assert(active_file_ && "Partition not initialized - active_file_ is null");
-
-    // Get the actual written size before flushing and closing
+    assert(active_file_);
     const uint64_t actual_size = active_file_->Size();
     const int active_fd = active_file_->Handle().Get();
 
-    // Flush
     KIO_TRY(co_await worker_.AsyncFsync(active_file_->Handle().Get()));
-
-    // truncate to the actual used space
     KIO_TRY(co_await worker_.AsyncFtruncate(active_fd, static_cast<off_t>(actual_size)));
-
-    // close
     KIO_TRY(co_await active_file_->AsyncClose());
 
-    // No need to add to FD cache as it will be done when needed
-
-    // Create a new active file
     KIO_TRY(co_await CreateAndSetActiveFile());
 
     stats_.file_rotations_total++;
-
     co_return {};
 }
 
@@ -197,10 +172,7 @@ Task<Result<void>> Partition::CreateAndSetActiveFile()
         KIO_TRY(co_await worker_.AsyncOpenat(GetDataFilePath(new_id), config_.write_flags, config_.file_mode));
 
     active_file_ = std::make_unique<DataFile>(new_fd, new_id, worker_, config_);
-
-    // Pre-allocate
     co_await worker_.AsyncFallocate(new_fd, 0, static_cast<off_t>(config_.max_file_size));
-
     co_return {};
 }
 
@@ -211,7 +183,6 @@ bool Partition::ShouldCompactFile(const uint64_t file_id) const
     {
         return false;
     }
-
     return it->second.Fragmentation() >= config_.fragmentation_threshold;
 }
 
@@ -257,41 +228,21 @@ std::filesystem::path Partition::GetHintFilePath(uint64_t file_id) const
 DetachedTask Partition::CompactionLoop()
 {
     co_await SwitchToWorker(worker_);
-
     ALOG_INFO("Partition {} compaction loop starting", partition_id_);
 
     const auto st = worker_.GetStopToken();
     while (!st.stop_requested() && !shutting_down_.load())
     {
-        // Wait for event or timer
-        // TODO: WaitFor is missing in Baton after refactoring. Add it back.
-        if (co_await compaction_trigger_.WaitFor(worker_, config_.compaction_interval_s))
-        {
-            ALOG_INFO("Partition {}: compaction triggered by event", partition_id_);
-        }
-        else
-        {
-            ALOG_INFO("Partition {}: compaction triggered by timer", partition_id_);
-        }
-
-        // Check shutdown again after waking up
+        co_await compaction_trigger_.WaitFor(worker_, config_.compaction_interval_s);
         if (shutting_down_.load())
-        {
             break;
-        }
 
-        // compact all fragmented files
         if (auto res = co_await Compact(); !res.has_value())
         {
             ALOG_ERROR("Partition {}: co_await compaction failed", partition_id_);
         }
-        // The new compacted file will be added to cache on first read
-
-        // Reset trigger
         compaction_trigger_.Reset();
-        stats_.compaction_running = false;
     }
-
     ALOG_INFO("Partition {} compaction loop exiting", partition_id_);
 }
 
@@ -301,11 +252,8 @@ std::vector<uint64_t> Partition::ScanDataFiles() const
     const std::filesystem::path dir_to_scan = DbPath();
     if (!std::filesystem::exists(dir_to_scan) || !std::filesystem::is_directory(DbPath()))
     {
-        ALOG_ERROR("Data directory {} does not exist or is not a directory", dir_to_scan.string());
         return {};
     }
-
-    ALOG_DEBUG("Scanning data directory {}", dir_to_scan.string());
 
     std::vector<uint64_t> result;
     constexpr size_t prefix_len = kDataFilePrefix.size();
@@ -313,47 +261,34 @@ std::vector<uint64_t> Partition::ScanDataFiles() const
 
     for (const auto& dir_entry : std::filesystem::directory_iterator(dir_to_scan))
     {
-        // skip early
         if (!dir_entry.is_regular_file())
         {
             continue;
         }
-
         std::string file_name = dir_entry.path().filename().string();
         std::string_view sv(file_name);
 
-        // skip early
         if (sv.size() <= (prefix_len + ext_len) || !sv.starts_with(kDataFilePrefix) ||
             !sv.ends_with(kDataFileExtension))
         {
             continue;
         }
 
-        // extract ID
         std::string_view file_id_str = sv.substr(prefix_len, sv.size() - prefix_len - ext_len);
-
-        // now parse
         uint64_t file_id{};
-
-        // verify success and push eventually
         if (auto [p, ec] = std::from_chars(file_id_str.data(), file_id_str.data() + file_id_str.size(), file_id);
             ec == std::errc{} && p == file_id_str.data() + file_id_str.size())
         {
             result.push_back(file_id);
         }
     }
-
-    // sort the result
     std::ranges::sort(result);
-
     return result;
 }
 
 Task<Result<void>> Partition::RecoverFromHintFile(const FileHandle& fh, const uint64_t file_id)
 {
     const int fd = fh.Get();
-
-    // hint files are small, read entirely
     const auto buf = KIO_TRY(co_await ReadFileContent(worker_, fd));
     if (buf.empty())
     {
@@ -361,17 +296,14 @@ Task<Result<void>> Partition::RecoverFromHintFile(const FileHandle& fh, const ui
     }
 
     std::span buf_span(buf);
-
     while (!buf_span.empty())
     {
         const auto [entry, size] = KIO_TRY(HintEntry::Deserialize(buf_span));
-
-        auto key_hash = Hash(std::string_view(entry.key));
-
-        keydir_[key_hash] = ValueLocation{file_id, entry.offset, entry.size, entry.timestamp_ns};
+        std::string key(entry.key);
+        keydir_[key] = ValueLocation{
+            .file_id = file_id, .offset = entry.offset, .total_size = entry.size, .timestamp_ns = entry.timestamp_ns};
         buf_span = buf_span.subspan(size);
     }
-
     co_return {};
 }
 
@@ -379,10 +311,8 @@ Task<Result<void>> Partition::RecoverFromDataFile(const FileHandle& fh, uint64_t
 {
     const int fd = fh.Get();
     auto file_size = KIO_TRY(GetFileSize(fd));
-
     if (file_size == 0)
     {
-        ALOG_DEBUG("File {} is empty, skipping recovery", file_id);
         co_return {};
     }
 
@@ -397,25 +327,19 @@ Task<Result<void>> Partition::RecoverFromDataFile(const FileHandle& fh, uint64_t
     {
         buffer.Reserve(config_.read_buffer_size);
         auto writable = buffer.WritableSpan();
-
         const uint64_t bytes_to_read = std::min(writable.size(), file_size - file_offset);
+
         const auto bytes_read =
             KIO_TRY(co_await worker_.AsyncReadAt(fd, writable.subspan(0, bytes_to_read), file_offset));
 
         if (bytes_read == 0)
         {
-            if (!buffer.IsEmpty())
-            {
-                // Warn about leftover bytes at EOF (likely corruption or incomplete write)
-                ALOG_WARN("File {} has {} bytes of incomplete data at EOF", file_id, buffer.Remaining());
-            }
             break;
         }
 
         buffer.CommitWrite(bytes_read);
         file_offset += static_cast<uint64_t>(bytes_read);
 
-        // Parse entries
         auto entries_result = RecoverDataFromBuffer(buffer, file_id, file_offset);
 
         if (!entries_result.has_value())
@@ -424,11 +348,7 @@ Task<Result<void>> Partition::RecoverFromDataFile(const FileHandle& fh, uint64_t
             {
                 continue;
             }
-
-            // Log a warning and stop processing this file.
-            // This allows valid entries recovered so far to remain in the KeyDir.
-            ALOG_WARN("File {} recovery stopped due to junk/corruption at offset {}: {}", file_id, file_offset,
-                      entries_result.error());
+            ALOG_WARN("File {} recovery stopped: {}", file_id, entries_result.error());
             break;
         }
 
@@ -439,12 +359,8 @@ Task<Result<void>> Partition::RecoverFromDataFile(const FileHandle& fh, uint64_t
         {
             buffer.Compact();
         }
-        ALOG_DEBUG("Recovering stats for file={}: recovered={} skipped={}", file_id, entries_recovered,
-                   entries_skipped);
     }
-
-    ALOG_INFO("Recovered {} entries ({} tombstones skipped) from file {}", entries_recovered, entries_skipped, file_id);
-
+    ALOG_INFO("Recovered {} entries from file {}", entries_recovered, file_id);
     co_return {};
 }
 
@@ -460,70 +376,58 @@ Result<std::pair<uint64_t, uint64_t>> Partition::RecoverDataFromBuffer(BytesMut&
         auto entry_result = DataEntry::Deserialize(readable);
 
         if (!entry_result.has_value())
-        {
             return std::unexpected(entry_result.error());
-        }
 
         auto entry = std::move(entry_result.value());
-
-        // Calculate absolute offset in file
         const uint64_t bytes_consumed = buffer.Consumed();
         const uint64_t buffer_start = file_offset - buffer.Remaining() - bytes_consumed;
         const uint64_t entry_offset = buffer_start + bytes_consumed;
 
         buffer.Advance(entry.Size());
 
-        auto key_hash = Hash(entry.GetKeyView());
         if (entry.IsTombstone())
         {
-            keydir_.erase(key_hash);
+            keydir_.erase(entry.GetKeyView());
             entries_skipped++;
             continue;
         }
 
         entries_recovered++;
-        keydir_[key_hash] = ValueLocation{file_id, entry_offset, entry.Size(), entry.GetTimestamp()};
+        keydir_.insert_or_assign(entry.GetKeyView(), ValueLocation{.file_id = file_id,
+                                                                   .offset = entry_offset,
+                                                                   .total_size = entry.Size(),
+                                                                   .timestamp_ns = entry.GetTimestamp()});
     }
-
     return std::make_pair(entries_recovered, entries_skipped);
 }
 
 Task<Result<void>> Partition::Recover()
 {
     const auto files = ScanDataFiles();
-
-    // Get file sizes
-    ALOG_INFO("Found {} data files", files.size());
     for (auto file_id : files)
     {
         stats_.data_files[file_id].total_bytes = std::filesystem::file_size(GetDataFilePath(file_id));
     }
 
-    // Recover each file
+    uint64_t max_file_id = 0;
     for (const auto file_id : files)
     {
-        // Try the hint file first
+        max_file_id = std::max(file_id, max_file_id);
+
         if (const auto hint_result = co_await TryRecoverFromHint(file_id); hint_result)
         {
-            // Success, skip to the next file
-            ALOG_DEBUG("Recovered from hint file {}", file_id);
             continue;
         }
 
-        // Fallback to a data file
         const auto fd =
             KIO_TRY(co_await worker_.AsyncOpenat(GetDataFilePath(file_id), config_.read_flags, config_.file_mode));
         FileHandle const data(fd);
         if (auto res = co_await RecoverFromDataFile(data, file_id); !res.has_value())
         {
-            // Do not exit on a single file failure, skip to the next
-            // TODO: add a flag for the user to decide what to do in such cases
-            ALOG_ERROR("Failed to recover from data file {}, skipping the rest of entries", file_id);
+            ALOG_ERROR("Failed to recover data file {}", file_id);
         }
-        ALOG_DEBUG("Recovered from data file {}", file_id);
     }
 
-    // Compute live stats
     for (const auto& loc : keydir_ | std::views::values)
     {
         auto& fs = stats_.data_files[loc.file_id];
@@ -531,9 +435,13 @@ Task<Result<void>> Partition::Recover()
         fs.live_entries++;
     }
 
-    // create and set an active file
-    KIO_TRY(co_await CreateAndSetActiveFile());
+    if (max_file_id > 0)
+    {
+        const auto decoded = FileID::Decode(max_file_id);
+        file_id_gen_.UpdateState(decoded.timestamp_sec, decoded.sequence);
+    }
 
+    KIO_TRY(co_await CreateAndSetActiveFile());
     co_return {};
 }
 
@@ -567,7 +475,7 @@ Task<Result<std::unique_ptr<Partition>>> Partition::Open(const BitcaskConfig& co
                                                          const size_t partition_id)
 {
     ALOG_INFO("Opening partition {}", partition_id);
-    std::unique_ptr<Partition> partition(new Partition(config, worker, partition_id));
+    auto partition = std::make_unique<Partition>(config, worker, partition_id);
     KIO_TRY(co_await partition->Recover());
     if (config.auto_compact)
     {
@@ -621,7 +529,7 @@ Task<Result<void>> Partition::SealActiveFile()
 
 Task<Result<void>> Partition::AsyncClose()
 {
-    ALOG_INFO("Partition {} closing...", partition_id_);
+    ALOG_DEBUG("Partition {} closing...", partition_id_);
 
     // Signal shutdown to compaction loop
     shutting_down_.store(true);
@@ -635,12 +543,17 @@ Task<Result<void>> Partition::AsyncClose()
 
     // The worker is not owned by the partition. It should not close it.
 
-    ALOG_INFO("Partition {} closed successfully.", partition_id_);
+    ALOG_DEBUG("Partition {} closed successfully.", partition_id_);
     co_return {};
 }
 
 Task<Result<void>> Partition::Compact()
 {
+    if (stats_.compaction_running)
+    {
+        co_return {};
+    }
+
     auto fragmented_files = FindFragmentedFiles();
 
     if (fragmented_files.empty())
@@ -681,7 +594,7 @@ Task<Result<void>> Partition::Compact()
     co_return {};
 }
 
-Task<Result<void>> Partition::Sync()
+Task<Result<void>> Partition::Sync() const
 {
     co_await SwitchToWorker(worker_);
     if (active_file_)

@@ -7,6 +7,7 @@
 
 #include "kio/core/async_logger.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <format>
@@ -70,6 +71,23 @@ public:
     explicit FileIdGenerator(const uint16_t partition_id) : partition_id_(partition_id) {}
 
     /**
+     * @brief Update the internal state to ensure monotonicity after recovery.
+     * This is crucial if the system clock has moved backwards since the files were created.
+     */
+    void UpdateState(const uint32_t max_timestamp, uint16_t max_sequence)
+    {
+        if (max_timestamp > last_timestamp_)
+        {
+            last_timestamp_ = max_timestamp;
+            sequence_ = max_sequence;
+        }
+        else if (max_timestamp == last_timestamp_)
+        {
+            sequence_ = std::max(max_sequence, sequence_);
+        }
+    }
+
+    /**
      * @brief Generate next file ID
      * Monotonically increasing. Handles clock skew.
      */
@@ -130,15 +148,15 @@ inline bool FileIdCompareByTime(uint64_t a, uint64_t b)
     // direct integer comparison sorts by Partition, THEN Time, THEN Seq.
     // If we want to sort purely by Time (ignoring Partition), we need decoding, but why would we want that ?
 
-    const auto kIdA = FileID::Decode(a);
-    const auto kIdB = FileID::Decode(b);
+    const auto id_a = FileID::Decode(a);
+    const auto id_b = FileID::Decode(b);
 
-    if (kIdA.timestamp_sec != kIdB.timestamp_sec)
+    if (id_a.timestamp_sec != id_b.timestamp_sec)
     {
-        return kIdA.timestamp_sec < kIdB.timestamp_sec;
+        return id_a.timestamp_sec < id_b.timestamp_sec;
     }
 
-    return kIdA.sequence < kIdB.sequence;
+    return id_a.sequence < id_b.sequence;
 }
 
 }  // namespace bitcask

@@ -30,7 +30,7 @@ Task<Result<std::unique_ptr<BitKV>>> simple_example()
             // Defaults for everything else
     };
 
-    auto db_res = co_await BitKV::open(db_config, io_config, 1);
+    auto db_res = co_await BitKV::Open(db_config, io_config, 1);
     if (!db_res.has_value())
     {
         ALOG_ERROR("Error opening database: {}", db_res.error());
@@ -42,9 +42,9 @@ Task<Result<std::unique_ptr<BitKV>>> simple_example()
     ALOG_INFO("Database opened successfully");
 
     // Put some data (value is vector<char>)
-    KIO_TRY(co_await db->put("user:123", to_vec("Alice")));
-    KIO_TRY(co_await db->put("user:456", to_vec("Bob")));
-    KIO_TRY(co_await db->put("user:789", to_vec("Charlie")));
+    KIO_TRY(co_await db->Put("user:123", to_vec("Alice")));
+    KIO_TRY(co_await db->Put("user:456", to_vec("Bob")));
+    KIO_TRY(co_await db->Put("user:789", to_vec("Charlie")));
 
     ALOG_INFO("Wrote 3 users");
 
@@ -57,11 +57,11 @@ Task<Result<std::unique_ptr<BitKV>>> simple_example()
     }
 
     // Update data
-    KIO_TRY(co_await db->put("user:123", to_vec("Alice Smith")));
+    KIO_TRY(co_await db->Put("user:123", to_vec("Alice Smith")));
     ALOG_INFO("Updated user:123");
 
     // Delete data
-    KIO_TRY(co_await db->del("user:789"));
+    KIO_TRY(co_await db->Del("user:789"));
     ALOG_INFO("Deleted user:789");
 
     // Verify deletion
@@ -73,7 +73,7 @@ Task<Result<std::unique_ptr<BitKV>>> simple_example()
 
     // Store binary data (not just strings)
     std::vector<char> binary_data = {char(0x01), char(0x02), char(0x03), char(0x04), char(0xFF), char(0xFE)};
-    KIO_TRY(co_await db->put("binary:key", std::move(binary_data)));
+    KIO_TRY(co_await db->Put("binary:key", std::move(binary_data)));
     ALOG_INFO("Stored binary data");
 
     // Retrieve binary data
@@ -104,7 +104,7 @@ int main()
         return 1;
     }
 
-    SyncWait(db.value()->close());
+    SyncWait(db.value()->Close());
 
     ALOG_INFO("Example complete");
     return 0;

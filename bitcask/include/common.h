@@ -18,7 +18,6 @@
 
 #include <sys/stat.h>
 
-#include <ylt/struct_pack.hpp>
 
 namespace bitcask
 {
@@ -36,7 +35,6 @@ constexpr std::string_view kHintFilePrefix = "hint_";
 constexpr std::string_view kDataFileExtension = ".db";
 constexpr std::string_view kHintFileExtension = ".ht";
 constexpr std::string_view kManifestFileName = "MANIFEST";
-
 // Magic number to identify our file format (ASCII 'BKV1')
 constexpr uint32_t kManifestMagic = 0x31564B42;
 
@@ -57,8 +55,8 @@ struct Manifest
 template <typename T = std::chrono::nanoseconds>
 std::uint64_t GetCurrentTimestamp()
 {
-    const auto kNow = std::chrono::steady_clock::now();
-    return std::chrono::duration_cast<T>(kNow.time_since_epoch()).count();
+    const auto now = std::chrono::steady_clock::now();
+    return std::chrono::duration_cast<T>(now.time_since_epoch()).count();
 }
 
 // Helper: ByteSwap (Uses std::byteswap in C++23, or a C++20 fallback)
@@ -128,9 +126,6 @@ inline uint64_t Hash(std::span<const char> data)
 {
     return XXH3_64bits(data.data(), data.size());
 }
-
-// Reflection for struct_pack
-YLT_REFL(Manifest, magic, version, partition_count);
 
 }  // namespace bitcask
 

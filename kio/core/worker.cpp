@@ -24,14 +24,14 @@ void Worker::CheckKernelVersion()
         throw std::runtime_error("Failed to get kernel version");
     }
 
-    std::string const kRelease(buf.release);
-    const size_t kDotPos = kRelease.find('.');
-    if (kDotPos == std::string::npos)
+    std::string const release(buf.release);
+    const size_t dot_pos = release.find('.');
+    if (dot_pos == std::string::npos)
     {
         throw std::runtime_error("Failed to parse kernel version");
     }
 
-    if (const int kMajor = std::stoi(kRelease.substr(0, kDotPos)); kMajor < 6)
+    if (const int major = std::stoi(release.substr(0, dot_pos)); major < 6)
     {
         throw std::runtime_error("Kernel version must be 6.0.0 or higher");
     }

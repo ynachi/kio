@@ -47,48 +47,48 @@ Result<DataEntry> DataEntry::Deserialize(std::span<const char> buffer)
     const char* base = buffer.data();
 
     // Decode Lengths to validate size
-    const auto kLen = ReadLe<uint32_t>(base + 13);
-    const auto kVLen = ReadLe<uint32_t>(base + 17);
+    const auto len = ReadLe<uint32_t>(base + 13);
+    const auto v_len = ReadLe<uint32_t>(base + 17);
 
-    if (buffer.size() < kEntryFixedHeaderSize + kLen + kVLen)
+    if (buffer.size() < kEntryFixedHeaderSize + len + v_len)
     {
         return std::unexpected(Error(ErrorCategory::kSerialization, kIoNeedMoreData));
     }
 
     // crc check
-    auto stored_crc = ReadLe<uint32_t>(base);
-    auto computed_crc = crc32c::Crc32c(base + 4, kEntryFixedHeaderSize - 4 + kLen + kVLen);
+    const auto stored_crc = ReadLe<uint32_t>(base);
 
-    if (computed_crc != stored_crc)
+    if (const auto computed_crc = crc32c::Crc32c(base + 4, kEntryFixedHeaderSize - 4 + len + v_len);
+        computed_crc != stored_crc)
     {
         return std::unexpected(Error{ErrorCategory::kSerialization, kIoDataCorrupted});
     }
 
     // Decode Metadata
-    auto timestamp = ReadLe<uint64_t>(base + 4);
-    auto flag = ReadLe<uint8_t>(base + 12);
+    const auto timestamp = ReadLe<uint64_t>(base + 4);
+    const auto flag = ReadLe<uint8_t>(base + 12);
 
     // Create Entry
-    std::string_view key(base + kEntryFixedHeaderSize, kLen);
-    std::span value(base + kEntryFixedHeaderSize + kLen, kVLen);
+    std::string_view key(base + kEntryFixedHeaderSize, len);
+    std::span value(base + kEntryFixedHeaderSize + len, v_len);
 
     return DataEntry(key, value, flag, timestamp);
 }
 
 std::vector<char> HintEntry::Serialize() const
 {
-    const auto kLen = static_cast<uint32_t>(key.size());
-    std::vector<char> buffer(kHintHeaderSize + kLen);
+    const auto len = static_cast<uint32_t>(key.size());
+    std::vector<char> buffer(kHintHeaderSize + len);
     char* ptr = buffer.data();
 
     WriteLe(ptr, timestamp_ns);
     WriteLe(ptr + 8, offset);
     WriteLe(ptr + 12, size);
-    WriteLe(ptr + 16, kLen);
+    WriteLe(ptr + 16, len);
 
-    if (kLen > 0)
+    if (len > 0)
     {
-        std::memcpy(ptr + kHintHeaderSize, key.data(), kLen);
+        std::memcpy(ptr + kHintHeaderSize, key.data(), len);
     }
     return buffer;
 }

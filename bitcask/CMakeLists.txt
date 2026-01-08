@@ -25,9 +25,11 @@ set(bitcask_sources
 )
 
 add_library(kio_bitcask ${bitcask_headers} ${bitcask_sources})
-target_link_libraries(kio_bitcask PUBLIC yalantinglibs::yalantinglibs crc32c)
-
-add_executable(bitcast_demo main.cpp)
-target_link_libraries(bitcast_demo PRIVATE yalantinglibs::yalantinglibs crc32c)
+target_link_libraries(kio_bitcask
+        PRIVATE
+        crc32c
+        absl::flat_hash_map
+        absl::inlined_vector
+)
 
 add_subdirectory(tests)
