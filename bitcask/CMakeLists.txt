@@ -28,6 +28,7 @@ add_library(kio_bitcask ${bitcask_headers} ${bitcask_sources})
 target_link_libraries(kio_bitcask
         PRIVATE
         crc32c
+        PUBLIC
         absl::flat_hash_map
         absl::inlined_vector
 )

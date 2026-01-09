@@ -1,15 +1,13 @@
 #ifndef KIO_BITCASK_COMPACTOR_H
 #define KIO_BITCASK_COMPACTOR_H
 
-#include "absl/container/inlined_vector.h"  // Import InlinedVector
-#include "bitcask/include/common.h"
+#include "absl/container/inlined_vector.h"
 #include "bitcask/include/config.h"
 #include "bitcask/include/stats.h"
 #include "entry.h"
 #include "kio/core/coro.h"
 #include "kio/core/worker.h"
 
-#include <cstdint>
 #include <vector>
 
 namespace bitcask::compactor
@@ -24,7 +22,7 @@ struct CompactionLimits
 struct CompactionContext
 {
     kio::io::Worker& worker;
-    BitcaskConfig& config;
+    BitcaskConfig config;
     KeyDir& keydir;
     PartitionStats& stats;
     size_t partition_id;

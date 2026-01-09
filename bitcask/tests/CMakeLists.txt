@@ -1,7 +1,9 @@
 # ============================================================================
-# Test Helper Function
+# Bitcask Test Suite
 # ============================================================================
-function(add_bitkv_test test_name source_file)
+
+# Helper function for test executables
+function(add_bitcask_test test_name source_file)
     add_executable(${test_name} ${source_file})
 
     target_link_libraries(${test_name} PRIVATE
@@ -18,130 +20,122 @@ function(add_bitkv_test test_name source_file)
     )
 
     kio_target_compile_options(${test_name})
-    
+
     add_test(NAME ${test_name} COMMAND ${test_name})
-    set_tests_properties(${test_name} PROPERTIES TIMEOUT 600 LABELS "integration")
     gtest_discover_tests(${test_name})
 endfunction()
 
-add_bitkv_test(compactor_test
-        ${CMAKE_CURRENT_SOURCE_DIR}/compactor_test.cpp
+# ============================================================================
+# Unit Tests
+# ============================================================================
+
+add_bitcask_test(entry_test
+        ${CMAKE_CURRENT_SOURCE_DIR}/unit/entry_test.cpp
+)
+set_tests_properties(entry_test PROPERTIES
+        LABELS "unit"
+        TIMEOUT 30
 )
 
-add_bitkv_test(partition_integration_test
-        ${CMAKE_CURRENT_SOURCE_DIR}/partition_integration_test.cpp
+add_bitcask_test(config_test
+        ${CMAKE_CURRENT_SOURCE_DIR}/unit/config_test.cpp
+)
+set_tests_properties(config_test PROPERTIES
+        LABELS "unit"
+        TIMEOUT 30
+)
+
+add_bitcask_test(data_file_test
+        ${CMAKE_CURRENT_SOURCE_DIR}/unit/data_file_test.cpp
+)
+set_tests_properties(data_file_test PROPERTIES
+        LABELS "unit"
+        TIMEOUT 60
 )
 
 # ============================================================================
-# Define Integration Tests
+# Integration Tests
 # ============================================================================
 
-# Core integration tests
-add_bitkv_test(bitkv_test
-        ${CMAKE_CURRENT_SOURCE_DIR}/bitkv_test.cpp
+add_bitcask_test(partition_test
+        ${CMAKE_CURRENT_SOURCE_DIR}/integration/partition_test.cpp
+)
+set_tests_properties(partition_test PROPERTIES
+        LABELS "integration"
+        TIMEOUT 120
 )
 
-# Advanced integration tests (performance & concurrency)
-add_bitkv_test(bitkv_advanced_test
-        ${CMAKE_CURRENT_SOURCE_DIR}/bitkv_advanced_test.cpp
+add_bitcask_test(compactor_test
+        ${CMAKE_CURRENT_SOURCE_DIR}/integration/compactor_test.cpp
+)
+set_tests_properties(compactor_test PROPERTIES
+        LABELS "integration"
+        TIMEOUT 120
 )
 
-# Error handling tests
-#add_bitkv_test(bitkv_error_test
-#        ${CMAKE_CURRENT_SOURCE_DIR}/bitkv_error_test.cpp
-#)
-
-# ============================================================================
-# Test Groups (Optional)
-# ============================================================================
-
-# Quick tests (for rapid development)
-add_custom_target(test_quick
-        COMMAND ${CMAKE_CTEST_COMMAND} -L integration -R "BitKVTest\\.BasicPutGet|BitKVTest\\.BasicGet"
-        DEPENDS bitkv_test
-        COMMENT "Running quick smoke tests"
+add_bitcask_test(bitkv_test
+        ${CMAKE_CURRENT_SOURCE_DIR}/integration/bitkv_test.cpp
+)
+set_tests_properties(bitkv_test PROPERTIES
+        LABELS "integration"
+        TIMEOUT 300
 )
 
-# All integration tests
-#add_custom_target(test_integration
-#        COMMAND ${CMAKE_CTEST_COMMAND} -L integration
-#        DEPENDS bitkv_test bitkv_advanced_test bitkv_error_test
-#        COMMENT "Running all integration tests"
-#)
-
-# Performance tests only
-#add_custom_target(test_perf
-#        COMMAND ${CMAKE_CTEST_COMMAND} -R "Performance|HighVolume"
-#        DEPENDS bitkv_advanced_test
-#        COMMENT "Running performance tests"
-#)
-
 # ============================================================================
-# Usage Examples
+# Test Targets
 # ============================================================================
 
-# Build tests:
-#   cmake --build . --target bitkv_test
-#   cmake --build . --target bitkv_advanced_test
-#   cmake --build . --target bitkv_error_test
-#
-# Run all tests:
-#   ctest
-#   or: make test
-#   or: ninja test
-#
-# Run specific test suite:
-#   ./bitkv_test
-#   ./bitkv_advanced_test
-#   ./bitkv_error_test
-#
-# Run with CTest:
-#   ctest -R bitkv          # Run all BitKV tests
-#   ctest -R Basic          # Run tests matching "Basic"
-#   ctest -V                # Verbose output
-#   ctest --output-on-failure  # Show output only on failure
-#
-# Run custom targets:
-#   make test_quick         # Quick smoke tests
-#   make test_integration   # All integration tests
-#   make test_perf         # Performance tests only
-#
-# Run with GTest filters:
-#   ./bitkv_test --gtest_filter=BitKVTest.BasicPutGet
-#   ./bitkv_test --gtest_filter=BitKVTest.Recovery*
-#   ./bitkv_advanced_test --gtest_filter=*Concurrent*
-#
-# Generate test report:
-#   ctest --output-on-failure --output-junit test_results.xml
+# Run all unit tests (fast)
+add_custom_target(test_unit
+        COMMAND ${CMAKE_CTEST_COMMAND} -L unit --output-on-failure
+        DEPENDS entry_test config_test data_file_test
+        COMMENT "Running unit tests"
+)
+
+# Run all integration tests
+add_custom_target(test_integration
+        COMMAND ${CMAKE_CTEST_COMMAND} -L integration --output-on-failure
+        DEPENDS partition_test bitkv_test
+        COMMENT "Running integration tests"
+)
+
+# Run all tests
+add_custom_target(test_all
+        COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
+        DEPENDS entry_test config_test data_file_test partition_test bitkv_test
+        COMMENT "Running all tests"
+)
+
+# Quick smoke test (fastest subset)
+add_custom_target(test_smoke
+        COMMAND ${CMAKE_CTEST_COMMAND} -R "entry_test|config_test" --output-on-failure
+        DEPENDS entry_test config_test
+        COMMENT "Running smoke tests"
+)
 
 # ============================================================================
-# Test Coverage (Optional - requires gcov/lcov)
+# Usage
 # ============================================================================
-
-if (CMAKE_BUILD_TYPE STREQUAL "Coverage")
-    find_program(LCOV lcov)
-    find_program(GENHTML genhtml)
-
-    if (LCOV AND GENHTML)
-        # Add coverage flags
-        target_compile_options(bitkv_test PRIVATE --coverage)
-        target_link_options(bitkv_test PRIVATE --coverage)
-
-        target_compile_options(bitkv_advanced_test PRIVATE --coverage)
-        target_link_options(bitkv_advanced_test PRIVATE --coverage)
-
-        target_compile_options(bitkv_error_test PRIVATE --coverage)
-        target_link_options(bitkv_error_test PRIVATE --coverage)
-
-        # Coverage target
-        add_custom_target(coverage
-                COMMAND ${CMAKE_CTEST_COMMAND}
-                COMMAND ${LCOV} --capture --directory . --output-file coverage.info
-                COMMAND ${LCOV} --remove coverage.info '/usr/*' --output-file coverage.info
-                COMMAND ${GENHTML} coverage.info --output-directory coverage_report
-                WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-                COMMENT "Generating code coverage report"
-        )
-    endif ()
-endif ()
-
+#
+# Build:
+#   cmake --build . --target entry_test
+#   cmake --build . --target test_all
+#
+# Run:
+#   ctest                          # All tests
+#   ctest -L unit                  # Unit tests only
+#   ctest -L integration           # Integration tests only
+#   ctest -R partition             # Tests matching "partition"
+#   ctest --output-on-failure      # Show output on failure
+#
+# Make targets:
+#   make test_smoke                # Fast smoke test
+#   make test_unit                 # All unit tests
+#   make test_integration          # All integration tests
+#   make test_all                  # Everything
+#
+# GTest filters:
+#   ./partition_test --gtest_filter=PartitionTest.Recovery*
+#   ./bitkv_test --gtest_filter=*Concurrent*
+#
+# ============================================================================

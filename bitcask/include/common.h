@@ -9,6 +9,8 @@
 #include "kio/core/coro.h"
 #include "kio/core/errors.h"
 #include "kio/core/worker.h"
+
+#define XXH_INLINE_ALL
 #include "kio/third_party/xxhash/xxhash.h"
 
 #include <bit>
@@ -25,7 +27,7 @@ constexpr std::uint8_t kFlagNone = 0x00;
 constexpr uint8_t kFlagTombstone = 0x01;
 // [crc(4)][Timestamp(8)][Flag(1)][KeyLen(4)][ValueLen(4)]
 constexpr std::size_t kEntryFixedHeaderSize = 21;
-constexpr std::size_t kHintHeaderSize = 20;
+constexpr std::size_t kHintHeaderSize = 24;
 constexpr std::size_t kFSReadChunkSize = 32 * 1024;
 constexpr std::size_t kKeydirDefaultShardCount = 2;
 

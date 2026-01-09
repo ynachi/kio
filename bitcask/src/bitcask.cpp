@@ -27,7 +27,8 @@ Task<Result<std::unique_ptr<BitKV>>> BitKV::Open(const BitcaskConfig& config, co
         // ensure dirs are created
         db->EnsureDirectories();
         // ensure the manifest is valid (must happen after ensure_directories)
-        db->CheckOrCreateManifest();
+        // TODO: bring me back
+        // db->CheckOrCreateManifest();
     }
     catch (const std::exception& e)
     {
@@ -86,62 +87,63 @@ void BitKV::EnsureDirectories() const
     }
 }
 
-void BitKV::CheckOrCreateManifest() const
-{
-    if (std::filesystem::path manifest_path = db_config_.directory / kManifestFileName;
-        std::filesystem::exists(manifest_path))
-    {
-        // Read and Verify
-        std::ifstream file(manifest_path, std::ios::binary);
-        if (!file.is_open())
-        {
-            ALOG_ERROR("Failed to open MANIFEST file");
-            throw std::runtime_error("Cannot open MANIFEST");
-        }
-
-        std::vector buffer((std::istreambuf_iterator(file)), std::istreambuf_iterator<char>());
-        auto res = struct_pack::deserialize<Manifest>(buffer);
-
-        if (!res.has_value())
-        {
-            ALOG_ERROR("Corrupted MANIFEST file");
-            throw std::runtime_error("Corrupted MANIFEST");
-        }
-
-        const auto& manifest = res.value();
-
-        if (manifest.magic != kManifestMagic)
-        {
-            ALOG_ERROR("Invalid MANIFEST magic");
-            throw std::runtime_error("Invalid MANIFEST magic");
-        }
-
-        if (manifest.partition_count != partition_count_)
-        {
-            ALOG_ERROR("Partition count mismatch! Config: {}, Manifest: {}", partition_count_,
-                       manifest.partition_count);
-            throw std::runtime_error("Partition count mismatch");
-        }
-    }
-    else
-    {
-        // Create a new Manifest
-        ALOG_INFO("Creating new MANIFEST with partition_count={}", partition_count_);
-        Manifest manifest;
-        manifest.partition_count = static_cast<uint32_t>(partition_count_);
-        auto data = struct_pack::serialize(manifest);
-
-        std::ofstream file(manifest_path, std::ios::binary);
-        file.write(data.data(), static_cast<int>(data.size()));
-        file.close();
-
-        if (!file.good())
-        {
-            ALOG_ERROR("Failed to write MANIFEST");
-            throw std::runtime_error("Failed to write MANIFEST");
-        }
-    }
-}
+// TODO: fix me
+// void BitKV::CheckOrCreateManifest() const
+// {
+//     if (std::filesystem::path manifest_path = db_config_.directory / kManifestFileName;
+//         std::filesystem::exists(manifest_path))
+//     {
+//         // Read and Verify
+//         std::ifstream file(manifest_path, std::ios::binary);
+//         if (!file.is_open())
+//         {
+//             ALOG_ERROR("Failed to open MANIFEST file");
+//             throw std::runtime_error("Cannot open MANIFEST");
+//         }
+//
+//         std::vector buffer((std::istreambuf_iterator(file)), std::istreambuf_iterator<char>());
+//         auto res = struct_pack::deserialize<Manifest>(buffer);
+//
+//         if (!res.has_value())
+//         {
+//             ALOG_ERROR("Corrupted MANIFEST file");
+//             throw std::runtime_error("Corrupted MANIFEST");
+//         }
+//
+//         const auto& manifest = res.value();
+//
+//         if (manifest.magic != kManifestMagic)
+//         {
+//             ALOG_ERROR("Invalid MANIFEST magic");
+//             throw std::runtime_error("Invalid MANIFEST magic");
+//         }
+//
+//         if (manifest.partition_count != partition_count_)
+//         {
+//             ALOG_ERROR("Partition count mismatch! Config: {}, Manifest: {}", partition_count_,
+//                        manifest.partition_count);
+//             throw std::runtime_error("Partition count mismatch");
+//         }
+//     }
+//     else
+//     {
+//         // Create a new Manifest
+//         ALOG_INFO("Creating new MANIFEST with partition_count={}", partition_count_);
+//         Manifest manifest;
+//         manifest.partition_count = static_cast<uint32_t>(partition_count_);
+//         auto data = struct_pack::serialize(manifest);
+//
+//         std::ofstream file(manifest_path, std::ios::binary);
+//         file.write(data.data(), static_cast<int>(data.size()));
+//         file.close();
+//
+//         if (!file.good())
+//         {
+//             ALOG_ERROR("Failed to write MANIFEST");
+//             throw std::runtime_error("Failed to write MANIFEST");
+//         }
+//     }
+// }
 
 DetachedTask BitKV::InitializePartition(BitKV& db, Worker& worker, InitState& state)
 {

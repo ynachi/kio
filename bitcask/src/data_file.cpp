@@ -46,6 +46,21 @@ DataFile::DataFile(const int fd, const uint64_t file_id, io::Worker& io_worker, 
         // this is a bug from the developer, so just throw
         throw std::invalid_argument("fd cannot be negative");
     }
+
+    // FIX: Validate that O_APPEND is NOT set.
+    // O_APPEND causes pwrite() to ignore the offset and always write at EOF,
+    // which would break our manual offset tracking and cause data corruption.
+    int flags = ::fcntl(fd, F_GETFL);
+    if (flags == -1)
+    {
+        throw std::system_error(errno, std::system_category(), "fcntl(F_GETFL) failed");
+    }
+    if (flags & O_APPEND)
+    {
+        throw std::invalid_argument(
+            "DataFile cannot be opened with O_APPEND - it breaks pwrite offset semantics. "
+            "Remove O_APPEND from write_flags in config.");
+    }
 }
 
 Task<Result<void>> DataFile::AsyncClose()
@@ -63,21 +78,39 @@ Task<Result<void>> DataFile::AsyncClose()
 
 Task<Result<uint64_t>> DataFile::AsyncWrite(const DataEntry& entry)
 {
-    // manual offset tracking. Current size if the writing offset
-    // because we use fallocate, which conflicts with O_APPEND
-    const auto entry_offset = size_;
+    const size_t entry_size = entry.Size();
 
-    // The file must be opened without O_APPEND for this pwrite-based call to work correctly.
-    KIO_TRY(co_await io_worker_.AsyncWriteExactAt(handle_.Get(), entry.GetPayload(), entry_offset));
+    // Reserve space BEFORE yielding to prevent race condition.
+    // Even though we're single-threaded, co_await yields to other coroutines.
+    // Without this fix:
+    //   1. Coroutine A reads size_ = 100
+    //   2. Coroutine A yields on co_await
+    //   3. Coroutine B reads size_ = 100 (still!)
+    //   4. Both write to offset 100 = DATA CORRUPTION
+    const uint64_t entry_offset = size_;
+    size_ += entry_size;  // Reserve immediately, BEFORE any co_await
+
+    // Now perform the write - other coroutines will see updated size_
+    auto write_result = co_await io_worker_.AsyncWriteExactAt(handle_.Get(), entry.GetPayload(), entry_offset);
+
+    if (!write_result.has_value())
+    {
+        // Write failed - we have a "hole" in the file.
+        // Options:
+        // 1. Leave it - recovery will skip corrupt entries via CRC check
+        // 2. Try to rollback size_ - but other writes may have happened
+        // 3. Mark file as corrupt and force rotation
+        //
+        // For Bitcask, option 1 is standard - recovery handles holes.
+        // The reserved space becomes garbage that recovery skips.
+        ALOG_ERROR("Write failed at offset {}, entry_size {}. File may have hole.", entry_offset, entry_size);
+        co_return std::unexpected(write_result.error());
+    }
 
     if (config_.sync_on_write)
     {
-        // After the writing completes, force it to disk if the user configured it
         KIO_TRY(co_await io_worker_.AsyncFdatasync(handle_.Get()));
     }
-
-    // Atomically update size_ for the next writing
-    size_ += entry.Size();
 
     co_return entry_offset;
 }
@@ -85,16 +118,17 @@ Task<Result<uint64_t>> DataFile::AsyncWrite(const DataEntry& entry)
 Task<Result<uint64_t>> DataFile::AsyncWrite(std::string_view key, std::span<const char> value, const uint64_t timestamp,
                                             const uint8_t flag)
 {
-    const auto entry_offset = size_;
-
-    // 1. Prepare Header (21 bytes)
-    // Layout: [CRC(4)][Timestamp(8)][Flag(1)][KeyLen(4)][ValueLen(4)]
-
-    char header_buf[kEntryFixedHeaderSize];
-
-    // Fill Metadata
+    // Calculate entry size FIRST
     const auto key_len = static_cast<uint32_t>(key.size());
     const auto val_len = static_cast<uint32_t>(value.size());
+    const size_t entry_size = kEntryFixedHeaderSize + key_len + val_len;
+
+    const uint64_t entry_offset = size_;
+    size_ += entry_size;
+
+    // 3. Prepare Header (21 bytes)
+    // Layout: [CRC(4)][Timestamp(8)][Flag(1)][KeyLen(4)][ValueLen(4)]
+    char header_buf[kEntryFixedHeaderSize];
 
     // Calculate CRC
     uint32_t const crc = ComputeCrc32c(timestamp, flag, key_len, val_len, key, value);
@@ -106,25 +140,34 @@ Task<Result<uint64_t>> DataFile::AsyncWrite(std::string_view key, std::span<cons
     WriteLe(header_buf + 13, key_len);
     WriteLe(header_buf + 17, val_len);
 
-    // 2. Prepare IO Vectors
+    // 4. Prepare IO Vectors
     iovec iov[3];
     iov[0].iov_base = header_buf;
     iov[0].iov_len = kEntryFixedHeaderSize;
     iov[1].iov_base = const_cast<char*>(key.data());
     iov[1].iov_len = key.size();
-
     iov[2].iov_base = const_cast<char*>(value.data());
     iov[2].iov_len = value.size();
 
-    // 3. Write using Scatter-Gather
-    // We pass offset explicitly. AsyncWritev in worker takes iovec* and count.
-    const size_t expected_bytes = kEntryFixedHeaderSize + key.size() + value.size();
+    // 5. Perform the write - NOW it's safe to yield
+    // Other coroutines will see size_ already incremented
+    auto write_result = co_await io_worker_.AsyncWritev(handle_.Get(), iov, 3, entry_offset);
 
-    if (const int bytes_written = KIO_TRY(co_await io_worker_.AsyncWritev(handle_.Get(), iov, 3, entry_offset));
-        std::cmp_not_equal(bytes_written, expected_bytes))
+    if (!write_result.has_value())
     {
-        // Partial write detected. This usually implies Disk Full or similar issues for local files.
-        // Resuming a writev is complex (requires shifting iovecs).
+        // Write failed after we reserved space - we have a hole.
+        // Recovery will skip this via CRC check. Log for debugging.
+        ALOG_ERROR("AsyncWritev failed at offset {}, size {}. Hole in file {}.",
+                   entry_offset, entry_size, file_id_);
+        co_return std::unexpected(write_result.error());
+    }
+
+    const int bytes_written = write_result.value();
+    if (std::cmp_not_equal(bytes_written, entry_size))
+    {
+        // Partial write - also creates a hole/corrupt entry
+        ALOG_ERROR("Partial write: expected {} bytes, wrote {} at offset {}",
+                   entry_size, bytes_written, entry_offset);
         co_return std::unexpected(Error{ErrorCategory::kFile, EIO});
     }
 
@@ -132,8 +175,6 @@ Task<Result<uint64_t>> DataFile::AsyncWrite(std::string_view key, std::span<cons
     {
         KIO_TRY(co_await io_worker_.AsyncFdatasync(handle_.Get()));
     }
-
-    size_ += expected_bytes;
 
     co_return entry_offset;
 }

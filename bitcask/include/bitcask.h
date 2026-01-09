@@ -141,7 +141,7 @@ private:
      * Creates: data/partition_0/, data/partition_1/, etc.
      */
     void EnsureDirectories() const;
-    void CheckOrCreateManifest() const;
+    // void CheckOrCreateManifest() const;
 
     // ====================================================================
     // ROUTING

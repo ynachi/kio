@@ -11,13 +11,36 @@
 #include "kio/core/coro.h"
 #include "kio/core/worker.h"
 
+#include <fcntl.h>  // For O_APPEND check in constructor
+
 namespace bitcask
 {
-// TODO, use fallocate to create the datafile
+
+/**
+ * @brief Manages a single append-only data file for Bitcask storage.
+ *
+ * Thread Safety:
+ * - DataFile is designed for single-worker access (share-nothing architecture)
+ * - However, multiple COROUTINES on the same worker can access it concurrently
+ * - The AsyncWrite methods handle this by reserving space BEFORE yielding
+ *
+ * IMPORTANT: Do NOT open the file with O_APPEND flag!
+ * O_APPEND causes pwrite() to ignore the offset parameter and always write at EOF.
+ * This breaks our manual offset tracking and causes data corruption.
+ */
 class DataFile
 {
 public:
-    // The fd will be created by the worker thread (the caller) and passed to the constructor
+    /**
+     * @brief Construct a DataFile wrapper.
+     *
+     * @param fd File descriptor (must be open for writing, WITHOUT O_APPEND)
+     * @param file_id Unique identifier for this file
+     * @param io_worker Worker that owns this file (for async I/O)
+     * @param config Bitcask configuration
+     *
+     * @throws std::invalid_argument if fd < 0 or if O_APPEND is set
+     */
     DataFile(int fd, uint64_t file_id, kio::io::Worker& io_worker, BitcaskConfig& config);
 
     // not copyable
@@ -31,10 +54,30 @@ public:
 
     ~DataFile() = default;
 
-    // Write an entry and return the offset
+    /**
+     * @brief Write a pre-constructed entry to the file.
+     *
+     * Coroutine-safe: Reserves space before yielding to prevent races.
+     *
+     * @param entry The entry to write
+     * @return Offset where entry was written, or error
+     */
     kio::Task<kio::Result<uint64_t>> AsyncWrite(const DataEntry& entry);
 
-    // Write an entry, use scatter gater for optimization
+    /**
+     * @brief Write an entry using scatter-gather I/O.
+     *
+     * More efficient than AsyncWrite(DataEntry) as it avoids copying
+     * key/value into a contiguous buffer.
+     *
+     * Coroutine-safe: Reserves space before yielding to prevent races.
+     *
+     * @param key Key data
+     * @param value Value data
+     * @param timestamp Entry timestamp
+     * @param flag Entry flags (e.g., tombstone)
+     * @return Offset where entry was written, or error
+     */
     kio::Task<kio::Result<uint64_t>> AsyncWrite(std::string_view key, std::span<const char> value, uint64_t timestamp,
                                                 uint8_t flag);
 

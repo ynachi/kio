@@ -12,6 +12,8 @@
 #include "file_id.h"
 #include "kio/sync/baton.h"
 
+#include <kio/core/bytes_mut.h>
+
 namespace bitcask
 {
 /**
@@ -83,10 +85,22 @@ private:
     kio::Task<kio::Result<void>> RecoverFromHintFile(const FileHandle& fh, uint64_t file_id);
 
     kio::Result<std::pair<uint64_t, uint64_t>> RecoverDataFromBuffer(kio::BytesMut& buffer, uint64_t file_id,
-                                                                     uint64_t file_offset);
+                                                                     uint64_t file_read_position);
 
     kio::Task<kio::Result<void>> CreateAndSetActiveFile();
     kio::Task<kio::Result<void>> RotateActiveFile();
+
+    /**
+     * @brief Write hint file for a sealed data file.
+     *
+     * Hint files contain a compact index of all live keys in the data file,
+     * enabling fast recovery without scanning the entire data file.
+     *
+     * @param file_id The ID of the data file being sealed
+     * @return Result indicating success or failure
+     */
+    kio::Task<kio::Result<void>> WriteHintFile(uint64_t file_id);
+
     /**
      * Seal the active file, truncate it to the actual db size.
      * This method invalidates the active file.

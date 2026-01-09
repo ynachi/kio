@@ -328,7 +328,7 @@ public:
         return MakeUringAwaitable(*this, prep, &Worker::StatIncWrite, fd, msg, flags);
     }
 
-    [[nodiscard]] auto AsyncOpenat(std::filesystem::path path, int flags, mode_t mode)
+    [[nodiscard]] auto AsyncOpenAt(std::filesystem::path path, int flags, mode_t mode)
     {
         auto prep = [](io_uring_sqe* sqe, int dfd, const std::filesystem::path& p, int f, mode_t m)
         { io_uring_prep_openat(sqe, dfd, p.c_str(), f, m); };

@@ -41,7 +41,7 @@ Task<Result<size_t>> count_chars_in_file(Worker& worker, std::string_view filena
               std::hash<std::thread::id>{}(std::this_thread::get_id()));
 
     // Now that we are on the correct thread, we can safely call async methods.
-    auto fd = KIO_TRY(co_await worker.AsyncOpenat(filename, O_RDONLY, 0));
+    auto fd = KIO_TRY(co_await worker.AsyncOpenAt(filename, O_RDONLY, 0));
 
     ALOG_INFO("Successfully opened file '{}', fd={}", filename, fd);
 

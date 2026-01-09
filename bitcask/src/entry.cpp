@@ -12,30 +12,30 @@ using namespace kio;
 
 DataEntry::DataEntry(std::string_view key, std::span<const char> value, const uint8_t flag, const uint64_t timestamp)
 {
-    const auto kLen = static_cast<uint32_t>(key.size());
-    const auto kVLen = static_cast<uint32_t>(value.size());
+    const auto len = static_cast<uint32_t>(key.size());
+    const auto v_len = static_cast<uint32_t>(value.size());
 
-    payload_.resize(kEntryFixedHeaderSize + kLen + kVLen);
+    payload_.resize(kEntryFixedHeaderSize + len + v_len);
     char* base = payload_.data();
 
     // Write header (leave CRC blank for now)
     WriteLe(base, static_cast<uint32_t>(0));  // CRC Placeholder
     WriteLe(base + 4, timestamp);
     WriteLe(base + 12, flag);
-    WriteLe(base + 13, kLen);
-    WriteLe(base + 17, kVLen);
+    WriteLe(base + 13, len);
+    WriteLe(base + 17, v_len);
 
     // Write key/value
-    std::memcpy(base + kEntryFixedHeaderSize, key.data(), kLen);
-    std::memcpy(base + kEntryFixedHeaderSize + kLen, value.data(), kVLen);
+    std::memcpy(base + kEntryFixedHeaderSize, key.data(), len);
+    std::memcpy(base + kEntryFixedHeaderSize + len, value.data(), v_len);
 
     // Compute CRC over everything except the CRC field itself
-    const uint32_t kCrc = crc32c::Crc32c(base + 4, payload_.size() - 4);
-    std::memcpy(base, &kCrc, sizeof(kCrc));
+    const uint32_t crc = crc32c::Crc32c(base + 4, payload_.size() - 4);
+    std::memcpy(base, &crc, sizeof(crc));
 
     // Views into payload
-    key_view_ = std::string_view(base + kEntryFixedHeaderSize, kLen);
-    value_view_ = std::span<const char>(base + kEntryFixedHeaderSize + kLen, kVLen);
+    key_view_ = std::string_view(base + kEntryFixedHeaderSize, len);
+    value_view_ = std::span<const char>(base + kEntryFixedHeaderSize + len, v_len);
 }
 
 Result<DataEntry> DataEntry::Deserialize(std::span<const char> buffer)
@@ -81,10 +81,14 @@ std::vector<char> HintEntry::Serialize() const
     std::vector<char> buffer(kHintHeaderSize + len);
     char* ptr = buffer.data();
 
+    // [0-7] Timestamp (8)
     WriteLe(ptr, timestamp_ns);
+    // [8-15] Offset (8)
     WriteLe(ptr + 8, offset);
-    WriteLe(ptr + 12, size);
-    WriteLe(ptr + 16, len);
+    // [16-19] Size (4)
+    WriteLe(ptr + 16, size);
+    // [20-23] Key Length (4)
+    WriteLe(ptr + 20, len);
 
     if (len > 0)
     {
@@ -103,22 +107,26 @@ Result<std::pair<HintEntry, size_t>> HintEntry::Deserialize(const std::span<cons
     const char* ptr = buffer.data();
 
     HintEntry entry;
+    // [0-7]
     entry.timestamp_ns = ReadLe<uint64_t>(ptr);
-    entry.offset = ReadLe<uint32_t>(ptr + 8);
-    entry.size = ReadLe<uint32_t>(ptr + 12);
+    // [8-15]
+    entry.offset = ReadLe<uint64_t>(ptr + 8);
+    // [16-19]
+    entry.size = ReadLe<uint32_t>(ptr + 16);
+    // [20-23]
+    const auto len = ReadLe<uint32_t>(ptr + 20);
 
-    const auto kLen = ReadLe<uint32_t>(ptr + 16);
-    if (buffer.size() < kHintHeaderSize + kLen)
+    if (buffer.size() < kHintHeaderSize + len)
     {
         return std::unexpected(Error(ErrorCategory::kSerialization, kIoNeedMoreData));
     }
 
-    if (kLen > 0)
+    if (len > 0)
     {
-        entry.key.assign(ptr + kHintHeaderSize, kLen);
+        entry.key.assign(ptr + kHintHeaderSize, len);
     }
 
-    return std::make_pair(entry, kHintHeaderSize + kLen);
+    return std::make_pair(entry, kHintHeaderSize + len);
 }
 
 }  // namespace bitcask

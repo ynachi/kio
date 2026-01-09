@@ -72,7 +72,7 @@ public:
      * @return
      */
     static kio::Result<DataEntry> Deserialize(std::span<const char> buffer);
-    DataEntry(std::string_view key, std::span<const char> value, uint8_t flag, uint64_t timestamp);
+    DataEntry(std::string_view key, std::span<const char> value, uint8_t flag = kFlagNone, uint64_t timestamp = GetCurrentTimestamp());
 
     [[nodiscard]] uint32_t GetCrc() const { return ReadLe<uint32_t>(payload_.data()); }
 
@@ -92,6 +92,12 @@ public:
 
     [[nodiscard]] std::span<const char> GetPayload() const { return payload_; }
     [[nodiscard]] uint32_t Size() const { return payload_.size(); }
+
+    // mostly for testing
+    bool operator==(const DataEntry& other) const
+    {
+        return payload_ == other.payload_;
+    }
 };
 
 struct HintEntry
@@ -103,7 +109,7 @@ struct HintEntry
     // [16-19] Key Length
     // [20...] Key Bytes
 
-    uint32_t offset{};
+    uint64_t offset{};
     uint32_t size{};
     uint64_t timestamp_ns{};
     std::string key;
@@ -124,6 +130,7 @@ struct HintEntry
     /// Deserialize from buffer, returns the entry and its serialized size
     /// Deserializing give access to that size returning it makes sense to not have to recompute it
     static kio::Result<std::pair<HintEntry, size_t>> Deserialize(std::span<const char> buffer);
+    bool operator==(const HintEntry& other) const = default;
 };
 
 // KeyDir entry (in-memory index):

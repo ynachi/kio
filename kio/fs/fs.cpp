@@ -43,7 +43,7 @@ Task<Result<File> > FileManager::AsyncOpen(std::filesystem::path path, const int
     // Ensure we are on the correct worker thread before touching its ring.
     co_await io::SwitchToWorker(*worker);
 
-    const int fd = KIO_TRY(co_await worker->AsyncOpenat(path, flags, mode));
+    const int fd = KIO_TRY(co_await worker->AsyncOpenAt(path, flags, mode));
 
     co_return std::expected<File, Error>(std::in_place, fd, pool_, worker_id);
 }

@@ -8,6 +8,7 @@
 
 #include <expected>
 #include <format>
+#include <iostream>  // Added for std::ostream
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -280,9 +281,16 @@ struct Error
     [[nodiscard]] constexpr bool IsSuccess() const { return category == ErrorCategory::kSuccess; }
 
     constexpr bool operator==(const Error& other) const = default;
+
+    // Output stream operator for logging and test assertions
+    friend std::ostream& operator<<(std::ostream& os, const Error& err)
+    {
+        return os << CategoryToString(err.category) << ": " << ErrorValueToString(err.value) << " (" << err.value
+                  << ")";
+    }
 };
 
-template<typename T>
+template <typename T>
 using Result = std::expected<T, Error>;
 
 }  // namespace kio
@@ -291,7 +299,7 @@ using Result = std::expected<T, Error>;
 // std::format Specialization
 // -------------------------------------------------------------------------
 
-template<>
+template <>
 struct std::formatter<kio::Error>
 {
     // Parses format specifications
@@ -314,7 +322,7 @@ struct std::formatter<kio::Error>
 
 namespace kio_try_internal
 {
-template<typename Exp>
+template <typename Exp>
 auto kio_try_unwrap_impl(Exp&& exp)  // NOLINT
 {
     using ValueT = std::decay_t<Exp>::value_type;
