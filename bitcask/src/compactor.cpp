@@ -192,8 +192,8 @@ Task<Result<void>> CompactFiles(CompactionContext& ctx)
     ALOG_INFO("Starting compaction for partition {}, merging {} files into new file {}", ctx.partition_id,
               ctx.src_file_ids.size(), ctx.dst_file_id);
 
-    auto dst_path = ctx.config.directory / std::format("partition_{}/data_{}.db", ctx.partition_id, ctx.dst_file_id);
-    int dst_fd = KIO_TRY(co_await ctx.worker.AsyncOpenAt(dst_path, ctx.config.write_flags, ctx.config.file_mode));
+    const auto dst_path = ctx.config.directory / std::format("partition_{}/data_{}.db", ctx.partition_id, ctx.dst_file_id);
+    const int dst_fd = KIO_TRY(co_await ctx.worker.AsyncOpenAt(dst_path, ctx.config.write_flags, ctx.config.file_mode));
 
     DataFile dst_file(dst_fd, ctx.dst_file_id, ctx.worker, ctx.config);
     BytesMut read_buffer(kCompactionBufferSize);

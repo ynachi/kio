@@ -121,7 +121,6 @@ Task<Result<void>> Partition::Del(const std::string_view key)
 
     const DataEntry tombstone(std::string(key), std::vector<char>{}, kFlagTombstone, GetCurrentTimestamp());
 
-
     KIO_TRY(co_await active_file_->AsyncWrite(tombstone));
 
     auto& active_stats = stats_.data_files[active_file_->FileId()];
@@ -184,8 +183,8 @@ Task<Result<void>> Partition::WriteHintFile(uint64_t file_id)
     const auto hint_path = GetHintFilePath(file_id);
 
     // Open hint file for writing
-    const int hint_fd = KIO_TRY(co_await worker_.AsyncOpenAt(
-        hint_path, O_CREAT | O_WRONLY | O_TRUNC, config_.file_mode));
+    const int hint_fd =
+        KIO_TRY(co_await worker_.AsyncOpenAt(hint_path, O_CREAT | O_WRONLY | O_TRUNC, config_.file_mode));
 
     FileHandle hint_handle(hint_fd);
 
@@ -347,7 +346,9 @@ DetachedTask Partition::CompactionLoop()
     {
         co_await compaction_trigger_.WaitFor(worker_, config_.compaction_interval_s);
         if (shutting_down_.load())
+        {
             break;
+        }
 
         if (auto res = co_await Compact(); !res.has_value())
         {
@@ -356,6 +357,8 @@ DetachedTask Partition::CompactionLoop()
         compaction_trigger_.Reset();
     }
     ALOG_INFO("Partition {} compaction loop exiting", partition_id_);
+
+    compaction_stop_.Post();
 }
 
 Result<std::pair<uint64_t, uint64_t>> Partition::RecoverDataFromBuffer(BytesMut& buffer, const uint64_t file_id,
@@ -400,11 +403,10 @@ Result<std::pair<uint64_t, uint64_t>> Partition::RecoverDataFromBuffer(BytesMut&
 
         // Use insert_or_assign with proper key (need to copy since entry will be destroyed)
         std::string key_copy(entry.GetKeyView());
-        keydir_.insert_or_assign(std::move(key_copy),
-                                 ValueLocation{.file_id = file_id,
-                                               .offset = entry_offset,
-                                               .total_size = entry.Size(),
-                                               .timestamp_ns = entry.GetTimestamp()});
+        keydir_.insert_or_assign(std::move(key_copy), ValueLocation{.file_id = file_id,
+                                                                    .offset = entry_offset,
+                                                                    .total_size = entry.Size(),
+                                                                    .timestamp_ns = entry.GetTimestamp()});
     }
     return std::make_pair(entries_recovered, entries_skipped);
 }
@@ -505,11 +507,10 @@ Task<Result<void>> Partition::RecoverFromHintFile(const FileHandle& fh, uint64_t
         remaining = remaining.subspan(consumed);
 
         // Insert into keydir (hint entries are always live - tombstones aren't in hints)
-        keydir_.insert_or_assign(std::move(hint.key),
-                                 ValueLocation{.file_id = file_id,
-                                               .offset = hint.offset,
-                                               .total_size = hint.size,
-                                               .timestamp_ns = hint.timestamp_ns});
+        keydir_.insert_or_assign(
+            std::move(hint.key),
+            ValueLocation{
+                .file_id = file_id, .offset = hint.offset, .total_size = hint.size, .timestamp_ns = hint.timestamp_ns});
         entries_recovered++;
     }
 
@@ -681,13 +682,21 @@ Task<Result<void>> Partition::AsyncClose()
     // Clear FD cache
     fd_cache_.Clear();
 
+    // wait for compaction to finish to avoid race condition
+    co_await compaction_trigger_.Wait(worker_);
+
+    // if background sync, wait for it
+    if (!config_.sync_on_write)
+    {
+        co_await sync_job_stop_.Wait(worker_);
+    }
+
     // The worker is not owned by the partition. It should not close it.
 
     ALOG_DEBUG("Partition {} closed successfully.", partition_id_);
     co_return {};
 }
 
-// FIX #1: Complete compaction with file deletion
 Task<Result<void>> Partition::Compact()
 {
     if (stats_.compaction_running)
@@ -735,7 +744,7 @@ Task<Result<void>> Partition::Compact()
               ctx.src_file_ids.size());
     stats_.compactions_total++;
 
-    // FIX #1: Delete source files after successful compaction
+    // Delete source files after successful compaction
     uint64_t bytes_reclaimed = 0;
     for (const uint64_t src_id : ctx.src_file_ids)
     {
@@ -810,4 +819,7 @@ DetachedTask Partition::BackgroundSync()
         }
     }
     ALOG_INFO("Partition {} background sync loop exiting", partition_id_);
+
+    // signal stopped
+    sync_job_stop_.Post();
 }

@@ -62,7 +62,7 @@ public:
 
 private:
     // Members
-    KeyDir keydir_;  // Now uses absl::flat_hash_map, no PMR needed
+    KeyDir keydir_;
 
     kio::io::Worker& worker_;
     std::unique_ptr<DataFile> active_file_;
@@ -75,6 +75,8 @@ private:
 
     // Compaction control
     kio::sync::AsyncBaton compaction_trigger_;
+    kio::sync::AsyncBaton compaction_stop_;
+    kio::sync::AsyncBaton sync_job_stop_;
     compactor::CompactionLimits compaction_limits_;
     std::atomic<bool> shutting_down_{false};
 
