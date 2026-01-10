@@ -95,7 +95,7 @@ TEST_F(BitKVTest, PutGetDelete)
     auto test = [&](BitKV* ptr) -> Task<void>
     {
         std::string const key = "user:1001";
-        std::string value = R"({"name": "Alice", "age": 30})";
+        std::string const value = R"({"name": "Alice", "age": 30})";
 
         // Put
         auto put_result = co_await ptr->Put(key, value);
@@ -127,7 +127,7 @@ TEST_F(BitKVTest, BinaryData)
 
     auto test = [&](BitKV* ptr) -> Task<void>
     {
-        std::string key = "binary_blob";
+        std::string const key = "binary_blob";
         std::vector<char> blob(50 * 1024);  // 50KB
         for (size_t i = 0; i < blob.size(); ++i)
         {
@@ -137,7 +137,7 @@ TEST_F(BitKVTest, BinaryData)
         auto put_result = co_await ptr->Put(std::string(key), std::vector<char>(blob));
         EXPECT_TRUE(put_result.has_value());
 
-        auto get_result = co_await ptr->Get(key);
+        const auto get_result = co_await ptr->Get(key);
         EXPECT_TRUE(get_result.has_value());
         EXPECT_TRUE(get_result.value().has_value());
         EXPECT_EQ(get_result.value().value(), blob);
@@ -183,8 +183,8 @@ TEST_F(BitKVTest, KeysDistributedAcrossPartitions)
     int partitions_with_data = 0;
     for (int p = 0; p < 4; ++p)
     {
-        auto partition_dir = test_dir_ / std::format("partition_{}", p);
-        for (const auto& entry : std::filesystem::directory_iterator(partition_dir))
+        for (auto partition_dir = test_dir_ / std::format("partition_{}", p);
+             const auto& entry : std::filesystem::directory_iterator(partition_dir))
         {
             if (entry.path().extension() == ".db")
             {
@@ -225,11 +225,11 @@ TEST_F(BitKVTest, DataSurvivesRestart)
 
         auto task = [&](BitKV* ptr) -> Task<void>
         {
-            auto result1 = co_await ptr->GetString("persistent_key");
+            const auto result1 = co_await ptr->GetString("persistent_key");
             EXPECT_TRUE(result1.value().has_value());
             EXPECT_EQ(result1.value().value(), "persistent_value");
 
-            auto result2 = co_await ptr->GetString("temp_key");
+            const auto result2 = co_await ptr->GetString("temp_key");
             EXPECT_FALSE(result2.value().has_value());
         };
 
@@ -248,7 +248,7 @@ TEST_F(BitKVTest, ManualCompaction)
 
     auto task = [&](BitKV* ptr) -> Task<void>
     {
-        std::string key = "frag_key";
+        std::string const key = "frag_key";
         std::string val(1024, 'A');
 
         // Write same key 100 times (creates fragmentation)
@@ -258,7 +258,7 @@ TEST_F(BitKVTest, ManualCompaction)
         }
 
         // Trigger compaction
-        auto compact_result = co_await ptr->Compact();
+        const auto compact_result = co_await ptr->Compact();
         EXPECT_TRUE(compact_result.has_value());
 
         // Verify data intact
@@ -281,11 +281,11 @@ TEST_F(BitKVTest, ConcurrentReadWriteDifferentKeys)
 
     auto test = [&](BitKV* ptr) -> Task<void>
     {
-        constexpr int num_keys = 100;
+        constexpr int kNumKeys = 100;
 
         // Generate keys
         std::vector<std::string> keys;
-        for (int i = 0; i < num_keys; ++i)
+        for (int i = 0; i < kNumKeys; ++i)
         {
             keys.push_back(std::format("key_{}", i));
         }
@@ -327,7 +327,7 @@ TEST_F(BitKVTest, ConcurrentReadWriteDifferentKeys)
         }
 
         // Verify all keys written
-        for (int i = 0; i < num_keys; ++i)
+        for (int i = 0; i < kNumKeys; ++i)
         {
             auto result = co_await ptr->GetString(keys[i]);
             EXPECT_TRUE(result.value().has_value()) << "Missing key: " << keys[i];

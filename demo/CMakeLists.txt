@@ -4,6 +4,7 @@
 function(add_kio_demo demo_name source_file)
     add_executable(${demo_name} ${source_file})
     target_link_libraries(${demo_name} PRIVATE kio_lib ${ARGN})
+    kio_add_sanitizers(${demo_name})
 endfunction()
 
 # ============================================================================

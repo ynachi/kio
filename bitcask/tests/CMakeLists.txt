@@ -20,6 +20,7 @@ function(add_bitcask_test test_name source_file)
     )
 
     kio_target_compile_options(${test_name})
+    kio_add_sanitizers(${test_name})
 
     add_test(NAME ${test_name} COMMAND ${test_name})
     gtest_discover_tests(${test_name})

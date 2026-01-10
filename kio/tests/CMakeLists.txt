@@ -51,6 +51,8 @@ function(add_kio_test test_name)
             LABELS "integration"
     )
 
+    kio_add_sanitizers(${test_name})
+
     # GTest automatic test discovery
     gtest_discover_tests(${test_name}
             WORKING_DIRECTORY ${TEST_WORKING_DIR}
