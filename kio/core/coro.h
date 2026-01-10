@@ -3,7 +3,6 @@
 
 #include "async_logger.h"
 
-#include <atomic>
 #include <coroutine>
 #include <exception>
 #include <format>
@@ -50,7 +49,7 @@ struct Task
     struct promise_type
     {
         std::variant<std::monostate, T, std::exception_ptr> result_;
-        std::atomic<std::coroutine_handle<>> continuation_;  // ✅ ATOMIC
+        std::coroutine_handle<> continuation_;  // No atomic needed in share-nothing
 
         [[nodiscard]]
         Task get_return_object() noexcept
@@ -66,9 +65,10 @@ struct Task
 
             std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_type> h) noexcept
             {
-                // ✅ Load with acquire
-                if (auto continuation = h.promise().continuation_.load(std::memory_order_acquire))
-                    return continuation;
+                auto& promise = h.promise();
+                if (promise.continuation_)
+                    return promise.continuation_;
+
                 return std::noop_coroutine();
             }
 
@@ -93,8 +93,7 @@ struct Task
 
     std::coroutine_handle<> await_suspend(std::coroutine_handle<> awaiting_coroutine) noexcept
     {
-        // ✅ Store with release
-        h_.promise().continuation_.store(awaiting_coroutine, std::memory_order_release);
+        h_.promise().continuation_ = awaiting_coroutine;
         return h_;
     }
 
@@ -148,7 +147,7 @@ struct Task<void>
     struct promise_type
     {
         std::variant<std::monostate, std::exception_ptr> result_;
-        std::atomic<std::coroutine_handle<>> continuation_;  // ✅ ATOMIC
+        std::coroutine_handle<> continuation_;  // No atomic needed in share-nothing
 
         [[nodiscard]]
         Task get_return_object() noexcept
@@ -164,9 +163,10 @@ struct Task<void>
 
             std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_type> h) noexcept
             {
-                // ✅ Load with acquire
-                if (auto continuation = h.promise().continuation_.load(std::memory_order_acquire))
-                    return continuation;
+                auto& promise = h.promise();
+                if (promise.continuation_)
+                    return promise.continuation_;
+
                 return std::noop_coroutine();
             }
 
@@ -187,8 +187,7 @@ struct Task<void>
 
     std::coroutine_handle<> await_suspend(std::coroutine_handle<> awaiting_coroutine) noexcept
     {
-        // ✅ Store with release
-        h_.promise().continuation_.store(awaiting_coroutine, std::memory_order_release);
+        h_.promise().continuation_ = awaiting_coroutine;
         return h_;
     }
 

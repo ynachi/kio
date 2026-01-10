@@ -21,7 +21,7 @@ struct sync_wait_task
 {
     struct promise_type
     {
-        std::atomic<SyncWaitEvent*> event{nullptr};  // ✅ ATOMIC
+        std::atomic<SyncWaitEvent*> event{nullptr};
         std::variant<std::monostate, T, std::exception_ptr> storage;
 
         sync_wait_task get_return_object() noexcept
@@ -37,7 +37,6 @@ struct sync_wait_task
 
             void await_suspend(std::coroutine_handle<promise_type> h) noexcept
             {
-                // ✅ Load with acquire and call set()
                 h.promise().event.load(std::memory_order_acquire)->set();
             }
 
@@ -78,7 +77,6 @@ struct sync_wait_task
 
     void start(SyncWaitEvent& event)
     {
-        // ✅ Store with release
         h_.promise().event.store(&event, std::memory_order_release);
         h_.resume();
     }
@@ -92,7 +90,7 @@ struct sync_wait_task<void>
 {
     struct promise_type
     {
-        std::atomic<SyncWaitEvent*> event{nullptr};  // ✅ ATOMIC
+        std::atomic<SyncWaitEvent*> event{nullptr};
         std::exception_ptr exception;
 
         sync_wait_task get_return_object() noexcept
@@ -108,7 +106,7 @@ struct sync_wait_task<void>
 
             void await_suspend(std::coroutine_handle<promise_type> h) noexcept
             {
-                // ✅ Load with acquire and call set()
+                // Load with acquire and call set()
                 h.promise().event.load(std::memory_order_acquire)->set();
             }
 
@@ -144,7 +142,7 @@ struct sync_wait_task<void>
 
     void start(SyncWaitEvent& event) const
     {
-        // ✅ Store with release
+        // Store with release
         h_.promise().event.store(&event, std::memory_order_release);
         h_.resume();
     }

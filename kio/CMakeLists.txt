@@ -4,12 +4,13 @@
 set(core_runtime_headers
         core/coro.h
         core/worker.h
+        core/op_pool.h
+        core/io_uring_awaitable.h
         core/worker_pool.h
         core/metrics_collector.h
         core/errors.h
         core/async_logger.h
         core/bytes_mut.h
-        core/safe_completion.h
         core/chunked_buffer.h
 )
 
@@ -27,6 +28,7 @@ set(sync_headers
         sync/mpsc_queue.h
         sync/sync_wait.h
         sync/baton.h
+        sync/baton_impl.h
 )
 
 # ============================================================================

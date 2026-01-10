@@ -10,8 +10,8 @@
 #include "io_uring_awaitable.h"
 #include "kio/net/net.h"
 #include "kio/net/socket.h"
+#include "kio/sync/baton.h"
 #include "kio/sync/mpsc_queue.h"
-#include "safe_completion.h"
 
 #include <expected>
 #include <filesystem>
@@ -28,15 +28,6 @@ namespace kio::io
 {
 
 class Worker;
-
-namespace internal
-{
-struct WorkerAccess
-{
-    static void Post(Worker& worker, std::coroutine_handle<> h);
-    static io_uring& GetRing(Worker& worker) noexcept;
-};
-}  // namespace internal
 
 struct alignas(std::hardware_destructive_interference_size) WorkerStats
 {
@@ -86,6 +77,9 @@ class Worker
 {
     template <typename, typename...>
     friend struct IoUringAwaitable;
+    friend struct SwitchToWorker;
+    friend class ::kio::sync::AsyncBaton;
+    friend struct ::kio::sync::AsyncBaton::TimedAwaiter;
 
     io_uring ring_{};
     OpPool op_pool_;
@@ -284,9 +278,9 @@ struct SwitchToWorker
 
     explicit SwitchToWorker(Worker& worker) : worker(worker) {}
 
-    bool await_ready() const noexcept { return worker.IsOnWorkerThread(); }                           // NOLINT
-    void await_suspend(std::coroutine_handle<> h) const { internal::WorkerAccess::Post(worker, h); }  // NOLINT
-    void await_resume() const noexcept {}                                                             // NOLINT
+    bool await_ready() const noexcept { return worker.IsOnWorkerThread(); }  // NOLINT
+    void await_suspend(std::coroutine_handle<> h) const { worker.Post(h); }  // NOLINT
+    void await_resume() const noexcept {}                                    // NOLINT
 };
 }  // namespace kio::io
 
@@ -327,5 +321,8 @@ bool kio::io::IoUringAwaitable<Prep, Args...>::await_suspend(std::coroutine_hand
     // Suspend - completion handler will resume us
     return true;
 }
+
+// Include inline implementations of AsyncBaton methods that depend on Worker
+#include "kio/sync/baton_impl.h"
 
 #endif  // KIO_WORKER_H
