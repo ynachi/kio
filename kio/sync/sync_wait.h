@@ -1,9 +1,8 @@
-#ifndef SYNC_WAIT_H
-#define SYNC_WAIT_H
+#pragma once
 
-#include "kio/core/coro.h"
-#include "kio/core/worker.h"
+#include "../core/coro.h"
 
+#include <atomic>
 #include <latch>
 
 namespace kio::internal
@@ -17,13 +16,12 @@ public:
     void wait() const noexcept { latch_.wait(); }
 };
 
-// Wrapper task that stores result and notifies on completion
 template <typename T>
 struct sync_wait_task
 {
     struct promise_type
     {
-        SyncWaitEvent* event{nullptr};
+        std::atomic<SyncWaitEvent*> event{nullptr};  // ✅ ATOMIC
         std::variant<std::monostate, T, std::exception_ptr> storage;
 
         sync_wait_task get_return_object() noexcept
@@ -31,19 +29,22 @@ struct sync_wait_task
             return sync_wait_task{std::coroutine_handle<promise_type>::from_promise(*this)};
         }
 
-        std::suspend_always initial_suspend() noexcept { return {}; }  // NOLINT
+        std::suspend_always initial_suspend() noexcept { return {}; }
 
         struct final_awaiter
         {
-            bool await_ready() noexcept { return false; }  // NOLINT
+            bool await_ready() noexcept { return false; }
+
             void await_suspend(std::coroutine_handle<promise_type> h) noexcept
             {
-                h.promise().event->set();  // Signal completion
+                // ✅ Load with acquire and call set()
+                h.promise().event.load(std::memory_order_acquire)->set();
             }
-            void await_resume() noexcept {}  // NOLINT
+
+            void await_resume() noexcept {}
         };
 
-        final_awaiter final_suspend() noexcept { return {}; }  // NOLINT
+        final_awaiter final_suspend() noexcept { return {}; }
 
         void return_value(T value)
             requires(!std::is_void_v<T>)
@@ -77,8 +78,8 @@ struct sync_wait_task
 
     void start(SyncWaitEvent& event)
     {
-        h_.promise().event = &event;
-        // Start execution
+        // ✅ Store with release
+        h_.promise().event.store(&event, std::memory_order_release);
         h_.resume();
     }
 
@@ -91,7 +92,7 @@ struct sync_wait_task<void>
 {
     struct promise_type
     {
-        SyncWaitEvent* event{nullptr};
+        std::atomic<SyncWaitEvent*> event{nullptr};  // ✅ ATOMIC
         std::exception_ptr exception;
 
         sync_wait_task get_return_object() noexcept
@@ -99,18 +100,24 @@ struct sync_wait_task<void>
             return sync_wait_task{std::coroutine_handle<promise_type>::from_promise(*this)};
         }
 
-        std::suspend_always initial_suspend() noexcept { return {}; }  // NOLINT
+        std::suspend_always initial_suspend() noexcept { return {}; }
 
         struct final_awaiter
         {
-            bool await_ready() noexcept { return false; }                                                     // NOLINT
-            void await_suspend(std::coroutine_handle<promise_type> h) noexcept { h.promise().event->set(); }  // NOLINT
-            void await_resume() noexcept {}                                                                   // NOLINT
+            bool await_ready() noexcept { return false; }
+
+            void await_suspend(std::coroutine_handle<promise_type> h) noexcept
+            {
+                // ✅ Load with acquire and call set()
+                h.promise().event.load(std::memory_order_acquire)->set();
+            }
+
+            void await_resume() noexcept {}
         };
 
-        final_awaiter final_suspend() noexcept { return {}; }  // NOLINT
+        final_awaiter final_suspend() noexcept { return {}; }
 
-        void return_void() noexcept {}  // NOLINT
+        void return_void() noexcept {}
 
         void unhandled_exception() noexcept { exception = std::current_exception(); }
 
@@ -137,7 +144,8 @@ struct sync_wait_task<void>
 
     void start(SyncWaitEvent& event) const
     {
-        h_.promise().event = &event;
+        // ✅ Store with release
+        h_.promise().event.store(&event, std::memory_order_release);
         h_.resume();
     }
 
@@ -172,5 +180,3 @@ auto SyncWait(Task<T> task) -> decltype(auto)
     return wrapper.result();
 }
 }  // namespace kio
-
-#endif  // SYNC_WAIT_H

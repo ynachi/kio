@@ -7,6 +7,7 @@
 
 #include "coro.h"
 #include "errors.h"
+#include "io_uring_awaitable.h"
 #include "kio/net/net.h"
 #include "kio/net/socket.h"
 #include "kio/sync/mpsc_queue.h"
@@ -81,87 +82,13 @@ struct WorkerConfig
     }
 };
 
-/**
- * IoUringAwaitable - Using SafeIoCompletion for robust cancellation
- */
-template <typename Prep, typename... Args>
-struct IoUringAwaitable
-{
-    Worker& worker;
-    Prep io_uring_prep;
-    using OnSuccess = void (*)(Worker&, int);
-    OnSuccess on_success;
-    std::tuple<Args...> io_args;
-
-    // Heap-allocated, ref-counted completion state
-    SafeIoCompletion* completion_state{nullptr};
-
-    bool await_ready() const noexcept { return false; }  // NOLINT
-
-    bool await_suspend(std::coroutine_handle<> h);  // NOLINT
-
-    [[nodiscard]] Result<int> await_resume() noexcept  // NOLINT
-    {
-        // Get result
-        int res = completion_state->result;
-
-        // We are done with the object on the User side. Release User ref.
-        completion_state->Release();
-        completion_state = nullptr;  // Clear to prevent dtor from abandoning
-
-        if (res < 0)
-        {
-            return std::unexpected(Error::FromErrno(-res));
-        }
-        if (on_success != nullptr)
-        {
-            on_success(worker, res);
-        }
-        return res;
-    }
-
-    explicit IoUringAwaitable(Worker& worker, Prep prep, OnSuccess on_success, Args... args)
-        : worker(worker), io_uring_prep(std::move(prep)), on_success(on_success), io_args(args...)
-    {
-    }
-
-    ~IoUringAwaitable()
-    {
-        // If completion_state is still set, it means await_resume() was NEVER called.
-        // This implies the coroutine is being destroyed while suspended (Cancellation).
-        if (completion_state != nullptr)
-        {
-            completion_state->Abandon();
-        }
-    }
-
-    IoUringAwaitable(const IoUringAwaitable&) = delete;
-    IoUringAwaitable& operator=(const IoUringAwaitable&) = delete;
-    IoUringAwaitable(IoUringAwaitable&&) = delete;
-    IoUringAwaitable& operator=(IoUringAwaitable&&) = delete;
-};
-
-template <typename Prep, typename... Args>
-auto MakeUringAwaitable(Worker& worker, Prep&& prep, void (*on_success)(Worker&, int), Args&&... args)
-{
-    return IoUringAwaitable<std::decay_t<Prep>, std::decay_t<Args>...>(worker, std::forward<Prep>(prep), on_success,
-                                                                       std::forward<Args>(args)...);
-}
-
-template <typename Prep, typename... Args>
-auto MakeUringAwaitable(Worker& worker, Prep&& prep, Args&&... args)
-{
-    return IoUringAwaitable<std::decay_t<Prep>, std::decay_t<Args>...>(worker, std::forward<Prep>(prep), nullptr,
-                                                                       std::forward<Args>(args)...);
-}
-
 class Worker
 {
-    friend struct internal::WorkerAccess;
     template <typename, typename...>
     friend struct IoUringAwaitable;
 
     io_uring ring_{};
+    OpPool op_pool_;
     WorkerConfig config_;
     size_t id_{0};
     std::atomic<std::thread::id> thread_id_;
@@ -199,7 +126,8 @@ class Worker
 
     void Post(std::coroutine_handle<> h);
     io_uring& GetRing() noexcept { return ring_; }
-    static void HandleCqe(io_uring_cqe* cqe);
+    OpPool& GetOpPool() noexcept { return op_pool_; }
+    void HandleCqe(io_uring_cqe* cqe);
     void Loop();
 
 public:
@@ -360,48 +288,44 @@ struct SwitchToWorker
     void await_suspend(std::coroutine_handle<> h) const { internal::WorkerAccess::Post(worker, h); }  // NOLINT
     void await_resume() const noexcept {}                                                             // NOLINT
 };
+}  // namespace kio::io
 
-namespace internal
-{
-inline void WorkerAccess::Post(Worker& worker, std::coroutine_handle<> h)
-{
-    worker.Post(h);
-}
-
-inline io_uring& WorkerAccess::GetRing(Worker& worker) noexcept
-{
-    return worker.GetRing();
-}
-}  // namespace internal
-
+// Implementation of await_suspend
 template <typename Prep, typename... Args>
-bool IoUringAwaitable<Prep, Args...>::await_suspend(std::coroutine_handle<> h)
+bool kio::io::IoUringAwaitable<Prep, Args...>::await_suspend(std::coroutine_handle<> h)
 {
     assert(worker.IsOnWorkerThread() && "kio::async_* operation was called from the wrong thread.");
 
-    // Acquire state from pool. RefCount starts at 2 (User + Kernel).
-    completion_state = CompletionPool::Acquire(h);
+    // Acquire slot from pool
+    try
+    {
+        op_handle.emplace(worker.op_pool_.Acquire(h));
+    }
+    catch (const std::exception& e)
+    {
+        // Pool exhausted or alloc failed
+        return false;  // Resume immediately, await_resume will see an empty handle
+    }
 
-    auto& ring = internal::WorkerAccess::GetRing(worker);
-    io_uring_sqe* sqe = io_uring_get_sqe(&ring);
-
+    // Get an SQE
+    io_uring_sqe* sqe = io_uring_get_sqe(&worker.GetRing());
     if (sqe == nullptr)
     {
         // Failed to get SQE.
-        completion_state->result = -EAGAIN;
-        // Drop Kernel ref immediately since we aren't giving it to kernel
-        completion_state->Release();
+        // We must release the slot we just acquired.
+        op_handle.reset();
         return false;
     }
 
+    // Prepare the SQE with the user's lambda
     std::apply([this, sqe]<typename... T>(T&&... unpacked_args)
                { io_uring_prep(sqe, std::forward<T>(unpacked_args)...); }, std::move(io_args));
 
-    // Pass the heap pointer to the kernel
-    io_uring_sqe_set_data(sqe, completion_state);
+    // Store the ID (with generation) in the SQE's user_data
+    io_uring_sqe_set_data64(sqe, op_handle->GetID());
+
+    // Suspend - completion handler will resume us
     return true;
 }
-
-}  // namespace kio::io
 
 #endif  // KIO_WORKER_H

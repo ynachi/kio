@@ -3,6 +3,7 @@
 
 #include "async_logger.h"
 
+#include <atomic>
 #include <coroutine>
 #include <exception>
 #include <format>
@@ -11,17 +12,16 @@
 
 namespace kio
 {
-
 template <typename T>
 struct Task
 {
-    struct promise_type;  // NOLINT
+    struct promise_type;
 
-    std::coroutine_handle<promise_type> h;
+    std::coroutine_handle<promise_type> h_;
 
-    explicit Task(std::coroutine_handle<promise_type> h) : h(h) {}
+    explicit Task(std::coroutine_handle<promise_type> h) : h_(h) {}
 
-    Task(Task&& other) noexcept : h(std::exchange(other.h, {})) {}
+    Task(Task&& other) noexcept : h_(std::exchange(other.h_, {})) {}
 
     Task(const Task&) = delete;
 
@@ -31,95 +31,81 @@ struct Task
     {
         if (this != &other)
         {
-            if (h)
-            {
-                h.destroy();
-            }
-            h = other.h;
-            other.h = nullptr;
+            if (h_)
+                h_.destroy();
+            h_ = other.h_;
+            other.h_ = nullptr;
         }
         return *this;
     }
 
-    ~Task() noexcept
+    ~Task()
     {
-        if (h && !h.done())
+        if (h_)
         {
-            h.destroy();
+            h_.destroy();
         }
     }
 
     struct promise_type
     {
-        std::variant<std::monostate, T, std::exception_ptr> result;
-        std::coroutine_handle<> continuation;
+        std::variant<std::monostate, T, std::exception_ptr> result_;
+        std::atomic<std::coroutine_handle<>> continuation_;  // ✅ ATOMIC
 
         [[nodiscard]]
-        Task get_return_object() noexcept  // NOLINT
+        Task get_return_object() noexcept
         {
             return Task{std::coroutine_handle<promise_type>::from_promise(*this)};
         }
 
-        // we are creating lazy coroutines
-        // Should be std::suspend_always to make the task "lazy" (it doesn't run until awaited).
-        std::suspend_always initial_suspend() noexcept { return {}; }  // NOLINT
-        // Crucially, this awaiter must resume any other coroutine that is co_awaiting this task's completion. This
-        // is how you chain asynchronous operations together.
-        // This awaiter is crucial for chaining coroutines.
-        // When this task completes, it resumes whoever was awaiting it.
-        struct FinalAwaiter
-        {
-            bool await_ready() noexcept { return false; }  // NOLINT
+        std::suspend_always initial_suspend() noexcept { return {}; }
 
-            std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_type> h) noexcept  // NOLINT
+        struct final_awaiter
+        {
+            bool await_ready() noexcept { return false; }
+
+            std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_type> h) noexcept
             {
-                // Resume the continuation or return to the original caller if there is none.
-                if (auto next_handle = h.promise().continuation)
-                {
-                    return next_handle;
-                }
+                // ✅ Load with acquire
+                if (auto continuation = h.promise().continuation_.load(std::memory_order_acquire))
+                    return continuation;
                 return std::noop_coroutine();
             }
 
-            void await_resume() noexcept {}  // NOLINT
+            void await_resume() noexcept {}
         };
 
-        FinalAwaiter final_suspend() noexcept { return {}; }  // NOLINT
-        // Stores the exception pointer so it can be re-thrown by the awaiting coroutine.
-        void unhandled_exception() { result.template emplace<2>(std::current_exception()); }  // NOLINT
+        final_awaiter final_suspend() noexcept { return {}; }
+        void unhandled_exception() { result_.template emplace<2>(std::current_exception()); }
 
-        // Stores the final result in the promise so the awaiting coroutine can retrieve it
-        // Conditionally provide return_value OR return_void, not both
-        void return_value(T value)  // NOLINT
+        void return_value(T value)
             requires(!std::is_void_v<T>)
         {
-            result.template emplace<1>(std::move(value));
+            result_.template emplace<1>(std::move(value));
         }
     };
 
     [[nodiscard]]
-    bool await_ready() const noexcept  // NOLINT
+    bool await_ready() const noexcept
     {
-        // A task is ready if it's already done.
-        return h.done();
+        return h_.done();
     }
 
-    std::coroutine_handle<> await_suspend(std::coroutine_handle<> awaiting_coroutine) noexcept  // NOLINT
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<> awaiting_coroutine) noexcept
     {
-        // Store the awaiting coroutine as our continuation
-        h.promise().continuation = awaiting_coroutine;
-        // Resume our handle to start the task's execution
-        return h;
+        // ✅ Store with release
+        h_.promise().continuation_.store(awaiting_coroutine, std::memory_order_release);
+        return h_;
     }
 
-    T await_resume()  // NOLINT
+    T await_resume()
     {
-        if (h.promise().result.index() == 2)
+        if (h_.promise().result_.index() == 2)
         {
-            std::rethrow_exception(std::get<2>(h.promise().result));
+            std::rethrow_exception(std::get<2>(h_.promise().result_));
         }
 
-        return std::get<1>(std::move(h.promise().result));
+        return std::get<1>(std::move(h_.promise().result_));
     }
 };
 
@@ -127,13 +113,13 @@ struct Task
 template <>
 struct Task<void>
 {
-    struct promise_type;  // NOLINT
+    struct promise_type;
 
-    std::coroutine_handle<promise_type> h;
+    std::coroutine_handle<promise_type> h_;
 
-    explicit Task(std::coroutine_handle<promise_type> h) : h(h) {}
+    explicit Task(std::coroutine_handle<promise_type> h) : h_(h) {}
 
-    Task(Task&& other) noexcept : h(std::exchange(other.h, {})) {}
+    Task(Task&& other) noexcept : h_(std::exchange(other.h_, {})) {}
 
     Task(const Task&) = delete;
 
@@ -143,81 +129,82 @@ struct Task<void>
     {
         if (this != &other)
         {
-            if (h)
-            {
-                h.destroy();
-            }
-            h = other.h;
-            other.h = nullptr;
+            if (h_)
+                h_.destroy();
+            h_ = other.h_;
+            other.h_ = nullptr;
         }
         return *this;
     }
 
     ~Task()
     {
-        if (h && !h.done())
+        if (h_)
         {
-            h.destroy();
+            h_.destroy();
         }
     }
 
     struct promise_type
     {
-        std::variant<std::monostate, std::exception_ptr> result;
-        std::coroutine_handle<> continuation;
+        std::variant<std::monostate, std::exception_ptr> result_;
+        std::atomic<std::coroutine_handle<>> continuation_;  // ✅ ATOMIC
 
         [[nodiscard]]
-        Task get_return_object() noexcept  // NOLINT
+        Task get_return_object() noexcept
         {
             return Task{std::coroutine_handle<promise_type>::from_promise(*this)};
         }
 
-        std::suspend_always initial_suspend() noexcept { return {}; }  // NOLINT
+        std::suspend_always initial_suspend() noexcept { return {}; }
 
-        struct FinalAwaiter
+        struct final_awaiter
         {
-            bool await_ready() noexcept { return false; }  // NOLINT
+            bool await_ready() noexcept { return false; }
 
-            std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_type> h) noexcept  // NOLINT
+            std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_type> h) noexcept
             {
-                if (auto continuation = h.promise().continuation)  // NOLINT
-                {
+                // ✅ Load with acquire
+                if (auto continuation = h.promise().continuation_.load(std::memory_order_acquire))
                     return continuation;
-                }
                 return std::noop_coroutine();
             }
 
-            void await_resume() noexcept {}  // NOLINT
+            void await_resume() noexcept {}
         };
 
-        FinalAwaiter final_suspend() noexcept { return {}; }               // NOLINT
-        void unhandled_exception() { result = std::current_exception(); }  // NOLINT
+        final_awaiter final_suspend() noexcept { return {}; }
+        void unhandled_exception() { result_ = std::current_exception(); }
 
-        void return_void() {}  // NOLINT
+        void return_void() {}
     };
 
     [[nodiscard]]
-    bool await_ready() const noexcept  // NOLINT
+    bool await_ready() const noexcept
     {
-        return h.done();
+        return h_.done();
     }
 
-    std::coroutine_handle<> await_suspend(std::coroutine_handle<> awaiting_coroutine) noexcept  // NOLINT
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<> awaiting_coroutine) noexcept
     {
-        h.promise().continuation = awaiting_coroutine;
-        return h;
+        // ✅ Store with release
+        h_.promise().continuation_.store(awaiting_coroutine, std::memory_order_release);
+        return h_;
     }
 
-    // await_resume returns void
-    void await_resume()  // NOLINT
+    void await_resume()
     {
-        if (h.promise().result.index() == 1)
+        if (h_.promise().result_.index() == 1)
         {
-            std::rethrow_exception(std::get<1>(h.promise().result));
+            std::rethrow_exception(std::get<1>(h_.promise().result_));
         }
     }
 };
 
+/**
+ * @brief A task that starts immediately and destroys itself on completion.
+ * Used for fire-and-forget operations like connection handlers.
+ */
 struct DetachedTask
 {
     struct promise_type  // NOLINT
@@ -228,6 +215,7 @@ struct DetachedTask
         std::suspend_never initial_suspend() noexcept { return {}; }  // NOLINT
 
         // Self-destruct on completion
+        // The coroutine frame is destroyed automatically after this returns
         std::suspend_never final_suspend() noexcept { return {}; }  // NOLINT
 
         void return_void() noexcept {}  // NOLINT

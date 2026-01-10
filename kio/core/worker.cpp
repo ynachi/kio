@@ -74,7 +74,8 @@ int Worker::SubmitSqesWait(const uint32_t wait_us)
 }
 
 Worker::Worker(const size_t id, const WorkerConfig& config, std::function<void(Worker&)> worker_init_callback)
-    : config_(config),
+    : op_pool_(1024, config.max_op_slots),
+      config_(config),
       id_(id),
       task_queue_(config.task_queue_capacity),
       worker_init_callback_(std::move(worker_init_callback))
@@ -87,18 +88,18 @@ void Worker::Initialize()
     io_uring_params params{};
     params.flags |= IORING_SETUP_COOP_TASKRUN | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN;
 
-    if (const int kRet = io_uring_queue_init_params(static_cast<int>(config_.uring_queue_depth), &ring_, &params);
-        kRet < 0)
+    if (const int ret = io_uring_queue_init_params(static_cast<int>(config_.uring_queue_depth), &ring_, &params);
+        ret < 0)
     {
-        throw std::system_error(-kRet, std::system_category(), "io_uring_queue_init failed");
+        throw std::system_error(-ret, std::system_category(), "io_uring_queue_init failed");
     }
 
     ALOG_INFO("IO uring initialized with queue size of {}", config_.uring_queue_depth);
 
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
-    const uint kCpu = id_ % std::thread::hardware_concurrency();
-    CPU_SET(kCpu, &cpuset);
+    const uint cpu = id_ % std::thread::hardware_concurrency();
+    CPU_SET(cpu, &cpuset);
 
     if (const int rc = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset); rc != 0)
     {
@@ -106,7 +107,7 @@ void Worker::Initialize()
     }
     else
     {
-        ALOG_INFO("Worker {} pinned to CPU {}", id_, kCpu);
+        ALOG_INFO("Worker {} pinned to CPU {}", id_, cpu);
     }
 
     if (const int ret = io_uring_register_iowq_aff(&ring_, 1, &cpuset); ret < 0)
@@ -115,7 +116,7 @@ void Worker::Initialize()
     }
     else
     {
-        ALOG_INFO("Worker {}: io-wq threads pinned to CPU {}", id_, kCpu);
+        ALOG_INFO("Worker {}: io-wq threads pinned to CPU {}", id_, cpu);
     }
 }
 
@@ -219,8 +220,8 @@ bool Worker::RequestStop()
         return false;
     }
 
-    const auto kStop = stop_source_.request_stop();
-    return kStop;
+    const auto stop = stop_source_.request_stop();
+    return stop;
 }
 
 Worker::~Worker()
@@ -240,21 +241,35 @@ void Worker::Post(std::coroutine_handle<> h)
     if (!task_queue_.TryPush(h))
     {
         ALOG_ERROR("Worker {} task queue is full. Dropping task.", id_);
-        return;
     }
 }
 
 void Worker::HandleCqe(io_uring_cqe* cqe)
 {
-    // The data pointer is now a SafeIoCompletion*
-    auto* completion = static_cast<SafeIoCompletion*>(io_uring_cqe_get_data(cqe));
-    if (completion == nullptr)
+    uint64_t id = cqe->user_data;
+
+    // Retrieve slot safely from pool using ID and generation check
+    auto* slot = op_pool_.Get(id);
+
+    if (slot == nullptr)
     {
+        // Generation mismatch or invalid ID.
+        // This likely means the operation was cancelled, the slot was released,
+        // and reused for a new operation. This stale completion should be ignored.
+        ALOG_DEBUG("Worker ignored stale completion for ID {}", id);
         return;
     }
 
-    // Complete() will check if the user has abandoned the task and handle cleanup
-    completion->Complete(cqe->res);
+    // Set result
+    slot->result = cqe->res;
+
+    // Resume the coroutine.
+    // The coroutine will call await_resume, read the result, and then
+    // OpHandle's destructor will eventually release the slot.
+    if (slot->handle)
+    {
+        slot->handle.resume();
+    }
 }
 
 bool Worker::IsOnWorkerThread() const

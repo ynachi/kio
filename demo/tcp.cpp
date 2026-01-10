@@ -48,43 +48,6 @@ DetachedTask HandleClientHttp(Worker& worker, const int client_fd)
     close(client_fd);
 }
 
-// User defines their application logic as coroutines
-DetachedTask handle_client(Worker& worker, const int client_fd)
-{
-    char buffer[8192];
-    const auto st = worker.GetStopToken();
-
-    while (!st.stop_requested())
-    {
-        // Read from the client - this co_await runs on the worker thread
-        auto n = co_await worker.AsyncRead(client_fd, std::span(buffer, sizeof(buffer)));
-        if (!n.has_value())
-        {
-            ALOG_DEBUG("Read failed: {}", n.error());
-            // in the io_uring world, most of the errors are fatal, so no need to specialize
-            break;
-        }
-
-        if (n == 0)
-        {
-            ALOG_INFO("Client disconnected");
-            break;
-        }
-
-        const size_t read_size = n.value();
-
-        // Write response - this co_await also runs on the worker thread
-
-        if (auto sent = co_await worker.AsyncWrite(client_fd, std::span(buffer, read_size)); !sent.has_value())
-        {
-            ALOG_ERROR("Write failed: {}", sent.error());
-            break;
-        }
-    }
-
-    close(client_fd);
-}
-
 // Accept loop - runs on each worker independently
 DetachedTask accept_loop(Worker& worker)
 {
@@ -117,10 +80,8 @@ DetachedTask accept_loop(Worker& worker)
             continue;
         }
 
-        ALOG_DEBUG("Accepted connection on fd {}", client_fd.value());
-
         // Spawn coroutine to handle this client
-        // Each connection runs independently on this worker
+        // Call .detach() to keep the task alive!
         HandleClientHttp(worker, client_fd.value());
     }
     ALOG_INFO("Worker {} stop accepting connexions", worker.GetId());
@@ -138,8 +99,12 @@ int main()
     config.uring_queue_depth = 16800;
 
     // Create a pool with 4 workers
-    // Each worker will run accept_loop independently
-    IOPool pool(4, config, [](Worker& worker) { accept_loop(worker); });
+    IOPool pool(4, config,
+                [](Worker& worker)
+                {
+                    // Call .detach() to keep the accept loop running!
+                    accept_loop(worker);
+                });
 
     ALOG_INFO("Server running with 4 workers. Press Ctrl+C to stop.");
 
