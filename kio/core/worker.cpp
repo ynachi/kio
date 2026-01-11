@@ -5,6 +5,24 @@
 
 #include "async_logger.h"
 
+// TSan annotations for coroutine handle synchronization.
+// The MPSC queue provides correct release-acquire semantics, but TSan cannot
+// trace happens-before through lock-free queues when synchronizing pointers
+// to external memory (coroutine frames). These annotations explicitly tell
+// TSan about the synchronization on the coroutine frame address.
+#if defined(__SANITIZE_THREAD__) || defined(__has_feature) && __has_feature(thread_sanitizer)
+extern "C"
+{
+void __tsan_acquire(void* addr);
+void __tsan_release(void* addr);
+}
+    #define TSAN_RELEASE(addr) __tsan_release(addr)
+    #define TSAN_ACQUIRE(addr) __tsan_acquire(addr)
+#else
+    #define TSAN_RELEASE(addr) ((void)0)
+    #define TSAN_ACQUIRE(addr) ((void)0)
+#endif
+
 #include <chrono>
 #include <functional>
 #include <utility>
@@ -130,6 +148,9 @@ void Worker::Loop()
         size_t resumed = 0;
         while (resumed < config_.task_batch_size && task_queue_.TryPop(h))
         {
+            // Tell TSan we're acquiring synchronization on the coroutine frame.
+            // This pairs with TSAN_RELEASE in Post() to establish happens-before.
+            TSAN_ACQUIRE(h.address());
             h.resume();
             resumed++;
         }
@@ -238,7 +259,11 @@ Worker::~Worker()
 
 void Worker::Post(std::coroutine_handle<> h)
 {
-    if (!task_queue_.TryPush(h))
+    // Tell TSan that all writes to the coroutine frame happen-before this point.
+    // The MPSC queue's release-acquire provides the actual synchronization,
+    // but TSan needs explicit help to trace through pointer indirection.
+    TSAN_RELEASE(h.address());
+    if (!task_queue_.TryPush(std::move(h)))
     {
         ALOG_ERROR("Worker {} task queue is full. Dropping task.", id_);
     }

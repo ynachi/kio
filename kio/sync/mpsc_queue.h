@@ -1,72 +1,39 @@
-// Created by Yao ACHI on 19/10/2025.
-//
-
-#ifndef KIO_LOCK_FREE_QUEUE_H
-#define KIO_LOCK_FREE_QUEUE_H
+#ifndef LOCK_FREE_QUEUE_H
+#define LOCK_FREE_QUEUE_H
 
 #include <atomic>
 #include <cassert>
-#include <type_traits>
-#include <utility>
+#include <new>  // for std::hardware_destructive_interference_size
+#include <stdexcept>
 #include <vector>
 
 namespace kio
 {
+
+// Use 64 bytes cache line size for alignment to prevent false sharing
+inline constexpr std::size_t kCacheLineSize = 64;
+
 /**
- * @brief A bounded, lock-free, multi-producer, single-consumer (MPSC) queue.
- *
- * Dmitry Vyukov's bounded MPSC queue (sequence per-slot).
- *
- * Supports non-default-constructible and move-only T by using placement-new
- * inside per-cell uninitialized storage.
+ * @brief Bounded Lock-Free Multi-Producer Single-Consumer Queue
+ * * Uses a ring buffer with sequence numbers to ensure thread safety
+ * and correct Acquire-Release memory ordering.
  */
 template <typename T>
 class MPSCQueue
 {
-    static constexpr size_t kCacheLineSize = 64;
-
-    // NOLINTBEGIN(
-    //   misc-non-private-member-variables-in-classes,
-    //   cppcoreguidelines-avoid-c-arrays,
-    //   modernize-avoid-c-arrays,
-    //   cppcoreguidelines-pro-type-reinterpret-cast
-    //   readability-magic-numbers
-    // )
-    struct Cell
+public:
+    explicit MPSCQueue(size_t size) : buffer_(size), mask_(size - 1)
     {
-        std::atomic<size_t> sequence;
-        // Uninitialized storage for T
-        alignas(alignof(T)) unsigned char storage[sizeof(T)]{};
-
-        Cell() noexcept { /* don't construct T */ }
-
-        // Access pointer to T in storage
-        T* DataPtr() noexcept { return reinterpret_cast<T*>(storage); }
-        const T* DataPtr() const noexcept { return reinterpret_cast<const T*>(storage); }
-
-        // Construct T in-place using forwarding args
-        template <typename... Args>
-        void ConstructInPlace(Args&&... args) noexcept(std::is_nothrow_constructible_v<T, Args...>)
+        // Size must be a power of 2
+        if (size == 0 || (size & (size - 1)) != 0)
         {
-            ::new (static_cast<void*>(storage)) T(std::forward<Args>(args)...);
         }
 
-        // Destroy the T in-place
-        void DestroyInPlace() noexcept { DataPtr()->~T(); }
-
-        // Note: we intentionally do not define destructor that destroys T,
-        // because we only want to destroy when we know an object was constructed.
-    };
-    // NOLINTEND
-
-public:
-    explicit MPSCQueue(size_t capacity) : buffer_(capacity), kMask(capacity - 1)
-    {
-        // Capacity must be power of 2
-        assert(capacity > 0 && (capacity & (capacity - 1)) == 0 && "Capacity must be a power of 2");
-
-        // Initialize sequence numbers for each slot (no T construction)
-        for (size_t i = 0; i < capacity; ++i)
+        // Initialize sequence numbers
+        // Initial sequence for slot i is i.
+        // After write: i + 1
+        // After read: i + size + 1 (generations)
+        for (size_t i = 0; i < size; ++i)
         {
             buffer_[i].sequence.store(i, std::memory_order_relaxed);
         }
@@ -75,144 +42,94 @@ public:
         dequeue_pos_.store(0, std::memory_order_relaxed);
     }
 
-    MPSCQueue(const MPSCQueue&) = delete;
-    MPSCQueue& operator=(const MPSCQueue&) = delete;
-    MPSCQueue(MPSCQueue&&) = delete;
-    MPSCQueue& operator=(MPSCQueue&&) = delete;
-
-    ~MPSCQueue()
+    // Producer Thread(s)
+    bool TryPush(T&& data)
     {
-        // Drain any remaining elements using the normal pop mechanism
-        if constexpr (std::is_default_constructible_v<T>)
-        {
-            T item;
-            while (TryPop(item))
-            {
-                // Item is properly moved out and the in-place object is destroyed
-            }
-        }
-        else
-        {
-            // For non-default-constructible types, we need to manually destroy remaining objects
-            const size_t kHead = dequeue_pos_.load(std::memory_order_relaxed);
-            const size_t kTail = enqueue_pos_.load(std::memory_order_relaxed);
-
-            for (size_t i = kHead; i < kTail; ++i)
-            {
-                Cell& cell = buffer_[i & kMask];
-
-                // Check if this cell contains a constructed object
-                if (const size_t kSeq = cell.sequence.load(std::memory_order_relaxed); kSeq == i + 1)
-                {
-                    cell.DestroyInPlace();
-                    // Mark as empty for safety
-                    cell.sequence.store(i + kMask + 1, std::memory_order_relaxed);
-                }
-            }
-        }
-    }
-
-    template <typename U>
-    bool TryPush(U&& u)
-    {
-        Cell* cell{nullptr};
+        Cell* cell;
         size_t pos = enqueue_pos_.load(std::memory_order_relaxed);
 
         for (;;)
         {
-            cell = &buffer_[pos & kMask];
-            const size_t kSeq = cell->sequence.load(std::memory_order_acquire);
+            cell = &buffer_[pos & mask_];
 
-            if (const intptr_t kDiff = static_cast<intptr_t>(kSeq) - static_cast<intptr_t>(pos); kDiff == 0)
+            // ACQUIRE: Ensure we see the slot's state (empty/full) correctly
+            size_t seq = cell->sequence.load(std::memory_order_acquire);
+            intptr_t dif = (intptr_t)seq - (intptr_t)pos;
+
+            if (dif == 0)
             {
-                if (enqueue_pos_.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed,
-                                                       std::memory_order_relaxed))
+                // Slot is empty and matches our position. Try to reserve it.
+                if (enqueue_pos_.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed))
                 {
-                    break;
+                    break;  // Success, we own this slot now
                 }
             }
-            else if (kDiff < 0)
+            else if (dif < 0)
             {
+                // Sequence is behind position, meaning queue is full or wrapped weirdly
                 return false;
             }
             else
             {
+                // Someone else advanced enqueue_pos_, update our view
                 pos = enqueue_pos_.load(std::memory_order_relaxed);
             }
         }
 
-        // Construct directly in cell storage from a forwarded argument
-        cell->ConstructInPlace(std::forward<U>(u));
+        // We own the slot. Write data.
+        cell->data = std::move(data);
 
+        // RELEASE: Commit the data write. Consumer will only see the sequence update
+        // AFTER the data write is visible.
         cell->sequence.store(pos + 1, std::memory_order_release);
         return true;
     }
 
-    /**
-     * try_pop for a single consumer. Moves the contained T into 'item' and destroys the in-place object.
-     */
-    bool TryPop(T& item)
+    // Consumer Thread (Single Consumer)
+    bool TryPop(T& data)
     {
-        Cell* cell{nullptr};
+        Cell* cell;
         size_t pos = dequeue_pos_.load(std::memory_order_relaxed);
 
-        for (;;)
-        {
-            cell = &buffer_[pos & kMask];
-            const size_t kSeq = cell->sequence.load(std::memory_order_acquire);
-            const intptr_t kDiff = static_cast<intptr_t>(kSeq) - static_cast<intptr_t>(pos + 1);
+        cell = &buffer_[pos & mask_];
 
-            if (kDiff == 0)
-            {
-                // This slot has data ready to read
-                // Advance dequeue position (single consumer, relaxed ok)
-                dequeue_pos_.store(pos + 1, std::memory_order_relaxed);
-                break;
-            }
-            if (kDiff < 0)
-            {
-                // slot not yet written -> queue empty
-                return false;
-            }
-            // should not happen normally; refresh
-            pos = dequeue_pos_.load(std::memory_order_relaxed);
+        // ACQUIRE: Ensure we see the data written by producer
+        size_t seq = cell->sequence.load(std::memory_order_acquire);
+        // Logic: If seq == pos + 1, it means producer finished writing (pos -> pos + 1)
+        intptr_t dif = (intptr_t)seq - (intptr_t)(pos + 1);
+
+        if (dif == 0)
+        {
+            // Data is ready.
+            data = std::move(cell->data);
+
+            // Release the slot back to producers.
+            // Move sequence to next generation: pos + 1 -> pos + buffer_mask + 1
+            // RELEASE: Ensure we are done reading before allowing overwrite
+            cell->sequence.store(pos + mask_ + 1, std::memory_order_release);
+
+            dequeue_pos_.store(pos + 1, std::memory_order_relaxed);
+            return true;
         }
 
-        // Move the data out of the cell
-        item = std::move(*cell->DataPtr());
-
-        // Destroy the in-place object now that we've moved it out
-        cell->DestroyInPlace();
-
-        // Mark the slot as available for producers again:
-        cell->sequence.store(pos + kMask + 1, std::memory_order_release);
-
-        return true;
-    }
-
-    [[nodiscard]]
-    size_t Capacity() const noexcept
-    {
-        return kMask + 1;
-    }
-
-    [[nodiscard]]
-    size_t SizeApprox() const noexcept
-    {
-        const size_t kHead = dequeue_pos_.load(std::memory_order_relaxed);
-        const size_t kTail = enqueue_pos_.load(std::memory_order_relaxed);
-        return kTail - kHead;
+        return false;
     }
 
 private:
-    std::vector<Cell> buffer_;
-    const size_t kMask;
+    struct Cell
+    {
+        std::atomic<size_t> sequence;
+        T data;
+    };
 
-    alignas(kCacheLineSize) std::atomic<size_t> dequeue_pos_;
+    std::vector<Cell> buffer_;
+    const size_t mask_;
+
+    // Padding to prevent false sharing between producer and consumer pointers
     alignas(kCacheLineSize) std::atomic<size_t> enqueue_pos_;
+    alignas(kCacheLineSize) std::atomic<size_t> dequeue_pos_;
 };
 
-// NOLINTBEGIN(readability-magic-numbers)
 constexpr size_t NextPowerOf2(size_t n)
 {
     if (n == 0)
@@ -234,4 +151,4 @@ constexpr size_t NextPowerOf2(size_t n)
 }
 }  // namespace kio
 
-#endif  // KIO_LOCK_FREE_QUEUE_H
+#endif  // LOCK_FREE_QUEUE_H

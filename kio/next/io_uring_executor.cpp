@@ -18,7 +18,7 @@ namespace kio::next
 thread_local IoUringExecutor::PerThreadContext* IoUringExecutor::current_context_ = nullptr;
 
 // Special marker for eventfd completions
-constexpr uint64_t EVENTFD_MARKER = 0xFFFFFFFFFFFFFFFFULL;
+static constexpr uint64_t kEventfdMarker = 0xFFFFFFFFFFFFFFFFULL;
 
 IoUringExecutor::IoUringExecutor(const IoUringExecutorConfig& config)
 {
@@ -27,23 +27,19 @@ IoUringExecutor::IoUringExecutor(const IoUringExecutorConfig& config)
         throw std::invalid_argument("num_threads must be > 0");
     }
 
-    // Ensure task queue size is power of 2
-    size_t queue_size = NextPowerOf2(config.task_queue_size);
+    size_t queue_size = config.task_queue_size;
 
-    // Create contexts
     contexts_.reserve(config.num_threads);
     for (size_t i = 0; i < config.num_threads; ++i)
     {
         auto ctx = std::make_unique<PerThreadContext>(i, queue_size);
 
-        // Initialize io_uring
         int ret = io_uring_queue_init(config.io_uring_entries, &ctx->ring, config.io_uring_flags);
         if (ret < 0)
         {
             throw std::system_error(-ret, std::system_category(), "io_uring_queue_init failed");
         }
 
-        // Create eventfd for waking up the thread
         ctx->eventfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
         if (ctx->eventfd < 0)
         {
@@ -53,7 +49,6 @@ IoUringExecutor::IoUringExecutor(const IoUringExecutorConfig& config)
         contexts_.push_back(std::move(ctx));
     }
 
-    // Start worker threads
     threads_.reserve(config.num_threads);
     for (size_t i = 0; i < config.num_threads; ++i)
     {
@@ -130,16 +125,17 @@ bool IoUringExecutor::scheduleOn(size_t context_id, Func&& func)
 
     auto& ctx = *contexts_[context_id];
 
-    // Try to push to the queue
-    if (!ctx.task_queue.TryPush(std::forward<Func>(func)))
+    if (!ctx.task_queue.TryPush(std::move(func)))
     {
-        return false;  // Queue full
+        return false;
     }
 
     ctx.task_count.fetch_add(1, std::memory_order_relaxed);
 
-    // Wake the thread
-    wakeThread(ctx);
+    if (current_context_ != &ctx)
+    {
+        wakeThread(ctx);
+    }
     return true;
 }
 
@@ -147,11 +143,9 @@ bool IoUringExecutor::scheduleLocal(Func&& func)
 {
     if (current_context_)
     {
-        // We're in an executor thread, use the local queue directly
-        return scheduleOn(current_context_->context_id, std::forward<Func>(func));
+        return scheduleOn(current_context_->context_id, std::move(func));
     }
-    // Not in executor, use normal schedule
-    return schedule(std::forward<Func>(func));
+    return schedule(std::move(func));
 }
 
 bool IoUringExecutor::currentThreadInExecutor() const
@@ -164,6 +158,26 @@ size_t IoUringExecutor::currentContextId() const
     return current_context_ ? current_context_->context_id : 0;
 }
 
+IoUringExecutor::Context IoUringExecutor::checkout()
+{
+    return current_context_ ? static_cast<Context>(current_context_) : NULLCTX;
+}
+
+bool IoUringExecutor::checkin(Func func, Context ctx, async_simple::ScheduleOptions)
+{
+    if (ctx == NULLCTX)
+    {
+        return schedule(std::move(func));
+    }
+    auto* pctx = static_cast<PerThreadContext*>(ctx);
+    return scheduleOn(pctx->context_id, std::move(func));
+}
+
+size_t IoUringExecutor::pickContextId()
+{
+    return selectContext().context_id;
+}
+
 void IoUringExecutor::runEventLoop(PerThreadContext* ctx)
 {
     // Register eventfd for wake-ups using multishot poll (if available)
@@ -171,14 +185,17 @@ void IoUringExecutor::runEventLoop(PerThreadContext* ctx)
     if (sqe)
     {
         io_uring_prep_poll_add(sqe, ctx->eventfd, POLLIN);
-        io_uring_sqe_set_data(sqe, reinterpret_cast<void*>(EVENTFD_MARKER));
+        io_uring_sqe_set_data(sqe, reinterpret_cast<void*>(kEventfdMarker));
         io_uring_submit(&ctx->ring);
     }
 
     while (ctx->running.load(std::memory_order_acquire))
     {
         // Process local task queue
-        processLocalQueue(ctx);
+        if (processLocalQueue(ctx))
+        {
+            continue;  // if we processed a full batch, check again immediately
+        }
 
         // Wait for I/O completions (with timeout to periodically check running flag)
         struct __kernel_timespec ts;
@@ -211,11 +228,9 @@ void IoUringExecutor::runEventLoop(PerThreadContext* ctx)
     }
 }
 
-void IoUringExecutor::processLocalQueue(PerThreadContext* ctx)
+bool IoUringExecutor::processLocalQueue(PerThreadContext* ctx)
 {
     Task task;
-
-    // Drain the queue in batches to avoid starvation
     constexpr size_t kMaxBatchSize = 64;
     size_t processed = 0;
 
@@ -235,6 +250,8 @@ void IoUringExecutor::processLocalQueue(PerThreadContext* ctx)
         }
         processed++;
     }
+
+    return processed == kMaxBatchSize;
 }
 
 void IoUringExecutor::wakeThread(PerThreadContext& ctx)
@@ -246,13 +263,7 @@ void IoUringExecutor::wakeThread(PerThreadContext& ctx)
 
 IoUringExecutor::PerThreadContext& IoUringExecutor::selectContext()
 {
-    // If we're already in an executor thread, prefer to use the same thread
-    // if (current_context_)
-    // {
-    //     return *current_context_;
-    // }
-
-    // Round-robin selection
+    // Always round-robin for general scheduling to ensure load balancing
     size_t idx = next_context_.fetch_add(1, std::memory_order_relaxed) % contexts_.size();
     return *contexts_[idx];
 }
@@ -265,20 +276,13 @@ void IoUringExecutor::pinThreadToCpu(size_t thread_id, size_t cpu_id)
 
     if (const int rc = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset); rc != 0)
     {
-        // ALOG_WARN("Worker Failed to set CPU affinity: {}", strerror(rc));
-    }
-    else
-    {
-        // ALOG_INFO("Worker  pinned to CPU {}", cpu_id);
+        std::cerr << "Worker Failed to set CPU affinity: " << strerror(rc) << std::endl;
     }
 
     if (const int ret = io_uring_register_iowq_aff(&current_context_->ring, 1, &cpuset); ret < 0)
     {
-        // ALOG_WARN("Worker : Failed to set io-wq affinity: {}", strerror(-ret));
-    }
-    else
-    {
-        // ALOG_INFO("Worker : io-wq threads pinned to CPU {}", cpu_id);
+        // Warn only, this affects internal workers
+        // std::cerr << "Worker : Failed to set io-wq affinity: " << strerror(-ret) << std::endl;
     }
 }
 
@@ -287,7 +291,7 @@ void IoUringExecutor::handleCompletion(PerThreadContext* ctx, io_uring_cqe* cqe)
     void* user_data = io_uring_cqe_get_data(cqe);
 
     // Check if this is an eventfd notification
-    if (user_data == reinterpret_cast<void*>(EVENTFD_MARKER))
+    if (user_data == reinterpret_cast<void*>(kEventfdMarker))
     {
         // Clear the eventfd
         uint64_t val;
@@ -298,20 +302,20 @@ void IoUringExecutor::handleCompletion(PerThreadContext* ctx, io_uring_cqe* cqe)
         if (sqe)
         {
             io_uring_prep_poll_add(sqe, ctx->eventfd, POLLIN);
-            io_uring_sqe_set_data(sqe, reinterpret_cast<void*>(EVENTFD_MARKER));
+            io_uring_sqe_set_data(sqe, reinterpret_cast<void*>(kEventfdMarker));
             io_uring_submit(&ctx->ring);
         }
         return;
     }
 
     // This is an I/O operation completion
-    // The user_data points to the Awaiter (IoOp) itself.
     if (user_data != nullptr)
     {
-        auto* op = static_cast<IoOp*>(user_data);
-        op->complete(cqe->res);
-        // Note: No 'delete op' here. The op is the Awaiter, which lives
-        // on the coroutine frame.
+        auto* completion = static_cast<IoCompletion*>(user_data);
+        if (completion->complete)
+        {
+            completion->complete(completion->self, cqe->res);
+        }
     }
 }
 }  // namespace kio::next
