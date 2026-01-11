@@ -25,3 +25,6 @@ add_kio_demo(ktls_server_demo ktls_server.cpp)
 add_kio_demo(ktls_client_demo ktls_client.cpp gflags::gflags)
 add_kio_demo(ktls_send_server tls_file_server/file_server.cpp gflags::gflags)
 add_kio_demo(ktls_send_client tls_file_server/file_client.cpp gflags::gflags)
+
+
+add_kio_demo(tcp_demo_next tcp_next.cpp)

@@ -14,6 +14,15 @@ set(core_runtime_headers
         core/chunked_buffer.h
 )
 
+set(core_next_runtime_headers
+        next/io_uring_executor.h
+        next/io_awaiters.h
+)
+
+set(core_next_runtime_sources
+        next/io_uring_executor.cpp
+)
+
 set(core_runtime_sources
         core/worker.cpp
         core/worker_pool.cpp
@@ -104,6 +113,8 @@ set(resp_sources
 add_library(kio_lib
         ${core_runtime_headers}
         ${core_runtime_sources}
+        ${core_next_runtime_headers}
+        ${core_next_runtime_sources}
         ${sync_headers}
         ${fs_headers}
         ${fs_sources}
@@ -117,7 +128,7 @@ add_library(kio_lib
         ${resp_sources}
 )
 
-target_link_libraries(kio_lib PRIVATE
+target_link_libraries(kio_lib PUBLIC
         PkgConfig::LibUring
         yalantinglibs::yalantinglibs
         OpenSSL::SSL
