@@ -215,9 +215,10 @@ int main()
         // Create executor
         next::IoUringExecutorConfig config;
         // config.num_threads = std::thread::hardware_concurrency();
-        config.num_threads = 8;
+        config.num_threads = 16;
         config.io_uring_entries = 16800;
         config.task_queue_size = 16800;
+        config.pin_threads = true;
         // config.io_uring_flags = IORING_SETUP_SQPOLL;
 
         next::IoUringExecutor executor(config);

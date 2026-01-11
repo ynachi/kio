@@ -43,6 +43,13 @@ struct IoUringExecutorConfig
      */
     uint32_t io_uring_flags = 0;  // e.g., IORING_SETUP_SQPOLL, IORING_SETUP_IOPOLL
     size_t task_queue_size = 1024;
+    /**
+     * @brief Pin threads to CPU cores
+     * Set to true to prevent OS from migrating threads.
+     * * CRITICAL: If you see "Half R / Half S" thread states (e.g. 4R + 4S on 8 cores),
+     * it means the OS is avoiding Hyperthreads. Enable this to force
+     * distribution across all logical cores.
+     */
     bool pin_threads = false;  // Pin threads to specific CPUs
 };
 

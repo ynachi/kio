@@ -3,6 +3,8 @@
 //
 #include "io_uring_executor.h"
 
+#include "kio/core/async_logger.h"
+
 #include <iostream>
 #include <stdexcept>
 
@@ -261,10 +263,22 @@ void IoUringExecutor::pinThreadToCpu(size_t thread_id, size_t cpu_id)
     CPU_ZERO(&cpuset);
     CPU_SET(cpu_id, &cpuset);
 
-    int ret = pthread_setaffinity_np(threads_[thread_id].native_handle(), sizeof(cpu_set_t), &cpuset);
-    if (ret != 0)
+    if (const int rc = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset); rc != 0)
     {
-        std::cerr << "Warning: Failed to pin thread " << thread_id << " to CPU " << cpu_id << std::endl;
+        // ALOG_WARN("Worker Failed to set CPU affinity: {}", strerror(rc));
+    }
+    else
+    {
+        // ALOG_INFO("Worker  pinned to CPU {}", cpu_id);
+    }
+
+    if (const int ret = io_uring_register_iowq_aff(&current_context_->ring, 1, &cpuset); ret < 0)
+    {
+        // ALOG_WARN("Worker : Failed to set io-wq affinity: {}", strerror(-ret));
+    }
+    else
+    {
+        // ALOG_INFO("Worker : io-wq threads pinned to CPU {}", cpu_id);
     }
 }
 
