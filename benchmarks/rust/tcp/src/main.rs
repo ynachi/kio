@@ -52,7 +52,7 @@ async fn accept_loop(listener: TcpListener) -> io::Result<()> {
 }
 
 // Hardcoded for a 4-core vs 4-core test
-#[tokio::main(flavor = "multi_thread", worker_threads = 8)]
+#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> io::Result<()> {
 
     let addr: SocketAddr = "0.0.0.0:8080".parse().expect("Invalid address");

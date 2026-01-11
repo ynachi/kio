@@ -12,12 +12,12 @@ DEFINE_uint64(backlog, 4096, "Listen backlog");
 DEFINE_uint64(buf_size, 8192, "Buffer size for reading");
 
 static constexpr std::string_view HTTP_RESPONSE =
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/plain\r\n"
-        "Content-Length: 13\r\n"
-        "Connection: keep-alive\r\n"
-        "\r\n"
-        "Hello, World!";
+    "HTTP/1.1 200 OK\r\n"
+    "Content-Type: text/plain\r\n"
+    "Content-Length: 13\r\n"
+    "Connection: keep-alive\r\n"
+    "\r\n"
+    "Hello, World!";
 
 void handle_connection(photon::net::ISocketStream* stream)
 {
@@ -71,7 +71,8 @@ int main(int argc, char** argv)
     }
     DEFER(photon::fini());
 
-    if (auto ret = photon_std::work_pool_init(FLAGS_workers, photon::INIT_EVENT_IOURING, photon::INIT_IO_NONE); ret != 0)
+    if (auto ret = photon_std::work_pool_init(FLAGS_workers, photon::INIT_EVENT_IOURING, photon::INIT_IO_NONE);
+        ret != 0)
     {
         LOG_FATAL("Work-pool init failed");
         abort();
@@ -104,7 +105,7 @@ int main(int argc, char** argv)
     photon::WorkPool wp(FLAGS_workers, photon::INIT_EVENT_IOURING, photon::INIT_IO_NONE, 128 * 1024);
     while (true)
     {
-        auto stream = server->accept();
+        auto* stream = server->accept();
         if (stream == nullptr)
         {
             LOG_ERRNO_RETURN(0, -1, "failed to accept connection");

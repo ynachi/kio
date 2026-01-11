@@ -9,42 +9,41 @@
 
 namespace kio
 {
-    std::string PrometheusTextSerializer::Serialize(const MetricSnapshot& snapshot)
+std::string PrometheusTextSerializer::Serialize(const MetricSnapshot& snapshot)
+{
+    std::ostringstream ss;
+    for (const auto& family: snapshot.GetFamilies())
     {
-        std::ostringstream ss;
-        for (const auto& family: snapshot.GetFamilies())
+        ss << "# HELP " << family.name << " " << family.help << "\n";
+        ss << "# TYPE " << family.name << " " << ToString(family.type) << "\n";
+
+        for (const auto& sample: family.samples)
         {
-            ss << "# HELP " << family.name << " " << family.help << "\n";
-            ss << "# TYPE " << family.name << " " << ToString(family.type) << "\n";
-
-            for (const auto& sample: family.samples)
+            ss << family.name;
+            if (!sample.labels.empty())
             {
-                ss << family.name;
-                if (!sample.labels.empty())
+                ss << "{";
+                bool first = true;
+                for (const auto& pair: sample.labels)
                 {
-                    ss << "{";
-                    bool first = true;
-                    for (const auto& pair: sample.labels)
-                    {
-                        if (!first) ss << ",";
-                        ss << SanitizeLabelKey(pair.first) << "=\"" << SanitizeLabelValue(pair.second) << "\"";
-                        first = false;
-                    }
-                    ss << "}";
+                    if (!first) ss << ",";
+                    ss << SanitizeLabelKey(pair.first) << "=\"" << SanitizeLabelValue(pair.second) << "\"";
+                    first = false;
                 }
-                ss << " " << sample.value << "\n";
+                ss << "}";
             }
-            // Extra newline between families
-            ss << "\n";
+            ss << " " << sample.value << "\n";
         }
-        return ss.str();
+        // Extra newline between families
+        ss << "\n";
     }
+    return ss.str();
+}
 
-    std::string PrometheusJsonMetricSerializer::Serialize(const MetricSnapshot& snapshot)
-    {
-        return "";
-        // TODO
-    }
-
+std::string PrometheusJsonMetricSerializer::Serialize(const MetricSnapshot& snapshot)
+{
+    return "";
+    // TODO
+}
 
 }  // namespace kio

@@ -2,9 +2,25 @@
 # Test Helper
 # ============================================================================
 
+# Ensure CMAKE_RUNTIME_OUTPUT_DIRECTORY is set to avoid CMP0174 warning
+if (NOT DEFINED CMAKE_RUNTIME_OUTPUT_DIRECTORY OR CMAKE_RUNTIME_OUTPUT_DIRECTORY STREQUAL "")
+    set(TEST_WORKING_DIR ${CMAKE_CURRENT_BINARY_DIR})
+else ()
+    set(TEST_WORKING_DIR ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})
+endif ()
+
 # Helper function to create test targets
-function(add_kio_test test_name source_file)
-    add_executable(${test_name} ${source_file})
+# Usage:
+#   add_kio_test(test_name source_file1 [source_file2 ...])
+function(add_kio_test test_name)
+    # All arguments after test_name are source files
+    set(source_files ${ARGN})
+
+    if (NOT source_files)
+        message(FATAL_ERROR "add_kio_test: No source files specified for test ${test_name}")
+    endif ()
+
+    add_executable(${test_name} ${source_files})
 
     # Link required libraries
     target_link_libraries(${test_name} PRIVATE
@@ -35,9 +51,11 @@ function(add_kio_test test_name source_file)
             LABELS "integration"
     )
 
+    kio_add_sanitizers(${test_name})
+
     # GTest automatic test discovery
     gtest_discover_tests(${test_name}
-            WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}
+            WORKING_DIRECTORY ${TEST_WORKING_DIR}
             PROPERTIES
             TIMEOUT 600
             LABELS "integration"
@@ -47,6 +65,20 @@ endfunction()
 # ============================================================================
 # Define unit Tests
 # ============================================================================
-add_kio_test(basic_resp_parser
+add_kio_test(kio_worker_test worker_test.cpp)
+add_kio_test(filemanager_test filemanager_test.cpp)
+add_kio_test(sync_wait_test sync_wait_test.cpp)
+add_kio_test(kio_logger_test kio_logger_test.cpp)
+add_kio_test(sync_tests sync/baton_test.cpp)
+add_kio_test(lock_free_free_queue ds/mpsc_queue_test.cpp)
+add_kio_test(bytes_mut_tests ds/bytes_mut_test.cpp)
+
+add_kio_test(resp_tests
         ${CMAKE_CURRENT_SOURCE_DIR}/resp/parser_test.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/resp/writer_test.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/resp/integration_test.cpp
+)
+
+add_kio_test(chunked_buffer_basic
+        ${CMAKE_CURRENT_SOURCE_DIR}/chunked_buffer_test.cpp
 )
