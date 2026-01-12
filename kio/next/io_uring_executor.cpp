@@ -42,11 +42,19 @@ IoUringExecutor::IoUringExecutor(const IoUringExecutorConfig& config)
             throw std::system_error(-ret, std::system_category(), "io_uring_queue_init failed");
         }
 
-        // Create eventfd for waking up the thread
-        ctx->eventfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+        // Create eventfd for waking up the thread, blocking
+        ctx->eventfd = eventfd(0, 0);
         if (ctx->eventfd < 0)
         {
             throw std::system_error(errno, std::system_category(), "eventfd creation failed");
+        }
+
+        // Associate completions with the eventfd.  Now every CQE
+        // will cause the kernel to write to ctx->eventfd.
+        ret = io_uring_register_eventfd(&ctx->ring, ctx->eventfd);
+        if (ret < 0)
+        {
+            throw std::system_error(-ret, std::system_category(), "io_uring_register_eventfd failed");
         }
 
         contexts_.push_back(std::move(ctx));
@@ -192,16 +200,17 @@ size_t IoUringExecutor::pickContextId()
 
 void IoUringExecutor::runEventLoop(PerThreadContext* ctx)
 {
-    // Register eventfd for wake-ups using a multishot poll
-    if (io_uring_sqe* sqe = io_uring_get_sqe(&ctx->ring))
-    {
-        io_uring_prep_poll_multishot(sqe, ctx->eventfd, POLLIN);
-        io_uring_sqe_set_data(sqe, reinterpret_cast<void*>(EVENTFD_MARKER));
-        io_uring_submit(&ctx->ring);
-    }
-
     while (ctx->running.load(std::memory_order_acquire))
     {
+        // Block until either a task was enqueued (write(eventfd))
+        // or the kernel posted a completion
+        eventfd_t count;
+        int r = eventfd_read(ctx->eventfd, &count);
+        if (r < 0 && errno != EINTR)
+        {
+            continue;  // EAGAIN can't happen with a blocking eventfd
+        }
+
         // Process the local task queue
         processLocalQueue(ctx);
 
