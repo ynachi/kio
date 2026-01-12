@@ -4,14 +4,15 @@
 #include "io_uring_executor.h"
 
 #include "kio/core/async_logger.h"
-#include "kio/third_party/concurrentqueue.h"
 
-#include <iostream>
+#include <format>
 #include <stdexcept>
 
 #include <pthread.h>
 
 #include <sys/poll.h>
+
+#include <ylt/easylog.hpp>
 
 namespace kio::next
 {
@@ -27,9 +28,6 @@ IoUringExecutor::IoUringExecutor(const IoUringExecutorConfig& config)
     {
         throw std::invalid_argument("num_threads must be > 0");
     }
-
-    // Ensure task queue size is power of 2
-    size_t queue_size = NextPowerOf2(config.task_queue_size);
 
     // Create contexts
     contexts_.reserve(config.num_threads);
@@ -141,12 +139,10 @@ bool IoUringExecutor::scheduleOn(size_t context_id, Func&& func)
     auto& ctx = *contexts_[context_id];
 
     // Try to push to the queue
-    if (!ctx.task_queue.enqueue(func))
+    if (!ctx.task_queue.enqueue(std::move(func)))
     {
         return false;  // Queue full
     }
-
-    ctx.task_count.fetch_add(1, std::memory_order_relaxed);
 
     // Wake the thread
     wakeThread(ctx);
@@ -196,9 +192,8 @@ size_t IoUringExecutor::pickContextId()
 
 void IoUringExecutor::runEventLoop(PerThreadContext* ctx)
 {
-    // Register eventfd for wake-ups using multishot poll (if available)
-    io_uring_sqe* sqe = io_uring_get_sqe(&ctx->ring);
-    if (sqe)
+    // Register eventfd for wake-ups using a multishot poll
+    if (io_uring_sqe* sqe = io_uring_get_sqe(&ctx->ring))
     {
         io_uring_prep_poll_multishot(sqe, ctx->eventfd, POLLIN);
         io_uring_sqe_set_data(sqe, reinterpret_cast<void*>(EVENTFD_MARKER));
@@ -207,10 +202,13 @@ void IoUringExecutor::runEventLoop(PerThreadContext* ctx)
 
     while (ctx->running.load(std::memory_order_acquire))
     {
-        // Process local task queue
+        // Process the local task queue
         processLocalQueue(ctx);
 
-        io_uring_submit(&ctx->ring);
+        if (const auto ret = io_uring_submit(&ctx->ring); ret < 0)
+        {
+            ELOGFMT(ERROR, "io_uring_submit failed: {}", strerror(-ret))
+        }
 
         io_uring_cqe* cqe;
         int ret = io_uring_wait_cqe(&ctx->ring, &cqe);
@@ -219,6 +217,11 @@ void IoUringExecutor::runEventLoop(PerThreadContext* ctx)
         {
             // Timeout, just loop again
             continue;
+        }
+
+        if (ret < 0)
+        {
+            ELOGFMT(ERROR, "io_uring_wait_cqe failed: {}", strerror(-ret))
         }
 
         if (ret == 0)
@@ -254,11 +257,11 @@ void IoUringExecutor::processLocalQueue(PerThreadContext* ctx)
         }
         catch (const std::exception& e)
         {
-            std::cerr << "Exception in task: " << e.what() << std::endl;
+            ELOGFMT(ERROR, "Exception in task: {}", e.what())
         }
         catch (...)
         {
-            std::cerr << "Unknown exception in task" << std::endl;
+            ELOGFMT(ERROR, "Unknown exception in task")
         }
         processed++;
     }
@@ -273,12 +276,6 @@ void IoUringExecutor::wakeThread(PerThreadContext& ctx)
 
 IoUringExecutor::PerThreadContext& IoUringExecutor::selectContext()
 {
-    // If we're already in an executor thread, prefer to use the same thread
-    // if (current_context_)
-    // {
-    //     return *current_context_;
-    // }
-
     // Round-robin selection
     size_t idx = next_context_.fetch_add(1, std::memory_order_relaxed) % contexts_.size();
     return *contexts_[idx];
@@ -292,20 +289,13 @@ void IoUringExecutor::pinThreadToCpu(size_t thread_id, size_t cpu_id)
 
     if (const int rc = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset); rc != 0)
     {
-        // ALOG_WARN("Worker Failed to set CPU affinity: {}", strerror(rc));
-    }
-    else
-    {
-        // ALOG_INFO("Worker  pinned to CPU {}", cpu_id);
+        ELOGFMT(WARNING, "Worker {}: Failed to set CPU affinity: {}", thread_id, strerror(rc))
     }
 
     if (const int ret = io_uring_register_iowq_aff(&current_context_->ring, 1, &cpuset); ret < 0)
     {
+        ELOGFMT(WARNING, "Worker {}: Failed to set io-wq affinity: {}", thread_id, strerror(-ret))
         // ALOG_WARN("Worker : Failed to set io-wq affinity: {}", strerror(-ret));
-    }
-    else
-    {
-        // ALOG_INFO("Worker : io-wq threads pinned to CPU {}", cpu_id);
     }
 }
 
@@ -320,14 +310,6 @@ void IoUringExecutor::handleCompletion(PerThreadContext* ctx, io_uring_cqe* cqe)
         uint64_t val;
         [[maybe_unused]] ssize_t _ = read(ctx->eventfd, &val, sizeof(val));
 
-        // Re-arm the eventfd poll
-        // io_uring_sqe* sqe = io_uring_get_sqe(&ctx->ring);
-        // if (sqe)
-        // {
-        //     io_uring_prep_poll_add(sqe, ctx->eventfd, POLLIN);
-        //     io_uring_sqe_set_data(sqe, reinterpret_cast<void*>(EVENTFD_MARKER));
-        //     io_uring_submit(&ctx->ring);
-        // }
         return;
     }
 

@@ -134,6 +134,7 @@ target_link_libraries(kio_lib PUBLIC
         OpenSSL::SSL
         OpenSSL::Crypto
         crc32c
+        stdc++exp
 )
 
 kio_target_compile_options(kio_lib)

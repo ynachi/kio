@@ -29,6 +29,7 @@ function(kio_add_sanitizers target_name)
     if (CMAKE_BUILD_TYPE STREQUAL "Debug")
         target_compile_options(${target_name} PRIVATE -fsanitize=thread -g)
         target_link_options(${target_name} PRIVATE -fsanitize=thread)
+        target_compile_definitions(${target_name} PRIVATE MOODYCAMEL_NO_TSAN)
     endif ()
 endfunction()
 

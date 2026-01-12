@@ -6,13 +6,11 @@
 #define KIO_CORE_URING_EXECUTOR_H
 
 #include "kio/sync/mpsc_queue.h"
-#include "kio/third_party/concurrentqueue.h"
 
 #include <atomic>
 #include <coroutine>
 #include <functional>
 #include <memory>
-#include <span>
 #include <thread>
 #include <vector>
 
@@ -22,7 +20,7 @@
 #include <sys/eventfd.h>
 
 #include <async_simple/Executor.h>
-#include <async_simple/IOExecutor.h>
+#include <ylt/util/concurrentqueue.h>
 
 namespace kio::next
 {
@@ -43,7 +41,6 @@ struct IoUringExecutorConfig
      * - IORING_SETUP_SQPOLL: Kernel thread polling (burns CPU, lowest latency).
      */
     uint32_t io_uring_flags = 0;  // e.g., IORING_SETUP_SQPOLL, IORING_SETUP_IOPOLL
-    size_t task_queue_size = 1024;
     /**
      * @brief Pin threads to CPU cores
      * Set to true to prevent OS from migrating threads.
@@ -103,14 +100,15 @@ private:
     struct PerThreadContext
     {
         io_uring ring{};
-        moodycamel::ConcurrentQueue<Task> task_queue;
+        // YLT also uses moodycamel queue so lets use it
+        ylt::detail::moodycamel::ConcurrentQueue<Task> task_queue;
         int eventfd;
         std::thread::id thread_id;
         size_t context_id;
         std::atomic<bool> running{true};
 
         // For round-robin selection
-        std::atomic<size_t> task_count{0};
+        // std::atomic<size_t> task_count{0};
 
         explicit PerThreadContext(const size_t id) : eventfd(-1), context_id(id) {}
 
@@ -184,7 +182,6 @@ public:
 
         prepare_func_(sqe);
         io_uring_sqe_set_data(sqe, static_cast<IoOp*>(this));
-        // io_uring_submit(ring);
         return true;  // Suspend normally
     }
 
@@ -199,7 +196,7 @@ public:
     }
 
     // IoOp interface implementation
-    void complete(int res) override
+    void complete(const int res) override
     {
         result_ = res;
         // Optimization: Direct resumption on the executor thread.
@@ -225,7 +222,7 @@ private:
 template <typename ResultType, typename PrepareFunc>
 auto make_io_awaiter(IoUringExecutor* executor, PrepareFunc&& prepare_func)
 {
-    // Use the current context if in executor, otherwise pick default (0)
+    // Use the current context if in executor, otherwise pick the next in round-robin fasion
     size_t ctx_id = executor->currentThreadInExecutor() ? executor->currentContextId() : executor->pickContextId();
 
     // We use std::decay_t to store the lambda type directly in the class

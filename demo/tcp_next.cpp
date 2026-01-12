@@ -153,29 +153,24 @@ Lazy<> acceptLoop(next::IoUringExecutor* executor, int listen_fd)
         inet_ntop(AF_INET, &client_addr.sin_addr, addr_str, sizeof(addr_str));
         std::string client_addr_str = std::string(addr_str) + ":" + std::to_string(ntohs(client_addr.sin_port));
 
-        // Schedule the client handler on the executor.
-        // This distributes the load round-robin across threads initially.
-        // Subsequent IO will "stick" to the assigned thread.
-        // TODO: this actually distribute load
-        // executor->schedule([executor, client_fd, client_addr_str]()
-        //                    { handleClientHttp(executor, client_fd, client_addr_str).start([](auto&&) {}); });
+        // 1) Schedule a lambda that starts the coroutine on whichever worker `schedule` picks.
+        // TODO: Only 1 CPU used here, why ?
+        // executor->schedule([executor, client_fd]() { handleClientHttp(executor, client_fd).start([](auto&&) {}); });
 
-        // handleClientHttp(executor, client_fd, client_addr_str).via(executor).start([](auto&&) {});
+        // 2) Use via() to attach the coroutine to the executor and start it outside the pool.
+        // TODO: Only 1 CPU used here, why ?
+        handleClientHttp(executor, client_fd).via(executor).start([](auto&&) {});
 
+        // 3) Use scheduleOn() to choose a specific worker and then start the coroutine.
+        // TODO: only this actually use all the CPUs
         size_t target_ctx = next_ctx++ % num_cpus;
-        executor->scheduleOn(target_ctx, [executor, client_fd, client_addr_str]()
-                             { handleClientHttp(executor, client_fd).start([](auto&&) {}); });
+        executor->scheduleOn(target_ctx,
+                             [executor, client_fd]() { handleClientHttp(executor, client_fd).start([](auto&&) {}); });
 
-        // Schedule the client handler on the executor.
-        //  TODO: when I do this, only one CPU is used, why ?
+        // 4) Directly call start() on the Lazy without any scheduling.
+        // Don’t call start() on a Lazy from outside the executor without via(); the coroutine will initially run on
+        // your current thread and only switch to a worker after an await, leading to under‑utilisation.
         // handleClientHttp(executor, client_fd, client_addr_str).start([](auto&&) {});
-        // executor->schedule(
-        //     [executor, client_fd, client_addr_str]()
-        //     {
-        //         // SWITCH HERE: Use handleClientHttp for benchmarking
-        //         // handleClient(executor, client_fd, client_addr_str).start([](auto&&) {});
-        //         handleClientHttp(executor, client_fd, client_addr_str).start([](auto&&) {});
-        //     });
     }
 }
 
@@ -225,11 +220,8 @@ int main()
         // config.num_threads = std::thread::hardware_concurrency();
         config.num_threads = 4;
         config.io_uring_entries = 16800;
-        config.task_queue_size = 16800;
         config.pin_threads = true;
-        // config.io_uring_flags = IORING_SETUP_SINGLE_ISSUER |
-        //                 IORING_SETUP_DEFER_TASKRUN |
-        //                 IORING_SETUP_COOP_TASKRUN;
+        // config.io_uring_flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_COOP_TASKRUN;
         // config.io_uring_flags = IORING_SETUP_SQPOLL;
 
         next::IoUringExecutor executor(config);
