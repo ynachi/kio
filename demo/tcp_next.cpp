@@ -74,7 +74,7 @@ Lazy<> handleClient(next::IoUringExecutor* executor, int client_fd, const std::s
  * @brief HTTP Handler for Benchmarking
  * Responds with a fixed "Hello World" to any request.
  */
-Lazy<void> handleClientHttp(next::IoUringExecutor* executor, int client_fd, std::string client_addr)
+Lazy<void> handleClientHttp(next::IoUringExecutor* executor, int client_fd)
 {
     // Optimization: Disable logging for high-throughput benchmarks
     // std::cout << "Client connected: " << client_addr << std::endl;
@@ -130,7 +130,7 @@ Lazy<void> handleClientHttp(next::IoUringExecutor* executor, int client_fd, std:
  */
 Lazy<> acceptLoop(next::IoUringExecutor* executor, int listen_fd)
 {
-    size_t current_cpu = 0;
+    size_t next_ctx = 0;
     const size_t num_cpus = executor->numThreads();
 
     while (true)
@@ -156,18 +156,26 @@ Lazy<> acceptLoop(next::IoUringExecutor* executor, int listen_fd)
         // Schedule the client handler on the executor.
         // This distributes the load round-robin across threads initially.
         // Subsequent IO will "stick" to the assigned thread.
+        // TODO: this actually distribute load
         // executor->schedule([executor, client_fd, client_addr_str]()
         //                    { handleClientHttp(executor, client_fd, client_addr_str).start([](auto&&) {}); });
 
+        // handleClientHttp(executor, client_fd, client_addr_str).via(executor).start([](auto&&) {});
+
+        size_t target_ctx = next_ctx++ % num_cpus;
+        executor->scheduleOn(target_ctx, [executor, client_fd, client_addr_str]()
+                             { handleClientHttp(executor, client_fd).start([](auto&&) {}); });
+
         // Schedule the client handler on the executor.
-        // We use scheduleOn to explicitly distribute the load across threads (Round-Robin).
-        executor->schedule(
-            [executor, client_fd, client_addr_str]()
-            {
-                // SWITCH HERE: Use handleClientHttp for benchmarking
-                // handleClient(executor, client_fd, client_addr_str).start([](auto&&) {});
-                handleClientHttp(executor, client_fd, client_addr_str).start([](auto&&) {});
-            });
+        //  TODO: when I do this, only one CPU is used, why ?
+        // handleClientHttp(executor, client_fd, client_addr_str).start([](auto&&) {});
+        // executor->schedule(
+        //     [executor, client_fd, client_addr_str]()
+        //     {
+        //         // SWITCH HERE: Use handleClientHttp for benchmarking
+        //         // handleClient(executor, client_fd, client_addr_str).start([](auto&&) {});
+        //         handleClientHttp(executor, client_fd, client_addr_str).start([](auto&&) {});
+        //     });
     }
 }
 
@@ -215,10 +223,13 @@ int main()
         // Create executor
         next::IoUringExecutorConfig config;
         // config.num_threads = std::thread::hardware_concurrency();
-        config.num_threads = 16;
+        config.num_threads = 4;
         config.io_uring_entries = 16800;
         config.task_queue_size = 16800;
         config.pin_threads = true;
+        // config.io_uring_flags = IORING_SETUP_SINGLE_ISSUER |
+        //                 IORING_SETUP_DEFER_TASKRUN |
+        //                 IORING_SETUP_COOP_TASKRUN;
         // config.io_uring_flags = IORING_SETUP_SQPOLL;
 
         next::IoUringExecutor executor(config);

@@ -4,6 +4,7 @@
 #include "io_uring_executor.h"
 
 #include "kio/core/async_logger.h"
+#include "kio/third_party/concurrentqueue.h"
 
 #include <iostream>
 #include <stdexcept>
@@ -34,7 +35,7 @@ IoUringExecutor::IoUringExecutor(const IoUringExecutorConfig& config)
     contexts_.reserve(config.num_threads);
     for (size_t i = 0; i < config.num_threads; ++i)
     {
-        auto ctx = std::make_unique<PerThreadContext>(i, queue_size);
+        auto ctx = std::make_unique<PerThreadContext>(i);
 
         // Initialize io_uring
         int ret = io_uring_queue_init(config.io_uring_entries, &ctx->ring, config.io_uring_flags);
@@ -117,6 +118,15 @@ bool IoUringExecutor::schedule(Func func)
         return false;
     }
 
+    // IMPORTANT:
+    // async_simple::Lazy::via() will call executor->schedule() from inside worker threads.
+    // If we round-robin here, a continuation can run on another worker and destroy helper
+    // coroutine frames concurrently -> TSAN races in ViaCoroutine / std::function.
+    if (current_context_ != nullptr)
+    {
+        return scheduleOn(current_context_->context_id, std::move(func));
+    }
+
     auto& ctx = selectContext();
     return scheduleOn(ctx.context_id, std::move(func));
 }
@@ -131,7 +141,7 @@ bool IoUringExecutor::scheduleOn(size_t context_id, Func&& func)
     auto& ctx = *contexts_[context_id];
 
     // Try to push to the queue
-    if (!ctx.task_queue.TryPush(std::forward<Func>(func)))
+    if (!ctx.task_queue.enqueue(func))
     {
         return false;  // Queue full
     }
@@ -164,13 +174,33 @@ size_t IoUringExecutor::currentContextId() const
     return current_context_ ? current_context_->context_id : 0;
 }
 
+IoUringExecutor::Context IoUringExecutor::checkout()
+{
+    return current_context_ ? static_cast<Context>(current_context_) : NULLCTX;
+}
+
+bool IoUringExecutor::checkin(Func func, Context ctx, async_simple::ScheduleOptions)
+{
+    if (ctx == NULLCTX)
+    {
+        return schedule(std::move(func));
+    }
+    auto* pctx = static_cast<PerThreadContext*>(ctx);
+    return scheduleOn(pctx->context_id, std::move(func));
+}
+
+size_t IoUringExecutor::pickContextId()
+{
+    return selectContext().context_id;
+}
+
 void IoUringExecutor::runEventLoop(PerThreadContext* ctx)
 {
     // Register eventfd for wake-ups using multishot poll (if available)
     io_uring_sqe* sqe = io_uring_get_sqe(&ctx->ring);
     if (sqe)
     {
-        io_uring_prep_poll_add(sqe, ctx->eventfd, POLLIN);
+        io_uring_prep_poll_multishot(sqe, ctx->eventfd, POLLIN);
         io_uring_sqe_set_data(sqe, reinterpret_cast<void*>(EVENTFD_MARKER));
         io_uring_submit(&ctx->ring);
     }
@@ -180,13 +210,10 @@ void IoUringExecutor::runEventLoop(PerThreadContext* ctx)
         // Process local task queue
         processLocalQueue(ctx);
 
-        // Wait for I/O completions (with timeout to periodically check running flag)
-        struct __kernel_timespec ts;
-        ts.tv_sec = 0;
-        ts.tv_nsec = 100000000;  // 100ms
+        io_uring_submit(&ctx->ring);
 
         io_uring_cqe* cqe;
-        int ret = io_uring_wait_cqe_timeout(&ctx->ring, &cqe, &ts);
+        int ret = io_uring_wait_cqe(&ctx->ring, &cqe);
 
         if (ret == -ETIME)
         {
@@ -219,7 +246,7 @@ void IoUringExecutor::processLocalQueue(PerThreadContext* ctx)
     constexpr size_t kMaxBatchSize = 64;
     size_t processed = 0;
 
-    while (processed < kMaxBatchSize && ctx->task_queue.TryPop(task))
+    while (processed < kMaxBatchSize && ctx->task_queue.try_dequeue(task))
     {
         try
         {
@@ -294,13 +321,13 @@ void IoUringExecutor::handleCompletion(PerThreadContext* ctx, io_uring_cqe* cqe)
         [[maybe_unused]] ssize_t _ = read(ctx->eventfd, &val, sizeof(val));
 
         // Re-arm the eventfd poll
-        io_uring_sqe* sqe = io_uring_get_sqe(&ctx->ring);
-        if (sqe)
-        {
-            io_uring_prep_poll_add(sqe, ctx->eventfd, POLLIN);
-            io_uring_sqe_set_data(sqe, reinterpret_cast<void*>(EVENTFD_MARKER));
-            io_uring_submit(&ctx->ring);
-        }
+        // io_uring_sqe* sqe = io_uring_get_sqe(&ctx->ring);
+        // if (sqe)
+        // {
+        //     io_uring_prep_poll_add(sqe, ctx->eventfd, POLLIN);
+        //     io_uring_sqe_set_data(sqe, reinterpret_cast<void*>(EVENTFD_MARKER));
+        //     io_uring_submit(&ctx->ring);
+        // }
         return;
     }
 

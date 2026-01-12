@@ -144,6 +144,9 @@ public:
         // Construct directly in cell storage from a forwarded argument
         cell->ConstructInPlace(std::forward<U>(u));
 
+        // Ensure construction is visible before marking cell as full
+        std::atomic_thread_fence(std::memory_order_release);  // ✅ Add this
+
         cell->sequence.store(pos + 1, std::memory_order_release);
         return true;
     }
@@ -181,6 +184,7 @@ public:
         // Move the data out of the cell
         item = std::move(*cell->DataPtr());
 
+        std::atomic_thread_fence(std::memory_order_acquire);
         // Destroy the in-place object now that we've moved it out
         cell->DestroyInPlace();
 

@@ -6,6 +6,7 @@
 #define KIO_CORE_URING_EXECUTOR_H
 
 #include "kio/sync/mpsc_queue.h"
+#include "kio/third_party/concurrentqueue.h"
 
 #include <atomic>
 #include <coroutine>
@@ -82,10 +83,14 @@ public:
     bool schedule(Func func) override;
     [[nodiscard]] bool currentThreadInExecutor() const override;
     [[nodiscard]] size_t currentContextId() const override;
+    Context checkout() override;
+    bool checkin(Func func, Context ctx, async_simple::ScheduleOptions opts) override;
 
     // Extended interface for better control
     bool scheduleOn(size_t context_id, Func&& func);
     bool scheduleLocal(Func&& func);  // Schedule on the current thread if in executor
+
+    size_t pickContextId();
 
     // Graceful shutdown
     void stop();
@@ -98,7 +103,7 @@ private:
     struct PerThreadContext
     {
         io_uring ring{};
-        MPSCQueue<Task> task_queue;
+        moodycamel::ConcurrentQueue<Task> task_queue;
         int eventfd;
         std::thread::id thread_id;
         size_t context_id;
@@ -107,10 +112,7 @@ private:
         // For round-robin selection
         std::atomic<size_t> task_count{0};
 
-        explicit PerThreadContext(const size_t id, const size_t queue_size)
-            : task_queue(queue_size), eventfd(-1), context_id(id)
-        {
-        }
+        explicit PerThreadContext(const size_t id) : eventfd(-1), context_id(id) {}
 
         ~PerThreadContext()
         {
@@ -168,36 +170,26 @@ public:
 
     bool await_ready() const noexcept { return false; }
 
-    void await_suspend(std::coroutine_handle<> h) noexcept
+    bool await_suspend(std::coroutine_handle<> h) noexcept
     {
         continuation_ = h;
-
         io_uring* ring = executor_->getRing(context_id_);
         io_uring_sqe* sqe = io_uring_get_sqe(ring);
 
-        if (sqe)
+        if (!sqe)
         {
-            // Invoke the lambda to prepare the SQE
-            prepare_func_(sqe);
+            result_ = -EBUSY;  // Signal error
+            return false;      // Don't suspend - resume immediately
+        }
 
-            // Set 'this' as user_data so handleCompletion can call complete()
-            io_uring_sqe_set_data(sqe, static_cast<IoOp*>(this));
-            io_uring_submit(ring);
-            submitted_ = true;
-        }
-        else
-        {
-            // Ring is full.
-            submitted_ = false;
-        }
+        prepare_func_(sqe);
+        io_uring_sqe_set_data(sqe, static_cast<IoOp*>(this));
+        // io_uring_submit(ring);
+        return true;  // Suspend normally
     }
 
     ResultType await_resume()
     {
-        if (!submitted_)
-        {
-            throw std::runtime_error("Failed to submit io_uring operation (Ring full?)");
-        }
         if (result_ < 0)
         {
             errno = -result_;
@@ -234,7 +226,7 @@ template <typename ResultType, typename PrepareFunc>
 auto make_io_awaiter(IoUringExecutor* executor, PrepareFunc&& prepare_func)
 {
     // Use the current context if in executor, otherwise pick default (0)
-    size_t ctx_id = executor->currentThreadInExecutor() ? executor->currentContextId() : 0;
+    size_t ctx_id = executor->currentThreadInExecutor() ? executor->currentContextId() : executor->pickContextId();
 
     // We use std::decay_t to store the lambda type directly in the class
     return IoUringAwaiter<ResultType, std::decay_t<PrepareFunc>>(executor, ctx_id,

@@ -238,7 +238,7 @@ Worker::~Worker()
 
 void Worker::Post(std::coroutine_handle<> h)
 {
-    if (!task_queue_.TryPush(h))
+    if (!task_queue_.TryPush(std::move(h)))
     {
         ALOG_ERROR("Worker {} task queue is full. Dropping task.", id_);
     }
