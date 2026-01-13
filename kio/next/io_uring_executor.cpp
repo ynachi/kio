@@ -1,14 +1,13 @@
 //
-// io_uring_executor_FAST.cpp
-// Simple, fast design - NO smart waking, NO cross-thread indirection
+// io_uring_executor.cpp
 //
-
 #include "io_uring_executor.h"
 
 #include <cerrno>
 #include <latch>
 #include <stdexcept>
 
+#include <fcntl.h>
 #include <pthread.h>
 
 namespace kio::next::v1
@@ -20,9 +19,7 @@ IoUringExecutor::IoUringExecutor(const IoUringExecutorConfig& config)
     : stop_latch_(config.num_threads), executor_config_(config)
 {
     if (config.num_threads == 0)
-    {
-        throw std::invalid_argument("num_threads must be > 0");
-    }
+        throw std::invalid_argument("num_threads > 0");
 
     contexts_.reserve(config.num_threads);
     for (size_t i = 0; i < config.num_threads; ++i)
@@ -43,49 +40,35 @@ IoUringExecutor::IoUringExecutor(const IoUringExecutorConfig& config)
                 ctx->thread_id = std::this_thread::get_id();
                 ctx->stop_token = getStopToken();
 
-                // Initialize io_uring with SINGLE_ISSUER
                 int ret = io_uring_queue_init(config.io_uring_entries, &ctx->ring, config.io_uring_flags);
                 if (ret < 0)
-                {
                     std::terminate();
-                }
 
-                ctx->eventfd = eventfd(0, 0);
+                // FIX 1: Use NON-BLOCKING eventfd to prevent deadlock risks
+                ctx->eventfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
                 if (ctx->eventfd < 0)
-                {
                     std::terminate();
-                }
 
                 ret = io_uring_register_eventfd(&ctx->ring, ctx->eventfd);
                 if (ret < 0)
-                {
                     std::terminate();
-                }
 
                 if (config.pin_threads)
-                {
                     pinThreadToCpu(i, i);
-                }
 
-                // Signal ready and wait for all threads
                 init_latch.count_down();
                 init_latch.wait();
 
-                // All threads ready - safe to run event loop
                 runEventLoop(ctx);
             });
     }
-
-    // Wait for all threads to initialize
     init_latch.wait();
 }
 
 IoUringExecutor::~IoUringExecutor()
 {
     if (executor_stopped_)
-    {
         return;
-    }
     stop();
     join();
     for (auto& ctx : contexts_)
@@ -97,11 +80,19 @@ IoUringExecutor::~IoUringExecutor()
 
 void IoUringExecutor::stop()
 {
-    (void)stop_source_.request_stop();
+    // 1. Request stop
+    if (!stop_source_.request_stop())
+    {
+        // Already stopped/stopping? We still ensure wake up.
+    }
+
+    // 2. Wake all threads so they exit their loops
     for (auto& ctx : contexts_)
     {
         wakeThread(*ctx);
     }
+
+    // 3. Wait for threads to acknowledge stop
     stop_latch_.wait();
     executor_stopped_.store(true, std::memory_order_release);
 }
@@ -129,8 +120,6 @@ bool IoUringExecutor::scheduleOn(size_t context_id, Func func)
         return false;
 
     auto& ctx = *contexts_[context_id];
-
-    // SIMPLE & FAST: No fences, no smart waking
     if (!ctx.task_queue.enqueue(std::move(func)))
         return false;
 
@@ -149,12 +138,10 @@ bool IoUringExecutor::currentThreadInExecutor() const
 {
     return current_context_ != nullptr;
 }
-
 size_t IoUringExecutor::currentContextId() const
 {
     return current_context_ ? current_context_->context_id : 0;
 }
-
 IoUringExecutor::Context IoUringExecutor::checkout()
 {
     return current_context_ ? static_cast<Context>(current_context_) : NULLCTX;
@@ -163,9 +150,7 @@ IoUringExecutor::Context IoUringExecutor::checkout()
 bool IoUringExecutor::checkin(Func func, Context ctx, async_simple::ScheduleOptions)
 {
     if (ctx == NULLCTX)
-    {
         return schedule(std::move(func));
-    }
     auto* pctx = static_cast<PerThreadContext*>(ctx);
     return scheduleOn(pctx->context_id, std::move(func));
 }
@@ -175,16 +160,22 @@ size_t IoUringExecutor::pickContextId()
     return selectContext().context_id;
 }
 
+// ============================================================================
+// FIX 2: ROBUST EVENT LOOP
+// ============================================================================
 void IoUringExecutor::runEventLoop(PerThreadContext* ctx)
 {
     while (!ctx->stop_token.stop_requested())
     {
-        // Process task queue
-        processLocalQueue(ctx, executor_config_.local_batch_size);
+        bool made_progress = false;
 
-        // Check completions (non-blocking peek)
-        io_uring_cqe* cqe;
+        // 1. Process Local Task Queue
+        // Returns true if queue is NOT empty (meaning we hit batch limit or have more work)
+        made_progress |= processLocalQueue(ctx, executor_config_.local_batch_size);
+
+        // 2. Process Completions
         unsigned head;
+        io_uring_cqe* cqe;
         unsigned count = 0;
         io_uring_for_each_cqe(&ctx->ring, head, cqe)
         {
@@ -194,38 +185,50 @@ void IoUringExecutor::runEventLoop(PerThreadContext* ctx)
         if (count > 0)
         {
             io_uring_cq_advance(&ctx->ring, count);
+            made_progress = true;
         }
 
-        // Submit pending I/O
+        // 3. Submit pending SQEs
+        // We do this unconditionally to ensure I/O is started
         io_uring_submit(&ctx->ring);
 
-        // Wait for events
-        uint64_t eventfd_value;
-        ssize_t n = read(ctx->eventfd, &eventfd_value, sizeof(eventfd_value));
-        if (n < 0 && errno == EINTR)
+        // 4. Wait ONLY if we did no work and have no pending tasks
+        if (!made_progress)
         {
-            continue;
-        }
+            // Efficient Wait:
+            // We use poll on the eventfd to sleep until signaled.
+            pollfd pfd;
+            pfd.fd = ctx->eventfd;
+            pfd.events = POLLIN;
 
-        // Process all completions after wake
-        count = 0;
-        io_uring_for_each_cqe(&ctx->ring, head, cqe)
-        {
-            handleCompletion(ctx, cqe);
-            count++;
+            // Wait indefinitely (-1) until eventfd is signaled or signal/stop token interrupts
+            // NOTE: In a real system, you might want a short timeout to check stop_token,
+            // but here checking stop_requested() at loop top + stop() waking threads is sufficient.
+            int ret = poll(&pfd, 1, -1);
+
+            if (ret > 0)
+            {
+                // Consume the event
+                uint64_t val;
+                read(ctx->eventfd, &val, sizeof(val));
+            }
         }
-        if (count > 0)
+        else
         {
-            io_uring_cq_advance(&ctx->ring, count);
+            // If we made progress, just peek/consume eventfd to clear it without waiting
+            // This prevents "stale" wakeups from triggering a useless loop later
+            uint64_t val;
+            ssize_t n = read(ctx->eventfd, &val, sizeof(val));
+            (void)n;  // Ignore EAGAIN
         }
     }
 
-    // now mark as stopped
     ctx->setStopped();
     stop_latch_.count_down();
 }
 
-void IoUringExecutor::processLocalQueue(PerThreadContext* ctx, size_t batch)
+// Returns true if there might be more work (limit reached), false if queue empty
+bool IoUringExecutor::processLocalQueue(PerThreadContext* ctx, size_t batch)
 {
     Task task;
     size_t processed = 0;
@@ -241,11 +244,15 @@ void IoUringExecutor::processLocalQueue(PerThreadContext* ctx, size_t batch)
         }
         processed++;
     }
+    // If we processed exactly batch size, assume there might be more work.
+    return processed == batch;
 }
 
 void IoUringExecutor::wakeThread(PerThreadContext& ctx)
 {
     uint64_t val = 1;
+    // We ignore result; if buffer full, thread is already awake/busy
+    // With EFD_NONBLOCK, this won't block.
     write(ctx.eventfd, &val, sizeof(val));
 }
 
@@ -258,9 +265,7 @@ IoUringExecutor::PerThreadContext& IoUringExecutor::selectContext()
 void IoUringExecutor::pinThreadToCpu(size_t thread_id, size_t cpu_id)
 {
     if (cpu_id >= CPU_SETSIZE)
-    {
         return;
-    }
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
     CPU_SET(cpu_id, &cpuset);

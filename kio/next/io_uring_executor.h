@@ -4,6 +4,7 @@
 // - Fixed critical hang bug (scheduleOn failure handling)
 // - Explicit submission context (.on_context())
 // - Explicit resume policy (.resume_on())
+// - Deadlock-free shutdown (poll-based loop)
 //
 
 #ifndef KIO_CORE_URING_EXECUTOR_H
@@ -19,6 +20,7 @@
 #include <vector>
 
 #include <liburing.h>
+#include <poll.h>
 #include <unistd.h>
 
 #include <sys/eventfd.h>
@@ -112,7 +114,8 @@ private:
     IoUringExecutorConfig executor_config_;
 
     void runEventLoop(PerThreadContext* ctx);
-    void processLocalQueue(PerThreadContext* ctx, size_t batch = 16);
+    // Updated: returns true if queue might still have work (batch limit hit)
+    bool processLocalQueue(PerThreadContext* ctx, size_t batch = 16);
     void wakeThread(PerThreadContext& ctx);
     PerThreadContext& selectContext();
     void pinThreadToCpu(size_t thread_id, size_t cpu_id);
