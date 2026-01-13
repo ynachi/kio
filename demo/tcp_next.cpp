@@ -185,10 +185,11 @@ int main()
         // OPTIMIZATION 7: Enable SQPOLL for kernel-side polling
         // This reduces syscall overhead by ~10-15%
         // Requires kernel 5.11+ for best performance
-        config.io_uring_flags = IORING_SETUP_SQPOLL;
+        //config.io_uring_flags = IORING_SETUP_SQPOLL;
 
         // Alternative: If SQPOLL causes issues, use SINGLE_ISSUER instead
-        //config.io_uring_flags = IORING_SETUP_SINGLE_ISSUER;
+        config.io_uring_flags = IORING_SETUP_SINGLE_ISSUER;
+        // config.io_uring_flags = IORING_SETUP_COOP_TASKRUN | IORING_SETUP_SINGLE_ISSUER;
 
         IoUringExecutor executor(config);
 

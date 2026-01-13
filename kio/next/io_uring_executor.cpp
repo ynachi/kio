@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <pthread.h>
 #include <cerrno>
+#include <latch>
 
 namespace kio::next::v1
 {
@@ -19,41 +20,48 @@ IoUringExecutor::IoUringExecutor(const IoUringExecutorConfig& config)
         throw std::invalid_argument("num_threads must be > 0");
 
     contexts_.reserve(config.num_threads);
-    for (size_t i = 0; i < config.num_threads; ++i)
-    {
-        auto ctx = std::make_unique<PerThreadContext>(i);
-
-        int ret = io_uring_queue_init(config.io_uring_entries, &ctx->ring, config.io_uring_flags);
-        if (ret < 0)
-            throw std::system_error(-ret, std::system_category(), "io_uring_queue_init failed");
-
-        // Blocking eventfd (no EFD_NONBLOCK)
-        ctx->eventfd = eventfd(0, 0);
-        if (ctx->eventfd < 0)
-            throw std::system_error(errno, std::system_category(), "eventfd creation failed");
-
-        ret = io_uring_register_eventfd(&ctx->ring, ctx->eventfd);
-        if (ret < 0)
-            throw std::system_error(-ret, std::system_category(), "io_uring_register_eventfd failed");
-
-        contexts_.push_back(std::move(ctx));
+    for (size_t i = 0; i < config.num_threads; ++i) {
+        contexts_.push_back(std::make_unique<PerThreadContext>(i));
     }
 
+    std::latch init_latch(config.num_threads);
+
     threads_.reserve(config.num_threads);
-    for (size_t i = 0; i < config.num_threads; ++i)
-    {
-        threads_.emplace_back([this, i, &config]()
-        {
+    for (size_t i = 0; i < config.num_threads; ++i) {
+        threads_.emplace_back([this, i, config, &init_latch]() {
             auto* ctx = contexts_[i].get();
             current_context_ = ctx;
             ctx->thread_id = std::this_thread::get_id();
 
+            // Initialize io_uring with SINGLE_ISSUER ✓
+            int ret = io_uring_queue_init(config.io_uring_entries,
+                                         &ctx->ring,
+                                         config.io_uring_flags);
+            if (ret < 0)
+                std::terminate();  // Can't throw from thread
+
+            ctx->eventfd = eventfd(0, 0);
+            if (ctx->eventfd < 0)
+                std::terminate();
+
+            ret = io_uring_register_eventfd(&ctx->ring, ctx->eventfd);
+            if (ret < 0)
+                std::terminate();
+
             if (config.pin_threads)
                 pinThreadToCpu(i, i);
 
+            // Signal ready and wait for all threads
+            init_latch.count_down();
+            init_latch.wait();
+
+            // All threads ready - safe to run event loop
             runEventLoop(ctx);
         });
     }
+
+    // Wait for all threads to initialize
+    init_latch.wait();
 }
 
 IoUringExecutor::~IoUringExecutor()
