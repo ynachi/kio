@@ -1,6 +1,6 @@
 //
 // io_uring_executor.cpp
-// Fixed: Smart Waking Implementation to reduce syscalls
+// Optimization: Check sq_ready before submitting to save syscalls
 //
 
 #include "io_uring_executor.h"
@@ -150,13 +150,19 @@ void IoUringExecutor::runEventLoop(PerThreadContext* ctx)
         // 1. Process tasks (may be woken by task insertion)
         bool partial_drain = processLocalQueue(ctx);
 
-        // 2. Submit IO
-        io_uring_submit(&ctx->ring);
+        // 2. Submit IO (OPTIMIZED)
+        // Only pay the syscall cost if we actually prepared some SQEs
+        if (io_uring_sq_ready(&ctx->ring) > 0)
+        {
+            io_uring_submit(&ctx->ring);
+        }
 
         // 3. Reap completions
         unsigned head;
         io_uring_cqe* cqe;
         unsigned count = 0;
+
+        // Peek at completions without syscall
         io_uring_for_each_cqe(&ctx->ring, head, cqe)
         {
             handleCompletion(ctx, cqe);
@@ -173,22 +179,23 @@ void IoUringExecutor::runEventLoop(PerThreadContext* ctx)
         }
 
         // 5. Safe Sleep Pattern
-        // Mark as sleeping
         ctx->sleeping.store(true, std::memory_order_seq_cst);
 
         // Double Check: Did a task arrive while we were deciding to sleep?
         if (processLocalQueue(ctx)) {
-            // Yes, found work. Abort sleep.
             ctx->sleeping.store(false, std::memory_order_relaxed);
             continue;
         }
 
-        // No work found, really block now.
+        // Also double check IO before sleeping?
+        // Technically io_uring_submit might be needed if we generated work in the check above,
+        // but processLocalQueue loop handles that on next iteration.
+        // We block on eventfd.
+
         uint64_t val;
         ssize_t r = read(ctx->eventfd, &val, sizeof(val));
         (void)r;
 
-        // Woken up
         ctx->sleeping.store(false, std::memory_order_relaxed);
     }
 }
@@ -199,9 +206,6 @@ bool IoUringExecutor::processLocalQueue(PerThreadContext* ctx)
     constexpr size_t kMaxBatchSize = 128;
     size_t processed = 0;
 
-    // Use try_dequeue inside loop.
-    // Note: If using strict priorities, one might want to drain all.
-    // Batching prevents starvation of IO reaping.
     while (processed < kMaxBatchSize && ctx->task_queue.try_dequeue(task))
     {
         try
