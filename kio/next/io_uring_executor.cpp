@@ -1,10 +1,9 @@
 //
-// io_uring_executor.cpp
-// Fixed: Smart Waking Implementation to reduce syscalls
+// io_uring_executor_FAST.cpp
+// Simple, fast design - NO smart waking, NO cross-thread indirection
 //
 
 #include "io_uring_executor.h"
-#include <format>
 #include <stdexcept>
 #include <pthread.h>
 #include <cerrno>
@@ -28,6 +27,7 @@ IoUringExecutor::IoUringExecutor(const IoUringExecutorConfig& config)
         if (ret < 0)
             throw std::system_error(-ret, std::system_category(), "io_uring_queue_init failed");
 
+        // Blocking eventfd (no EFD_NONBLOCK)
         ctx->eventfd = eventfd(0, 0);
         if (ctx->eventfd < 0)
             throw std::system_error(errno, std::system_category(), "eventfd creation failed");
@@ -91,21 +91,16 @@ bool IoUringExecutor::schedule(Func func)
 
 bool IoUringExecutor::scheduleOn(size_t context_id, Func func)
 {
-    if (context_id >= contexts_.size() || stopped_.load(std::memory_order_acquire)) return false;
+    if (context_id >= contexts_.size() || stopped_.load(std::memory_order_acquire))
+        return false;
+
     auto& ctx = *contexts_[context_id];
 
-    // 1. Enqueue task
-    if (!ctx.task_queue.enqueue(std::move(func))) return false;
+    // SIMPLE & FAST: No fences, no smart waking
+    if (!ctx.task_queue.enqueue(std::move(func)))
+        return false;
 
-    // 2. Smart Wake: Only syscall if thread is actually sleeping.
-    // Use SC fence to ensure enqueue is visible before checking sleeping.
-    std::atomic_thread_fence(std::memory_order_seq_cst);
-
-    if (ctx.sleeping.load(std::memory_order_seq_cst))
-    {
-        wakeThread(ctx);
-    }
-
+    wakeThread(ctx);
     return true;
 }
 
@@ -147,61 +142,40 @@ void IoUringExecutor::runEventLoop(PerThreadContext* ctx)
 {
     while (ctx->running.load(std::memory_order_acquire))
     {
-        // 1. Process tasks (may be woken by task insertion)
-        bool partial_drain = processLocalQueue(ctx);
+        // 1. Process task queue
+        processLocalQueue(ctx);
 
-        // 2. Submit IO
+        // 2. Submit pending I/O
         io_uring_submit(&ctx->ring);
 
-        // 3. Reap completions
-        unsigned head;
+        // 3. Wait for events (blocks on eventfd)
+        // This wakes for BOTH tasks and I/O completions
+        uint64_t eventfd_value;
+        ssize_t n = read(ctx->eventfd, &eventfd_value, sizeof(eventfd_value));
+        if (n < 0 && errno == EINTR) continue;
+
+        // 4. Process I/O completions
         io_uring_cqe* cqe;
+        unsigned head;
         unsigned count = 0;
+
         io_uring_for_each_cqe(&ctx->ring, head, cqe)
         {
             handleCompletion(ctx, cqe);
             count++;
         }
-        if (count > 0) io_uring_cq_advance(&ctx->ring, count);
 
-        // 4. Park/Sleep Logic
-        // If we did work (tasks or IO), we loop to try to do more work (busy-waitish).
-        // Only if we did NOTHING do we prepare to sleep.
-        if (partial_drain || count > 0)
-        {
-             continue;
-        }
-
-        // 5. Safe Sleep Pattern
-        // Mark as sleeping
-        ctx->sleeping.store(true, std::memory_order_seq_cst);
-
-        // Double Check: Did a task arrive while we were deciding to sleep?
-        if (processLocalQueue(ctx)) {
-            // Yes, found work. Abort sleep.
-            ctx->sleeping.store(false, std::memory_order_relaxed);
-            continue;
-        }
-
-        // No work found, really block now.
-        uint64_t val;
-        ssize_t r = read(ctx->eventfd, &val, sizeof(val));
-        (void)r;
-
-        // Woken up
-        ctx->sleeping.store(false, std::memory_order_relaxed);
+        if (count > 0)
+            io_uring_cq_advance(&ctx->ring, count);
     }
 }
 
-bool IoUringExecutor::processLocalQueue(PerThreadContext* ctx)
+void IoUringExecutor::processLocalQueue(PerThreadContext* ctx)
 {
     Task task;
-    constexpr size_t kMaxBatchSize = 128;
+    constexpr size_t kMaxBatchSize = 64;
     size_t processed = 0;
 
-    // Use try_dequeue inside loop.
-    // Note: If using strict priorities, one might want to drain all.
-    // Batching prevents starvation of IO reaping.
     while (processed < kMaxBatchSize && ctx->task_queue.try_dequeue(task))
     {
         try
@@ -211,15 +185,12 @@ bool IoUringExecutor::processLocalQueue(PerThreadContext* ctx)
         catch (...) {}
         processed++;
     }
-
-    return processed == kMaxBatchSize;
 }
 
 void IoUringExecutor::wakeThread(PerThreadContext& ctx)
 {
     uint64_t val = 1;
-    ssize_t ret = write(ctx.eventfd, &val, sizeof(val));
-    (void)ret;
+    write(ctx.eventfd, &val, sizeof(val));
 }
 
 IoUringExecutor::PerThreadContext& IoUringExecutor::selectContext()

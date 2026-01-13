@@ -1,10 +1,10 @@
 //
-// io_uring_executor.h
-// Fixed: Smart Waking & Thread-Safe IO
+// io_uring_executor_FAST.h
+// Simple, fast design - Direct I/O submission, no indirection
 //
 
-#ifndef KIO_CORE_URING_EXECUTOR_V1_H
-#define KIO_CORE_URING_EXECUTOR_V1_H
+#ifndef KIO_CORE_URING_EXECUTOR_FAST_H
+#define KIO_CORE_URING_EXECUTOR_FAST_H
 
 #include <atomic>
 #include <coroutine>
@@ -74,9 +74,6 @@ private:
         size_t context_id;
         std::atomic<bool> running{true};
 
-        // Smart Waking Flag: "true" means thread is blocked on read(eventfd)
-        std::atomic<bool> sleeping{false};
-
         explicit PerThreadContext(size_t id) : eventfd(-1), context_id(id) {}
 
         ~PerThreadContext()
@@ -96,7 +93,7 @@ private:
     std::atomic<size_t> next_context_{0};
 
     void runEventLoop(PerThreadContext* ctx);
-    bool processLocalQueue(PerThreadContext* ctx);
+    void processLocalQueue(PerThreadContext* ctx);
     void wakeThread(PerThreadContext& ctx);
     PerThreadContext& selectContext();
     void pinThreadToCpu(size_t thread_id, size_t cpu_id);
@@ -110,7 +107,7 @@ struct IoOp
     virtual ~IoOp() = default;
 };
 
-// Zero-allocation awaiter for io_uring operations
+// FAST awaiter - Direct I/O submission, no cross-thread checks
 template <typename ResultType, typename PrepareFunc>
 class IoUringAwaiter : public IoOp
 {
@@ -128,30 +125,24 @@ public:
     {
         continuation_ = h;
 
-        // 1. Determine Target Context
-        // If sticky, stay here. If external, pick one.
+        // Capture context at suspension time (not construction)
         context_id_ = executor_->currentThreadInExecutor()
             ? executor_->currentContextId()
             : executor_->pickContextId();
 
-        // 2. Thread Safety Check
-        // Only touch the ring if we are ON the correct thread.
-        if (executor_->currentThreadInExecutor() &&
-            executor_->currentContextId() == context_id_)
+        // SIMPLE & FAST: Direct submission, no cross-thread checks
+        io_uring* ring = executor_->getRing(context_id_);
+        io_uring_sqe* sqe = io_uring_get_sqe(ring);
+
+        if (!sqe)
         {
-            return submit_sqe();
+            result_ = -EBUSY;
+            return false;
         }
-        else
-        {
-            // Cross-thread submission: Schedule as task.
-            executor_->scheduleOn(context_id_, [this]() {
-                if (!this->submit_sqe()) {
-                    this->result_ = -EBUSY;
-                    if (this->continuation_) this->continuation_.resume();
-                }
-            });
-            return true;
-        }
+
+        prepare_func_(sqe);
+        io_uring_sqe_set_data(sqe, static_cast<IoOp*>(this));
+        return true;
     }
 
     ResultType await_resume()
@@ -174,21 +165,6 @@ public:
     }
 
 private:
-    bool submit_sqe() {
-        io_uring* ring = executor_->getRing(context_id_);
-        io_uring_sqe* sqe = io_uring_get_sqe(ring);
-
-        if (!sqe)
-        {
-            result_ = -EBUSY;
-            return false;
-        }
-
-        prepare_func_(sqe);
-        io_uring_sqe_set_data(sqe, static_cast<IoOp*>(this));
-        return true;
-    }
-
     IoUringExecutor* executor_;
     size_t context_id_{0};
     PrepareFunc prepare_func_;
@@ -205,4 +181,4 @@ auto make_io_awaiter(IoUringExecutor* executor, PrepareFunc&& prepare_func)
 
 }  // namespace kio::next::v1
 
-#endif  // KIO_CORE_URING_EXECUTOR_V1_H
+#endif  // KIO_CORE_URING_EXECUTOR_FAST_H
