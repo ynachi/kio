@@ -1,5 +1,5 @@
 //
-// tcp_next.cpp - TCP Echo Server using Dual Queue Executor
+// tcp_next.cpp - TCP Echo Server (Multi-Reactor Pattern + SO_REUSEPORT)
 //
 
 #include "kio/next/io_uring_executor.h"
@@ -8,6 +8,7 @@
 #include <iostream>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include <arpa/inet.h>
 #include <async_simple/coro/Lazy.h>
@@ -15,7 +16,7 @@
 using namespace async_simple::coro;
 using namespace kio::next::v1;
 
-// Simple awaiters wrapper for v1 namespace locally for the demo
+// Simple awaiters wrapper
 namespace io::v1
 {
     inline auto accept(IoUringExecutor* exec, int listen_fd, sockaddr* addr, socklen_t* addrlen)
@@ -40,13 +41,12 @@ namespace io::v1
 Lazy<void> handleClient(IoUringExecutor* executor, int client_fd)
 {
     char buffer[4096];
-
     try
     {
         while (true)
         {
+            // Read
             ssize_t bytes_read = co_await io::v1::recv(executor, client_fd, buffer, sizeof(buffer));
-
             if (bytes_read <= 0) break;
 
             static const std::string response =
@@ -56,6 +56,7 @@ Lazy<void> handleClient(IoUringExecutor* executor, int client_fd)
                 "\r\n"
                 "Hello, World!";
 
+            // Write
             ssize_t bytes_sent = 0;
             while (bytes_sent < response.size())
             {
@@ -66,19 +67,16 @@ Lazy<void> handleClient(IoUringExecutor* executor, int client_fd)
             }
         }
     }
-    catch (const std::exception& e)
-    {
-        // Error handling
-    }
-
+    catch (...) {}
     close(client_fd);
 }
 
+//
+// Accept Loop: Now runs per-thread.
+// No cross-thread scheduling required. Connections are handled where they arrive.
+//
 Lazy<> acceptLoop(IoUringExecutor* executor, int listen_fd)
 {
-    size_t next_ctx = 0;
-    const size_t num_cpus = executor->numThreads();
-
     while (true)
     {
         sockaddr_in client_addr{};
@@ -87,13 +85,13 @@ Lazy<> acceptLoop(IoUringExecutor* executor, int listen_fd)
         int client_fd = co_await io::v1::accept(executor, listen_fd,
             reinterpret_cast<sockaddr*>(&client_addr), &addr_len);
 
-        if (client_fd < 0) continue;
-
-        // Explicitly schedule processing to a worker thread (Round Robin)
-        size_t target_ctx = next_ctx++ % num_cpus;
-        executor->scheduleOn(target_ctx, [executor, client_fd]() {
+        if (client_fd >= 0)
+        {
+            // Spawn handler locally on this thread.
+            // Since we are already in the correct executor context, .start() simply
+            // queues the coroutine to run on this thread (sticky scheduling).
             handleClient(executor, client_fd).start([](auto&&) {});
-        });
+        }
     }
 }
 
@@ -105,6 +103,9 @@ int createListenSocket(uint16_t port)
 
     int opt = 1;
     setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    // CRITICAL for Multi-Reactor: Allow multiple sockets to bind to same port
+    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
@@ -123,7 +124,6 @@ int createListenSocket(uint16_t port)
         throw std::system_error(errno, std::system_category(), "listen");
     }
 
-    std::cout << "Listening on port " << port << std::endl;
     return listen_fd;
 }
 
@@ -135,36 +135,42 @@ int main()
 
         IoUringExecutorConfig config;
         config.num_threads = 4;
-        config.io_uring_entries = 4096;
+        config.io_uring_entries = 32768;
         config.pin_threads = true;
         config.io_uring_flags = 0;
 
         IoUringExecutor executor(config);
 
-        int listen_fd = createListenSocket(PORT);
-
-        std::cout << "HTTP server (V1 - Dual Queue) started on port " << PORT
+        std::cout << "HTTP server (Multi-Reactor + SO_REUSEPORT) started on port " << PORT
                   << " with " << config.num_threads << " threads." << std::endl;
 
-        // Synchronization to keep main alive
         std::mutex mtx;
         std::condition_variable cv;
         bool done = false;
 
-        // Schedule acceptLoop to run on thread 0
-        executor.scheduleOn(0, [&executor, listen_fd, &mtx, &cv, &done]() {
-            acceptLoop(&executor, listen_fd).start([&mtx, &cv, &done](auto&&) {
-                std::lock_guard<std::mutex> lock(mtx);
-                done = true;
-                cv.notify_one();
-            });
-        });
+        // Create N listeners for N threads
+        // Each thread gets its own socket and its own accept loop
+        std::vector<int> listen_fds;
+        for(size_t i = 0; i < config.num_threads; ++i)
+        {
+            int fd = createListenSocket(PORT);
+            listen_fds.push_back(fd);
 
-        // Wait for completion
+            // Schedule the accept loop specifically on thread 'i'
+            executor.scheduleOn(i, [&executor, fd, &mtx, &cv, &done]() {
+                acceptLoop(&executor, fd).start([&mtx, &cv, &done](auto&&) {
+                    // In a real server we wouldn't exit, but here we keep the structure
+                    std::lock_guard<std::mutex> lock(mtx);
+                    done = true;
+                    cv.notify_one();
+                });
+            });
+        }
+
         std::unique_lock<std::mutex> lock(mtx);
         cv.wait(lock, [&done] { return done; });
 
-        close(listen_fd);
+        for(int fd : listen_fds) close(fd);
     }
     catch (const std::exception& e)
     {

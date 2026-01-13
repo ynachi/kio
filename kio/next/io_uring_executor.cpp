@@ -1,5 +1,6 @@
 //
-// io_uring_executor.cpp - Refactored Event Loop to prevent Deadlocks
+// io_uring_executor.cpp
+// Fixed: Smart Waking Implementation to reduce syscalls
 //
 
 #include "io_uring_executor.h"
@@ -27,12 +28,10 @@ IoUringExecutor::IoUringExecutor(const IoUringExecutorConfig& config)
         if (ret < 0)
             throw std::system_error(-ret, std::system_category(), "io_uring_queue_init failed");
 
-        // Eventfd for unified wakeups
         ctx->eventfd = eventfd(0, 0);
         if (ctx->eventfd < 0)
             throw std::system_error(errno, std::system_category(), "eventfd creation failed");
 
-        // Register eventfd so IO completions also trigger it
         ret = io_uring_register_eventfd(&ctx->ring, ctx->eventfd);
         if (ret < 0)
             throw std::system_error(-ret, std::system_category(), "io_uring_register_eventfd failed");
@@ -94,8 +93,19 @@ bool IoUringExecutor::scheduleOn(size_t context_id, Func func)
 {
     if (context_id >= contexts_.size() || stopped_.load(std::memory_order_acquire)) return false;
     auto& ctx = *contexts_[context_id];
+
+    // 1. Enqueue task
     if (!ctx.task_queue.enqueue(std::move(func))) return false;
-    wakeThread(ctx);
+
+    // 2. Smart Wake: Only syscall if thread is actually sleeping.
+    // Use SC fence to ensure enqueue is visible before checking sleeping.
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+
+    if (ctx.sleeping.load(std::memory_order_seq_cst))
+    {
+        wakeThread(ctx);
+    }
+
     return true;
 }
 
@@ -133,21 +143,17 @@ size_t IoUringExecutor::pickContextId()
     return selectContext().context_id;
 }
 
-//
-// CRITICAL FIX: Enhanced Event Loop
-//
 void IoUringExecutor::runEventLoop(PerThreadContext* ctx)
 {
     while (ctx->running.load(std::memory_order_acquire))
     {
-        // 1. Process local tasks
-        // 'partial_drain' is true if we hit the batch limit, implying more work might be ready.
+        // 1. Process tasks (may be woken by task insertion)
         bool partial_drain = processLocalQueue(ctx);
 
-        // 2. Submit queued IO
+        // 2. Submit IO
         io_uring_submit(&ctx->ring);
 
-        // 3. Process Completions
+        // 3. Reap completions
         unsigned head;
         io_uring_cqe* cqe;
         unsigned count = 0;
@@ -158,36 +164,44 @@ void IoUringExecutor::runEventLoop(PerThreadContext* ctx)
         }
         if (count > 0) io_uring_cq_advance(&ctx->ring, count);
 
-        bool io_activity = (count > 0);
-
-        // 4. Decide whether to Sleep
-        // We ONLY sleep if:
-        // a) We fully drained the task queue (partial_drain == false)
-        // b) We processed no IO completions (which might have spawned new tasks)
-        // If we have any potential work, we loop immediately (busy-spin/yield) rather than blocking.
-        if (partial_drain || io_activity)
+        // 4. Park/Sleep Logic
+        // If we did work (tasks or IO), we loop to try to do more work (busy-waitish).
+        // Only if we did NOTHING do we prepare to sleep.
+        if (partial_drain || count > 0)
         {
-             // Optional: Try to clear eventfd if it was set, to prevent counter buildup.
-             // But strictly not necessary as the next read will just return immediately.
              continue;
         }
 
-        // 5. Block on EventFD
-        // This blocks until either a Task is scheduled (wakeThread) OR IO completes (kernel writes to eventfd).
+        // 5. Safe Sleep Pattern
+        // Mark as sleeping
+        ctx->sleeping.store(true, std::memory_order_seq_cst);
+
+        // Double Check: Did a task arrive while we were deciding to sleep?
+        if (processLocalQueue(ctx)) {
+            // Yes, found work. Abort sleep.
+            ctx->sleeping.store(false, std::memory_order_relaxed);
+            continue;
+        }
+
+        // No work found, really block now.
         uint64_t val;
         ssize_t r = read(ctx->eventfd, &val, sizeof(val));
         (void)r;
+
+        // Woken up
+        ctx->sleeping.store(false, std::memory_order_relaxed);
     }
 }
 
-// Returns true if we stopped because of batch limit (meaning more tasks might exist)
 bool IoUringExecutor::processLocalQueue(PerThreadContext* ctx)
 {
     Task task;
-    // Increased batch size for better throughput under load
     constexpr size_t kMaxBatchSize = 128;
     size_t processed = 0;
 
+    // Use try_dequeue inside loop.
+    // Note: If using strict priorities, one might want to drain all.
+    // Batching prevents starvation of IO reaping.
     while (processed < kMaxBatchSize && ctx->task_queue.try_dequeue(task))
     {
         try

@@ -1,6 +1,6 @@
 //
-// io_uring_executor.h - Dual Queue Architecture (Eventfd + Task Queue)
-// Fixed: Thread-safe IO submission & Lost Wakeup Logic
+// io_uring_executor.h
+// Fixed: Smart Waking & Thread-Safe IO
 //
 
 #ifndef KIO_CORE_URING_EXECUTOR_V1_H
@@ -27,7 +27,7 @@ namespace kio::next::v1
 struct IoUringExecutorConfig
 {
     size_t num_threads = std::thread::hardware_concurrency();
-    uint32_t io_uring_entries = 32768; // Increased for high throughput
+    uint32_t io_uring_entries = 32768;
     uint32_t io_uring_flags = 0;
     bool pin_threads = false;
 };
@@ -74,6 +74,9 @@ private:
         size_t context_id;
         std::atomic<bool> running{true};
 
+        // Smart Waking Flag: "true" means thread is blocked on read(eventfd)
+        std::atomic<bool> sleeping{false};
+
         explicit PerThreadContext(size_t id) : eventfd(-1), context_id(id) {}
 
         ~PerThreadContext()
@@ -93,7 +96,7 @@ private:
     std::atomic<size_t> next_context_{0};
 
     void runEventLoop(PerThreadContext* ctx);
-    bool processLocalQueue(PerThreadContext* ctx); // Returns true if tasks remain
+    bool processLocalQueue(PerThreadContext* ctx);
     void wakeThread(PerThreadContext& ctx);
     PerThreadContext& selectContext();
     void pinThreadToCpu(size_t thread_id, size_t cpu_id);
@@ -126,13 +129,13 @@ public:
         continuation_ = h;
 
         // 1. Determine Target Context
+        // If sticky, stay here. If external, pick one.
         context_id_ = executor_->currentThreadInExecutor()
             ? executor_->currentContextId()
             : executor_->pickContextId();
 
         // 2. Thread Safety Check
-        // If we are not on the correct thread, we MUST NOT touch the ring.
-        // We schedule a task to the target thread to perform the submission.
+        // Only touch the ring if we are ON the correct thread.
         if (executor_->currentThreadInExecutor() &&
             executor_->currentContextId() == context_id_)
         {
@@ -140,7 +143,7 @@ public:
         }
         else
         {
-            // Thread hopping: Suspend now, resume when task runs on worker
+            // Cross-thread submission: Schedule as task.
             executor_->scheduleOn(context_id_, [this]() {
                 if (!this->submit_sqe()) {
                     this->result_ = -EBUSY;
