@@ -25,7 +25,7 @@ Task<Result<int>> connect_to_server(Worker& worker, std::string_view host, uint1
     int fd = KIO_TRY(net::create_raw_socket(addr.family));
 
     ALOG_INFO("Connecting to {}:{}...", host, port);
-    auto connect_result = co_await worker.async_connect(fd, reinterpret_cast<const sockaddr*>(&addr.addr), addr.addrlen);
+    auto connect_result = co_await worker.AsyncConnect(fd, reinterpret_cast<const sockaddr*>(&addr.addr), addr.addrlen);
 
     if (!connect_result)
     {
@@ -48,11 +48,11 @@ Task<Result<void>> echo_test(Worker& worker, std::string_view host, uint16_t por
     ALOG_INFO("Sending: {}", message);
 
     // Write message
-    auto write_result = co_await worker.async_write(fd, std::span<const char>(message.data(), message.size()));
+    auto write_result = co_await worker.AsyncWrite(fd, std::span<const char>(message.data(), message.size()));
     if (!write_result)
     {
         ALOG_ERROR("Write failed: {}", write_result.error());
-        co_await worker.async_close(fd);
+        co_await worker.AsyncClose(fd);
         co_return std::unexpected(write_result.error());
     }
 
@@ -62,11 +62,11 @@ Task<Result<void>> echo_test(Worker& worker, std::string_view host, uint16_t por
     char buffer[8192] = {};
     ALOG_INFO("Waiting for response...");
 
-    auto read_result = co_await worker.async_read(fd, buffer);
+    auto read_result = co_await worker.AsyncRead(fd, buffer);
     if (!read_result)
     {
         ALOG_ERROR("Read failed: {}", read_result.error());
-        co_await worker.async_close(fd);
+        co_await worker.AsyncClose(fd);
         co_return std::unexpected(read_result.error());
     }
 
@@ -84,7 +84,7 @@ Task<Result<void>> echo_test(Worker& worker, std::string_view host, uint16_t por
     }
 
     // Close connection
-    co_await worker.async_close(fd);
+    co_await worker.AsyncClose(fd);
     ALOG_INFO("Connection closed");
 
     co_return {};
@@ -96,7 +96,8 @@ Task<Result<void>> multi_message_test(Worker& worker, std::string_view host, uin
     int fd = KIO_TRY(co_await connect_to_server(worker, host, port));
 
     // Send multiple messages
-    const char* messages[] = {"Message 1: Testing kio framework\n", "Message 2: This is awesome!\n", "Message 3: Echo server works!\n"};
+    const char* messages[] = {"Message 1: Testing kio framework\n", "Message 2: This is awesome!\n",
+                              "Message 3: Echo server works!\n"};
 
     for (const char* msg: messages)
     {
@@ -104,7 +105,7 @@ Task<Result<void>> multi_message_test(Worker& worker, std::string_view host, uin
         ALOG_INFO("Sending: {}", message);
 
         // Write
-        auto write_result = co_await worker.async_write(fd, std::span<const char>(message.data(), message.size()));
+        auto write_result = co_await worker.AsyncWrite(fd, std::span<const char>(message.data(), message.size()));
         if (!write_result)
         {
             ALOG_ERROR("Write failed: {}", write_result.error());
@@ -113,7 +114,7 @@ Task<Result<void>> multi_message_test(Worker& worker, std::string_view host, uin
 
         // Read echo
         char buffer[8192] = {};
-        auto read_result = co_await worker.async_read(fd, buffer);
+        auto read_result = co_await worker.AsyncRead(fd, buffer);
         if (!read_result)
         {
             ALOG_ERROR("Read failed: {}", read_result.error());
@@ -123,7 +124,7 @@ Task<Result<void>> multi_message_test(Worker& worker, std::string_view host, uin
         ALOG_INFO("Received: {}", std::string_view(buffer, read_result.value()));
     }
 
-    co_await worker.async_close(fd);
+    co_await worker.AsyncClose(fd);
     ALOG_INFO("Multi-message test complete");
 
     co_return {};
@@ -145,11 +146,12 @@ Task<Result<void>> large_data_test(Worker& worker, std::string_view host, uint16
     ALOG_INFO("Sending large message ({} bytes)...", size);
 
     // Write
-    auto write_result = co_await worker.async_write(fd, std::span<const char>(large_message.data(), large_message.size()));
+    auto write_result =
+            co_await worker.AsyncWrite(fd, std::span<const char>(large_message.data(), large_message.size()));
     if (!write_result)
     {
         ALOG_ERROR("Write failed: {}", write_result.error());
-        co_await worker.async_close(fd);
+        co_await worker.AsyncClose(fd);
         co_return std::unexpected(write_result.error());
     }
 
@@ -162,7 +164,7 @@ Task<Result<void>> large_data_test(Worker& worker, std::string_view host, uint16
 
     while (total_read < size)
     {
-        auto read_result = co_await worker.async_read(fd, buffer);
+        auto read_result = co_await worker.AsyncRead(fd, buffer);
         if (!read_result || read_result.value() == 0)
         {
             ALOG_ERROR("Read failed or EOF after {} bytes", total_read);
@@ -185,7 +187,7 @@ Task<Result<void>> large_data_test(Worker& worker, std::string_view host, uint16
         ALOG_WARN("Data mismatch - sent {} bytes, received {} bytes", size, total_read);
     }
 
-    co_await worker.async_close(fd);
+    co_await worker.AsyncClose(fd);
 
     co_return {};
 }
@@ -214,8 +216,8 @@ int main(int argc, char* argv[])
     config.default_op_slots = 8096;
 
     Worker worker(0, config);
-    std::jthread t([&] { worker.loop_forever(); });
-    worker.wait_ready();
+    std::jthread t([&] { worker.LoopForever(); });
+    worker.WaitReady();
 
     ALOG_INFO("========================================");
     ALOG_INFO("KIO TCP Client Test Suite");
@@ -253,6 +255,6 @@ int main(int argc, char* argv[])
     ALOG_INFO("All tests complete!");
     ALOG_INFO("========================================");
 
-    (void) worker.request_stop();
+    (void) worker.RequestStop();
     return 0;
 }

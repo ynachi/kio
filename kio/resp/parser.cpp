@@ -5,254 +5,404 @@
 #include "parser.h"
 
 #include <charconv>
+#include <cmath>
 #include <cstring>
+#include <utility>
 
 namespace kio::resp
 {
-    static std::optional<size_t> find_crlf(std::span<const char> span)
+
+namespace
+{
+std::optional<size_t> FindCrlf(std::span<const char> span)
+{
+    const char* ptr = span.data();
+    const size_t kLen = span.size();
+    if (kLen < 2)
     {
-        const char* ptr = span.data();
-        const size_t len = span.size();
-        if (len < 2) return std::nullopt;
+        return std::nullopt;
+    }
 
-        const char* current = ptr;
-        size_t remaining = len;
+    const char* current = ptr;
+    size_t remaining = kLen;
 
-        // Vectorized scan for \n
-        while (remaining > 0)
+    // Vectorized scan for \n
+    while (remaining > 0)
+    {
+        const void* found = std::memchr(current, '\n', remaining);
+        if (found == nullptr)
         {
-            const void* found = std::memchr(current, '\n', remaining);
-            if (!found) return std::nullopt;
-
-            const auto lf = static_cast<const char*>(found);
-            const size_t idx = lf - ptr;
-
-            if (idx > 0 && ptr[idx - 1] == '\r') return idx - 1;  // Return index of \r
-
-            current = lf + 1;
-            remaining = len - (current - ptr);
-        }
-        return std::nullopt;
-    }
-
-    static std::optional<int64_t> parse_int(std::string_view s)
-    {
-        if (s.empty()) return std::nullopt;
-
-        int64_t val;
-        auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), val);
-        if (ec == std::errc() && ptr == s.data() + s.size()) return val;
-        return std::nullopt;
-    }
-
-    static std::optional<double> parse_double(std::string_view s)
-    {
-        if (s.empty()) return std::nullopt;
-        // Special values
-        if (s == "inf" || s == "+inf") return std::numeric_limits<double>::infinity();
-        if (s == "-inf") return -std::numeric_limits<double>::infinity();
-        if (s == "nan") return std::numeric_limits<double>::quiet_NaN();
-
-        double val;
-        auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), val);
-        if (ec == std::errc() && ptr == s.data() + s.size()) return val;
-        return std::nullopt;
-    }
-
-    static std::optional<bool> parse_boolean(std::string_view s)
-    {
-        if (s == "t") return true;
-        if (s == "f") return false;
-        return std::nullopt;
-    }
-
-    static bool is_valid_bignum(std::string_view s)
-    {
-        if (s.empty()) return false;
-        size_t i = 0;
-
-        // Optional sign
-        if (s[0] == '-' || s[0] == '+')
-        {
-            i = 1;
+            return std::nullopt;
         }
 
-        if (i >= s.size()) return false;  // " + " or " - " or empty after sign
+        const auto* const kLf = static_cast<const char*>(found);
 
-        for (; i < s.size(); ++i)
+        if (const size_t kIdx = kLf - ptr; kIdx > 0 && ptr[kIdx - 1] == '\r')
         {
-            if (s[i] < '0' || s[i] > '9') return false;
+            return kIdx - 1;  // Return index of \r
         }
+
+        current = kLf + 1;
+        remaining = kLen - (current - ptr);
+    }
+    return std::nullopt;
+}
+
+std::optional<int64_t> ParseInt(std::string_view s)
+{
+    if (s.empty())
+    {
+        return std::nullopt;
+    }
+
+    int64_t val = 0;
+    auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), val);
+    if (ec == std::errc() && ptr == s.data() + s.size())  // NOLINT
+    {
+        return val;
+    }
+    return std::nullopt;
+}
+
+std::optional<double> ParseDouble(std::string_view s)
+{
+    if (s.empty())
+    {
+        return std::nullopt;
+    }
+    // Special values
+    if (s == "inf" || s == "+inf")
+    {
+        return std::numeric_limits<double>::infinity();
+    }
+    if (s == "-inf")
+    {
+        return -std::numeric_limits<double>::infinity();
+    }
+    if (s == "nan")
+    {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+
+    double val{};
+    auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), val);
+    if (ec == std::errc() && ptr == s.data() + s.size())  // NOLINT
+    {
+        return val;
+    }
+    return std::nullopt;
+}
+
+std::optional<bool> ParseBoolean(std::string_view s)
+{
+    if (s == "t")
+    {
         return true;
     }
-
-    std::string_view get_simple_payload(const FrameHeader& frame)
+    if (s == "f")
     {
-        const auto crlf = find_crlf({frame.data, frame.size});
-        if (!crlf) return {};
-        return {frame.data + 1, *crlf - 1};
+        return false;
+    }
+    return std::nullopt;
+}
+
+bool IsValidBignum(std::string_view s)
+{
+    if (s.empty())
+    {
+        return false;
+    }
+    size_t i = 0;
+
+    // Optional sign
+    if (s[0] == '-' || s[0] == '+')
+    {
+        i = 1;
     }
 
-    std::string_view get_bulk_payload(const FrameHeader& frame)
+    if (i >= s.size())
     {
-        const auto header_end = find_crlf({frame.data, frame.size});
-        if (!header_end) return {};
-
-        const size_t header_len = *header_end + 2;
-        if (frame.size < header_len + 2) return {};
-
-        return {frame.data + header_len, frame.size - header_len - 2};
+        return false;  // " + " or " - " or empty after sign
     }
 
-    std::expected<FrameHeader, ParseError> Parser::extract_bulk_header(std::span<const char> data, const FrameType type) const
+    for (; i < s.size(); ++i)
     {
-        const auto pos = find_crlf(data);
-        if (!pos) return std::unexpected(ParseError::NeedMoreData);
-
-        const size_t header_len = *pos + 2;
-        const auto maybe_payload_len = parse_int({data.data() + 1, *pos - 1});
-
-        if (!maybe_payload_len) return std::unexpected(ParseError::Atoi);
-
-        const auto payload_len = *maybe_payload_len;
-
-        // Handle Null Bulk: $-1\r\n
-        if (payload_len == -1)
+        if (s[i] < '0' || s[i] > '9')
         {
-            return FrameHeader{type, data.data(), header_len, 0};
-        }
-
-        if (payload_len < 0) return std::unexpected(ParseError::Atoi);
-
-        if (static_cast<size_t>(payload_len) > config_.max_size)
-        {
-            return std::unexpected(ParseError::SizeOverflow);
-        }
-
-        const auto total = header_len + payload_len + 2;
-        if (data.size() < total) return std::unexpected(ParseError::NeedMoreData);
-
-        return FrameHeader{type, data.data(), total, 0};
-    }
-
-    std::expected<FrameHeader, ParseError> Parser::parse_frame_internal(std::span<const char> data, const size_t depth)
-    {
-        // Check Recursion Limit
-        if (depth > config_.max_aggregate_depth) return std::unexpected(ParseError::MaxDepthReached);
-
-        if (data.empty()) return std::unexpected(ParseError::NeedMoreData);
-
-        const auto pos = find_crlf(data);
-        if (!pos) return std::unexpected(ParseError::NeedMoreData);
-
-        switch (const auto type = static_cast<FrameType>(data[0]))
-        {
-            case FrameType::Integer:
-            {
-                // Validation: ensure it is a valid 64-bit integer
-                if (!parse_int({data.data() + 1, *pos - 1}))
-                {
-                    return std::unexpected(ParseError::Atoi);
-                }
-                return FrameHeader{type, data.data(), *pos + 2, 0};
-            }
-            case FrameType::Boolean:
-            {
-                if (const std::string_view payload{data.data() + 1, *pos - 1}; !parse_boolean(payload).has_value())
-                {
-                    return std::unexpected(ParseError::MalformedFrame);
-                };
-
-                FrameHeader header{type, data.data(), *pos + 2, 0};
-                return header;
-            }
-            case FrameType::Double:
-            {
-                if (const std::string_view payload{data.data() + 1, *pos - 1}; !parse_double(payload).has_value())
-                {
-                    return std::unexpected(ParseError::MalformedFrame);
-                }
-
-                return FrameHeader{type, data.data(), *pos + 2, 0};
-            }
-            case FrameType::BigNumber:
-            {
-                if (const std::string_view payload{data.data() + 1, *pos - 1}; !is_valid_bignum(payload))
-                {
-                    return std::unexpected(ParseError::MalformedFrame);
-                }
-
-                return FrameHeader{type, data.data(), *pos + 2, 0};
-            }
-            case FrameType::SimpleString:
-            case FrameType::SimpleError:
-            case FrameType::Null:
-                return FrameHeader{type, data.data(), *pos + 2, 0};
-            case FrameType::BulkString:
-            case FrameType::BulkError:
-            case FrameType::VerbatimString:
-                return extract_bulk_header(data, type);
-
-                // Aggregates
-            case FrameType::Array:
-            case FrameType::Map:
-            case FrameType::Set:
-            case FrameType::Push:
-            case FrameType::Attribute:
-            {
-                const size_t header_len = *pos + 2;
-
-                const auto maybe_count = parse_int({data.data() + 1, *pos - 1});
-                if (!maybe_count || *maybe_count < 0)
-                {
-                    return std::unexpected(ParseError::MalformedFrame);
-                }
-
-                const auto count = static_cast<size_t>(*maybe_count);
-                const size_t loop_count = (type == FrameType::Map || type == FrameType::Attribute) ? count * 2 : count;
-
-                size_t offset = header_len;
-                for (size_t i = 0; i < loop_count; ++i)
-                {
-                    const auto child = parse_frame_internal(data.subspan(offset), depth + 1);
-                    if (!child) return std::unexpected(child.error());
-                    offset += child->size;
-                }
-
-                return FrameHeader{type, data.data(), offset, count};
-            }
-            default:
-                return std::unexpected(ParseError::Unknown);
+            return false;
         }
     }
-
-    FrameIterator::FrameIterator(const FrameHeader& parent, Parser& parser) : parser_(parser), current_(parent.data), remaining_(parent.element_count), depth_(0)
+    return true;
+}
+}  // namespace
+std::string_view GetSimplePayload(const FrameHeader& frame)
+{
+    const auto kCrlf = FindCrlf({frame.data, frame.size});
+    if (!kCrlf)
     {
-        // Skip header
-        if (const auto header_crlf = find_crlf({parent.data, parent.size}))
-        {
-            current_ += (*header_crlf + 2);
-        }
+        return {};
+    }
+    return {frame.data + 1, *kCrlf - 1};
+}
 
-        // Fix iteration count for Maps
-        if (parent.type == FrameType::Map || parent.type == FrameType::Attribute)
-        {
-            remaining_ *= 2;
-        }
+std::string_view GetBulkPayload(const FrameHeader& frame)
+{
+    const auto kHeaderEnd = FindCrlf({frame.data, frame.size});
+    if (!kHeaderEnd)
+    {
+        return {};
     }
 
-    std::expected<FrameHeader, ParseError> FrameIterator::next()
+    const size_t kHeaderLen = *kHeaderEnd + 2;
+    if (frame.size < kHeaderLen + 2)
     {
-        if (remaining_ == 0) return std::unexpected(ParseError::EoIter);
-
-        // We can pass SIZE_MAX because we know the parent was validated.
-        auto child = parser_.parse_frame_internal({current_, SIZE_MAX}, depth_);
-
-        if (!child) return std::unexpected(child.error());
-
-        current_ += child->size;
-        remaining_--;
-
-        return child;
+        return {};
     }
+
+    return {frame.data + kHeaderLen, frame.size - kHeaderLen - 2};
+}
+
+std::expected<FrameHeader, ParseError> Parser::ExtractBulkHeader(std::span<const char> data, const FrameType type) const
+{
+    const auto kPos = FindCrlf(data);
+    if (!kPos)
+    {
+        return std::unexpected(ParseError::kNeedMoreData);
+    }
+
+    const size_t kHeaderLen = *kPos + 2;
+    const auto kMaybePayloadLen = ParseInt({data.data() + 1, *kPos - 1});
+
+    if (!kMaybePayloadLen)
+    {
+        return std::unexpected(ParseError::kAtoi);
+    }
+
+    const auto kPayloadLen = *kMaybePayloadLen;
+
+    // Handle Null Bulk: $-1\r\n
+    if (kPayloadLen == -1)
+    {
+        return FrameHeader{.type = type, .data = data.data(), .size = kHeaderLen, .element_count = 0};
+    }
+
+    if (kPayloadLen < 0)
+    {
+        return std::unexpected(ParseError::kAtoi);
+    }
+
+    if (std::cmp_greater(kPayloadLen, config_.max_size))
+    {
+        return std::unexpected(ParseError::kSizeOverflow);
+    }
+
+    const auto kTotal = kHeaderLen + static_cast<size_t>(kPayloadLen) + 2;
+    if (data.size() < kTotal)
+    {
+        return std::unexpected(ParseError::kNeedMoreData);
+    }
+
+    // STRICT VALIDATION (Reviewer Finding 3):
+    // Ensure the payload is actually followed by \r\n
+    // data[kTotal - 2] must be \r, data[kTotal - 1] must be \n
+    if (data[kTotal - 2] != '\r' || data[kTotal - 1] != '\n')
+    {
+        return std::unexpected(ParseError::kMalformedFrame);
+    }
+
+    return FrameHeader{.type = type, .data = data.data(), .size = kTotal, .element_count = 0};
+}
+
+std::expected<FrameHeader, ParseError> Parser::ParseFrameInternal(std::span<const char> data, const size_t depth)
+{
+    // Reviewer Finding 4: Changed > to >= for inclusive limit
+    if (depth >= config_.max_aggregate_depth)
+    {
+        return std::unexpected(ParseError::kMaxDepthReached);
+    }
+
+    if (data.empty())
+    {
+        return std::unexpected(ParseError::kNeedMoreData);
+    }
+
+    const auto kPos = FindCrlf(data);
+    if (!kPos)
+    {
+        return std::unexpected(ParseError::kNeedMoreData);
+    }
+
+    switch (const auto kType = static_cast<FrameType>(data[0]))
+    {
+        case FrameType::kInteger:
+        {
+            // Validation: ensure it is a valid 64-bit integer
+            if (!ParseInt({data.data() + 1, *kPos - 1}))
+            {
+                return std::unexpected(ParseError::kAtoi);
+            }
+            return FrameHeader{.type = kType, .data = data.data(), .size = *kPos + 2, .element_count = 0};
+        }
+        case FrameType::kBoolean:
+        {
+            if (const std::string_view kPayload{data.data() + 1, *kPos - 1}; !ParseBoolean(kPayload).has_value())
+            {
+                return std::unexpected(ParseError::kMalformedFrame);
+            };
+
+            FrameHeader header{.type = kType, .data = data.data(), .size = *kPos + 2, .element_count = 0};
+            return header;
+        }
+        case FrameType::kDouble:
+        {
+            if (const std::string_view kPayload{data.data() + 1, *kPos - 1}; !ParseDouble(kPayload).has_value())
+            {
+                return std::unexpected(ParseError::kMalformedFrame);
+            }
+
+            return FrameHeader{.type = kType, .data = data.data(), .size = *kPos + 2, .element_count = 0};
+        }
+        case FrameType::kBigNumber:
+        {
+            if (const std::string_view kPayload{data.data() + 1, *kPos - 1}; !IsValidBignum(kPayload))
+            {
+                return std::unexpected(ParseError::kMalformedFrame);
+            }
+
+            return FrameHeader{.type = kType, .data = data.data(), .size = *kPos + 2, .element_count = 0};
+        }
+        case FrameType::kSimpleString:
+        case FrameType::kSimpleError:
+        case FrameType::kNull:
+            return FrameHeader{.type = kType, .data = data.data(), .size = *kPos + 2, .element_count = 0};
+        case FrameType::kBulkString:
+        case FrameType::kBulkError:
+        case FrameType::kVerbatimString:
+            return ExtractBulkHeader(data, kType);
+
+            // Aggregates
+        case FrameType::kArray:
+        case FrameType::kMap:
+        case FrameType::kSet:
+        case FrameType::kPush:
+        case FrameType::kAttribute:
+        {
+            const size_t kHeaderLen = *kPos + 2;
+
+            const auto kMaybeCount = ParseInt({data.data() + 1, *kPos - 1});
+
+            // Allow -1 count for Arrays (Null Array)
+            if (kType == FrameType::kArray && kMaybeCount && *kMaybeCount == -1)
+            {
+                return FrameHeader{.type = kType, .data = data.data(), .size = kHeaderLen, .element_count = 0};
+            }
+
+            if (!kMaybeCount || *kMaybeCount < 0)
+            {
+                return std::unexpected(ParseError::kMalformedFrame);
+            }
+
+            const auto kCount = static_cast<size_t>(*kMaybeCount);
+
+            // Reviewer Finding 2: Overflow check
+            // Check if doubling for Map/Attribute would overflow
+            if ((kType == FrameType::kMap || kType == FrameType::kAttribute))
+            {
+                if (kCount > (std::numeric_limits<size_t>::max() / 2))
+                {
+                    return std::unexpected(ParseError::kSizeOverflow);
+                }
+            }
+
+            const size_t kLoopCount =
+                (kType == FrameType::kMap || kType == FrameType::kAttribute) ? kCount * 2 : kCount;
+
+            size_t offset = kHeaderLen;
+            for (size_t i = 0; i < kLoopCount; ++i)
+            {
+                // Safety: Bounds check for subspan creation
+                if (offset >= data.size())
+                {
+                    return std::unexpected(ParseError::kNeedMoreData);
+                }
+
+                const auto kChild = ParseFrameInternal(data.subspan(offset), depth + 1);
+                if (!kChild)
+                {
+                    return std::unexpected(kChild.error());
+                }
+                // Reviewer Finding 2: Offset growth unchecked
+                // Check for overflow of offset + child size
+                if (std::numeric_limits<size_t>::max() - offset < kChild->size)
+                {
+                    return std::unexpected(ParseError::kSizeOverflow);
+                }
+
+                offset += kChild->size;
+
+                // Check against config max size
+                if (offset > config_.max_size)
+                {
+                    return std::unexpected(ParseError::kSizeOverflow);
+                }
+            }
+
+            return FrameHeader{.type = kType, .data = data.data(), .size = offset, .element_count = kCount};
+        }
+        default:
+            return std::unexpected(ParseError::kUnknown);
+    }
+}
+
+FrameIterator::FrameIterator(const FrameHeader& parent, Parser& parser, size_t depth)
+    : parser_(parser),
+      current_(parent.data),
+      end_(parent.data + parent.size),
+      remaining_(parent.element_count),
+      depth_(depth)
+{
+    // Skip header
+    if (const auto kHeaderCrlf = FindCrlf({parent.data, parent.size}))
+    {
+        current_ += (*kHeaderCrlf + 2);
+    }
+
+    // Double count for Maps
+    if (parent.type == FrameType::kMap || parent.type == FrameType::kAttribute)
+    {
+        remaining_ *= 2;
+    }
+}
+
+std::expected<FrameHeader, ParseError> FrameIterator::Next()
+{
+    if (remaining_ == 0)
+    {
+        return std::unexpected(ParseError::kEoIter);
+    }
+
+    // Reviewer Finding 1: Bounds check using end_
+    // Calculate exact remaining bytes in the parent frame
+    if (current_ >= end_)
+    {
+        // This should technically not happen if remaining_ > 0 and frame is well-formed,
+        // but it catches malformed frames safely.
+        return std::unexpected(ParseError::kMalformedFrame);
+    }
+
+    const size_t kBytesAvailable = end_ - current_;
+
+    // Pass explicit bounds instead of SIZE_MAX
+    auto child = parser_.ParseFrameInternal({current_, kBytesAvailable}, depth_);
+
+    if (!child)
+    {
+        return std::unexpected(child.error());
+    }
+
+    current_ += child->size;
+    remaining_--;
+
+    return child;
+}
 }  // namespace kio::resp

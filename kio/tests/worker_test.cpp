@@ -4,15 +4,18 @@
 
 #include "kio/core/worker.h"
 
-#include <gtest/gtest.h>
-#include <sys/socket.h>
-#include <thread>
-#include <unistd.h>
-#include <unordered_set>
-
 #include "kio/core/coro.h"
 #include "kio/core/errors.h"
 #include "kio/sync/sync_wait.h"
+
+#include <thread>
+#include <unordered_set>
+
+#include <unistd.h>
+
+#include <sys/socket.h>
+
+#include <gtest/gtest.h>
 
 using namespace kio;
 using namespace kio::io;
@@ -20,43 +23,43 @@ using namespace kio::io;
 class WorkerTest : public ::testing::Test
 {
 protected:
-    std::unique_ptr<Worker> worker;
-    std::filesystem::path test_dir;
-    std::unique_ptr<std::jthread> worker_thread;
-    WorkerConfig config;
+    std::unique_ptr<Worker> worker_;
+    std::filesystem::path test_dir_;
+    std::unique_ptr<std::jthread> worker_thread_;
+    WorkerConfig config_;
 
     void SetUp() override
     {
-        alog::configure(1024, LogLevel::Debug);
+        alog::Configure(1024, LogLevel::kDisabled);
 
-        test_dir = std::filesystem::temp_directory_path() / "kio_tests/";
-        std::filesystem::create_directories(test_dir);
-        config.uring_submit_timeout_ms = 10;
-        worker = std::make_unique<Worker>(0, config);
+        test_dir_ = std::filesystem::temp_directory_path() / "kio_tests/";
+        std::filesystem::create_directories(test_dir_);
+        config_.uring_submit_timeout_ms = 10;
+        worker_ = std::make_unique<Worker>(0, config_);
 
         // Start the worker's event loop on a dedicated thread
-        worker_thread = std::make_unique<std::jthread>([this] { worker->loop_forever(); });
+        worker_thread_ = std::make_unique<std::jthread>([this] { worker_->LoopForever(); });
 
-        worker->wait_ready();
+        worker_->WaitReady();
     }
 
     void TearDown() override
     {
         // Request the worker to stop and wait for its thread to join.
-        (void) worker->request_stop();
-        worker_thread.reset();
-        worker.reset();
-        std::filesystem::remove_all(test_dir);
+        (void)worker_->RequestStop();
+        worker_thread_.reset();
+        worker_.reset();
+        std::filesystem::remove_all(test_dir_);
     }
 
     // Helper coroutine to run a test on the worker thread
-    template<typename Awaitable>
+    template <typename Awaitable>
     auto RunOnWorker(Awaitable&& awaitable)
     {
         using AwaitableType = std::remove_reference_t<Awaitable>;
         auto task = [&]() -> Task<decltype(std::declval<AwaitableType>().await_resume())>
         {
-            co_await SwitchToWorker(*worker);
+            co_await SwitchToWorker(*worker_);
             co_return co_await std::forward<Awaitable>(awaitable);
         };
 
@@ -68,15 +71,15 @@ TEST_F(WorkerTest, AsyncSleep)
 {
     auto test_coro = [&]() -> Task<void>
     {
-        co_await SwitchToWorker(*worker);
+        co_await SwitchToWorker(*worker_);
 
-        const auto start = std::chrono::steady_clock::now();
-        const auto result = co_await worker->async_sleep(std::chrono::milliseconds(20));
-        const auto end = std::chrono::steady_clock::now();
+        const auto kStart = std::chrono::steady_clock::now();
+        const auto kResult = co_await worker_->AsyncSleep(std::chrono::milliseconds(20));
+        const auto kEnd = std::chrono::steady_clock::now();
 
-        EXPECT_TRUE(result.has_value());
-        const auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-        EXPECT_GE(duration.count(), 20);
+        EXPECT_TRUE(kResult.has_value());
+        const auto kDuration = std::chrono::duration_cast<std::chrono::milliseconds>(kEnd - kStart);
+        EXPECT_GE(kDuration.count(), 20);
     };
 
     SyncWait(test_coro());
@@ -86,12 +89,12 @@ TEST_F(WorkerTest, AsyncReadOnBadFdReturnsError)
 {
     auto test_coro = [&]() -> Task<void>
     {
-        co_await SwitchToWorker(*worker);
-        constexpr int bad_fd = 999;
+        co_await SwitchToWorker(*worker_);
+        constexpr int kBadFd = 999;
         char buffer[10];
 
         // We expect this to fail
-        auto result = co_await worker->async_read(bad_fd, std::span(buffer));
+        auto result = co_await worker_->AsyncRead(kBadFd, std::span(buffer));
 
         EXPECT_FALSE(result.has_value());
         // The error must be 'InvalidFileDescriptor' (EBADF)
@@ -106,22 +109,22 @@ TEST_F(WorkerTest, AsyncReadWriteSocketPair)
     int fds[2];
     // Create a connected pair: fds[0] <--> fds[1]
     ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
-    const int read_fd = fds[0];
-    const int write_fd = fds[1];
+    const int kReadFd = fds[0];
+    const int kWriteFd = fds[1];
 
     auto test_coro = [&]() -> Task<void>
     {
-        co_await SwitchToWorker(*worker);
+        co_await SwitchToWorker(*worker_);
 
         std::string write_buf = "hello";
-        const auto write_res = co_await worker->async_write(write_fd, std::span(write_buf.data(), write_buf.size()));
-        EXPECT_TRUE(write_res.has_value());
-        EXPECT_EQ(*write_res, 5);
+        const auto kWriteRes = co_await worker_->AsyncWrite(kWriteFd, std::span(write_buf.data(), write_buf.size()));
+        EXPECT_TRUE(kWriteRes.has_value());
+        EXPECT_EQ(*kWriteRes, 5);
 
         char read_buf[10]{};
-        const auto read_res = co_await worker->async_read(read_fd, std::span(read_buf, sizeof(read_buf)));
-        EXPECT_TRUE(read_res.has_value());
-        EXPECT_EQ(*read_res, 5);
+        const auto kReadRes = co_await worker_->AsyncRead(kReadFd, std::span(read_buf, sizeof(read_buf)));
+        EXPECT_TRUE(kReadRes.has_value());
+        EXPECT_EQ(*kReadRes, 5);
 
         EXPECT_EQ(std::string(read_buf, 5), "hello");
     };
@@ -129,64 +132,65 @@ TEST_F(WorkerTest, AsyncReadWriteSocketPair)
     SyncWait(test_coro());
 
     // Clean up fds
-    ::close(read_fd);
-    ::close(write_fd);
+    ::close(kReadFd);
+    ::close(kWriteFd);
 }
 
 TEST_F(WorkerTest, AsyncReadWriteExactSocketPair)
 {
     int fds[2];
     ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
-    const int read_fd = fds[0];
-    const int write_fd = fds[1];
+    const int kReadFd = fds[0];
+    const int kWriteFd = fds[1];
 
     auto test_coro = [&]() -> Task<void>
     {
-        co_await SwitchToWorker(*worker);
+        co_await SwitchToWorker(*worker_);
 
         std::string write_buf = "hello world";
-        auto write_res = co_await worker->async_write_exact(write_fd, std::span(write_buf.data(), write_buf.size()));
+        const auto kWriteRes =
+            co_await worker_->AsyncWriteExact(kWriteFd, std::span(write_buf.data(), write_buf.size()));
 
-        EXPECT_TRUE(write_res.has_value());
+        EXPECT_TRUE(kWriteRes.has_value());
 
         std::vector<char> read_buf(write_buf.size());
-        const auto read_res = co_await worker->async_read_exact(read_fd, std::span(read_buf.data(), read_buf.size()));
+        const auto kReadRes = co_await worker_->AsyncReadExact(kReadFd, std::span(read_buf.data(), read_buf.size()));
 
-        EXPECT_TRUE(read_res.has_value());
+        EXPECT_TRUE(kReadRes.has_value());
         EXPECT_EQ(std::string(read_buf.data(), read_buf.size()), "hello world");
     };
 
     SyncWait(test_coro());
 
     // Clean up fds
-    ::close(read_fd);
-    ::close(write_fd);
+    ::close(kReadFd);
+    ::close(kWriteFd);
 }
 
 TEST_F(WorkerTest, AsyncReadExactEOF)
 {
     int fds[2];
     ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
-    const int read_fd = fds[0];
-    const int write_fd = fds[1];
+    const int kReadFd = fds[0];
+    const int kWriteFd = fds[1];
 
     auto test_coro = [&]() -> Task<void>
     {
-        co_await SwitchToWorker(*worker);
+        co_await SwitchToWorker(*worker_);
 
         std::string write_buf = "short";
-        const auto write_res = co_await worker->async_write(write_fd, std::span(write_buf.data(), write_buf.size()));
-        EXPECT_TRUE(write_res.has_value());
+        const auto kWriteRes = co_await worker_->AsyncWrite(kWriteFd, std::span(write_buf.data(), write_buf.size()));
+        EXPECT_TRUE(kWriteRes.has_value());
 
         // Close the writing end. This will send an EOF to the read end after
         // the initial 5 bytes are read.
         // We use async_close to ensure it happens on the worker thread.
-        const auto close_res = co_await worker->async_close(write_fd);
-        EXPECT_TRUE(close_res.has_value());
+        const auto kCloseRes = co_await worker_->AsyncClose(kWriteFd);
+        EXPECT_TRUE(kCloseRes.has_value());
 
         // Attempt to read *exactly* 10 bytes. This should fail.
         char read_buf[10];  // Expect 10 bytes
-        auto read_res = co_await worker->async_read_exact(read_fd, std::span(read_buf, sizeof(read_buf)));
+        auto read_res = co_await worker_->AsyncReadExact(kReadFd, std::span(read_buf, sizeof(read_buf)));
 
         EXPECT_FALSE(read_res.has_value());
         // The error must be due to EOF
@@ -195,7 +199,7 @@ TEST_F(WorkerTest, AsyncReadExactEOF)
 
     SyncWait(test_coro());
 
-    ::close(read_fd);
+    ::close(kReadFd);
 }
 
 TEST_F(WorkerTest, SingleThreadedExecution)
@@ -208,7 +212,7 @@ TEST_F(WorkerTest, SingleThreadedExecution)
 
     auto test_coro = [&]() -> Task<void>
     {
-        co_await SwitchToWorker(*worker);
+        co_await SwitchToWorker(*worker_);
 
         // Shared variable - NO synchronization needed because Worker is single-threaded
         int shared_counter = 0;
@@ -217,7 +221,7 @@ TEST_F(WorkerTest, SingleThreadedExecution)
         // Launch a detached task that will increment the counter
         auto detached_increment = [&]() -> DetachedTask
         {
-            co_await SwitchToWorker(*worker);
+            co_await SwitchToWorker(*worker_);
 
             // Even though this is "detached", it runs on the same worker thread
             // So it will execute cooperatively with other tasks
@@ -225,24 +229,24 @@ TEST_F(WorkerTest, SingleThreadedExecution)
             {
                 shared_counter++;
                 // Yield control to allow other tasks to run
-                co_await worker->async_sleep(std::chrono::milliseconds(0));
+                co_await worker_->AsyncSleep(std::chrono::milliseconds(0));
             }
             detached_task_completed = true;
         };
 
         // Start the detached task
-        detached_increment().detach();
+        detached_increment();
 
         // Multiple regular tasks also incrementing the counter
         auto increment_task = [&](const int iterations) -> Task<void>
         {
-            co_await SwitchToWorker(*worker);
+            co_await SwitchToWorker(*worker_);
 
             for (int i = 0; i < iterations; ++i)
             {
                 shared_counter++;
                 // Yield to allow interleaving
-                co_await worker->async_sleep(std::chrono::milliseconds(0));
+                co_await worker_->AsyncSleep(std::chrono::milliseconds(0));
             }
         };
 
@@ -259,7 +263,7 @@ TEST_F(WorkerTest, SingleThreadedExecution)
         // Wait for a detached task to complete by polling
         while (!detached_task_completed)
         {
-            co_await worker->async_sleep(std::chrono::milliseconds(1));
+            co_await worker_->AsyncSleep(std::chrono::milliseconds(1));
         }
 
         // Check: All increments should have happened
@@ -270,138 +274,77 @@ TEST_F(WorkerTest, SingleThreadedExecution)
     SyncWait(test_coro());
 }
 
-TEST_F(WorkerTest, GetOpIdPoolGrowthCorrectness)
-{
-    auto test_coro = [&]() -> Task<void>
-    {
-        co_await SwitchToWorker(*worker);
-
-        const size_t initial_capacity = worker->get_stats().active_coroutines + worker->get_stats().active_coroutines;  // just trigger reading
-
-        std::unordered_set<uint64_t> ids;
-        for (size_t i = 0; i < initial_capacity + 10; ++i)
-        {
-            uint64_t id = kio::io::internal::WorkerAccess::get_op_id(*worker);
-            ids.insert(id);
-            kio::io::internal::WorkerAccess::init_op_slot(*worker, id, {});
-        }
-
-        EXPECT_GT(worker->get_stats().active_coroutines, initial_capacity);
-        EXPECT_EQ(ids.size(), initial_capacity + 10);  // all IDs unique
-
-        // cleanup
-        for (const auto id: ids) kio::io::internal::WorkerAccess::release_op_id(*worker, id);
-    };
-
-    SyncWait(test_coro());
-}
-
-TEST_F(WorkerTest, ReleaseOpIdReuseCorrectness)
-{
-    auto test_coro = [&]() -> Task<void>
-    {
-        co_await SwitchToWorker(*worker);
-
-        const uint64_t id1 = kio::io::internal::WorkerAccess::get_op_id(*worker);
-        kio::io::internal::WorkerAccess::release_op_id(*worker, id1);
-
-        const uint64_t id2 = kio::io::internal::WorkerAccess::get_op_id(*worker);
-        EXPECT_EQ(id1, id2);  // recycled ID must be reissued
-        kio::io::internal::WorkerAccess::release_op_id(*worker, id2);
-    };
-
-    SyncWait(test_coro());
-}
-
-TEST_F(WorkerTest, DoubleReleaseOpIdIsSafe)
-{
-    auto test_coro = [&]() -> Task<void>
-    {
-        co_await SwitchToWorker(*worker);
-
-        const uint64_t id = kio::io::internal::WorkerAccess::get_op_id(*worker);
-        kio::io::internal::WorkerAccess::release_op_id(*worker, id);
-        kio::io::internal::WorkerAccess::release_op_id(*worker, id);  // should NOT crash or corrupt
-
-        const uint64_t id2 = kio::io::internal::WorkerAccess::get_op_id(*worker);
-        EXPECT_EQ(id, id2);  // still reusable
-        kio::io::internal::WorkerAccess::release_op_id(*worker, id2);
-    };
-
-    SyncWait(test_coro());
-}
-
 TEST_F(WorkerTest, AsyncReadAtRealFileOffsetWorks)
 {
     namespace fs = std::filesystem;
-    const fs::path path = test_dir / "tmp_read_test.bin";
+    const fs::path path = test_dir_ / "tmp_read_test.bin";
 
     const std::string data = "ABCDEFGHIJ";
-    const int fd = ::open(path.c_str(), O_CREAT | O_RDWR, 0644);
-    ASSERT_GT(fd, 0);
-    ASSERT_EQ(::write(fd, data.data(), data.size()), 10);
-    ASSERT_EQ(::lseek(fd, 0, SEEK_SET), 0);
+    const int kFd = ::open(path.c_str(), O_CREAT | O_RDWR, 0644);
+    ASSERT_GT(kFd, 0);
+    ASSERT_EQ(::write(kFd, data.data(), data.size()), 10);
+    ASSERT_EQ(::lseek(kFd, 0, SEEK_SET), 0);
 
     auto coro = [&]() -> Task<void>
     {
-        co_await SwitchToWorker(*worker);
+        co_await SwitchToWorker(*worker_);
         char buf[3]{};
 
-        const auto res = co_await worker->async_read_at(fd, std::span(buf, 3), 4);
-        EXPECT_TRUE(res.has_value());
-        EXPECT_EQ(*res, 3);
+        const auto kRes = co_await worker_->AsyncReadAt(kFd, std::span(buf, 3), 4);
+        EXPECT_TRUE(kRes.has_value());
+        EXPECT_EQ(*kRes, 3);
         EXPECT_EQ(std::string(buf, 3), "EFG");
     };
 
     SyncWait(coro());
 
-    ::close(fd);
+    ::close(kFd);
     fs::remove(path);
 }
 
 TEST_F(WorkerTest, RequestStopIsIdempotentAndWakesLoop)
 {
-    EXPECT_TRUE(worker->request_stop());
-    EXPECT_TRUE(worker->request_stop());
+    EXPECT_TRUE(worker_->RequestStop());
+    EXPECT_TRUE(worker_->RequestStop());
 }
 
 TEST_F(WorkerTest, AsyncReadExactAtOffsetCorrectness)
 {
     namespace fs = std::filesystem;
-    const fs::path path = test_dir / "read_exact_offset_test.bin";
+    const fs::path path = test_dir_ / "read_exact_offset_test.bin";
 
     const std::string data = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";  // 26 bytes
-    const int fd = ::open(path.c_str(), O_CREAT | O_RDWR, 0644);
-    ASSERT_GT(fd, 0);
-    ASSERT_EQ((::write(fd, data.data(), data.size())), data.size());
-    ASSERT_EQ(::lseek(fd, 0, SEEK_SET), 0);
+    const int kFd = ::open(path.c_str(), O_CREAT | O_RDWR, 0644);
+    ASSERT_GT(kFd, 0);
+    ASSERT_EQ((::write(kFd, data.data(), data.size())), data.size());
+    ASSERT_EQ(::lseek(kFd, 0, SEEK_SET), 0);
 
     auto coro = [&]() -> Task<void>
     {
-        co_await SwitchToWorker(*worker);
-        constexpr size_t to_read = 5;
-        char buf[to_read]{};
+        co_await SwitchToWorker(*worker_);
+        constexpr size_t kToRead = 5;
+        char buf[kToRead]{};
 
         // Read 5 bytes starting at offset 10 ("KLMNO")
-        const auto res = co_await worker->async_read_exact_at(fd, std::span(buf, to_read), 10);
+        const auto res = co_await worker_->AsyncReadExactAt(kFd, std::span(buf, kToRead), 10);
 
         EXPECT_TRUE(res.has_value()) << "read_exact_at must succeed for full buffer fill";
-        EXPECT_EQ(std::string(buf, to_read), data.substr(10, to_read));
+        EXPECT_EQ(std::string(buf, kToRead), data.substr(10, kToRead));
     };
 
     SyncWait(coro());
 
-    ::close(fd);
+    ::close(kFd);
     fs::remove(path);
 }
 
 TEST_F(WorkerTest, AsyncWriteExactFile_Correctness)
 {
     namespace fs = std::filesystem;
-    const fs::path path = test_dir / "write_exact_test.bin";
+    const fs::path kPath = test_dir_ / "write_exact_test.bin";
 
     // Initial file
-    int fd = ::open(path.c_str(), O_CREAT | O_RDWR, 0644);
+    int fd = ::open(kPath.c_str(), O_CREAT | O_RDWR, 0644);
     ASSERT_GT(fd, 0);
     ::close(fd);
 
@@ -410,21 +353,21 @@ TEST_F(WorkerTest, AsyncWriteExactFile_Correctness)
 
     auto coro = [&]() -> Task<void>
     {
-        co_await SwitchToWorker(*worker);
+        co_await SwitchToWorker(*worker_);
 
-        int fd = ::open(path.c_str(), O_RDWR);
+        int fd = ::open(kPath.c_str(), O_RDWR);
         EXPECT_GT(fd, 0);
 
-        const auto res = co_await worker->async_write_exact(fd, std::span(payload.data(), N));
+        const auto kRes = co_await worker_->AsyncWriteExact(fd, std::span(payload.data(), N));
 
-        EXPECT_TRUE(res.has_value()) << "async_write_exact must succeed on file";
+        EXPECT_TRUE(kRes.has_value()) << "async_write_exact must succeed on file";
         ::close(fd);
     };
 
     SyncWait(coro());
 
     // Validate file content
-    fd = ::open(path.c_str(), O_RDONLY);
+    fd = ::open(kPath.c_str(), O_RDONLY);
     ASSERT_GT(fd, 0);
 
     std::vector<char> buf(N);
@@ -438,11 +381,11 @@ TEST_F(WorkerTest, AsyncWriteExactFile_Correctness)
 TEST_F(WorkerTest, DirectIO_AlignedOffsetAndSize)
 {
     namespace fs = std::filesystem;
-    const fs::path path = test_dir / "direct_io_test.bin";
+    const fs::path path = test_dir_ / "direct_io_test.bin";
 
     // Open a file with O_DIRECT
-    const int fd = ::open(path.c_str(), O_CREAT | O_RDWR | O_DIRECT, 0644);
-    ASSERT_GT(fd, 0);
+    const int kFd = ::open(path.c_str(), O_CREAT | O_RDWR | O_DIRECT, 0644);
+    ASSERT_GT(kFd, 0);
 
     // Allocate aligned buffer multiple of 4096
     constexpr size_t N = 4096 * 3;
@@ -455,26 +398,26 @@ TEST_F(WorkerTest, DirectIO_AlignedOffsetAndSize)
 
     auto coro = [&]() -> Task<void>
     {
-        co_await SwitchToWorker(*worker);
+        co_await SwitchToWorker(*worker_);
 
         const std::span<const char> out(static_cast<char*>(ptr), N);
-        auto w = co_await worker->async_write_at(fd, out, 0);
+        auto w = co_await worker_->AsyncWriteAt(kFd, out, 0);
         EXPECT_TRUE(w.has_value());
         EXPECT_EQ(*w, N);
 
-        lseek(fd, 0, SEEK_SET);
+        lseek(kFd, 0, SEEK_SET);
 
         const std::span in(static_cast<char*>(ptr), N);
-        const auto r = co_await worker->async_read_at(fd, in, 0);
-        EXPECT_TRUE(r.has_value());
-        EXPECT_EQ(*r, N);
+        const auto kR = co_await worker_->AsyncReadAt(kFd, in, 0);
+        EXPECT_TRUE(kR.has_value());
+        EXPECT_EQ(*kR, N);
         EXPECT_EQ(std::string_view(static_cast<char*>(ptr), pattern.size()), pattern);
     };
 
     SyncWait(coro());
 
     free(ptr);
-    ::close(fd);
+    ::close(kFd);
 }
 
 // This code should not pass because the offset is not aligned but
@@ -483,23 +426,22 @@ TEST_F(WorkerTest, DirectIO_AlignedOffsetAndSize)
 TEST_F(WorkerTest, DISABLED_DirectIO_UnalignedOffset_Fails)
 {
     namespace fs = std::filesystem;
-    const fs::path path = test_dir / "direct_io_unaligned.bin";
+    const fs::path path = test_dir_ / "direct_io_unaligned.bin";
 
     const int fd = ::open(path.c_str(), O_CREAT | O_RDWR | O_DIRECT, 0644);
     ASSERT_GT(fd, 0);
 
     auto coro = [&]() -> Task<void>
     {
-        co_await SwitchToWorker(*worker);
+        co_await SwitchToWorker(*worker_);
         char buf[4096];
-        const auto r = co_await worker->async_read_at(fd, std::span(buf, 4096), 3);  // ❗ 3 is NOT aligned
+        const auto r = co_await worker_->AsyncReadAt(fd, std::span(buf, 4096), 3);  // ❗ 3 is NOT aligned
         EXPECT_FALSE(r.has_value());
     };
 
     SyncWait(coro());
     ::close(fd);
 }
-
 
 int main(int argc, char** argv)
 {

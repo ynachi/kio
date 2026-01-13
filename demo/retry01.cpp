@@ -1,10 +1,10 @@
-#include <chrono>
-
 #include "kio/core/async_logger.h"
 #include "kio/core/errors.h"
 #include "kio/core/worker.h"
 #include "kio/net/net.h"
 #include "kio/sync/sync_wait.h"
+
+#include <chrono>
 
 using namespace kio;
 using namespace io;
@@ -31,7 +31,7 @@ Task<Result<int>> connect_with_retries(Worker& worker)
 
         ALOG_INFO("Attempt {}/{} to connect...", i + 1, max_retries);
         // Add reinterpret_cast to match const sockaddr*
-        auto connect_result = co_await worker.async_connect(fd, reinterpret_cast<const sockaddr*>(&addr), addr.addrlen);
+        auto connect_result = co_await worker.AsyncConnect(fd, reinterpret_cast<const sockaddr*>(&addr), addr.addrlen);
 
         if (connect_result)
         {
@@ -40,27 +40,28 @@ Task<Result<int>> connect_with_retries(Worker& worker)
         }
 
         // Connection failed. Log it, close the failed fd, and wait.
-        ALOG_WARN("Connect failed: {}. Retrying in {:.1f}s.", connect_result.error(), std::chrono::duration<double>(delay).count());
+        ALOG_WARN("Connect failed: {}. Retrying in {:.1f}s.", connect_result.error(),
+                  std::chrono::duration<double>(delay).count());
 
         close(fd);
 
         // Use the 1-argument KIO_TRY for a void expression
-        KIO_TRY(co_await worker.async_sleep(delay));
+        KIO_TRY(co_await worker.AsyncSleep(delay));
 
         // Double the delay for the next attempt (exponential backoff)
         delay *= 2;
     }
 
     ALOG_ERROR("All {} connection attempts failed.", max_retries);
-    co_return std::unexpected(Error::from_errno(ETIMEDOUT));
+    co_return std::unexpected(Error::FromErrno(ETIMEDOUT));
 }
 
 int main()
 {
-    alog::configure(4096, LogLevel::Info);
+    alog::Configure(4096, LogLevel::kInfo);
     Worker worker(0, {});
-    std::jthread t([&] { worker.loop_forever(); });
-    worker.wait_ready();
+    std::jthread t([&] { worker.LoopForever(); });
+    worker.WaitReady();
 
     if (auto result = SyncWait(connect_with_retries(worker)); !result.has_value())
     {
@@ -68,6 +69,6 @@ int main()
     }
 
     // Cast to (void) to suppress the nodiscard warning
-    (void) worker.request_stop();
+    (void)worker.RequestStop();
     return 0;
 }

@@ -18,17 +18,16 @@ Task<std::expected<void, Error>> timer_coroutine(Worker& worker)
     ALOG_INFO("Now going to sleep for 5 seconds...");
 
     // Use KIO_TRY for the void-returning function
-    KIO_TRY(co_await worker.async_sleep(std::chrono::seconds(5)));
+    KIO_TRY(co_await worker.AsyncSleep(std::chrono::seconds(5)));
 
     // 2. Wrap the format string in fmt::runtime()
     ALOG_INFO("...Woke up! The current time is {:%H:%M:%S}.", std::chrono::system_clock::now());
 
     ALOG_INFO("Now going to sleep for 500 milliseconds...");
     // 2. Wrap the format string in fmt::runtime()
-    KIO_TRY(co_await worker.async_sleep(std::chrono::milliseconds(500)));
+    KIO_TRY(co_await worker.AsyncSleep(std::chrono::milliseconds(500)));
 
     ALOG_INFO("...Woke up again! The current time is {:%H:%M:%S}.", std::chrono::system_clock::now());
-
 
     co_return {};
 }
@@ -41,8 +40,8 @@ int main()
     Worker worker(0, config);
 
     // Start the worker in a background thread.
-    std::jthread worker_thread([&](const std::stop_token& st) { worker.loop_forever(); });
-    worker.wait_ready();
+    std::jthread worker_thread([&](const std::stop_token& st) { worker.LoopForever(); });
+    worker.WaitReady();
 
     ALOG_INFO("--- Running Timer Demo ---");
 
@@ -56,7 +55,7 @@ int main()
     }
 
     // Request stop and wait for the worker thread to finish.
-    (void) worker.request_stop();
+    (void) worker.RequestStop();
 
     return 0;
 }

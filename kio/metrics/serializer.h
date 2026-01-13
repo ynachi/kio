@@ -8,24 +8,24 @@
 
 namespace kio
 {
-    class IMetricSerializer
-    {
-    public:
-        virtual ~IMetricSerializer() = default;
-        virtual std::string Serialize(const MetricSnapshot& snapshot) = 0;
-    };
+class IMetricSerializer
+{
+public:
+    virtual ~IMetricSerializer() = default;
+    virtual std::string Serialize(const MetricSnapshot& snapshot) = 0;
+};
 
-    class PrometheusTextSerializer final : public IMetricSerializer
-    {
-    public:
-        std::string Serialize(const MetricSnapshot& snapshot) override;
-    };
+class PrometheusTextSerializer final : public IMetricSerializer
+{
+public:
+    std::string Serialize(const MetricSnapshot& snapshot) override;
+};
 
-    class PrometheusJsonMetricSerializer final : public IMetricSerializer
-    {
-    public:
-        std::string Serialize(const MetricSnapshot& snapshot) override;
-    };
+class PrometheusJsonMetricSerializer final : public IMetricSerializer
+{
+public:
+    std::string Serialize(const MetricSnapshot& snapshot) override;
+};
 }  // namespace kio
 
 #endif  // KIO_SERIALIZER_H

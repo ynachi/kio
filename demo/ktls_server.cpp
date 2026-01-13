@@ -10,31 +10,35 @@
  *
  */
 
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <sys/stat.h>
-
 #include "kio/core/async_logger.h"
 #include "kio/core/worker_pool.h"
-#include "kio/net/net.h"
 #include "kio/tls/listener.h"
 #include "kio/tls/stream.h"
 
-using namespace kio;
-using namespace kio::tls;
-using namespace kio::io;
-using namespace kio::net;
+#include <fcntl.h>
 
-DetachedTask handle_client(TlsStream stream)
+namespace io = kio::io;
+namespace tls = kio::tls;
+namespace net = kio::net;
+
+static auto HandleClient(tls::TlsStream stream) -> kio::DetachedTask
 {
-    ALOG_INFO("✅ Client ready to start sending traffic");
+    // Log negotiated protocol
+    if (auto proto = stream.GetNegotiatedProtocol(); !proto.empty())
+    {
+        ALOG_INFO("✅ Client ready (ALPN: '{}')", proto);
+    }
+    else
+    {
+        ALOG_INFO("✅ Client ready (No ALPN)");
+    }
 
     char buffer[8192];
     size_t total_bytes = 0;
 
     while (true)
     {
-        auto read_result = co_await stream.async_read(buffer);
+        auto read_result = co_await stream.AsyncRead(buffer);
         if (!read_result.has_value())
         {
             // With KTLS, EIO (errno 5) is returned when the peer closes the TLS connection.
@@ -64,7 +68,8 @@ DetachedTask handle_client(TlsStream stream)
         total_bytes += bytes_read;
 
         // Echo back
-        if (auto write_result = co_await stream.async_write_exact({buffer, static_cast<size_t>(bytes_read)}); !write_result.has_value())
+        if (auto write_result = co_await stream.AsyncWriteExact({buffer, static_cast<size_t>(bytes_read)});
+            !write_result.has_value())
         {
             ALOG_ERROR("Write error: {}", write_result.error());
             break;
@@ -72,16 +77,16 @@ DetachedTask handle_client(TlsStream stream)
     }
 
     ALOG_INFO("Connection closed. Total bytes echoed: {}", total_bytes);
-    co_await stream.async_close();
+    co_await stream.AsyncClose();
 }
 
 // Accept loop - runs on each worker independently
-DetachedTask accept_loop(Worker& worker, const ListenerConfig& listener_cfg, TlsContext& ctx)
+kio::DetachedTask AcceptLoop(io::Worker& worker, const tls::ListenerConfig& listener_cfg, tls::TlsContext& ctx)
 {
     ALOG_INFO("✅ Starting KTLS-only server");
-    const auto st = worker.get_stop_token();
+    const auto st = worker.GetStopToken();
 
-    auto listener_res = TlsListener::bind(worker, listener_cfg, ctx);
+    auto listener_res = tls::TlsListener::Bind(worker, listener_cfg, ctx);
     if (!listener_res.has_value())
     {
         ALOG_ERROR("Failed to create listener: {}", listener_res.error());
@@ -95,7 +100,7 @@ DetachedTask accept_loop(Worker& worker, const ListenerConfig& listener_cfg, Tls
     while (!st.stop_requested())
     {
         // Accept connection - blocks this coroutine until a client connects
-        auto accept_res = co_await listener.accept();
+        auto accept_res = co_await listener.Accept();
 
         if (!accept_res.has_value())
         {
@@ -104,34 +109,37 @@ DetachedTask accept_loop(Worker& worker, const ListenerConfig& listener_cfg, Tls
         }
 
         auto stream = std::move(accept_res.value());
-        ALOG_DEBUG("Accepted connection from {}:{}", stream.peer_ip(), stream.peer_port());
+        ALOG_DEBUG("Accepted connection from {}:{}", stream.PeerIp(), stream.PeerPort());
 
         // Spawn coroutine to handle this client
         // Each connection runs independently on this worker
-        handle_client(std::move(stream)).detach();
+        HandleClient(std::move(stream));
     }
-    ALOG_INFO("Worker {} stopped accepting connections", worker.get_id());
+    ALOG_INFO("Worker {} stopped accepting connections", worker.GetId());
 }
 
 int main()
 {
-    alog::configure(4096, LogLevel::Debug);
+    kio::alog::Configure(4096, kio::LogLevel::kDebug);
 
     // do not kill our server on a broken pipe
     signal(SIGPIPE, SIG_IGN);
 
     ALOG_INFO("OpenSSL version: {}", OpenSSL_version(OPENSSL_VERSION));
 
-    ListenerConfig listener_cfg{};
+    tls::ListenerConfig listener_cfg{};
     listener_cfg.port = 8080;
 
-    TlsConfig tls_cfg{};
+    tls::TlsConfig tls_cfg{};
     // TODO: make it configurable
     tls_cfg.cert_path = "/home/ynachi/test_certs/server.crt";
     tls_cfg.key_path = "/home/ynachi/test_certs/server.key";
 
+    // Add ALPN support to the server (preferred protocols)
+    tls_cfg.alpn_protocols = {"h2", "http/1.1"};
+
     // Create SSL context (reuse for all connections!)
-    auto ctx_res = TlsContext::make_server(tls_cfg);
+    auto ctx_res = tls::TlsContext::MakeServer(tls_cfg);
     if (!ctx_res.has_value())
     {
         ALOG_ERROR("Failed to create TLS Context: {}", ctx_res.error());
@@ -141,13 +149,13 @@ int main()
     ALOG_INFO("🚀 KTLS-Only Server listening on port {}", listener_cfg.port);
     ALOG_INFO("⚡ Zero-copy mode - maximum performance!");
     ALOG_INFO("📝 TLS 1.3 only, no fallback");
+    ALOG_INFO("🌐 ALPN enabled: h2, http/1.1");
 
     auto ctx = std::move(ctx_res.value());
 
     // Configure workers
-    WorkerConfig config{};
+    io::WorkerConfig config{};
     config.uring_queue_depth = 16800;
-    config.default_op_slots = 8096;
 
     // Create a worker pool
     // You may have noticed references are passed to coroutines. You may wonder about lifetime and you are right!
@@ -156,13 +164,13 @@ int main()
     // Main own objects that are shared with the non owning struct and the main thread is the last to go
     // out of scope. See below, it does after the pool is stopped.
     // As a user, you can still create shared ptrs for worker, TLS context, ... but that is not necessary normally.
-    IOPool pool(4, config, [&listener_cfg, &ctx](Worker& worker) { accept_loop(worker, listener_cfg, ctx).detach(); });
+    io::IOPool pool(4, config, [&listener_cfg, &ctx](io::Worker& worker) { AcceptLoop(worker, listener_cfg, ctx); });
 
     // Main thread waits
     std::cout << "Server running. Press Enter to stop..." << std::endl;
     // Blocks until user presses Enter
     std::cin.get();
-    pool.stop();
+    pool.Stop();
 
     ALOG_INFO("Server stopped");
 
