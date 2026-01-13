@@ -323,6 +323,5 @@ bool kio::io::IoUringAwaitable<Prep, Args...>::await_suspend(std::coroutine_hand
 }
 
 // Include inline implementations of AsyncBaton methods that depend on Worker
-#include "kio/sync/baton_impl.h"
 
 #endif  // KIO_WORKER_H

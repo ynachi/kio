@@ -1,83 +1,59 @@
 //
-// Created by Yao ACHI on 11/01/2026.
+// io_uring_executor.cpp - Refactored Event Loop to prevent Deadlocks
 //
+
 #include "io_uring_executor.h"
-
-#include "kio/core/async_logger.h"
-
 #include <format>
 #include <stdexcept>
-
 #include <pthread.h>
+#include <cerrno>
 
-#include <sys/poll.h>
-
-#include <ylt/easylog.hpp>
-
-namespace kio::next
+namespace kio::next::v1
 {
-// Thread-local storage
-thread_local IoUringExecutor::PerThreadContext* IoUringExecutor::current_context_ = nullptr;
 
-// Special marker for eventfd completions
-constexpr uint64_t EVENTFD_MARKER = 0xFFFFFFFFFFFFFFFFULL;
+thread_local IoUringExecutor::PerThreadContext* IoUringExecutor::current_context_ = nullptr;
 
 IoUringExecutor::IoUringExecutor(const IoUringExecutorConfig& config)
 {
     if (config.num_threads == 0)
-    {
         throw std::invalid_argument("num_threads must be > 0");
-    }
 
-    // Create contexts
     contexts_.reserve(config.num_threads);
     for (size_t i = 0; i < config.num_threads; ++i)
     {
         auto ctx = std::make_unique<PerThreadContext>(i);
 
-        // Initialize io_uring
         int ret = io_uring_queue_init(config.io_uring_entries, &ctx->ring, config.io_uring_flags);
         if (ret < 0)
-        {
             throw std::system_error(-ret, std::system_category(), "io_uring_queue_init failed");
-        }
 
-        // Create eventfd for waking up the thread, blocking
+        // Eventfd for unified wakeups
         ctx->eventfd = eventfd(0, 0);
         if (ctx->eventfd < 0)
-        {
             throw std::system_error(errno, std::system_category(), "eventfd creation failed");
-        }
 
-        // Associate completions with the eventfd.  Now every CQE
-        // will cause the kernel to write to ctx->eventfd.
+        // Register eventfd so IO completions also trigger it
         ret = io_uring_register_eventfd(&ctx->ring, ctx->eventfd);
         if (ret < 0)
-        {
             throw std::system_error(-ret, std::system_category(), "io_uring_register_eventfd failed");
-        }
 
         contexts_.push_back(std::move(ctx));
     }
 
-    // Start worker threads
     threads_.reserve(config.num_threads);
     for (size_t i = 0; i < config.num_threads; ++i)
     {
-        threads_.emplace_back(
-            [this, i, &config]()
-            {
-                auto* ctx = contexts_[i].get();
-                current_context_ = ctx;
-                ctx->thread_id = std::this_thread::get_id();
+        threads_.emplace_back([this, i, &config]()
+        {
+            auto* ctx = contexts_[i].get();
+            current_context_ = ctx;
+            ctx->thread_id = std::this_thread::get_id();
 
-                if (config.pin_threads)
-                {
-                    pinThreadToCpu(i, i);
-                }
+            if (config.pin_threads)
+                pinThreadToCpu(i, i);
 
-                runEventLoop(ctx);
-            });
+            runEventLoop(ctx);
+        });
     }
 }
 
@@ -85,19 +61,13 @@ IoUringExecutor::~IoUringExecutor()
 {
     stop();
     join();
-
-    // Cleanup io_uring instances
     for (auto& ctx : contexts_)
-    {
         io_uring_queue_exit(&ctx->ring);
-    }
 }
 
 void IoUringExecutor::stop()
 {
     stopped_.store(true, std::memory_order_release);
-
-    // Wake all threads
     for (auto& ctx : contexts_)
     {
         ctx->running.store(false, std::memory_order_release);
@@ -109,63 +79,31 @@ void IoUringExecutor::join()
 {
     for (auto& thread : threads_)
     {
-        if (thread.joinable())
-        {
-            thread.join();
-        }
+        if (thread.joinable()) thread.join();
     }
 }
 
-// Fixed: Signature matches base class (by value)
 bool IoUringExecutor::schedule(Func func)
 {
-    if (stopped_.load(std::memory_order_acquire))
-    {
-        return false;
-    }
-
-    // IMPORTANT:
-    // async_simple::Lazy::via() will call executor->schedule() from inside worker threads.
-    // If we round-robin here, a continuation can run on another worker and destroy helper
-    // coroutine frames concurrently -> TSAN races in ViaCoroutine / std::function.
-    if (current_context_ != nullptr)
-    {
-        return scheduleOn(current_context_->context_id, std::move(func));
-    }
-
+    if (stopped_.load(std::memory_order_acquire)) return false;
     auto& ctx = selectContext();
     return scheduleOn(ctx.context_id, std::move(func));
 }
 
-bool IoUringExecutor::scheduleOn(size_t context_id, Func&& func)
+bool IoUringExecutor::scheduleOn(size_t context_id, Func func)
 {
-    if (context_id >= contexts_.size() || stopped_.load(std::memory_order_acquire))
-    {
-        return false;
-    }
-
+    if (context_id >= contexts_.size() || stopped_.load(std::memory_order_acquire)) return false;
     auto& ctx = *contexts_[context_id];
-
-    // Try to push to the queue
-    if (!ctx.task_queue.enqueue(std::move(func)))
-    {
-        return false;  // Queue full
-    }
-
-    // Wake the thread
+    if (!ctx.task_queue.enqueue(std::move(func))) return false;
     wakeThread(ctx);
     return true;
 }
 
-bool IoUringExecutor::scheduleLocal(Func&& func)
+bool IoUringExecutor::scheduleLocal(Func func)
 {
     if (current_context_)
-    {
-        // We're in an executor thread, use the local queue directly
-        return scheduleOn(current_context_->context_id, std::forward<Func>(func));
-    }
-    // Not in executor, use normal schedule
-    return schedule(std::forward<Func>(func));
+        return scheduleOn(current_context_->context_id, std::move(func));
+    return schedule(std::move(func));
 }
 
 bool IoUringExecutor::currentThreadInExecutor() const
@@ -185,10 +123,7 @@ IoUringExecutor::Context IoUringExecutor::checkout()
 
 bool IoUringExecutor::checkin(Func func, Context ctx, async_simple::ScheduleOptions)
 {
-    if (ctx == NULLCTX)
-    {
-        return schedule(std::move(func));
-    }
+    if (ctx == NULLCTX) return schedule(std::move(func));
     auto* pctx = static_cast<PerThreadContext*>(ctx);
     return scheduleOn(pctx->context_id, std::move(func));
 }
@@ -198,64 +133,59 @@ size_t IoUringExecutor::pickContextId()
     return selectContext().context_id;
 }
 
+//
+// CRITICAL FIX: Enhanced Event Loop
+//
 void IoUringExecutor::runEventLoop(PerThreadContext* ctx)
 {
     while (ctx->running.load(std::memory_order_acquire))
     {
-        // Block until either a task was enqueued (write(eventfd))
-        // or the kernel posted a completion
-        eventfd_t count;
-        int r = eventfd_read(ctx->eventfd, &count);
-        if (r < 0 && errno != EINTR)
-        {
-            continue;  // EAGAIN can't happen with a blocking eventfd
-        }
+        // 1. Process local tasks
+        // 'partial_drain' is true if we hit the batch limit, implying more work might be ready.
+        bool partial_drain = processLocalQueue(ctx);
 
-        // Process the local task queue
-        processLocalQueue(ctx);
+        // 2. Submit queued IO
+        io_uring_submit(&ctx->ring);
 
-        if (const auto ret = io_uring_submit(&ctx->ring); ret < 0)
-        {
-            ELOGFMT(ERROR, "io_uring_submit failed: {}", strerror(-ret))
-        }
-
+        // 3. Process Completions
+        unsigned head;
         io_uring_cqe* cqe;
-        int ret = io_uring_wait_cqe(&ctx->ring, &cqe);
-
-        if (ret == -ETIME)
+        unsigned count = 0;
+        io_uring_for_each_cqe(&ctx->ring, head, cqe)
         {
-            // Timeout, just loop again
-            continue;
+            handleCompletion(ctx, cqe);
+            count++;
+        }
+        if (count > 0) io_uring_cq_advance(&ctx->ring, count);
+
+        bool io_activity = (count > 0);
+
+        // 4. Decide whether to Sleep
+        // We ONLY sleep if:
+        // a) We fully drained the task queue (partial_drain == false)
+        // b) We processed no IO completions (which might have spawned new tasks)
+        // If we have any potential work, we loop immediately (busy-spin/yield) rather than blocking.
+        if (partial_drain || io_activity)
+        {
+             // Optional: Try to clear eventfd if it was set, to prevent counter buildup.
+             // But strictly not necessary as the next read will just return immediately.
+             continue;
         }
 
-        if (ret < 0)
-        {
-            ELOGFMT(ERROR, "io_uring_wait_cqe failed: {}", strerror(-ret))
-        }
-
-        if (ret == 0)
-        {
-            // Process all available completions
-            unsigned head;
-            unsigned count = 0;
-
-            io_uring_for_each_cqe(&ctx->ring, head, cqe)
-            {
-                handleCompletion(ctx, cqe);
-                count++;
-            }
-
-            io_uring_cq_advance(&ctx->ring, count);
-        }
+        // 5. Block on EventFD
+        // This blocks until either a Task is scheduled (wakeThread) OR IO completes (kernel writes to eventfd).
+        uint64_t val;
+        ssize_t r = read(ctx->eventfd, &val, sizeof(val));
+        (void)r;
     }
 }
 
-void IoUringExecutor::processLocalQueue(PerThreadContext* ctx)
+// Returns true if we stopped because of batch limit (meaning more tasks might exist)
+bool IoUringExecutor::processLocalQueue(PerThreadContext* ctx)
 {
     Task task;
-
-    // Drain the queue in batches to avoid starvation
-    constexpr size_t kMaxBatchSize = 64;
+    // Increased batch size for better throughput under load
+    constexpr size_t kMaxBatchSize = 128;
     size_t processed = 0;
 
     while (processed < kMaxBatchSize && ctx->task_queue.try_dequeue(task))
@@ -264,72 +194,44 @@ void IoUringExecutor::processLocalQueue(PerThreadContext* ctx)
         {
             task();
         }
-        catch (const std::exception& e)
-        {
-            ELOGFMT(ERROR, "Exception in task: {}", e.what())
-        }
-        catch (...)
-        {
-            ELOGFMT(ERROR, "Unknown exception in task")
-        }
+        catch (...) {}
         processed++;
     }
+
+    return processed == kMaxBatchSize;
 }
 
 void IoUringExecutor::wakeThread(PerThreadContext& ctx)
 {
     uint64_t val = 1;
-    // Ignore errors - if write fails, the thread will wake up eventually
-    [[maybe_unused]] ssize_t _ = write(ctx.eventfd, &val, sizeof(val));
+    ssize_t ret = write(ctx.eventfd, &val, sizeof(val));
+    (void)ret;
 }
 
 IoUringExecutor::PerThreadContext& IoUringExecutor::selectContext()
 {
-    // Round-robin selection
     size_t idx = next_context_.fetch_add(1, std::memory_order_relaxed) % contexts_.size();
     return *contexts_[idx];
 }
 
 void IoUringExecutor::pinThreadToCpu(size_t thread_id, size_t cpu_id)
 {
+    if (cpu_id >= CPU_SETSIZE) return;
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
     CPU_SET(cpu_id, &cpuset);
-
-    if (const int rc = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset); rc != 0)
-    {
-        ELOGFMT(WARNING, "Worker {}: Failed to set CPU affinity: {}", thread_id, strerror(rc))
-    }
-
-    if (const int ret = io_uring_register_iowq_aff(&current_context_->ring, 1, &cpuset); ret < 0)
-    {
-        ELOGFMT(WARNING, "Worker {}: Failed to set io-wq affinity: {}", thread_id, strerror(-ret))
-        // ALOG_WARN("Worker : Failed to set io-wq affinity: {}", strerror(-ret));
-    }
+    pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+    io_uring_register_iowq_aff(&current_context_->ring, 1, &cpuset);
 }
 
 void IoUringExecutor::handleCompletion(PerThreadContext* ctx, io_uring_cqe* cqe)
 {
     void* user_data = io_uring_cqe_get_data(cqe);
-
-    // Check if this is an eventfd notification
-    if (user_data == reinterpret_cast<void*>(EVENTFD_MARKER))
-    {
-        // Clear the eventfd
-        uint64_t val;
-        [[maybe_unused]] ssize_t _ = read(ctx->eventfd, &val, sizeof(val));
-
-        return;
-    }
-
-    // This is an I/O operation completion
-    // The user_data points to the Awaiter (IoOp) itself.
-    if (user_data != nullptr)
+    if (user_data)
     {
         auto* op = static_cast<IoOp*>(user_data);
         op->complete(cqe->res);
-        // Note: No 'delete op' here. The op is the Awaiter, which lives
-        // on the coroutine frame.
     }
 }
-}  // namespace kio::next
+
+}  // namespace kio::next::v1

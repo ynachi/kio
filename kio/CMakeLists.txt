@@ -37,7 +37,6 @@ set(sync_headers
         sync/mpsc_queue.h
         sync/sync_wait.h
         sync/baton.h
-        sync/baton_impl.h
 )
 
 # ============================================================================
