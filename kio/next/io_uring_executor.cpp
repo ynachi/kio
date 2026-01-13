@@ -4,10 +4,12 @@
 //
 
 #include "io_uring_executor.h"
-#include <stdexcept>
-#include <pthread.h>
+
 #include <cerrno>
 #include <latch>
+#include <stdexcept>
+
+#include <pthread.h>
 
 namespace kio::next::v1
 {
@@ -15,49 +17,63 @@ namespace kio::next::v1
 thread_local IoUringExecutor::PerThreadContext* IoUringExecutor::current_context_ = nullptr;
 
 IoUringExecutor::IoUringExecutor(const IoUringExecutorConfig& config)
+    : stop_latch_(config.num_threads), executor_config_(config)
 {
     if (config.num_threads == 0)
+    {
         throw std::invalid_argument("num_threads must be > 0");
+    }
 
     contexts_.reserve(config.num_threads);
-    for (size_t i = 0; i < config.num_threads; ++i) {
+    for (size_t i = 0; i < config.num_threads; ++i)
+    {
         contexts_.push_back(std::make_unique<PerThreadContext>(i));
     }
 
     std::latch init_latch(config.num_threads);
 
     threads_.reserve(config.num_threads);
-    for (size_t i = 0; i < config.num_threads; ++i) {
-        threads_.emplace_back([this, i, config, &init_latch]() {
-            auto* ctx = contexts_[i].get();
-            current_context_ = ctx;
-            ctx->thread_id = std::this_thread::get_id();
+    for (size_t i = 0; i < config.num_threads; ++i)
+    {
+        threads_.emplace_back(
+            [this, i, config, &init_latch]()
+            {
+                auto* ctx = contexts_[i].get();
+                current_context_ = ctx;
+                ctx->thread_id = std::this_thread::get_id();
+                ctx->stop_token = getStopToken();
 
-            // Initialize io_uring with SINGLE_ISSUER ✓
-            int ret = io_uring_queue_init(config.io_uring_entries,
-                                         &ctx->ring,
-                                         config.io_uring_flags);
-            if (ret < 0)
-                std::terminate();  // Can't throw from thread
+                // Initialize io_uring with SINGLE_ISSUER
+                int ret = io_uring_queue_init(config.io_uring_entries, &ctx->ring, config.io_uring_flags);
+                if (ret < 0)
+                {
+                    std::terminate();
+                }
 
-            ctx->eventfd = eventfd(0, 0);
-            if (ctx->eventfd < 0)
-                std::terminate();
+                ctx->eventfd = eventfd(0, 0);
+                if (ctx->eventfd < 0)
+                {
+                    std::terminate();
+                }
 
-            ret = io_uring_register_eventfd(&ctx->ring, ctx->eventfd);
-            if (ret < 0)
-                std::terminate();
+                ret = io_uring_register_eventfd(&ctx->ring, ctx->eventfd);
+                if (ret < 0)
+                {
+                    std::terminate();
+                }
 
-            if (config.pin_threads)
-                pinThreadToCpu(i, i);
+                if (config.pin_threads)
+                {
+                    pinThreadToCpu(i, i);
+                }
 
-            // Signal ready and wait for all threads
-            init_latch.count_down();
-            init_latch.wait();
+                // Signal ready and wait for all threads
+                init_latch.count_down();
+                init_latch.wait();
 
-            // All threads ready - safe to run event loop
-            runEventLoop(ctx);
-        });
+                // All threads ready - safe to run event loop
+                runEventLoop(ctx);
+            });
     }
 
     // Wait for all threads to initialize
@@ -66,40 +82,50 @@ IoUringExecutor::IoUringExecutor(const IoUringExecutorConfig& config)
 
 IoUringExecutor::~IoUringExecutor()
 {
+    if (executor_stopped_)
+    {
+        return;
+    }
     stop();
     join();
     for (auto& ctx : contexts_)
+    {
+        io_uring_unregister_eventfd(&ctx->ring);
         io_uring_queue_exit(&ctx->ring);
+    }
 }
 
 void IoUringExecutor::stop()
 {
-    stopped_.store(true, std::memory_order_release);
+    (void)stop_source_.request_stop();
     for (auto& ctx : contexts_)
     {
-        ctx->running.store(false, std::memory_order_release);
         wakeThread(*ctx);
     }
+    stop_latch_.wait();
+    executor_stopped_.store(true, std::memory_order_release);
 }
 
 void IoUringExecutor::join()
 {
     for (auto& thread : threads_)
     {
-        if (thread.joinable()) thread.join();
+        if (thread.joinable())
+            thread.join();
     }
 }
 
 bool IoUringExecutor::schedule(Func func)
 {
-    if (stopped_.load(std::memory_order_acquire)) return false;
+    if (executor_stopped_.load(std::memory_order_acquire))
+        return false;
     auto& ctx = selectContext();
     return scheduleOn(ctx.context_id, std::move(func));
 }
 
 bool IoUringExecutor::scheduleOn(size_t context_id, Func func)
 {
-    if (context_id >= contexts_.size() || stopped_.load(std::memory_order_acquire))
+    if (context_id >= contexts_.size() || executor_stopped_.load(std::memory_order_acquire))
         return false;
 
     auto& ctx = *contexts_[context_id];
@@ -136,7 +162,10 @@ IoUringExecutor::Context IoUringExecutor::checkout()
 
 bool IoUringExecutor::checkin(Func func, Context ctx, async_simple::ScheduleOptions)
 {
-    if (ctx == NULLCTX) return schedule(std::move(func));
+    if (ctx == NULLCTX)
+    {
+        return schedule(std::move(func));
+    }
     auto* pctx = static_cast<PerThreadContext*>(ctx);
     return scheduleOn(pctx->context_id, std::move(func));
 }
@@ -148,49 +177,68 @@ size_t IoUringExecutor::pickContextId()
 
 void IoUringExecutor::runEventLoop(PerThreadContext* ctx)
 {
-    while (ctx->running.load(std::memory_order_acquire))
+    while (!ctx->stop_token.stop_requested())
     {
-        // 1. Process task queue
-        processLocalQueue(ctx);
+        // Process task queue
+        processLocalQueue(ctx, executor_config_.local_batch_size);
 
-        // 2. Submit pending I/O
-        io_uring_submit(&ctx->ring);
-
-        // 3. Wait for events (blocks on eventfd)
-        // This wakes for BOTH tasks and I/O completions
-        uint64_t eventfd_value;
-        ssize_t n = read(ctx->eventfd, &eventfd_value, sizeof(eventfd_value));
-        if (n < 0 && errno == EINTR) continue;
-
-        // 4. Process I/O completions
+        // Check completions (non-blocking peek)
         io_uring_cqe* cqe;
         unsigned head;
         unsigned count = 0;
-
         io_uring_for_each_cqe(&ctx->ring, head, cqe)
         {
             handleCompletion(ctx, cqe);
             count++;
         }
-
         if (count > 0)
+        {
             io_uring_cq_advance(&ctx->ring, count);
+        }
+
+        // Submit pending I/O
+        io_uring_submit(&ctx->ring);
+
+        // Wait for events
+        uint64_t eventfd_value;
+        ssize_t n = read(ctx->eventfd, &eventfd_value, sizeof(eventfd_value));
+        if (n < 0 && errno == EINTR)
+        {
+            continue;
+        }
+
+        // Process all completions after wake
+        count = 0;
+        io_uring_for_each_cqe(&ctx->ring, head, cqe)
+        {
+            handleCompletion(ctx, cqe);
+            count++;
+        }
+        if (count > 0)
+        {
+            io_uring_cq_advance(&ctx->ring, count);
+        }
     }
+
+    // now mark as stopped
+    ctx->setStopped();
+    stop_latch_.count_down();
 }
 
-void IoUringExecutor::processLocalQueue(PerThreadContext* ctx)
+void IoUringExecutor::processLocalQueue(PerThreadContext* ctx, size_t batch)
 {
     Task task;
-    constexpr size_t kMaxBatchSize = 64;
     size_t processed = 0;
 
-    while (processed < kMaxBatchSize && ctx->task_queue.try_dequeue(task))
+    while (processed < batch && ctx->task_queue.try_dequeue(task))
     {
         try
         {
             task();
         }
-        catch (...) {}
+        catch (...)
+        {
+        }
         processed++;
     }
 }
@@ -209,7 +257,10 @@ IoUringExecutor::PerThreadContext& IoUringExecutor::selectContext()
 
 void IoUringExecutor::pinThreadToCpu(size_t thread_id, size_t cpu_id)
 {
-    if (cpu_id >= CPU_SETSIZE) return;
+    if (cpu_id >= CPU_SETSIZE)
+    {
+        return;
+    }
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
     CPU_SET(cpu_id, &cpuset);

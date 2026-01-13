@@ -12,14 +12,15 @@
 #include <atomic>
 #include <coroutine>
 #include <functional>
+#include <latch>
 #include <memory>
+#include <system_error>
 #include <thread>
 #include <vector>
-#include <system_error>
-#include <cstdint>
 
 #include <liburing.h>
 #include <unistd.h>
+
 #include <sys/eventfd.h>
 
 #include <async_simple/Executor.h>
@@ -33,6 +34,8 @@ struct IoUringExecutorConfig
     size_t num_threads = std::thread::hardware_concurrency();
     uint32_t io_uring_entries = 32768;
     uint32_t io_uring_flags = 0;
+    // batch size for local queue
+    size_t local_batch_size = 16;
     bool pin_threads = false;
 };
 
@@ -66,7 +69,8 @@ public:
     void join();
 
     [[nodiscard]] size_t numThreads() const { return contexts_.size(); }
-    [[nodiscard]] io_uring* getRing(size_t context_id) const { return &contexts_[context_id]->ring; }
+    [[nodiscard]] io_uring* getRing(const size_t context_id) const { return &contexts_[context_id]->ring; }
+    [[nodiscard]] std::stop_token getStopToken() const noexcept { return stop_source_.get_token(); }
 
 private:
     struct PerThreadContext
@@ -77,11 +81,19 @@ private:
         std::thread::id thread_id;
         size_t context_id;
         std::atomic<bool> running{true};
+        std::stop_token stop_token;
 
         explicit PerThreadContext(size_t id) : eventfd(-1), context_id(id) {}
 
+        bool setStopped()
+        {
+            bool expected = true;
+            return running.compare_exchange_strong(expected, false);
+        }
+
         ~PerThreadContext()
         {
+            setStopped();
             if (eventfd >= 0)
             {
                 close(eventfd);
@@ -92,12 +104,15 @@ private:
     static thread_local PerThreadContext* current_context_;
 
     std::vector<std::unique_ptr<PerThreadContext>> contexts_;
-    std::vector<std::thread> threads_;
-    std::atomic<bool> stopped_{false};
+    std::vector<std::jthread> threads_;
+    std::stop_source stop_source_;
+    std::atomic<bool> executor_stopped_{false};
+    std::latch stop_latch_;
     std::atomic<size_t> next_context_{0};
+    IoUringExecutorConfig executor_config_;
 
     void runEventLoop(PerThreadContext* ctx);
-    void processLocalQueue(PerThreadContext* ctx);
+    void processLocalQueue(PerThreadContext* ctx, size_t batch = 16);
     void wakeThread(PerThreadContext& ctx);
     PerThreadContext& selectContext();
     void pinThreadToCpu(size_t thread_id, size_t cpu_id);
@@ -139,8 +154,7 @@ public:
     }
 
     // Fluent API: Explicitly set resume context
-    IoUringAwaiter&& resume_on(async_simple::Executor::Context home,
-                               async_simple::ScheduleOptions opts = {}) &&
+    IoUringAwaiter&& resume_on(async_simple::Executor::Context home, async_simple::ScheduleOptions opts = {}) &&
     {
         resume_mode_ = ResumeMode::ViaCheckin;
         home_ctx_ = home;
@@ -157,9 +171,8 @@ public:
         // Pick submit context (explicit or automatic)
         if (!forced_ctx_)
         {
-            context_id_ = executor_->currentThreadInExecutor()
-                ? executor_->currentContextId()
-                : executor_->pickContextId();
+            context_id_ =
+                executor_->currentThreadInExecutor() ? executor_->currentContextId() : executor_->pickContextId();
         }
 
         // Capture "home" context if using checkin-based resume but no explicit context provided
@@ -169,21 +182,22 @@ public:
         }
 
         // Fast path: already on target context
-        if (executor_->currentThreadInExecutor() &&
-            executor_->currentContextId() == context_id_)
+        if (executor_->currentThreadInExecutor() && executor_->currentContextId() == context_id_)
         {
             return submit_sqe_or_resume_error();
         }
 
         // Cross-thread submission
-        // CRITICAL FIX: Handle scheduleOn failure to prevent coroutine hang
-        bool ok = executor_->scheduleOn(context_id_, [this]() {
-            if (!this->submit_sqe())
-            {
-                this->result_ = -EBUSY;
-                this->complete(this->result_);
-            }
-        });
+        // Handle scheduleOn failure to prevent coroutine hang
+        const bool ok = executor_->scheduleOn(context_id_,
+                                              [this]()
+                                              {
+                                                  if (!this->submit_sqe())
+                                                  {
+                                                      this->result_ = -EBUSY;
+                                                      this->complete(this->result_);
+                                                  }
+                                              });
 
         if (!ok)
         {
@@ -206,10 +220,13 @@ public:
         return static_cast<ResultType>(result_);
     }
 
-    void complete(int res) override
+    void complete(const int res) override
     {
         result_ = res;
-        if (!continuation_) return;
+        if (!continuation_)
+        {
+            return;
+        };
 
         if (resume_mode_ == ResumeMode::InlineOnSubmitCtx)
         {
@@ -218,7 +235,7 @@ public:
             return;
         }
 
-        // Resume via async_simple checkin (hop back to original context)
+        // Resume via async_simple checkin (hop back to the original context)
         auto h = continuation_;
         continuation_ = {};  // Clear before checkin to prevent double-resume
         executor_->checkin([h]() mutable { h.resume(); }, home_ctx_, opts_);
@@ -227,7 +244,8 @@ public:
 private:
     bool submit_sqe_or_resume_error() noexcept
     {
-        if (submit_sqe()) return true;
+        if (submit_sqe())
+            return true;
 
         // Submit failed, don't suspend
         result_ = -EBUSY;
@@ -241,11 +259,18 @@ private:
 
         if (!sqe)
         {
-            // Optional improvement: try submitting pending ops and retry once
-            // io_uring_submit(ring);
-            // sqe = io_uring_get_sqe(ring);
-            // if (!sqe) return false;
-            return false;
+            // Try flushing pending operations
+            if (const int submitted = io_uring_submit(ring); submitted < 0)
+            {
+                return false;
+            };
+
+            // Retry once
+            sqe = io_uring_get_sqe(ring);
+            if (!sqe)
+            {
+                return false;
+            };
         }
 
         prepare_func_(sqe);
@@ -270,8 +295,7 @@ private:
 template <typename ResultType, typename PrepareFunc>
 auto make_io_awaiter(IoUringExecutor* executor, PrepareFunc&& prepare_func)
 {
-    return IoUringAwaiter<ResultType, std::decay_t<PrepareFunc>>(
-        executor, std::forward<PrepareFunc>(prepare_func));
+    return IoUringAwaiter<ResultType, std::decay_t<PrepareFunc>>(executor, std::forward<PrepareFunc>(prepare_func));
 }
 
 }  // namespace kio::next::v1

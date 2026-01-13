@@ -19,24 +19,22 @@ using namespace kio::next::v1;
 
 namespace io::v1
 {
-    inline auto accept(IoUringExecutor* exec, int listen_fd, sockaddr* addr, socklen_t* addrlen)
-    {
-        return make_io_awaiter<int>(exec,
-            [=](io_uring_sqe* sqe) { io_uring_prep_accept(sqe, listen_fd, addr, addrlen, 0); });
-    }
-
-    inline auto recv(IoUringExecutor* exec, int fd, void* buf, size_t len, int flags = 0)
-    {
-        return make_io_awaiter<ssize_t>(exec,
-            [=](io_uring_sqe* sqe) { io_uring_prep_recv(sqe, fd, buf, len, flags); });
-    }
-
-    inline auto send(IoUringExecutor* exec, int fd, const void* buf, size_t len, int flags = 0)
-    {
-        return make_io_awaiter<ssize_t>(exec,
-            [=](io_uring_sqe* sqe) { io_uring_prep_send(sqe, fd, buf, len, flags); });
-    }
+inline auto accept(IoUringExecutor* exec, int listen_fd, sockaddr* addr, socklen_t* addrlen)
+{
+    return make_io_awaiter<int>(exec,
+                                [=](io_uring_sqe* sqe) { io_uring_prep_accept(sqe, listen_fd, addr, addrlen, 0); });
 }
+
+inline auto recv(IoUringExecutor* exec, int fd, void* buf, size_t len, int flags = 0)
+{
+    return make_io_awaiter<ssize_t>(exec, [=](io_uring_sqe* sqe) { io_uring_prep_recv(sqe, fd, buf, len, flags); });
+}
+
+inline auto send(IoUringExecutor* exec, int fd, const void* buf, size_t len, int flags = 0)
+{
+    return make_io_awaiter<ssize_t>(exec, [=](io_uring_sqe* sqe) { io_uring_prep_send(sqe, fd, buf, len, flags); });
+}
+}  // namespace io::v1
 
 Lazy<void> handleClient(IoUringExecutor* executor, int client_fd)
 {
@@ -46,7 +44,7 @@ Lazy<void> handleClient(IoUringExecutor* executor, int client_fd)
     setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
 
     // OPTIMIZATION 2: Set socket buffers (optional, helps with throughput)
-    int bufsize = 256*1024;  // 256KB
+    int bufsize = 256 * 1024;  // 256KB
     setsockopt(client_fd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
     setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
 
@@ -57,7 +55,8 @@ Lazy<void> handleClient(IoUringExecutor* executor, int client_fd)
         while (true)
         {
             ssize_t bytes_read = co_await io::v1::recv(executor, client_fd, buffer, sizeof(buffer));
-            if (bytes_read <= 0) break;
+            if (bytes_read <= 0)
+                break;
 
             static const std::string response =
                 "HTTP/1.1 200 OK\r\n"
@@ -70,14 +69,17 @@ Lazy<void> handleClient(IoUringExecutor* executor, int client_fd)
             ssize_t bytes_sent = 0;
             while (bytes_sent < response.size())
             {
-                ssize_t sent = co_await io::v1::send(executor, client_fd,
-                    response.data() + bytes_sent, response.size() - bytes_sent);
-                if (sent <= 0) throw std::runtime_error("Send failed");
+                ssize_t sent = co_await io::v1::send(executor, client_fd, response.data() + bytes_sent,
+                                                     response.size() - bytes_sent);
+                if (sent <= 0)
+                    throw std::runtime_error("Send failed");
                 bytes_sent += sent;
             }
         }
     }
-    catch (...) {}
+    catch (...)
+    {
+    }
 
     close(client_fd);
 }
@@ -92,16 +94,16 @@ Lazy<> acceptLoop(IoUringExecutor* executor, int listen_fd)
         sockaddr_in client_addr{};
         socklen_t addr_len = sizeof(client_addr);
 
-        int client_fd = co_await io::v1::accept(executor, listen_fd,
-            reinterpret_cast<sockaddr*>(&client_addr), &addr_len);
+        int client_fd =
+            co_await io::v1::accept(executor, listen_fd, reinterpret_cast<sockaddr*>(&client_addr), &addr_len);
 
-        if (client_fd < 0) continue;
+        if (client_fd < 0)
+            continue;
 
         // Round-robin distribution to all workers
         size_t target_ctx = next_ctx++ % num_cpus;
-        executor->scheduleOn(target_ctx, [executor, client_fd]() {
-            handleClient(executor, client_fd).start([](auto&&) {});
-        });
+        executor->scheduleOn(target_ctx,
+                             [executor, client_fd]() { handleClient(executor, client_fd).start([](auto&&) {}); });
     }
 }
 
@@ -117,7 +119,7 @@ int createListenSocket(uint16_t port)
     setsockopt(listen_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
 
     // OPTIMIZATION 4: Increase socket buffers
-    int bufsize = 2*1024*1024;  // 2MB
+    int bufsize = 2 * 1024 * 1024;  // 2MB
     setsockopt(listen_fd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
     setsockopt(listen_fd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
 
@@ -185,7 +187,7 @@ int main()
         // OPTIMIZATION 7: Enable SQPOLL for kernel-side polling
         // This reduces syscall overhead by ~10-15%
         // Requires kernel 5.11+ for best performance
-        //config.io_uring_flags = IORING_SETUP_SQPOLL;
+        // config.io_uring_flags = IORING_SETUP_SQPOLL;
 
         // Alternative: If SQPOLL causes issues, use SINGLE_ISSUER instead
         config.io_uring_flags = IORING_SETUP_SINGLE_ISSUER;
@@ -195,8 +197,8 @@ int main()
 
         int listen_fd = createListenSocket(PORT);
 
-        std::cout << "HTTP server (V1 - Optimized) started on port " << PORT
-                  << " with " << config.num_threads << " threads." << std::endl;
+        std::cout << "HTTP server (V1 - Optimized) started on port " << PORT << " with " << config.num_threads
+                  << " threads." << std::endl;
 
         printOptimizationStatus(config);
 
@@ -205,16 +207,22 @@ int main()
         std::condition_variable cv;
         bool done = false;
 
-        executor.scheduleOn(0, [&executor, listen_fd, &mtx, &cv, &done]() {
-            acceptLoop(&executor, listen_fd).start([&mtx, &cv, &done](auto&&) {
-                std::lock_guard<std::mutex> lock(mtx);
-                done = true;
-                cv.notify_one();
-            });
-        });
+        executor.scheduleOn(0,
+                            [&executor, listen_fd, &mtx, &cv, &done]()
+                            {
+                                acceptLoop(&executor, listen_fd)
+                                    .start(
+                                        [&mtx, &cv, &done](auto&&)
+                                        {
+                                            std::lock_guard<std::mutex> lock(mtx);
+                                            done = true;
+                                            cv.notify_one();
+                                        });
+                            });
 
-        std::unique_lock<std::mutex> lock(mtx);
-        cv.wait(lock, [&done] { return done; });
+        std::cout << "Server running. Press Enter to stop..." << std::endl;
+        std::cin.get();  // Blocks until user presses Enter
+        executor.stop();
 
         close(listen_fd);
     }
