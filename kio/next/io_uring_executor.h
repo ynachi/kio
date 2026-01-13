@@ -1,6 +1,6 @@
 //
-// io_uring_executor.h
-// Fixed: Smart Waking & Thread-Safe IO
+// io_uring_executor_v1.h - Dual Queue Architecture (Eventfd + Task Queue)
+// Refactored version with all critical fixes applied
 //
 
 #ifndef KIO_CORE_URING_EXECUTOR_V1_H
@@ -12,7 +12,6 @@
 #include <memory>
 #include <thread>
 #include <vector>
-#include <system_error>
 
 #include <liburing.h>
 #include <unistd.h>
@@ -27,17 +26,16 @@ namespace kio::next::v1
 struct IoUringExecutorConfig
 {
     size_t num_threads = std::thread::hardware_concurrency();
-    uint32_t io_uring_entries = 32768;
+    uint32_t io_uring_entries = 256;
     uint32_t io_uring_flags = 0;
     bool pin_threads = false;
 };
 
 class IoUringExecutor : public async_simple::Executor
 {
-public:
-    using Func = std::function<void()>;
-    using Task = Func;
+    using Task = std::function<void()>;
 
+public:
     explicit IoUringExecutor(const IoUringExecutorConfig& config = IoUringExecutorConfig{});
     ~IoUringExecutor() override;
 
@@ -54,8 +52,8 @@ public:
     bool checkin(Func func, Context ctx, async_simple::ScheduleOptions opts) override;
 
     // Extended interface
-    bool scheduleOn(size_t context_id, Func func);
-    bool scheduleLocal(Func func);
+    bool scheduleOn(size_t context_id, Func&& func);
+    bool scheduleLocal(Func&& func);
     size_t pickContextId();
 
     void stop();
@@ -73,9 +71,6 @@ private:
         std::thread::id thread_id;
         size_t context_id;
         std::atomic<bool> running{true};
-
-        // Smart Waking Flag: "true" means thread is blocked on read(eventfd)
-        std::atomic<bool> sleeping{false};
 
         explicit PerThreadContext(size_t id) : eventfd(-1), context_id(id) {}
 
@@ -96,7 +91,7 @@ private:
     std::atomic<size_t> next_context_{0};
 
     void runEventLoop(PerThreadContext* ctx);
-    bool processLocalQueue(PerThreadContext* ctx);
+    void processLocalQueue(PerThreadContext* ctx);
     void wakeThread(PerThreadContext& ctx);
     PerThreadContext& selectContext();
     void pinThreadToCpu(size_t thread_id, size_t cpu_id);
@@ -128,30 +123,23 @@ public:
     {
         continuation_ = h;
 
-        // 1. Determine Target Context
-        // If sticky, stay here. If external, pick one.
+        // CRITICAL FIX: Capture context at suspension time, not construction
         context_id_ = executor_->currentThreadInExecutor()
             ? executor_->currentContextId()
             : executor_->pickContextId();
 
-        // 2. Thread Safety Check
-        // Only touch the ring if we are ON the correct thread.
-        if (executor_->currentThreadInExecutor() &&
-            executor_->currentContextId() == context_id_)
+        io_uring* ring = executor_->getRing(context_id_);
+        io_uring_sqe* sqe = io_uring_get_sqe(ring);
+
+        if (!sqe)
         {
-            return submit_sqe();
+            result_ = -EBUSY;
+            return false;
         }
-        else
-        {
-            // Cross-thread submission: Schedule as task.
-            executor_->scheduleOn(context_id_, [this]() {
-                if (!this->submit_sqe()) {
-                    this->result_ = -EBUSY;
-                    if (this->continuation_) this->continuation_.resume();
-                }
-            });
-            return true;
-        }
+
+        prepare_func_(sqe);
+        io_uring_sqe_set_data(sqe, static_cast<IoOp*>(this));
+        return true;
     }
 
     ResultType await_resume()
@@ -174,21 +162,6 @@ public:
     }
 
 private:
-    bool submit_sqe() {
-        io_uring* ring = executor_->getRing(context_id_);
-        io_uring_sqe* sqe = io_uring_get_sqe(ring);
-
-        if (!sqe)
-        {
-            result_ = -EBUSY;
-            return false;
-        }
-
-        prepare_func_(sqe);
-        io_uring_sqe_set_data(sqe, static_cast<IoOp*>(this));
-        return true;
-    }
-
     IoUringExecutor* executor_;
     size_t context_id_{0};
     PrepareFunc prepare_func_;

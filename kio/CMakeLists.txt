@@ -17,6 +17,7 @@ set(core_runtime_headers
 set(core_next_runtime_headers
         next/io_uring_executor.h
         next/io_awaiters.h
+        next/io_awaiters_multishot.h
 )
 
 set(core_next_runtime_sources
