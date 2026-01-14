@@ -1,10 +1,9 @@
 //
 // io_uring_executor.h - Production Version
 // Features:
-// - Fixed critical hang bug (scheduleOn failure handling)
-// - Explicit submission context (.on_context())
-// - Explicit resume policy (.resume_on())
-// - Deadlock-free shutdown (poll-based loop)
+// - Fixed Race: eventfd initialized in Context constructor
+// - Fixed Race: Latch lifetime extension
+// - Robust Event Loop
 //
 
 #ifndef KIO_CORE_URING_EXECUTOR_H
@@ -19,6 +18,7 @@
 #include <thread>
 #include <vector>
 
+#include <fcntl.h>  // For O_NONBLOCK
 #include <liburing.h>
 #include <poll.h>
 #include <unistd.h>
@@ -36,7 +36,6 @@ struct IoUringExecutorConfig
     size_t num_threads = std::thread::hardware_concurrency();
     uint32_t io_uring_entries = 32768;
     uint32_t io_uring_flags = 0;
-    // batch size for local queue
     size_t local_batch_size = 16;
     bool pin_threads = false;
 };
@@ -49,11 +48,6 @@ public:
 
     explicit IoUringExecutor(const IoUringExecutorConfig& config = IoUringExecutorConfig{});
     ~IoUringExecutor() override;
-
-    IoUringExecutor(const IoUringExecutor&) = delete;
-    IoUringExecutor& operator=(const IoUringExecutor&) = delete;
-    IoUringExecutor(IoUringExecutor&&) = delete;
-    IoUringExecutor& operator=(IoUringExecutor&&) = delete;
 
     // async_simple::Executor interface
     bool schedule(Func func) override;
@@ -79,13 +73,23 @@ private:
     {
         io_uring ring{};
         ylt::detail::moodycamel::ConcurrentQueue<Task> task_queue;
-        int eventfd;
+        int eventfd{-1};
         std::thread::id thread_id;
         size_t context_id;
         std::atomic<bool> running{true};
+        std::atomic<bool> needs_wakeup{false};
         std::stop_token stop_token;
 
-        explicit PerThreadContext(size_t id) : eventfd(-1), context_id(id) {}
+        explicit PerThreadContext(const size_t id) : context_id(id)
+        {
+            // Create eventfd HERE (Main Thread) before worker starts.
+            // This guarantees 'eventfd' is visible and valid for any thread trying to wake us.
+            eventfd = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+            if (eventfd < 0)
+            {
+                throw std::system_error(errno, std::system_category(), "eventfd creation failed");
+            }
+        }
 
         bool setStopped()
         {
@@ -114,7 +118,6 @@ private:
     IoUringExecutorConfig executor_config_;
 
     void runEventLoop(PerThreadContext* ctx);
-    // Updated: returns true if queue might still have work (batch limit hit)
     bool processLocalQueue(PerThreadContext* ctx, size_t batch = 16);
     void wakeThread(PerThreadContext& ctx);
     PerThreadContext& selectContext();
@@ -122,21 +125,18 @@ private:
     static void handleCompletion(PerThreadContext* ctx, io_uring_cqe* cqe);
 };
 
-// Base interface for I/O operations
 struct IoOp
 {
     virtual void complete(int res) = 0;
     virtual ~IoOp() = default;
 };
 
-// Resume policy for I/O operations
 enum class ResumeMode : uint8_t
 {
-    InlineOnSubmitCtx,  // Resume inline on submit context (fastest, current behavior)
-    ViaCheckin          // Resume via executor->checkin() (hop back to original context)
+    InlineOnSubmitCtx,
+    ViaCheckin
 };
 
-// Production-grade awaiter with explicit control
 template <typename ResultType, typename PrepareFunc>
 class IoUringAwaiter : public IoOp
 {
@@ -148,7 +148,6 @@ public:
     {
     }
 
-    // Fluent API: Explicitly set submission context
     IoUringAwaiter&& on_context(size_t ctx) &&
     {
         forced_ctx_ = true;
@@ -156,7 +155,6 @@ public:
         return std::move(*this);
     }
 
-    // Fluent API: Explicitly set resume context
     IoUringAwaiter&& resume_on(async_simple::Executor::Context home, async_simple::ScheduleOptions opts = {}) &&
     {
         resume_mode_ = ResumeMode::ViaCheckin;
@@ -171,27 +169,22 @@ public:
     {
         continuation_ = h;
 
-        // Pick submit context (explicit or automatic)
         if (!forced_ctx_)
         {
             context_id_ =
                 executor_->currentThreadInExecutor() ? executor_->currentContextId() : executor_->pickContextId();
         }
 
-        // Capture "home" context if using checkin-based resume but no explicit context provided
         if (resume_mode_ == ResumeMode::ViaCheckin && home_ctx_ == IoUringExecutor::NULLCTX)
         {
             home_ctx_ = executor_->checkout();
         }
 
-        // Fast path: already on target context
         if (executor_->currentThreadInExecutor() && executor_->currentContextId() == context_id_)
         {
             return submit_sqe_or_resume_error();
         }
 
-        // Cross-thread submission
-        // Handle scheduleOn failure to prevent coroutine hang
         const bool ok = executor_->scheduleOn(context_id_,
                                               [this]()
                                               {
@@ -204,13 +197,11 @@ public:
 
         if (!ok)
         {
-            // CRITICAL: Don't suspend if scheduleOn failed!
-            // Returning true would hang the coroutine forever.
             result_ = -ECANCELED;
-            return false;  // Resume immediately, await_resume will throw
+            return false;
         }
 
-        return true;  // Safe to suspend
+        return true;
     }
 
     ResultType await_resume()
@@ -227,20 +218,16 @@ public:
     {
         result_ = res;
         if (!continuation_)
-        {
             return;
-        };
 
         if (resume_mode_ == ResumeMode::InlineOnSubmitCtx)
         {
-            // Fast path: resume inline (current behavior)
             continuation_.resume();
             return;
         }
 
-        // Resume via async_simple checkin (hop back to the original context)
         auto h = continuation_;
-        continuation_ = {};  // Clear before checkin to prevent double-resume
+        continuation_ = {};
         executor_->checkin([h]() mutable { h.resume(); }, home_ctx_, opts_);
     }
 
@@ -249,10 +236,8 @@ private:
     {
         if (submit_sqe())
             return true;
-
-        // Submit failed, don't suspend
         result_ = -EBUSY;
-        return false;  // await_resume will throw
+        return false;
     }
 
     bool submit_sqe() noexcept
@@ -262,18 +247,11 @@ private:
 
         if (!sqe)
         {
-            // Try flushing pending operations
             if (const int submitted = io_uring_submit(ring); submitted < 0)
-            {
                 return false;
-            };
-
-            // Retry once
             sqe = io_uring_get_sqe(ring);
             if (!sqe)
-            {
                 return false;
-            };
         }
 
         prepare_func_(sqe);
@@ -289,7 +267,6 @@ private:
     std::coroutine_handle<> continuation_;
     int result_{0};
 
-    // Resumption control
     ResumeMode resume_mode_{ResumeMode::InlineOnSubmitCtx};
     async_simple::Executor::Context home_ctx_{IoUringExecutor::NULLCTX};
     async_simple::ScheduleOptions opts_{};
