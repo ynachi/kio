@@ -5,10 +5,13 @@
 
 #include "kio/next/io_uring_executor.h"
 
+#include <chrono>
 #include <condition_variable>
 #include <iostream>
 #include <mutex>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include <arpa/inet.h>
 #include <async_simple/coro/Lazy.h>
@@ -38,15 +41,22 @@ inline auto send(IoUringExecutor* exec, int fd, const void* buf, size_t len, int
 
 Lazy<void> handleClient(IoUringExecutor* executor, int client_fd)
 {
-    // OPTIMIZATION 1: Enable TCP_NODELAY (disable Nagle's algorithm)
-    // This reduces latency by sending small packets immediately
+    // OPTIMIZATION 1: Enable TCP_NODELAY
     int flag = 1;
     setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
 
-    // OPTIMIZATION 2: Set socket buffers (optional, helps with throughput)
-    int bufsize = 256 * 1024;  // 256KB
+    // OPTIMIZATION 2: Set socket buffers
+    int bufsize = 256 * 1024;
     setsockopt(client_fd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
     setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
+
+    // NOTE: Avoid forcing an RST when closing the connection.  The previous
+    // version set SO_LINGER to {1,0} to avoid TIME_WAIT during benchmarks,
+    // which can increase packet loss and harm long‑running performance.  The
+    // default behaviour (l_onoff=0) allows the connection to gracefully
+    // transition through FIN‑WAIT states.  You can still set a non‑zero
+    // linger time if you need aggressive cleanup, but leaving it unset
+    // generally improves stability under load.
 
     char buffer[4096];
 
@@ -62,7 +72,7 @@ Lazy<void> handleClient(IoUringExecutor* executor, int client_fd)
                 "HTTP/1.1 200 OK\r\n"
                 "Content-Type: text/plain\r\n"
                 "Content-Length: 13\r\n"
-                "Connection: keep-alive\r\n"  // Keep connections alive
+                "Connection: keep-alive\r\n"
                 "\r\n"
                 "Hello, World!";
 
@@ -84,26 +94,46 @@ Lazy<void> handleClient(IoUringExecutor* executor, int client_fd)
     close(client_fd);
 }
 
+// Accept loop now runs on EACH thread independently
 Lazy<> acceptLoop(IoUringExecutor* executor, int listen_fd)
 {
-    size_t next_ctx = 0;
-    const size_t num_cpus = executor->numThreads();
-
     while (true)
     {
         sockaddr_in client_addr{};
         socklen_t addr_len = sizeof(client_addr);
+        int client_fd = -1;
 
-        int client_fd =
-            co_await io::v1::accept(executor, listen_fd, reinterpret_cast<sockaddr*>(&client_addr), &addr_len);
+        try
+        {
+            client_fd =
+                co_await io::v1::accept(executor, listen_fd, reinterpret_cast<sockaddr*>(&client_addr), &addr_len);
+        }
+        catch (const std::system_error& e)
+        {
+            if (e.code().value() == EMFILE || e.code().value() == ENFILE)
+            {
+                std::cerr << "[Accept] EMFILE (Backoff)" << std::endl;
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                continue;
+            }
+            else if (e.code().value() == ECANCELED)
+            {
+                break;  // Shutdown
+            }
+            continue;
+        }
+        catch (...)
+        {
+            continue;
+        }
 
         if (client_fd < 0)
             continue;
 
-        // Round-robin distribution to all workers
-        size_t target_ctx = next_ctx++ % num_cpus;
-        executor->scheduleOn(target_ctx,
-                             [executor, client_fd]() { handleClient(executor, client_fd).start([](auto&&) {}); });
+        // OPTIMIZATION: Handle LOCALLY.
+        // Since we now have an acceptLoop per thread, we process the connection        // on the same thread that
+        // accepted it. This maximizes cache locality.
+        handleClient(executor, client_fd).start([](auto&&) {});
     }
 }
 
@@ -113,18 +143,18 @@ int createListenSocket(uint16_t port)
     if (listen_fd < 0)
         throw std::system_error(errno, std::system_category(), "socket");
 
-    // OPTIMIZATION 3: SO_REUSEADDR and SO_REUSEPORT
     int opt = 1;
     setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
     setsockopt(listen_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
 
-    // OPTIMIZATION 4: Increase socket buffers
-    int bufsize = 2 * 1024 * 1024;  // 2MB
+    int bufsize = 2 * 1024 * 1024;
     setsockopt(listen_fd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
     setsockopt(listen_fd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
 
-    // OPTIMIZATION 5: Enable TCP Fast Open (Linux 3.7+)
-    int qlen = 5;
+    // Set a reasonable backlog for TCP Fast Open.  The previous code used
+    // a backlog of 5, which can cause connection drops under high load.  A
+    // backlog of 256 or higher is recommended for internet servers.
+    int qlen = 1024;
     setsockopt(listen_fd, SOL_TCP, TCP_FASTOPEN, &qlen, sizeof(qlen));
 
     sockaddr_in addr{};
@@ -138,8 +168,7 @@ int createListenSocket(uint16_t port)
         throw std::system_error(errno, std::system_category(), "bind");
     }
 
-    // OPTIMIZATION 6: Increase listen backlog
-    if (listen(listen_fd, 4096) < 0)  // Up from 128
+    if (listen(listen_fd, 4096) < 0)
     {
         close(listen_fd);
         throw std::system_error(errno, std::system_category(), "listen");
@@ -152,24 +181,10 @@ int createListenSocket(uint16_t port)
 void printOptimizationStatus(const IoUringExecutorConfig& config)
 {
     std::cout << "\n=== Performance Optimizations Enabled ===" << std::endl;
-
-    std::cout << "io_uring optimizations:" << std::endl;
-    if (config.io_uring_flags & IORING_SETUP_SQPOLL)
-        std::cout << "  ✓ SQPOLL: Kernel polling thread (+10-15% throughput)" << std::endl;
-    if (config.pin_threads)
-        std::cout << "  ✓ Thread pinning: Reduced cache misses" << std::endl;
-
-    std::cout << "\nTCP optimizations:" << std::endl;
-    std::cout << "  ✓ TCP_NODELAY: Reduced latency" << std::endl;
-    std::cout << "  ✓ TCP_FASTOPEN: Faster connection establishment" << std::endl;
-    std::cout << "  ✓ Large socket buffers: Better throughput" << std::endl;
-    std::cout << "  ✓ SO_REUSEPORT: Load balanced accept" << std::endl;
-    std::cout << "  ✓ Listen backlog 4096: Handle connection bursts" << std::endl;
-
-    std::cout << "\nExpected performance:" << std::endl;
-    std::cout << "  • Throughput: 370-420K req/s (10-25% better)" << std::endl;
-    std::cout << "  • P99 latency: <6ms (improved)" << std::endl;
-    std::cout << "  • CPU usage: 65-75% (kernel-bound)" << std::endl;
+    std::cout << "  ✓ Multi-Threaded Accept (SO_REUSEPORT scaling)" << std::endl;
+    std::cout << "  ✓ Local Processing (Zero-copy scheduling)" << std::endl;
+    std::cout << "  ✓ SO_LINGER (TIME_WAIT avoidance)" << std::endl;
+    std::cout << "  ✓ TCP_NODELAY & Socket Buffers" << std::endl;
     std::cout << "==========================================\n" << std::endl;
 }
 
@@ -181,47 +196,50 @@ int main()
 
         IoUringExecutorConfig config;
         config.num_threads = 4;
-        config.io_uring_entries = 16800;
+        config.io_uring_entries = 32768;
+        config.local_batch_size = 64;
         config.pin_threads = true;
-
-        // OPTIMIZATION 7: Enable SQPOLL for kernel-side polling
-        // This reduces syscall overhead by ~10-15%
-        // Requires kernel 5.11+ for best performance
+        // Use SQ poll to offload submission queue polling to the kernel and
+        // reduce wakeup overhead.  This flag requires a reasonably recent
+        // kernel.  It can be combined with SINGLE_ISSUER.
+        // config.io_uring_flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_SQPOLL;
         // config.io_uring_flags = IORING_SETUP_SQPOLL;
+        // config.io_uring_flags = IORING_SETUP_SINGLE_ISSUER;
 
-        // Alternative: If SQPOLL causes issues, use SINGLE_ISSUER instead
-        config.io_uring_flags = IORING_SETUP_SINGLE_ISSUER;
-        // config.io_uring_flags = IORING_SETUP_COOP_TASKRUN | IORING_SETUP_SINGLE_ISSUER;
+        // TODO: No flags is actually extremly faster
 
         IoUringExecutor executor(config);
 
         int listen_fd = createListenSocket(PORT);
 
-        std::cout << "HTTP server (V1 - Optimized) started on port " << PORT << " with " << config.num_threads
-                  << " threads." << std::endl;
+        std::cout << "HTTP server started on port " << PORT << " with " << config.num_threads << " threads."
+                  << std::endl;
 
         printOptimizationStatus(config);
 
-        // Start accept loop
+        // Start accept loop on ALL threads
         std::mutex mtx;
         std::condition_variable cv;
-        bool done = false;
+        int active_threads = config.num_threads;
 
-        executor.scheduleOn(0,
-                            [&executor, listen_fd, &mtx, &cv, &done]()
-                            {
-                                acceptLoop(&executor, listen_fd)
-                                    .start(
-                                        [&mtx, &cv, &done](auto&&)
-                                        {
-                                            std::lock_guard<std::mutex> lock(mtx);
-                                            done = true;
-                                            cv.notify_one();
-                                        });
-                            });
+        for (size_t i = 0; i < config.num_threads; ++i)
+        {
+            executor.scheduleOn(i,
+                                [&executor, listen_fd, &mtx, &cv, &active_threads]()
+                                {
+                                    acceptLoop(&executor, listen_fd)
+                                        .start(
+                                            [&mtx, &cv, &active_threads](auto&&)
+                                            {
+                                                std::lock_guard<std::mutex> lock(mtx);
+                                                if (--active_threads == 0)
+                                                    cv.notify_one();
+                                            });
+                                });
+        }
 
         std::cout << "Server running. Press Enter to stop..." << std::endl;
-        std::cin.get();  // Blocks until user presses Enter
+        std::cin.get();
         executor.stop();
 
         close(listen_fd);

@@ -30,6 +30,19 @@ IoUringExecutor::IoUringExecutor(const IoUringExecutorConfig& config)
         contexts_.push_back(std::make_unique<PerThreadContext>(i));
     }
 
+    // Initialize a dedicated control ring for cross‑thread scheduling.  This ring
+    // will be used exclusively by the main thread to issue IORING_OP_MSG_RING
+    // operations.  Use SINGLE_ISSUER to guarantee thread safety on this ring.
+    {
+        io_uring_params params{};
+        params.flags = IORING_SETUP_SINGLE_ISSUER;
+        int ret = io_uring_queue_init_params(config.io_uring_entries, &control_ring_, &params);
+        if (ret < 0)
+        {
+            throw std::system_error(-ret, std::system_category(), "control ring init failed");
+        }
+    }
+
     // FIX: Use shared_ptr for latch to prevent use-after-free
     // If the main thread wakes up and exits constructor, stack latch is destroyed
     // while worker threads might still be waiting/accessing it.
@@ -46,14 +59,15 @@ IoUringExecutor::IoUringExecutor(const IoUringExecutorConfig& config)
                 ctx->thread_id = std::this_thread::get_id();
                 ctx->stop_token = getStopToken();
 
-                int ret = io_uring_queue_init(config.io_uring_entries, &ctx->ring, config.io_uring_flags);
+                // Initialize per‑thread ring with single issuer and cooperative task run.
+                io_uring_params params{};
+                params.flags = config.io_uring_flags | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_COOP_TASKRUN |
+                               IORING_SETUP_DEFER_TASKRUN;
+                int ret = io_uring_queue_init_params(config.io_uring_entries, &ctx->ring, &params);
                 if (ret < 0)
+                {
                     std::terminate();
-
-                // eventfd is already created in constructor. Register it.
-                ret = io_uring_register_eventfd(&ctx->ring, ctx->eventfd);
-                if (ret < 0)
-                    std::terminate();
+                }
 
                 if (config.pin_threads)
                     pinThreadToCpu(i, i);
@@ -77,22 +91,38 @@ IoUringExecutor::~IoUringExecutor()
     join();
     for (auto& ctx : contexts_)
     {
-        io_uring_unregister_eventfd(&ctx->ring);
         io_uring_queue_exit(&ctx->ring);
     }
+    io_uring_queue_exit(&control_ring_);
 }
 
 void IoUringExecutor::stop()
 {
+    // Request stop for all worker loops
     if (!stop_source_.request_stop())
     {
         // Already stopped/stopping
     }
 
+    // Send a dummy message to each ring to wake up any waiting thread.  Use
+    // IORING_OP_MSG_RING with a null user_data so that handleCompletion()
+    // ignores it.  Use IOSQE_CQE_SKIP_SUCCESS so the control ring does not
+    // receive a completion event for these messages.
     for (auto& ctx : contexts_)
     {
-        wakeThread(*ctx);
+        io_uring_sqe* sqe = io_uring_get_sqe(&control_ring_);
+        if (!sqe)
+        {
+            (void)io_uring_submit(&control_ring_);
+            sqe = io_uring_get_sqe(&control_ring_);
+            if (!sqe)
+                continue;
+        }
+        int target_fd = ctx->ring.ring_fd;
+        io_uring_prep_msg_ring(sqe, target_fd, 0, 0, 0);
+        io_uring_sqe_set_flags(sqe, IOSQE_CQE_SKIP_SUCCESS);
     }
+    io_uring_submit(&control_ring_);
 
     stop_latch_.wait();
     executor_stopped_.store(true, std::memory_order_release);
@@ -120,11 +150,64 @@ bool IoUringExecutor::scheduleOn(size_t context_id, Func func)
     if (context_id >= contexts_.size() || executor_stopped_.load(std::memory_order_acquire))
         return false;
 
-    auto& ctx = *contexts_[context_id];
-    if (!ctx.task_queue.enqueue(std::move(func)))
-        return false;
+    // Wrap the function in a TaskOp so it can be delivered via io_uring.
+    struct TaskOp : public IoOp
+    {
+        Func fn;
+        explicit TaskOp(Func&& f) : fn(std::move(f)) {}
+        void complete(int) override
+        {
+            try
+            {
+                fn();
+            }
+            catch (...)
+            {
+            }
+            delete this;
+        }
+    };
 
-    wakeThread(ctx);
+    // Allocate task on the heap.  It will delete itself when complete() is called.
+    auto* task = new TaskOp(std::move(func));
+
+    // If scheduling from within the same context, post a NOP directly on the ring.
+    if (current_context_ && current_context_->context_id == context_id)
+    {
+        io_uring* ring = &current_context_->ring;
+        io_uring_sqe* sqe = io_uring_get_sqe(ring);
+        if (!sqe)
+        {
+            (void)io_uring_submit(ring);
+            sqe = io_uring_get_sqe(ring);
+            if (!sqe)
+            {
+                delete task;
+                return false;
+            }
+        }
+        io_uring_prep_nop(sqe);
+        io_uring_sqe_set_data(sqe, static_cast<IoOp*>(task));
+        io_uring_submit(ring);
+        return true;
+    }
+
+    // Otherwise, use the control ring to send a message to the target ring.
+    io_uring_sqe* sqe = io_uring_get_sqe(&control_ring_);
+    if (!sqe)
+    {
+        (void)io_uring_submit(&control_ring_);
+        sqe = io_uring_get_sqe(&control_ring_);
+        if (!sqe)
+        {
+            delete task;
+            return false;
+        }
+    }
+    int target_fd = contexts_[context_id]->ring.ring_fd;
+    io_uring_prep_msg_ring(sqe, target_fd, 0, reinterpret_cast<__u64>(static_cast<IoOp*>(task)), 0);
+    io_uring_sqe_set_flags(sqe, IOSQE_CQE_SKIP_SUCCESS);
+    io_uring_submit(&control_ring_);
     return true;
 }
 
@@ -163,78 +246,49 @@ size_t IoUringExecutor::pickContextId()
 
 void IoUringExecutor::runEventLoop(PerThreadContext* ctx)
 {
+    io_uring* ring = &ctx->ring;
+    io_uring_cqe* cqe;
     while (!ctx->stop_token.stop_requested())
     {
-        bool made_progress = false;
-
-        made_progress |= processLocalQueue(ctx, executor_config_.local_batch_size);
-
-        unsigned head;
-        io_uring_cqe* cqe;
-        unsigned count = 0;
-        io_uring_for_each_cqe(&ctx->ring, head, cqe)
+        bool processed = false;
+        // Drain all ready CQEs
+        while (io_uring_peek_cqe(ring, &cqe) == 0)
         {
             handleCompletion(ctx, cqe);
-            count++;
+            io_uring_cqe_seen(ring, cqe);
+            processed = true;
         }
-        if (count > 0)
+        // Submit any pending SQEs
+        io_uring_submit(ring);
+        if (!processed)
         {
-            io_uring_cq_advance(&ctx->ring, count);
-            made_progress = true;
-        }
-
-        io_uring_submit(&ctx->ring);
-
-        if (!made_progress)
-        {
-            pollfd pfd;
-            pfd.fd = ctx->eventfd;
-            pfd.events = POLLIN;
-
-            int ret = poll(&pfd, 1, -1);
-
-            if (ret > 0)
+            // Wait for the next completion
+            int ret = io_uring_wait_cqe(ring, &cqe);
+            if (ret == 0)
             {
-                uint64_t val;
-                read(ctx->eventfd, &val, sizeof(val));
+                handleCompletion(ctx, cqe);
+                io_uring_cqe_seen(ring, cqe);
             }
         }
-        else
-        {
-            uint64_t val;
-            ssize_t n = read(ctx->eventfd, &val, sizeof(val));
-            (void)n;
-        }
     }
-
     ctx->setStopped();
     stop_latch_.count_down();
 }
 
 bool IoUringExecutor::processLocalQueue(PerThreadContext* ctx, size_t batch)
 {
-    Task task;
-    size_t processed = 0;
-
-    while (processed < batch && ctx->task_queue.try_dequeue(task))
-    {
-        try
-        {
-            task();
-        }
-        catch (...)
-        {
-        }
-        processed++;
-    }
-
-    return processed == batch;
+    // Local queue processing has been replaced by io_uring task scheduling.  No
+    // additional queue is used.
+    (void)ctx;
+    (void)batch;
+    return false;
 }
 
 void IoUringExecutor::wakeThread(PerThreadContext& ctx)
 {
-    uint64_t val = 1;
-    write(ctx.eventfd, &val, sizeof(val));
+    // No-op: wakeThread is obsolete in the ring-only design.  Scheduling
+    // cross‑thread tasks uses msg_ring messages instead of eventfds.
+    (void)ctx;
 }
 
 IoUringExecutor::PerThreadContext& IoUringExecutor::selectContext()

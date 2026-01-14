@@ -72,23 +72,21 @@ private:
     struct PerThreadContext
     {
         io_uring ring{};
-        ylt::detail::moodycamel::ConcurrentQueue<Task> task_queue;
-        int eventfd{-1};
+        // task_queue and eventfd are removed in favor of io_uring based scheduling.
+        // The ring itself is used as the only queue. Cross‑thread scheduling uses
+        // IORING_OP_MSG_RING which delivers work to the target ring.
+        int eventfd;  // unused; retained for ABI compatibility but always -1.
         std::thread::id thread_id;
         size_t context_id;
         std::atomic<bool> running{true};
-        std::atomic<bool> needs_wakeup{false};
         std::stop_token stop_token;
 
-        explicit PerThreadContext(const size_t id) : context_id(id)
+        explicit PerThreadContext(size_t id) : context_id(id)
         {
-            // Create eventfd HERE (Main Thread) before worker starts.
-            // This guarantees 'eventfd' is visible and valid for any thread trying to wake us.
-            eventfd = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-            if (eventfd < 0)
-            {
-                throw std::system_error(errno, std::system_category(), "eventfd creation failed");
-            }
+            // Each PerThreadContext owns its own io_uring instance.  No external
+            // eventfd or queue is used for task scheduling; tasks are posted
+            // directly into the ring itself.
+            eventfd = -1;
         }
 
         bool setStopped()
@@ -100,10 +98,7 @@ private:
         ~PerThreadContext()
         {
             setStopped();
-            if (eventfd >= 0)
-            {
-                close(eventfd);
-            }
+            // Nothing to clean up for eventfd, as it is unused.
         }
     };
 
@@ -116,6 +111,11 @@ private:
     std::latch stop_latch_;
     std::atomic<size_t> next_context_{0};
     IoUringExecutorConfig executor_config_;
+
+    // Dedicated ring used by the main thread to dispatch cross‑thread tasks via
+    // IORING_OP_MSG_RING.  This ring is created with IORING_SETUP_SINGLE_ISSUER
+    // so that only the main thread can submit requests to it.
+    io_uring control_ring_{};
 
     void runEventLoop(PerThreadContext* ctx);
     bool processLocalQueue(PerThreadContext* ctx, size_t batch = 16);
