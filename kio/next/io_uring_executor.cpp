@@ -1,6 +1,7 @@
+// io_uring_executor_lockfree.cpp
+// Lock-free implementation with per-thread control rings
 //
-// io_uring_executor.cpp
-//
+
 #include "io_uring_executor.h"
 
 #include <cerrno>
@@ -19,33 +20,29 @@ IoUringExecutor::IoUringExecutor(const IoUringExecutorConfig& config)
     : stop_latch_(config.num_threads), executor_config_(config)
 {
     if (config.num_threads == 0)
-        throw std::invalid_argument("num_threads > 0");
+        throw std::invalid_argument("num_threads must be > 0");
+
+    if (config.max_cqe_batch == 0)
+        throw std::invalid_argument("max_cqe_batch must be > 0");
 
     contexts_.reserve(config.num_threads);
     for (size_t i = 0; i < config.num_threads; ++i)
     {
-        // eventfd is created inside PerThreadContext constructor here (Main Thread).
-        // This eliminates the race where a thread tries to wake this context
-        // before the worker thread has started and created the fd.
-        contexts_.push_back(std::make_unique<PerThreadContext>(i));
+        contexts_.push_back(std::make_unique<PerThreadContext>(i, config.task_pool_size));
     }
 
-    // Initialize a dedicated control ring for cross‑thread scheduling.  This ring
-    // will be used exclusively by the main thread to issue IORING_OP_MSG_RING
-    // operations.  Use SINGLE_ISSUER to guarantee thread safety on this ring.
+    // Initialize external control ring for scheduling from non-executor threads
+    // This ring is protected by mutex since we don't know which thread will use it
     {
         io_uring_params params{};
-        params.flags = IORING_SETUP_SINGLE_ISSUER;
-        int ret = io_uring_queue_init_params(config.io_uring_entries, &control_ring_, &params);
+        params.flags = 0;  // No SINGLE_ISSUER since multiple external threads may use it
+        int ret = io_uring_queue_init_params(config.control_ring_entries, &external_control_ring_, &params);
         if (ret < 0)
         {
-            throw std::system_error(-ret, std::system_category(), "control ring init failed");
+            throw std::system_error(-ret, std::system_category(), "external control ring init failed");
         }
     }
 
-    // FIX: Use shared_ptr for latch to prevent use-after-free
-    // If the main thread wakes up and exits constructor, stack latch is destroyed
-    // while worker threads might still be waiting/accessing it.
     auto init_latch = std::make_shared<std::latch>(config.num_threads);
 
     threads_.reserve(config.num_threads);
@@ -59,14 +56,30 @@ IoUringExecutor::IoUringExecutor(const IoUringExecutorConfig& config)
                 ctx->thread_id = std::this_thread::get_id();
                 ctx->stop_token = getStopToken();
 
-                // Initialize per‑thread ring with single issuer and cooperative task run.
-                io_uring_params params{};
-                params.flags = config.io_uring_flags | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_COOP_TASKRUN |
-                               IORING_SETUP_DEFER_TASKRUN;
-                int ret = io_uring_queue_init_params(config.io_uring_entries, &ctx->ring, &params);
-                if (ret < 0)
+                // Initialize worker ring with SINGLE_ISSUER and cooperative task run
                 {
-                    std::terminate();
+                    io_uring_params params{};
+                    params.flags = config.io_uring_flags | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_COOP_TASKRUN |
+                                   IORING_SETUP_DEFER_TASKRUN;
+
+                    int ret = io_uring_queue_init_params(config.io_uring_entries, &ctx->ring, &params);
+                    if (ret < 0)
+                    {
+                        std::terminate();
+                    }
+                }
+
+                // Initialize per-thread control ring with SINGLE_ISSUER
+                // This thread is the ONLY issuer to this control ring
+                {
+                    io_uring_params params{};
+                    params.flags = IORING_SETUP_SINGLE_ISSUER;
+
+                    int ret = io_uring_queue_init_params(config.control_ring_entries, &ctx->control_ring, &params);
+                    if (ret < 0)
+                    {
+                        std::terminate();
+                    }
                 }
 
                 if (config.pin_threads)
@@ -79,7 +92,6 @@ IoUringExecutor::IoUringExecutor(const IoUringExecutorConfig& config)
             });
     }
 
-    // Main thread waits for all workers to be ready
     init_latch->wait();
 }
 
@@ -87,42 +99,47 @@ IoUringExecutor::~IoUringExecutor()
 {
     if (executor_stopped_)
         return;
+
     stop();
     join();
+
     for (auto& ctx : contexts_)
     {
         io_uring_queue_exit(&ctx->ring);
+        io_uring_queue_exit(&ctx->control_ring);
     }
-    io_uring_queue_exit(&control_ring_);
+    io_uring_queue_exit(&external_control_ring_);
 }
 
 void IoUringExecutor::stop()
 {
-    // Request stop for all worker loops
     if (!stop_source_.request_stop())
     {
-        // Already stopped/stopping
+        return;
     }
 
-    // Send a dummy message to each ring to wake up any waiting thread.  Use
-    // IORING_OP_MSG_RING with a null user_data so that handleCompletion()
-    // ignores it.  Use IOSQE_CQE_SKIP_SUCCESS so the control ring does not
-    // receive a completion event for these messages.
-    for (auto& ctx : contexts_)
+    // Wake all threads by sending dummy messages
+    // Use external control ring since we're on main thread
     {
-        io_uring_sqe* sqe = io_uring_get_sqe(&control_ring_);
-        if (!sqe)
+        std::lock_guard lock(external_control_mutex_);
+
+        for (auto& ctx : contexts_)
         {
-            (void)io_uring_submit(&control_ring_);
-            sqe = io_uring_get_sqe(&control_ring_);
+            io_uring_sqe* sqe = io_uring_get_sqe(&external_control_ring_);
             if (!sqe)
-                continue;
+            {
+                (void)io_uring_submit(&external_control_ring_);
+                sqe = io_uring_get_sqe(&external_control_ring_);
+                if (!sqe)
+                    continue;
+            }
+
+            int target_fd = ctx->ring.ring_fd;
+            io_uring_prep_msg_ring(sqe, target_fd, 0, 0, 0);
+            io_uring_sqe_set_flags(sqe, IOSQE_CQE_SKIP_SUCCESS);
         }
-        int target_fd = ctx->ring.ring_fd;
-        io_uring_prep_msg_ring(sqe, target_fd, 0, 0, 0);
-        io_uring_sqe_set_flags(sqe, IOSQE_CQE_SKIP_SUCCESS);
+        io_uring_submit(&external_control_ring_);
     }
-    io_uring_submit(&control_ring_);
 
     stop_latch_.wait();
     executor_stopped_.store(true, std::memory_order_release);
@@ -141,6 +158,7 @@ bool IoUringExecutor::schedule(Func func)
 {
     if (executor_stopped_.load(std::memory_order_acquire))
         return false;
+
     auto& ctx = selectContext();
     return scheduleOn(ctx.context_id, std::move(func));
 }
@@ -150,65 +168,10 @@ bool IoUringExecutor::scheduleOn(size_t context_id, Func func)
     if (context_id >= contexts_.size() || executor_stopped_.load(std::memory_order_acquire))
         return false;
 
-    // Wrap the function in a TaskOp so it can be delivered via io_uring.
-    struct TaskOp : public IoOp
-    {
-        Func fn;
-        explicit TaskOp(Func&& f) : fn(std::move(f)) {}
-        void complete(int) override
-        {
-            try
-            {
-                fn();
-            }
-            catch (...)
-            {
-            }
-            delete this;
-        }
-    };
+    if (executor_config_.enable_metrics)
+        metrics_.tasks_scheduled.fetch_add(1, std::memory_order_relaxed);
 
-    // Allocate task on the heap.  It will delete itself when complete() is called.
-    auto* task = new TaskOp(std::move(func));
-
-    // If scheduling from within the same context, post a NOP directly on the ring.
-    if (current_context_ && current_context_->context_id == context_id)
-    {
-        io_uring* ring = &current_context_->ring;
-        io_uring_sqe* sqe = io_uring_get_sqe(ring);
-        if (!sqe)
-        {
-            (void)io_uring_submit(ring);
-            sqe = io_uring_get_sqe(ring);
-            if (!sqe)
-            {
-                delete task;
-                return false;
-            }
-        }
-        io_uring_prep_nop(sqe);
-        io_uring_sqe_set_data(sqe, static_cast<IoOp*>(task));
-        io_uring_submit(ring);
-        return true;
-    }
-
-    // Otherwise, use the control ring to send a message to the target ring.
-    io_uring_sqe* sqe = io_uring_get_sqe(&control_ring_);
-    if (!sqe)
-    {
-        (void)io_uring_submit(&control_ring_);
-        sqe = io_uring_get_sqe(&control_ring_);
-        if (!sqe)
-        {
-            delete task;
-            return false;
-        }
-    }
-    int target_fd = contexts_[context_id]->ring.ring_fd;
-    io_uring_prep_msg_ring(sqe, target_fd, 0, reinterpret_cast<__u64>(static_cast<IoOp*>(task)), 0);
-    io_uring_sqe_set_flags(sqe, IOSQE_CQE_SKIP_SUCCESS);
-    io_uring_submit(&control_ring_);
-    return true;
+    return submitTask(context_id, std::move(func));
 }
 
 bool IoUringExecutor::scheduleLocal(Func func)
@@ -222,10 +185,12 @@ bool IoUringExecutor::currentThreadInExecutor() const
 {
     return current_context_ != nullptr;
 }
+
 size_t IoUringExecutor::currentContextId() const
 {
     return current_context_ ? current_context_->context_id : 0;
 }
+
 IoUringExecutor::Context IoUringExecutor::checkout()
 {
     return current_context_ ? static_cast<Context>(current_context_) : NULLCTX;
@@ -235,6 +200,7 @@ bool IoUringExecutor::checkin(Func func, Context ctx, async_simple::ScheduleOpti
 {
     if (ctx == NULLCTX)
         return schedule(std::move(func));
+
     auto* pctx = static_cast<PerThreadContext*>(ctx);
     return scheduleOn(pctx->context_id, std::move(func));
 }
@@ -248,47 +214,69 @@ void IoUringExecutor::runEventLoop(PerThreadContext* ctx)
 {
     io_uring* ring = &ctx->ring;
     io_uring_cqe* cqe;
+
+    const size_t max_batch = executor_config_.max_cqe_batch;
+
     while (!ctx->stop_token.stop_requested())
     {
         bool processed = false;
-        // Drain all ready CQEs
-        while (io_uring_peek_cqe(ring, &cqe) == 0)
+        size_t batch_count = 0;
+
+        // Drain CQEs with batching limit
+        while (batch_count < max_batch && io_uring_peek_cqe(ring, &cqe) == 0)
         {
-            handleCompletion(ctx, cqe);
+            bool is_task = false;
+            handleCompletion(ctx, cqe, is_task);
             io_uring_cqe_seen(ring, cqe);
             processed = true;
+            batch_count++;
+
+            if (executor_config_.enable_metrics)
+            {
+                if (is_task)
+                    metrics_.tasks_completed.fetch_add(1, std::memory_order_relaxed);
+                else
+                    metrics_.io_ops_completed.fetch_add(1, std::memory_order_relaxed);
+            }
         }
-        // Submit any pending SQEs
+
+        if (executor_config_.enable_metrics && processed)
+            metrics_.batches_processed.fetch_add(1, std::memory_order_relaxed);
+
+        // Submit any pending SQEs on worker ring
         io_uring_submit(ring);
+
+        // Also submit any pending SQEs on control ring
+        // (in case we've queued cross-thread messages)
+        io_uring_submit(&ctx->control_ring);
+
         if (!processed)
         {
             // Wait for the next completion
             int ret = io_uring_wait_cqe(ring, &cqe);
             if (ret == 0)
             {
-                handleCompletion(ctx, cqe);
+                bool is_task = false;
+                handleCompletion(ctx, cqe, is_task);
                 io_uring_cqe_seen(ring, cqe);
+
+                if (executor_config_.enable_metrics)
+                {
+                    if (is_task)
+                        metrics_.tasks_completed.fetch_add(1, std::memory_order_relaxed);
+                    else
+                        metrics_.io_ops_completed.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+            else if (ret == -EINTR)
+            {
+                continue;
             }
         }
     }
+
     ctx->setStopped();
     stop_latch_.count_down();
-}
-
-bool IoUringExecutor::processLocalQueue(PerThreadContext* ctx, size_t batch)
-{
-    // Local queue processing has been replaced by io_uring task scheduling.  No
-    // additional queue is used.
-    (void)ctx;
-    (void)batch;
-    return false;
-}
-
-void IoUringExecutor::wakeThread(PerThreadContext& ctx)
-{
-    // No-op: wakeThread is obsolete in the ring-only design.  Scheduling
-    // cross‑thread tasks uses msg_ring messages instead of eventfds.
-    (void)ctx;
 }
 
 IoUringExecutor::PerThreadContext& IoUringExecutor::selectContext()
@@ -301,6 +289,7 @@ void IoUringExecutor::pinThreadToCpu(size_t thread_id, size_t cpu_id)
 {
     if (cpu_id >= CPU_SETSIZE)
         return;
+
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
     CPU_SET(cpu_id, &cpuset);
@@ -308,14 +297,137 @@ void IoUringExecutor::pinThreadToCpu(size_t thread_id, size_t cpu_id)
     io_uring_register_iowq_aff(&current_context_->ring, 1, &cpuset);
 }
 
-void IoUringExecutor::handleCompletion(PerThreadContext* ctx, io_uring_cqe* cqe)
+void IoUringExecutor::handleCompletion(PerThreadContext* ctx, io_uring_cqe* cqe, bool& is_task)
 {
     void* user_data = io_uring_cqe_get_data(cqe);
+    is_task = false;
+
     if (user_data)
     {
         auto* op = static_cast<IoOp*>(user_data);
+        is_task = (dynamic_cast<TaskOp*>(op) != nullptr);
         op->complete(cqe->res);
     }
+}
+
+bool IoUringExecutor::submitTask(size_t context_id, Func func)
+{
+    // Same-thread optimization
+    if (current_context_ && current_context_->context_id == context_id)
+    {
+        if (executor_config_.enable_metrics)
+            metrics_.same_thread_schedules.fetch_add(1, std::memory_order_relaxed);
+        return submitTaskSameThread(current_context_, std::move(func));
+    }
+
+    // Cross-thread scheduling from executor thread
+    if (current_context_)
+    {
+        if (executor_config_.enable_metrics)
+            metrics_.cross_thread_schedules.fetch_add(1, std::memory_order_relaxed);
+        return submitTaskCrossThread(context_id, std::move(func));
+    }
+
+    // External thread (not in executor)
+    if (executor_config_.enable_metrics)
+        metrics_.external_schedules.fetch_add(1, std::memory_order_relaxed);
+    return submitTaskExternal(context_id, std::move(func));
+}
+
+bool IoUringExecutor::submitTaskSameThread(PerThreadContext* ctx, Func func)
+{
+    // Same thread - use NOP on worker ring
+    TaskOp* task = ctx->task_pool->acquire(std::move(func));
+    task->owner_ctx = ctx;
+
+    io_uring* ring = &ctx->ring;
+    io_uring_sqe* sqe = io_uring_get_sqe(ring);
+
+    if (!sqe)
+    {
+        (void)io_uring_submit(ring);
+        sqe = io_uring_get_sqe(ring);
+        if (!sqe)
+        {
+            ctx->task_pool->release(task);
+            return false;
+        }
+    }
+
+    io_uring_prep_nop(sqe);
+    io_uring_sqe_set_data(sqe, static_cast<IoOp*>(task));
+    io_uring_submit(ring);
+
+    return true;
+}
+
+bool IoUringExecutor::submitTaskCrossThread(size_t context_id, Func func)
+{
+    // Cross-thread from executor thread
+    // Use THIS thread's control ring to send message to target thread
+    // This is LOCK-FREE because only this thread uses this control ring
+
+    auto* target_ctx = contexts_[context_id].get();
+
+    TaskOp* task = target_ctx->task_pool->acquire(std::move(func));
+    task->owner_ctx = target_ctx;
+
+    // Use current thread's control ring (SINGLE_ISSUER, no lock needed)
+    io_uring* control = &current_context_->control_ring;
+
+    io_uring_sqe* sqe = io_uring_get_sqe(control);
+    if (!sqe)
+    {
+        (void)io_uring_submit(control);
+        sqe = io_uring_get_sqe(control);
+        if (!sqe)
+        {
+            target_ctx->task_pool->release(task);
+            return false;
+        }
+    }
+
+    int target_fd = target_ctx->ring.ring_fd;
+    io_uring_prep_msg_ring(sqe, target_fd, 0, reinterpret_cast<__u64>(static_cast<IoOp*>(task)), 0);
+    io_uring_sqe_set_flags(sqe, IOSQE_CQE_SKIP_SUCCESS);
+
+    // Submit happens in runEventLoop, but we can submit immediately for lower latency
+    io_uring_submit(control);
+
+    return true;
+}
+
+bool IoUringExecutor::submitTaskExternal(size_t context_id, Func func)
+{
+    // External thread (main thread, user thread, etc.)
+    // Use shared external control ring with mutex protection
+
+    auto* target_ctx = contexts_[context_id].get();
+
+    TaskOp* task = target_ctx->task_pool->acquire(std::move(func));
+    task->owner_ctx = target_ctx;
+
+    // Need mutex because we don't know which external thread is calling
+    std::lock_guard lock(external_control_mutex_);
+
+    io_uring_sqe* sqe = io_uring_get_sqe(&external_control_ring_);
+    if (!sqe)
+    {
+        (void)io_uring_submit(&external_control_ring_);
+        sqe = io_uring_get_sqe(&external_control_ring_);
+        if (!sqe)
+        {
+            target_ctx->task_pool->release(task);
+            return false;
+        }
+    }
+
+    int target_fd = target_ctx->ring.ring_fd;
+    io_uring_prep_msg_ring(sqe, target_fd, 0, reinterpret_cast<__u64>(static_cast<IoOp*>(task)), 0);
+    io_uring_sqe_set_flags(sqe, IOSQE_CQE_SKIP_SUCCESS);
+    io_uring_submit(&external_control_ring_);
+
+    return true;
 }
 
 }  // namespace kio::next::v1

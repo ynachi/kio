@@ -50,14 +50,6 @@ Lazy<void> handleClient(IoUringExecutor* executor, int client_fd)
     setsockopt(client_fd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
     setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
 
-    // NOTE: Avoid forcing an RST when closing the connection.  The previous
-    // version set SO_LINGER to {1,0} to avoid TIME_WAIT during benchmarks,
-    // which can increase packet loss and harm long‑running performance.  The
-    // default behaviour (l_onoff=0) allows the connection to gracefully
-    // transition through FIN‑WAIT states.  You can still set a non‑zero
-    // linger time if you need aggressive cleanup, but leaving it unset
-    // generally improves stability under load.
-
     char buffer[4096];
 
     try
@@ -116,7 +108,8 @@ Lazy<> acceptLoop(IoUringExecutor* executor, int listen_fd)
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 continue;
             }
-            else if (e.code().value() == ECANCELED)
+            // CRITICAL FIX: Handle EBADF (Socket closed) to break the loop and destroy coroutine frame.
+            else if (e.code().value() == ECANCELED || e.code().value() == EBADF)
             {
                 break;  // Shutdown
             }
@@ -130,9 +123,6 @@ Lazy<> acceptLoop(IoUringExecutor* executor, int listen_fd)
         if (client_fd < 0)
             continue;
 
-        // OPTIMIZATION: Handle LOCALLY.
-        // Since we now have an acceptLoop per thread, we process the connection        // on the same thread that
-        // accepted it. This maximizes cache locality.
         handleClient(executor, client_fd).start([](auto&&) {});
     }
 }
@@ -151,9 +141,6 @@ int createListenSocket(uint16_t port)
     setsockopt(listen_fd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
     setsockopt(listen_fd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
 
-    // Set a reasonable backlog for TCP Fast Open.  The previous code used
-    // a backlog of 5, which can cause connection drops under high load.  A
-    // backlog of 256 or higher is recommended for internet servers.
     int qlen = 1024;
     setsockopt(listen_fd, SOL_TCP, TCP_FASTOPEN, &qlen, sizeof(qlen));
 
@@ -197,16 +184,8 @@ int main()
         IoUringExecutorConfig config;
         config.num_threads = 4;
         config.io_uring_entries = 32768;
-        config.local_batch_size = 64;
+        // config.local_batch_size = 64;
         config.pin_threads = true;
-        // Use SQ poll to offload submission queue polling to the kernel and
-        // reduce wakeup overhead.  This flag requires a reasonably recent
-        // kernel.  It can be combined with SINGLE_ISSUER.
-        // config.io_uring_flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_SQPOLL;
-        // config.io_uring_flags = IORING_SETUP_SQPOLL;
-        // config.io_uring_flags = IORING_SETUP_SINGLE_ISSUER;
-
-        // TODO: No flags is actually extremly faster
 
         IoUringExecutor executor(config);
 
@@ -240,9 +219,23 @@ int main()
 
         std::cout << "Server running. Press Enter to stop..." << std::endl;
         std::cin.get();
+
+        // --- VALGRIND LEAK FIX ---
+        std::cout << "Stopping listener..." << std::endl;
+        // 1. Close the socket first. This will trigger -EBADF or -ECANCELED
+        // in the accept() calls waiting in the ring.
+        shutdown(listen_fd, SHUT_RDWR);
+        close(listen_fd);
+
+        // 2. Give the worker threads a moment to process the cancellation events.
+        // This ensures the acceptLoop coroutines resume, catch the exception,
+        // and exit, freeing their memory (the leak).
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+        std::cout << "Stopping executor..." << std::endl;
         executor.stop();
 
-        close(listen_fd);
+        // listen_fd is already closed.
     }
     catch (const std::exception& e)
     {
