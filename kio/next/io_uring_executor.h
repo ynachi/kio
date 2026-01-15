@@ -1,14 +1,3 @@
-//
-// io_uring_executor.h
-// Production-Ready: Pure io_uring design with per-thread control rings
-//
-// Key improvements:
-// 1. await_suspend returns void to prevent race conditions
-// 2. Cache-line alignment for PerThreadContext
-// 3. Robust object pool shutdown sequence
-// 4. Safe "trampoline" error handling for failed submissions
-//
-
 #ifndef KIO_CORE_URING_EXECUTOR_H
 #define KIO_CORE_URING_EXECUTOR_H
 
@@ -42,10 +31,10 @@ struct IoUringExecutorConfig
     size_t num_threads = std::thread::hardware_concurrency();
     uint32_t io_uring_entries = 32768;
     uint32_t io_uring_flags = 0;
-    uint32_t control_ring_entries = 2048;  // Bumped for high throughput
+    uint32_t control_ring_entries = 2048;
 
     size_t max_cqe_batch = 256;
-    size_t task_pool_size = 4096;  // Increased pool size
+    size_t task_pool_size = 4096;
 
     bool pin_threads = false;
     bool enable_metrics = false;
@@ -92,12 +81,14 @@ public:
         return *this;
     }
 
-    int init(uint32_t entries, io_uring_params* params)
+    int init(const uint32_t entries, io_uring_params* params)
     {
         if (initialized_)
+        {
             return -EBUSY;
+        }
 
-        int ret = io_uring_queue_init_params(entries, &ring_, params);
+        const int ret = io_uring_queue_init_params(entries, &ring_, params);
         if (ret == 0)
         {
             initialized_ = true;
@@ -119,136 +110,10 @@ private:
 };
 
 // ============================================================================
-// Inline Function - reduces std::function overhead for small callables
+// Inline Function - Using C++23 std::move_only_function
 // ============================================================================
 
-class InlineFunction
-{
-    static constexpr size_t kBufferSize = 64;  // Increased to cover larger captures
-    static constexpr size_t kBufferAlign = alignof(std::max_align_t);
-
-    using InvokePtr = void (*)(void*);
-    using DestroyPtr = void (*)(void*);
-    using MovePtr = void (*)(void* dst, void* src);
-
-    alignas(kBufferAlign) char buffer_[kBufferSize];
-    InvokePtr invoke_ = nullptr;
-    DestroyPtr destroy_ = nullptr;
-    MovePtr move_ = nullptr;
-    bool heap_allocated_ = false;
-
-    template <typename F>
-    static void invoke_impl(void* p)
-    {
-        (*static_cast<F*>(p))();
-    }
-
-    template <typename F>
-    static void destroy_impl(void* p)
-    {
-        static_cast<F*>(p)->~F();
-    }
-
-    template <typename F>
-    static void move_impl(void* dst, void* src)
-    {
-        new (dst) F(std::move(*static_cast<F*>(src)));
-        static_cast<F*>(src)->~F();
-    }
-
-public:
-    InlineFunction() = default;
-
-    template <typename F, typename = std::enable_if_t<!std::is_same_v<std::decay_t<F>, InlineFunction>>>
-    InlineFunction(F&& f)
-    {
-        using Func = std::decay_t<F>;
-
-        if constexpr (sizeof(Func) <= kBufferSize && alignof(Func) <= kBufferAlign &&
-                      std::is_nothrow_move_constructible_v<Func>)
-        {
-            new (buffer_) Func(std::forward<F>(f));
-            heap_allocated_ = false;
-        }
-        else
-        {
-            *reinterpret_cast<Func**>(buffer_) = new Func(std::forward<F>(f));
-            heap_allocated_ = true;
-        }
-
-        invoke_ = heap_allocated_ ? [](void* p) { (*(*static_cast<Func**>(p)))(); } : &invoke_impl<Func>;
-
-        destroy_ = heap_allocated_ ? [](void* p) { delete *static_cast<Func**>(p); } : &destroy_impl<Func>;
-
-        move_ = heap_allocated_ ? [](void* dst, void* src)
-        {
-            *static_cast<Func**>(dst) = *static_cast<Func**>(src);
-            *static_cast<Func**>(src) = nullptr;
-        }
-                                : &move_impl<Func>;
-    }
-
-    ~InlineFunction() { reset(); }
-
-    InlineFunction(InlineFunction&& other) noexcept
-        : invoke_(other.invoke_), destroy_(other.destroy_), move_(other.move_), heap_allocated_(other.heap_allocated_)
-    {
-        if (move_)
-        {
-            move_(buffer_, other.buffer_);
-        }
-        other.invoke_ = nullptr;
-        other.destroy_ = nullptr;
-        other.move_ = nullptr;
-    }
-
-    InlineFunction& operator=(InlineFunction&& other) noexcept
-    {
-        if (this != &other)
-        {
-            reset();
-
-            invoke_ = other.invoke_;
-            destroy_ = other.destroy_;
-            move_ = other.move_;
-            heap_allocated_ = other.heap_allocated_;
-
-            if (move_)
-            {
-                move_(buffer_, other.buffer_);
-            }
-
-            other.invoke_ = nullptr;
-            other.destroy_ = nullptr;
-            other.move_ = nullptr;
-        }
-        return *this;
-    }
-
-    InlineFunction(const InlineFunction&) = delete;
-    InlineFunction& operator=(const InlineFunction&) = delete;
-
-    explicit operator bool() const { return invoke_ != nullptr; }
-
-    void operator()()
-    {
-        if (invoke_)
-        {
-            invoke_(buffer_);
-        }
-    }
-
-    void reset()
-    {
-        if (destroy_)
-        {
-            destroy_(buffer_);
-        }
-        invoke_ = nullptr;
-        destroy_ = nullptr;
-        move_ = nullptr;
-    }
-};
+using InlineFunction = std::move_only_function<void()>;
 
 // ============================================================================
 // IoOp Base with Type Tag
@@ -322,8 +187,10 @@ public:
 
     void release(T* obj)
     {
-        if (!obj)
+        if (obj == nullptr)
+        {
             return;
+        }
 
         if (free_list_.size() < max_pool_size_)
         {
@@ -337,7 +204,7 @@ public:
 
 private:
     std::vector<T*> free_list_;
-    static constexpr size_t max_pool_size_ = 8192;  // Larger pool for high throughput
+    static constexpr size_t max_pool_size_ = 32768;
 };
 
 // ============================================================================
@@ -419,7 +286,7 @@ private:
         ~PerThreadContext() { setStopped(); }
     };
 
-    struct TaskOp : public IoOp
+    struct TaskOp : IoOp
     {
         InternalFunc fn;
         PerThreadContext* owner_ctx{nullptr};
@@ -431,14 +298,16 @@ private:
         void complete(int) override
         {
             if (fn)
+            {
                 fn();
-            fn.reset();
-            return_to_pool();
+            }
+            fn = nullptr;
+            returnToPool();
         }
 
         void reclaim()
         {
-            if (source_ctx && source_ctx->task_pool)
+            if (source_ctx != nullptr && source_ctx->task_pool)
             {
                 source_ctx->task_pool->release(this);
             }
@@ -449,7 +318,7 @@ private:
         }
 
     private:
-        void return_to_pool();  // Defined in .cpp to avoid circular dep issues
+        void returnToPool();
     };
 
     static thread_local PerThreadContext* current_context_;
@@ -476,6 +345,10 @@ private:
     bool submitTaskSameThread(PerThreadContext* ctx, InternalFunc func);
     bool submitTaskCrossThread(size_t context_id, InternalFunc func);
     bool submitTaskExternal(size_t context_id, InternalFunc func);
+    void validateConfig();
+    void initExternalControlRing();
+    void workerThreadEntry(size_t index, std::shared_ptr<std::latch> init_latch, std::atomic<bool>& init_failed,
+                           std::atomic<int>& init_error);
 };
 
 // ============================================================================
@@ -522,7 +395,7 @@ public:
     IoUringAwaiter(const IoUringAwaiter&) = delete;
     IoUringAwaiter& operator=(const IoUringAwaiter&) = delete;
 
-    [[nodiscard]] IoUringAwaiter on_context(size_t ctx) &&
+    [[nodiscard]] IoUringAwaiter on_context(const size_t ctx) &&
     {
         forced_ctx_ = true;
         context_id_ = ctx;
@@ -540,7 +413,6 @@ public:
 
     bool await_ready() const noexcept { return false; }
 
-    // CRITICAL: Returns void to prevent resumption race conditions
     void await_suspend(std::coroutine_handle<> h) noexcept
     {
         continuation_ = h;
@@ -626,7 +498,9 @@ public:
     {
         result_ = res;
         if (!continuation_)
+        {
             return;
+        }
 
         auto h = continuation_;
         continuation_ = {};
@@ -647,7 +521,7 @@ private:
         io_uring* ring = executor_->getRing(context_id_);
         io_uring_sqe* sqe = io_uring_get_sqe(ring);
 
-        if (!sqe)
+        if (sqe == nullptr)
         {
             if (io_uring_submit(ring) < 0)
             {
@@ -655,7 +529,7 @@ private:
                 return false;
             }
             sqe = io_uring_get_sqe(ring);
-            if (!sqe)
+            if (sqe == nullptr)
             {
                 result_ = -EBUSY;
                 return false;
@@ -683,7 +557,7 @@ private:
 
     ResumeMode resume_mode_{ResumeMode::InlineOnSubmitCtx};
     async_simple::Executor::Context home_ctx_{IoUringExecutor::NULLCTX};
-    async_simple::ScheduleOptions opts_{};
+    async_simple::ScheduleOptions opts_;
 };
 
 template <typename ResultType, typename PrepareFunc>
