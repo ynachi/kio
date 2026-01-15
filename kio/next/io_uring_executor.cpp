@@ -62,8 +62,6 @@ void IoUringExecutor::TaskOp::returnToPool()
 
     // We do NOT call io_uring_submit here to batch returns implicitly.
     // The event loop will submit eventually.
-    // However, if the ring is very quiet, we might need to force it?
-    // For now, let's rely on the loop's submit.
 }
 
 void IoUringExecutor::validateConfig()
@@ -370,13 +368,10 @@ void IoUringExecutor::runEventLoop(PerThreadContext* ctx)
 
     while (!ctx->stop_token.stop_requested() || shouldDrain())
     {
-        // Reclaim pool objects periodically is NOT needed here because
-        // they come in as CQEs via msg_ring now! Nice.
-
         bool processed = false;
         size_t batch_count = 0;
 
-        // Process completions
+        // 1. Process Worker Ring (Inbound Tasks & IO)
         while (batch_count < max_batch && io_uring_peek_cqe(ring, &cqe) == 0)
         {
             if (batch_count % 32 == 0 && ctx->stop_token.stop_requested())
@@ -400,6 +395,59 @@ void IoUringExecutor::runEventLoop(PerThreadContext* ctx)
                 {
                     metrics_.io_ops_completed.fetch_add(1, std::memory_order_relaxed);
                 }
+            }
+        }
+
+        // 2. Process Control Ring (Outbound Acks & Errors)
+        // We must reap this to handle msg_ring failures and prevent CQ overflow.
+        {
+            io_uring_cqe* ccqe = nullptr;
+            unsigned head;
+            unsigned c_count = 0;
+            io_uring_for_each_cqe(ctx->control_ring.get(), head, ccqe)
+            {
+                c_count++;
+                // If result < 0, the msg_ring failed (e.g., target ring full).
+                // We must recover the Op to prevent memory leaks or lost tasks.
+                if (ccqe->res < 0)
+                {
+                    auto* op = reinterpret_cast<IoOp*>(io_uring_cqe_get_data(ccqe));
+                    if (op)
+                    {
+                        if (op->type == IoOp::Type::Task)
+                        {
+                            // Failed to send task to target thread.
+                            // Fallback: Run locally to ensure progress, then reclaim.
+                            auto* task = static_cast<TaskOp*>(op);
+                            if (task && task->fn)
+                            {
+                                task->fn();
+                            }
+                            // Since we failed to send it, we (the source) still own the memory
+                            // and it came from our pool.
+                            if (ctx->task_pool)
+                            {
+                                ctx->task_pool->release(task);
+                            }
+                            else
+                            {
+                                delete task;
+                            }
+                        }
+                        else if (op->type == IoOp::Type::PoolReturn)
+                        {
+                            // Failed to return object to its source thread.
+                            // We cannot reclaim it into our pool (wrong owner).
+                            // We must delete it to prevent leak.
+                            auto* task = static_cast<TaskOp*>(op);
+                            delete task;
+                        }
+                    }
+                }
+            }
+            if (c_count > 0)
+            {
+                io_uring_cq_advance(ctx->control_ring.get(), c_count);
             }
         }
 
@@ -432,10 +480,6 @@ void IoUringExecutor::runEventLoop(PerThreadContext* ctx)
                         metrics_.io_ops_completed.fetch_add(1, std::memory_order_relaxed);
                     }
                 }
-            }
-            else if (ret != -EINTR)
-            {
-                // Serious error handling? mostly ignore for event loop
             }
         }
     }
@@ -595,6 +639,36 @@ bool IoUringExecutor::submitTaskExternal(size_t context_id, InternalFunc func)
     task->source_ctx = nullptr;
 
     std::scoped_lock lock(external_control_mutex_);
+
+    // Drain potential errors from the external control ring to prevent overflow
+    {
+        io_uring* ext_ring = external_control_ring_.get();
+        io_uring_cqe* ccqe = nullptr;
+        unsigned head;
+        unsigned c_count = 0;
+        io_uring_for_each_cqe(ext_ring, head, ccqe)
+        {
+            c_count++;
+            if (ccqe->res < 0)
+            {
+                auto* op = reinterpret_cast<IoOp*>(io_uring_cqe_get_data(ccqe));
+                if (op)
+                {
+                    // External submissions are always Type::Task and allocated via new.
+                    // If they fail, we must delete them.
+                    if (op->type == IoOp::Type::Task)
+                    {
+                        auto* failed_task = static_cast<TaskOp*>(op);
+                        delete failed_task;
+                    }
+                }
+            }
+        }
+        if (c_count > 0)
+        {
+            io_uring_cq_advance(ext_ring, c_count);
+        }
+    }
 
     io_uring_sqe* sqe = io_uring_get_sqe(external_control_ring_.get());
     if (sqe == nullptr)
