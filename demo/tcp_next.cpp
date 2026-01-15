@@ -11,7 +11,6 @@
 #include <mutex>
 #include <string>
 #include <thread>
-#include <vector>
 
 #include <arpa/inet.h>
 #include <async_simple/coro/Lazy.h>

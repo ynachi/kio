@@ -11,6 +11,7 @@
 #include <new>
 #include <system_error>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 #include <fcntl.h>
@@ -39,6 +40,7 @@ struct IoUringExecutorConfig
     bool pin_threads = false;
     bool enable_metrics = false;
     bool immediate_submit = false;
+    bool cancel_on_stop = false;
 };
 
 // ============================================================================
@@ -133,6 +135,14 @@ struct IoOp
     explicit IoOp(Type t) : type(t) {}
     virtual void complete(int res) = 0;
     virtual ~IoOp() = default;
+};
+
+struct PendingIo
+{
+    virtual void requestCancel() noexcept = 0;
+
+protected:
+    ~PendingIo() = default;
 };
 
 class IoUringExecutor;
@@ -234,6 +244,7 @@ public:
     bool scheduleLocal(InternalFunc func);
     size_t pickContextId();
 
+    // Drains until awaiters resume; if cancel_on_stop is true, requests cancellation.
     void stop();
     void join();
 
@@ -258,6 +269,8 @@ public:
 
 private:
     struct TaskOp;
+    template <typename, typename>
+    friend class IoUringAwaiter;
 
     // Cache-aligned to prevent false sharing between threads
     struct alignas(64) PerThreadContext
@@ -335,6 +348,10 @@ private:
     std::mutex external_control_mutex_;
 
     Metrics metrics_;
+    std::atomic<size_t> pending_io_count_{0};
+    std::atomic<bool> drain_on_stop_{false};
+    std::mutex pending_io_mutex_;
+    std::unordered_set<PendingIo*> pending_io_;
 
     void runEventLoop(PerThreadContext* ctx);
     PerThreadContext& selectContext();
@@ -349,6 +366,11 @@ private:
     void initExternalControlRing();
     void workerThreadEntry(size_t index, std::shared_ptr<std::latch> init_latch, std::atomic<bool>& init_failed,
                            std::atomic<int>& init_error);
+
+    void registerPendingIo(PendingIo* op);
+    void unregisterPendingIo(PendingIo* op);
+    void requestCancelPendingIo();
+    [[nodiscard]] bool shouldDrain() const noexcept;
 };
 
 // ============================================================================
@@ -366,13 +388,13 @@ enum class ResumeMode : uint8_t
 // ============================================================================
 
 template <typename ResultType, typename PrepareFunc>
-class IoUringAwaiter : public IoOp
+class IoUringAwaiter : public IoOp, public PendingIo
 {
 public:
     using result_type = ResultType;
 
-    IoUringAwaiter(IoUringExecutor* executor, PrepareFunc&& prepare_func)
-        : IoOp(Type::Io), executor_(executor), prepare_func_(std::move(prepare_func))
+    IoUringAwaiter(IoUringExecutor* executor, PrepareFunc&& prepare_func, async_simple::Slot* slot = nullptr)
+        : IoOp(Type::Io), executor_(executor), prepare_func_(std::move(prepare_func)), slot_(slot)
     {
     }
 
@@ -386,9 +408,14 @@ public:
           result_(other.result_),
           resume_mode_(other.resume_mode_),
           home_ctx_(other.home_ctx_),
-          opts_(other.opts_)
+          opts_(other.opts_),
+          slot_(other.slot_),
+          cancel_requested_(other.cancel_requested_.load(std::memory_order_relaxed)),
+          completed_(other.completed_.load(std::memory_order_relaxed)),
+          registered_(other.registered_)
     {
         other.continuation_ = nullptr;
+        other.registered_ = false;
     }
 
     IoUringAwaiter& operator=(IoUringAwaiter&&) = delete;
@@ -411,11 +438,13 @@ public:
         return std::move(*this);
     }
 
-    bool await_ready() const noexcept { return false; }
+    bool await_ready() const noexcept { return async_simple::signalHelper{async_simple::Terminate}.hasCanceled(slot_); }
 
     void await_suspend(std::coroutine_handle<> h) noexcept
     {
         continuation_ = h;
+        registered_ = true;
+        executor_->registerPendingIo(this);
 
         if (!forced_ctx_)
         {
@@ -428,13 +457,30 @@ public:
             home_ctx_ = executor_->checkout();
         }
 
+        if (slot_ != nullptr)
+        {
+            bool const not_canceled = async_simple::signalHelper{async_simple::Terminate}.tryEmplace(
+                slot_, [this](async_simple::SignalType, async_simple::Signal*) { request_cancel(); });
+            if (!not_canceled)
+            {
+                schedule_resume_on_cancel();
+                return;
+            }
+        }
+
+        if (cancel_requested_.load(std::memory_order_relaxed))
+        {
+            schedule_resume_on_cancel();
+            return;
+        }
+
         // Optimized same-thread submission
         if (executor_->currentThreadInExecutor() && executor_->currentContextId() == context_id_)
         {
             if (!submit_sqe_inline())
             {
                 // Submission failed (ring full), trampoline error to resume
-                executor_->scheduleLocal([h]() { h.resume(); });
+                schedule_resume(h);
             }
             return;
         }
@@ -444,6 +490,12 @@ public:
         const bool scheduled = executor_->scheduleOn(context_id_,
                                                      [self]()
                                                      {
+                                                         if (self->cancel_requested_.load(std::memory_order_relaxed))
+                                                         {
+                                                             self->complete(-ECANCELED);
+                                                             return;
+                                                         }
+
                                                          io_uring* ring = self->executor_->getRing(self->context_id_);
                                                          io_uring_sqe* sqe = io_uring_get_sqe(ring);
 
@@ -471,21 +523,18 @@ public:
         if (!scheduled)
         {
             // Schedule failed, trampoline error
-            result_ = -ECANCELED;
-            if (executor_->currentThreadInExecutor())
-            {
-                executor_->scheduleLocal([h]() { h.resume(); });
-            }
-            else
-            {
-                // Fallback for external thread scheduling failure
-                h.resume();
-            }
+            schedule_resume_on_cancel();
         }
     }
 
     ResultType await_resume()
     {
+        if (registered_)
+        {
+            registered_ = false;
+            executor_->unregisterPendingIo(this);
+        }
+        async_simple::signalHelper{async_simple::Terminate}.checkHasCanceled(slot_, "io_uring operation canceled");
         if (result_ < 0)
         {
             errno = -result_;
@@ -496,6 +545,11 @@ public:
 
     void complete(const int res) override
     {
+        if (completed_.exchange(true, std::memory_order_relaxed))
+        {
+            return;
+        }
+
         result_ = res;
         if (!continuation_)
         {
@@ -511,11 +565,82 @@ public:
         }
         else
         {
-            executor_->checkin([h]() mutable { h.resume(); }, home_ctx_, opts_);
+            if (!executor_->checkin([h]() mutable { h.resume(); }, home_ctx_, opts_))
+            {
+                h.resume();
+            }
         }
     }
 
 private:
+    void requestCancel() noexcept override { request_cancel(); }
+
+    void request_cancel() noexcept
+    {
+        if (completed_.load(std::memory_order_relaxed))
+        {
+            return;
+        }
+
+        bool expected = false;
+        if (!cancel_requested_.compare_exchange_strong(expected, true, std::memory_order_relaxed))
+        {
+            return;
+        }
+
+        IoUringAwaiter* self = this;
+        (void)executor_->scheduleOn(context_id_,
+                                    [self]()
+                                    {
+                                        io_uring* ring = self->executor_->getRing(self->context_id_);
+                                        io_uring_sqe* sqe = io_uring_get_sqe(ring);
+
+                                        if (sqe == nullptr)
+                                        {
+                                            io_uring_submit(ring);
+                                            sqe = io_uring_get_sqe(ring);
+                                        }
+
+                                        if (sqe == nullptr)
+                                        {
+                                            return;
+                                        }
+
+                                        io_uring_prep_cancel(sqe, static_cast<IoOp*>(self), 0);
+                                        io_uring_sqe_set_data(sqe, nullptr);
+
+                                        if (self->executor_->immediateSubmit())
+                                        {
+                                            io_uring_submit(ring);
+                                        }
+                                    });
+    }
+
+    void schedule_resume_on_cancel() noexcept
+    {
+        cancel_requested_.store(true, std::memory_order_relaxed);
+        if (completed_.exchange(true, std::memory_order_relaxed))
+        {
+            return;
+        }
+
+        result_ = -ECANCELED;
+        auto h = continuation_;
+        continuation_ = {};
+        if (h)
+        {
+            schedule_resume(h);
+        }
+    }
+
+    void schedule_resume(std::coroutine_handle<> h) noexcept
+    {
+        if (!executor_->scheduleLocal([h]() { h.resume(); }))
+        {
+            std::thread([h]() mutable { h.resume(); }).detach();
+        }
+    }
+
     bool submit_sqe_inline() noexcept
     {
         io_uring* ring = executor_->getRing(context_id_);
@@ -558,12 +683,17 @@ private:
     ResumeMode resume_mode_{ResumeMode::InlineOnSubmitCtx};
     async_simple::Executor::Context home_ctx_{IoUringExecutor::NULLCTX};
     async_simple::ScheduleOptions opts_;
+    async_simple::Slot* slot_{nullptr};
+    std::atomic<bool> cancel_requested_{false};
+    std::atomic<bool> completed_{false};
+    bool registered_{false};
 };
 
 template <typename ResultType, typename PrepareFunc>
-auto make_io_awaiter(IoUringExecutor* executor, PrepareFunc&& prepare_func)
+auto make_io_awaiter(IoUringExecutor* executor, PrepareFunc&& prepare_func, async_simple::Slot* slot = nullptr)
 {
-    return IoUringAwaiter<ResultType, std::decay_t<PrepareFunc>>(executor, std::forward<PrepareFunc>(prepare_func));
+    return IoUringAwaiter<ResultType, std::decay_t<PrepareFunc>>(executor, std::forward<PrepareFunc>(prepare_func),
+                                                                 slot);
 }
 
 }  // namespace kio::next::v1

@@ -18,22 +18,25 @@ using namespace kio::next::v1;
 
 namespace io::v1
 {
-    inline auto accept(IoUringExecutor* exec, int listen_fd, sockaddr* addr, socklen_t* addrlen)
+    inline auto accept(IoUringExecutor* exec, int listen_fd, sockaddr* addr, socklen_t* addrlen,
+                       async_simple::Slot* slot = nullptr)
     {
         return make_io_awaiter<int>(exec,
-            [=](io_uring_sqe* sqe) { io_uring_prep_accept(sqe, listen_fd, addr, addrlen, 0); });
+            [=](io_uring_sqe* sqe) { io_uring_prep_accept(sqe, listen_fd, addr, addrlen, 0); }, slot);
     }
 
-    inline auto recv(IoUringExecutor* exec, int fd, void* buf, size_t len, int flags = 0)
+    inline auto recv(IoUringExecutor* exec, int fd, void* buf, size_t len, int flags = 0,
+                     async_simple::Slot* slot = nullptr)
     {
         return make_io_awaiter<ssize_t>(exec,
-            [=](io_uring_sqe* sqe) { io_uring_prep_recv(sqe, fd, buf, len, flags); });
+            [=](io_uring_sqe* sqe) { io_uring_prep_recv(sqe, fd, buf, len, flags); }, slot);
     }
 
-    inline auto send(IoUringExecutor* exec, int fd, const void* buf, size_t len, int flags = 0)
+    inline auto send(IoUringExecutor* exec, int fd, const void* buf, size_t len, int flags = 0,
+                     async_simple::Slot* slot = nullptr)
     {
         return make_io_awaiter<ssize_t>(exec,
-            [=](io_uring_sqe* sqe) { io_uring_prep_send(sqe, fd, buf, len, flags); });
+            [=](io_uring_sqe* sqe) { io_uring_prep_send(sqe, fd, buf, len, flags); }, slot);
     }
 }
 
@@ -50,12 +53,13 @@ Lazy<void> handleClient(IoUringExecutor* executor, int client_fd)
     setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
 
     char buffer[4096];
+    auto slot = co_await CurrentSlot{};
 
     try
     {
         while (true)
         {
-            ssize_t bytes_read = co_await io::v1::recv(executor, client_fd, buffer, sizeof(buffer));
+            ssize_t bytes_read = co_await io::v1::recv(executor, client_fd, buffer, sizeof(buffer), 0, slot);
             if (bytes_read <= 0) break;
 
             static const std::string response =
@@ -70,7 +74,7 @@ Lazy<void> handleClient(IoUringExecutor* executor, int client_fd)
             while (bytes_sent < response.size())
             {
                 ssize_t sent = co_await io::v1::send(executor, client_fd,
-                    response.data() + bytes_sent, response.size() - bytes_sent);
+                    response.data() + bytes_sent, response.size() - bytes_sent, 0, slot);
                 if (sent <= 0) throw std::runtime_error("Send failed");
                 bytes_sent += sent;
             }
@@ -85,6 +89,7 @@ Lazy<> acceptLoop(IoUringExecutor* executor, int listen_fd)
 {
     size_t next_ctx = 0;
     const size_t num_cpus = executor->numThreads();
+    auto slot = co_await CurrentSlot{};
 
     while (true)
     {
@@ -92,7 +97,7 @@ Lazy<> acceptLoop(IoUringExecutor* executor, int listen_fd)
         socklen_t addr_len = sizeof(client_addr);
 
         int client_fd = co_await io::v1::accept(executor, listen_fd,
-            reinterpret_cast<sockaddr*>(&client_addr), &addr_len);
+            reinterpret_cast<sockaddr*>(&client_addr), &addr_len, slot);
 
         if (client_fd < 0) continue;
 

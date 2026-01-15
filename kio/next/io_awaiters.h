@@ -14,46 +14,53 @@ namespace kio::io::next
 // Simple API (backward compatible - uses defaults)
 // ============================================================================
 
-inline auto read(kio::next::v1::IoUringExecutor* executor, int fd, void* buf, size_t len, off_t offset = 0)
+inline auto read(kio::next::v1::IoUringExecutor* executor, int fd, void* buf, size_t len, off_t offset = 0,
+                 async_simple::Slot* slot = nullptr)
 {
     return kio::next::v1::make_io_awaiter<ssize_t>(
-        executor, [=](io_uring_sqe* sqe) { io_uring_prep_read(sqe, fd, buf, len, offset); });
+        executor, [=](io_uring_sqe* sqe) { io_uring_prep_read(sqe, fd, buf, len, offset); }, slot);
 }
 
-inline auto write(kio::next::v1::IoUringExecutor* executor, int fd, const void* buf, size_t len, off_t offset = 0)
+inline auto write(kio::next::v1::IoUringExecutor* executor, int fd, const void* buf, size_t len, off_t offset = 0,
+                  async_simple::Slot* slot = nullptr)
 {
     return kio::next::v1::make_io_awaiter<ssize_t>(
-        executor, [=](io_uring_sqe* sqe) { io_uring_prep_write(sqe, fd, buf, len, offset); });
+        executor, [=](io_uring_sqe* sqe) { io_uring_prep_write(sqe, fd, buf, len, offset); }, slot);
 }
 
-inline auto fsync(kio::next::v1::IoUringExecutor* executor, int fd, int flags = 0)
-{
-    return kio::next::v1::make_io_awaiter<int>(executor,
-                                               [=](io_uring_sqe* sqe) { io_uring_prep_fsync(sqe, fd, flags); });
-}
-
-inline auto accept(kio::next::v1::IoUringExecutor* exec, int listen_fd, sockaddr* addr, socklen_t* addrlen)
+inline auto fsync(kio::next::v1::IoUringExecutor* executor, int fd, int flags = 0,
+                  async_simple::Slot* slot = nullptr)
 {
     return kio::next::v1::make_io_awaiter<int>(
-        exec, [=](io_uring_sqe* sqe) { io_uring_prep_accept(sqe, listen_fd, addr, addrlen, 0); });
+        executor, [=](io_uring_sqe* sqe) { io_uring_prep_fsync(sqe, fd, flags); }, slot);
 }
 
-inline auto recv(kio::next::v1::IoUringExecutor* exec, int fd, void* buf, size_t len, int flags = 0)
-{
-    return kio::next::v1::make_io_awaiter<ssize_t>(
-        exec, [=](io_uring_sqe* sqe) { io_uring_prep_recv(sqe, fd, buf, len, flags); });
-}
-
-inline auto send(kio::next::v1::IoUringExecutor* exec, int fd, const void* buf, size_t len, int flags = 0)
-{
-    return kio::next::v1::make_io_awaiter<ssize_t>(
-        exec, [=](io_uring_sqe* sqe) { io_uring_prep_send(sqe, fd, buf, len, flags); });
-}
-
-inline auto connect(kio::next::v1::IoUringExecutor* exec, int fd, const sockaddr* addr, socklen_t addrlen)
+inline auto accept(kio::next::v1::IoUringExecutor* exec, int listen_fd, sockaddr* addr, socklen_t* addrlen,
+                   async_simple::Slot* slot = nullptr)
 {
     return kio::next::v1::make_io_awaiter<int>(
-        exec, [=](io_uring_sqe* sqe) { io_uring_prep_connect(sqe, fd, addr, addrlen); });
+        exec, [=](io_uring_sqe* sqe) { io_uring_prep_accept(sqe, listen_fd, addr, addrlen, 0); }, slot);
+}
+
+inline auto recv(kio::next::v1::IoUringExecutor* exec, int fd, void* buf, size_t len, int flags = 0,
+                 async_simple::Slot* slot = nullptr)
+{
+    return kio::next::v1::make_io_awaiter<ssize_t>(
+        exec, [=](io_uring_sqe* sqe) { io_uring_prep_recv(sqe, fd, buf, len, flags); }, slot);
+}
+
+inline auto send(kio::next::v1::IoUringExecutor* exec, int fd, const void* buf, size_t len, int flags = 0,
+                 async_simple::Slot* slot = nullptr)
+{
+    return kio::next::v1::make_io_awaiter<ssize_t>(
+        exec, [=](io_uring_sqe* sqe) { io_uring_prep_send(sqe, fd, buf, len, flags); }, slot);
+}
+
+inline auto connect(kio::next::v1::IoUringExecutor* exec, int fd, const sockaddr* addr, socklen_t addrlen,
+                    async_simple::Slot* slot = nullptr)
+{
+    return kio::next::v1::make_io_awaiter<int>(
+        exec, [=](io_uring_sqe* sqe) { io_uring_prep_connect(sqe, fd, addr, addrlen); }, slot);
 }
 
 // ============================================================================
@@ -66,6 +73,7 @@ Example 1: Simple usage (backward compatible)
 auto n = co_await recv(executor, fd, buf, len);
 // - Submits on current or picked context (automatic)
 // - Resumes inline on submit context (fast)
+// - For cancellation, pass Slot* from co_await CurrentSlot{}
 
 
 Example 2: Explicit submission context

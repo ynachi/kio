@@ -5,7 +5,6 @@
 
 #include "io_uring_executor.h"
 
-#include <cerrno>
 #include <latch>
 #include <stdexcept>
 
@@ -88,6 +87,58 @@ void IoUringExecutor::initExternalControlRing()
     {
         throw std::system_error(-ret, std::system_category(), "external control ring init failed");
     }
+}
+
+void IoUringExecutor::registerPendingIo(PendingIo* op)
+{
+    pending_io_count_.fetch_add(1, std::memory_order_relaxed);
+    if (!executor_config_.cancel_on_stop)
+    {
+        return;
+    }
+
+    std::scoped_lock lock(pending_io_mutex_);
+    (void)pending_io_.insert(op);
+}
+
+void IoUringExecutor::unregisterPendingIo(PendingIo* op)
+{
+    pending_io_count_.fetch_sub(1, std::memory_order_relaxed);
+    if (!executor_config_.cancel_on_stop)
+    {
+        return;
+    }
+
+    std::scoped_lock lock(pending_io_mutex_);
+    (void)pending_io_.erase(op);
+}
+
+void IoUringExecutor::requestCancelPendingIo()
+{
+    if (!executor_config_.cancel_on_stop)
+    {
+        return;
+    }
+
+    std::vector<PendingIo*> snapshot;
+    {
+        std::scoped_lock lock(pending_io_mutex_);
+        snapshot.reserve(pending_io_.size());
+        for (auto* op : pending_io_)
+        {
+            snapshot.push_back(op);
+        }
+    }
+
+    for (auto* op : snapshot)
+    {
+        op->requestCancel();
+    }
+}
+
+bool IoUringExecutor::shouldDrain() const noexcept
+{
+    return drain_on_stop_.load(std::memory_order_acquire) && pending_io_count_.load(std::memory_order_acquire) > 0;
 }
 
 void IoUringExecutor::workerThreadEntry(size_t index, std::shared_ptr<std::latch> init_latch,
@@ -190,10 +241,13 @@ IoUringExecutor::~IoUringExecutor()
 
 void IoUringExecutor::stop()
 {
+    drain_on_stop_.store(true, std::memory_order_release);
     if (!stop_source_.request_stop())
     {
         return;
     }
+
+    requestCancelPendingIo();
 
     // Wake up all threads using external control ring
     {
@@ -314,7 +368,7 @@ void IoUringExecutor::runEventLoop(PerThreadContext* ctx)
 
     const size_t max_batch = executor_config_.max_cqe_batch;
 
-    while (!ctx->stop_token.stop_requested())
+    while (!ctx->stop_token.stop_requested() || shouldDrain())
     {
         // Reclaim pool objects periodically is NOT needed here because
         // they come in as CQEs via msg_ring now! Nice.
