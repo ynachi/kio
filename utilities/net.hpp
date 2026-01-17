@@ -6,9 +6,10 @@
 // Optimized for low-overhead server applications.
 ////////////////////////////////////////////////////////////////////////////////
 
+#include "result.h"
+
 #include <cstring>
 #include <expected>
-#include <memory>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -26,17 +27,6 @@
 
 namespace uring::net
 {
-
-using ResultVoid = std::expected<void, std::error_code>;
-
-template <typename T>
-using Result = std::expected<T, std::error_code>;
-
-// Helper to convert errno to std::error_code
-inline std::unexpected<std::error_code> error_from_errno(int err)
-{
-    return std::unexpected(std::error_code(err, std::system_category()));
-}
 
 ////////////////////////////////////////////////////////////////////////////////
 // Socket - RAII wrapper for file descriptors
@@ -90,7 +80,7 @@ public:
 
     // --- Socket Options ---
 
-    ResultVoid set_non_blocking() const
+    Result<void> set_non_blocking() const
     {
         int flags = ::fcntl(fd_, F_GETFL, 0);
         if (flags == -1)
@@ -100,7 +90,7 @@ public:
         return {};
     }
 
-    ResultVoid set_reuse_addr(bool enable = true) const
+    Result<> set_reuse_addr(bool enable = true) const
     {
         int opt = enable ? 1 : 0;
         if (::setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
@@ -108,7 +98,7 @@ public:
         return {};
     }
 
-    ResultVoid set_reuse_port(bool enable = true) const
+    Result<> set_reuse_port(bool enable = true) const
     {
         int opt = enable ? 1 : 0;
         if (::setsockopt(fd_, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0)
@@ -116,7 +106,7 @@ public:
         return {};
     }
 
-    ResultVoid set_nodelay(bool enable = true) const
+    Result<> set_nodelay(bool enable = true) const
     {
         int opt = enable ? 1 : 0;
         if (::setsockopt(fd_, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt)) < 0)
@@ -124,14 +114,14 @@ public:
         return {};
     }
 
-    ResultVoid set_send_buffer(int size) const
+    Result<> set_send_buffer(int size) const
     {
         if (::setsockopt(fd_, SOL_SOCKET, SO_SNDBUF, &size, sizeof(size)) < 0)
             return error_from_errno(errno);
         return {};
     }
 
-    ResultVoid set_recv_buffer(int size) const
+    Result<> set_recv_buffer(int size) const
     {
         if (::setsockopt(fd_, SOL_SOCKET, SO_RCVBUF, &size, sizeof(size)) < 0)
             return error_from_errno(errno);

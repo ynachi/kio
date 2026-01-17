@@ -26,8 +26,6 @@ function(kio_target_compile_options target_name)
             -Wno-gnu-statement-expression
             -Wno-missing-field-initializers
 
-            "-fmacro-prefix-map=${CMAKE_SOURCE_DIR}=."
-
             #"-DLOG_BUILD_LEVEL=${LOG_BUILD_LEVEL}"
 
             $<$<CONFIG:Debug>:-g -O0>
