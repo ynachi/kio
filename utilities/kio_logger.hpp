@@ -14,16 +14,14 @@
 //   Modify Log::g_level at runtime to toggle visibility of remaining logs.
 ////////////////////////////////////////////////////////////////////////////////
 
-#include <print>
-#include <source_location>
-#include <format>
 #include <chrono>
 #include <cstring>
-#include <thread>
+#include <format>
 #include <print>
+#include <source_location>
 #include <string_view>
 
-// 1. HARD COMPILE-TIME FLOOR
+// HARD COMPILE-TIME FLOOR
 // Logs below this level are stripped from the binary.
 // 0=Debug, 1=Info, 2=Warn, 3=Error, 4=Disabled
 #ifndef LOG_BUILD_LEVEL
@@ -56,14 +54,12 @@ inline const char* get_basename(const char* path) {
     return slash ? slash + 1 : path;
 }
 
-// --- Thread ID Caching ---
-// Returns a pointer to a thread-local static string.
+// Thread ID Caching
 inline const char* get_thread_id() {
     thread_local char buf[16];
-    thread_local bool init = false;
 
-    if (!init) {
-        long tid = syscall(SYS_gettid); // Linux specific LWP ID
+    if (thread_local bool init = false; !init) {
+        long tid = syscall(SYS_gettid);
         auto end = std::format_to(buf, "{}", tid);
         *end = '\0';
         init = true;
@@ -74,17 +70,16 @@ inline const char* get_thread_id() {
 inline void output(Level lvl, std::source_location loc, std::string_view msg) {
     auto& cfg = levels[static_cast<int>(lvl)];
 
-    // 1. Time (Stack buffer, zero allocation)
-    auto now = std::chrono::system_clock::now();
+    // Time (Stack buffer, zero allocation)
+    const auto now = std::chrono::system_clock::now();
     auto now_ms = std::chrono::floor<std::chrono::milliseconds>(now);
     char time_buf[64];
     *std::format_to(time_buf, "{:%T}", now_ms) = '\0';
 
-    // 2. Thread ID
     const char* tid = get_thread_id();
 
     const char* file = get_basename(loc.file_name());
-    // 3. Print
+
     // Format: [LABEL] [TIME] [TID] FILE:LINE | MSG
     if (g_colors) {
         std::println(stderr, "{}[{}] [{}] [{}] {} {}:{} | {}",
@@ -106,8 +101,6 @@ inline void output(Level lvl, std::source_location loc, std::string_view msg) {
     }
 }
 }  // namespace detail
-
-// THE HYBRID CHECK
 
 template<typename... Args>
 struct debug {

@@ -188,7 +188,7 @@ int main() {
 
         std::cout << "Server on port " << PORT << " (Threads: " << config.num_threads << ")\n";
 
-        rt.start(config.pin_threads);
+        rt.loop_forever(config.pin_threads);
 
         for (size_t i = 0; i < rt.size(); ++i) {
             auto& ctx = rt.thread(i);

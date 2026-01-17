@@ -103,6 +103,7 @@ Checks:
   ,-readability-use-anyofallof\
   ,-hicpp-use-emplace\
   ,-modernize-use-emplace\
+  ,-cppcoreguidelines-avoid-reference-coroutine-parameters,\
   ,# TODO: will be removed in TAXICOMMON-11134
   ,-clang-analyzer-optin.cplusplus.UninitializedObject\
   ,-google-readability-casting\
