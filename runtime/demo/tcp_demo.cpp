@@ -74,7 +74,8 @@ static Task<> handleClientLogic(Executor& ex, Socket client_sock)
             size_t bytes_sent = 0;
             while (bytes_sent < response.size())
             {
-                auto send_res = co_await send(ex, fd, response.data() + bytes_sent, response.size() - bytes_sent);
+                auto send_res =
+                    co_await send(ex, fd, std::span(response.data() + bytes_sent, response.size() - bytes_sent));
                 if (!send_res)
                     goto cleanup;
                 bytes_sent += *send_res;

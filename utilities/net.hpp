@@ -6,8 +6,6 @@
 // Optimized for low-overhead server applications.
 ////////////////////////////////////////////////////////////////////////////////
 
-#include "result.h"
-
 #include <cstring>
 #include <expected>
 #include <string>
@@ -21,6 +19,7 @@
 
 #include <sys/socket.h>
 
+#include "result.hpp"
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>

@@ -6,26 +6,28 @@
 // Requires: Linux 6.1+, liburing, C++23
 ////////////////////////////////////////////////////////////////////////////////
 
-#include "utilities/result.h"
-
 #include <cerrno>
+#include <chrono>
+#include <concepts>  // Required for concepts
 #include <coroutine>
 #include <cstdint>
 #include <expected>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <system_error>
 #include <utility>
 
 #include <liburing.h>
 
+#include "utilities/result.hpp"
+
 namespace uring
 {
 
 class Executor;
-////////////////////////////////////////////////////////////////////////////////
-// Task<T> - Lazy coroutine return type
-////////////////////////////////////////////////////////////////////////////////
+
+// ... [Task and Promise classes remain exactly the same] ...
 
 template <typename T>
 class Task;
@@ -49,7 +51,6 @@ struct PromiseBase
         {
             if (auto cont = h.promise().continuation)
                 return cont;
-            // No continuation = top-level task. Self-destroy to avoid race.
             h.destroy();
             return std::noop_coroutine();
         }
@@ -120,7 +121,6 @@ public:
             handle_.destroy();
     }
 
-    // Awaiter for co_await
     struct Awaiter
     {
         handle_type handle;
@@ -135,7 +135,6 @@ public:
 
         T await_resume()
         {
-            // We own the handle now, ensure cleanup
             struct Guard
             {
                 handle_type h;
@@ -145,7 +144,6 @@ public:
                         h.destroy();
                 }
             } guard{handle};
-
             if (handle.promise().exception)
                 std::rethrow_exception(handle.promise().exception);
             if constexpr (!std::is_void_v<T>)
@@ -153,12 +151,8 @@ public:
         }
     };
 
-    Awaiter operator co_await() &&
-    {
-        return Awaiter{std::exchange(handle_, nullptr)};  // Transfer ownership to Awaiter
-    }
+    Awaiter operator co_await() && { return Awaiter{std::exchange(handle_, nullptr)}; }
 
-    // For running as a top-level task
     handle_type handle() const { return handle_; }
     handle_type release() { return std::exchange(handle_, nullptr); }
 };
@@ -197,9 +191,7 @@ struct BaseOp
 struct ExecutorConfig
 {
     unsigned entries = 256;
-    // Raw io_uring flags - user's responsibility
     unsigned uring_flags = 0;
-    // For IORING_SETUP_SQPOLL
     unsigned sq_thread_idle_ms = 0;
 };
 
@@ -227,7 +219,6 @@ public:
     Executor(const Executor&) = delete;
     Executor& operator=(const Executor&) = delete;
 
-    // Get an SQE, submitting if the ring is full
     io_uring_sqe* get_sqe()
     {
         io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
@@ -236,61 +227,49 @@ public:
             io_uring_submit(&ring_);
             sqe = io_uring_get_sqe(&ring_);
             if (!sqe)
-            {
                 throw std::runtime_error("SQ ring full even after submit");
-            }
         }
         ++pending_;
         return sqe;
     }
 
-    // Submit without waiting
     int submit() { return io_uring_submit(&ring_); }
 
-    /**
-     * @brief Loop until stopped or no more work
-     */
     void loop()
     {
         while (!stopped_ && pending_ > 0)
         {
-            io_uring_submit_and_wait(&ring_, 1);
-            process_completions();
+            loop_once(true);
         }
     }
 
-    /**
-     * Process all available io operations in one iteration
-     * @param wait Weather to wait for requests
-     * // TODO: we might want to add a timeout
-     * @return return true if work was done, false if not
-     */
+    void loop_forever()
+    {
+        while (!stopped_)
+        {
+            if (pending_ > 0)
+                loop_once(true);
+            else
+                break;
+        }
+    }
+
     bool loop_once(const bool wait = true)
     {
         if (stopped_)
-        {
             return false;
-        }
 
-        // Submit any queued work
         io_uring_submit(&ring_);
 
         if (pending_ == 0)
-        {
-            // Nothing pending - if waiting, we'd block forever
-            // Return false to let caller decide what to do
             return false;
-        }
 
-        if (wait == true)
-        {
+        if (wait)
             io_uring_submit_and_wait(&ring_, 1);
-        }
 
         return process_completions() > 0;
     }
 
-    // Spawn a top-level task
     template <typename T>
     void spawn(Task<T> task)
     {
@@ -300,7 +279,6 @@ public:
     void stop() { stopped_ = true; }
     bool stopped() const { return stopped_; }
     unsigned pending() const { return pending_; }
-
     io_uring* ring() { return &ring_; }
 
 private:
@@ -329,7 +307,7 @@ private:
 };
 
 ////////////////////////////////////////////////////////////////////////////////
-// Storage Operations
+// Operations (Low Level - Raw Types)
 ////////////////////////////////////////////////////////////////////////////////
 
 struct ReadOp : BaseOp
@@ -340,7 +318,7 @@ struct ReadOp : BaseOp
     unsigned len;
     uint64_t offset;
 
-    ReadOp(Executor& ex, const int fd_, void* buf_, const unsigned len_, const uint64_t off = 0)
+    ReadOp(Executor& ex, const int fd_, void* buf_, const unsigned len_, const uint64_t off)
         : exec(ex), fd(fd_), buf(buf_), len(len_), offset(off)
     {
     }
@@ -356,7 +334,7 @@ struct ReadOp : BaseOp
     Result<int> await_resume()
     {
         if (result < 0)
-            return std::unexpected(std::error_code(-result, std::system_category()));
+            return error_from_errno(-result);
         return result;
     }
 };
@@ -369,7 +347,7 @@ struct WriteOp : BaseOp
     unsigned len;
     uint64_t offset;
 
-    WriteOp(Executor& ex, int fd_, const void* buf_, unsigned len_, uint64_t off = 0)
+    WriteOp(Executor& ex, int fd_, const void* buf_, unsigned len_, uint64_t off)
         : exec(ex), fd(fd_), buf(buf_), len(len_), offset(off)
     {
     }
@@ -385,7 +363,7 @@ struct WriteOp : BaseOp
     Result<int> await_resume()
     {
         if (result < 0)
-            return std::unexpected(std::error_code(-result, std::system_category()));
+            return error_from_errno(-result);
         return result;
     }
 };
@@ -409,14 +387,10 @@ struct FsyncOp : BaseOp
     Result<void> await_resume()
     {
         if (result < 0)
-            return std::unexpected(std::error_code(-result, std::system_category()));
+            return error_from_errno(-result);
         return {};
     }
 };
-
-////////////////////////////////////////////////////////////////////////////////
-// Network Operations
-////////////////////////////////////////////////////////////////////////////////
 
 struct AcceptOp : BaseOp
 {
@@ -441,7 +415,7 @@ struct AcceptOp : BaseOp
     Result<int> await_resume()
     {
         if (result < 0)
-            return std::unexpected(std::error_code(-result, std::system_category()));
+            return error_from_errno(-result);
         return result;
     }
 };
@@ -469,7 +443,7 @@ struct ConnectOp : BaseOp
     Result<void> await_resume()
     {
         if (result < 0)
-            return std::unexpected(std::error_code(-result, std::system_category()));
+            return error_from_errno(-result);
         return {};
     }
 };
@@ -498,7 +472,7 @@ struct RecvOp : BaseOp
     Result<int> await_resume()
     {
         if (result < 0)
-            return std::unexpected(std::error_code(-result, std::system_category()));
+            return error_from_errno(-result);
         return result;
     }
 };
@@ -527,7 +501,7 @@ struct SendOp : BaseOp
     Result<int> await_resume()
     {
         if (result < 0)
-            return std::unexpected(std::error_code(-result, std::system_category()));
+            return error_from_errno(-result);
         return result;
     }
 };
@@ -550,29 +524,17 @@ struct CloseOp : BaseOp
     Result<void> await_resume()
     {
         if (result < 0)
-            return std::unexpected(std::error_code(-result, std::system_category()));
+            return error_from_errno(-result);
         return {};
     }
 };
-
-////////////////////////////////////////////////////////////////////////////////
-// Timing Operations
-////////////////////////////////////////////////////////////////////////////////
 
 struct TimeoutOp : BaseOp
 {
     Executor& exec;
     __kernel_timespec ts;
 
-    TimeoutOp(Executor& ex, uint64_t ns) : exec(ex)
-    {
-        ts.tv_sec = static_cast<int64_t>(ns / 1'000'000'000ULL);
-        ts.tv_nsec = static_cast<long long>(ns % 1'000'000'000ULL);
-    }
-
-    static TimeoutOp ms(Executor& ex, uint64_t millis) { return TimeoutOp(ex, millis * 1'000'000ULL); }
-
-    static TimeoutOp sec(Executor& ex, uint64_t seconds) { return TimeoutOp(ex, seconds * 1'000'000'000ULL); }
+    TimeoutOp(Executor& ex, __kernel_timespec t) : exec(ex), ts(t) {}
 
     void await_suspend(std::coroutine_handle<> h)
     {
@@ -584,16 +546,11 @@ struct TimeoutOp : BaseOp
 
     Result<void> await_resume()
     {
-        // -ETIME is expected for timeout expiry
         if (result == -ETIME || result == 0)
             return {};
-        return std::unexpected(std::error_code(-result, std::system_category()));
+        return error_from_errno(-result);
     }
 };
-
-////////////////////////////////////////////////////////////////////////////////
-// Cancellation Operations
-////////////////////////////////////////////////////////////////////////////////
 
 struct CancelOp : BaseOp
 {
@@ -612,10 +569,9 @@ struct CancelOp : BaseOp
 
     Result<void> await_resume()
     {
-        // -ENOENT = already completed, -EALREADY = cancel in progress
         if (result == 0 || result == -ENOENT || result == -EALREADY)
             return {};
-        return std::unexpected(std::error_code(-result, std::system_category()));
+        return error_from_errno(-result);
     }
 };
 
@@ -636,25 +592,32 @@ struct CancelFdOp : BaseOp
 
     Result<int> await_resume()
     {
-        // Returns number of cancelled operations on success, or error code
         if (result < 0)
-            return std::unexpected(std::error_code(-result, std::system_category()));
+            return error_from_errno(-result);
         return result;
     }
 };
 
 ////////////////////////////////////////////////////////////////////////////////
-// Convenience Functions
+// High Level API (Facade with Type Safety)
 ////////////////////////////////////////////////////////////////////////////////
 
-inline auto read(Executor& ex, int fd, void* buf, unsigned len, uint64_t off = 0)
+// --- Concept Check for SocketAddress ---
+// We don't include net.hpp, but we enforce the shape of the type.
+template <typename T>
+concept SocketAddressable = requires(const T& t) {
+    { t.get() } -> std::convertible_to<const sockaddr*>;
+    { t.addrlen } -> std::convertible_to<socklen_t>;
+};
+
+inline auto read(Executor& ex, int fd, std::span<char> buf, uint64_t off = 0)
 {
-    return ReadOp(ex, fd, buf, len, off);
+    return ReadOp(ex, fd, buf.data(), buf.size_bytes(), off);
 }
 
-inline auto write(Executor& ex, int fd, const void* buf, unsigned len, uint64_t off = 0)
+inline auto write(Executor& ex, int fd, std::span<const char> buf, uint64_t off = 0)
 {
-    return WriteOp(ex, fd, buf, len, off);
+    return WriteOp(ex, fd, buf.data(), buf.size_bytes(), off);
 }
 
 inline auto fsync(Executor& ex, int fd, bool datasync = false)
@@ -667,19 +630,28 @@ inline auto accept(Executor& ex, int fd, sockaddr* addr = nullptr, socklen_t* le
     return AcceptOp(ex, fd, addr, len);
 }
 
+// 1. Raw pointer overload (Low-level)
 inline auto connect(Executor& ex, int fd, const sockaddr* addr, socklen_t len)
 {
     return ConnectOp(ex, fd, addr, len);
 }
 
-inline auto recv(Executor& ex, int fd, void* buf, unsigned len, int flags = 0)
+// 2. SocketAddress overload (High-level)
+// USES CONCEPT: Only allows types that look like SocketAddress
+template <SocketAddressable T>
+inline auto connect(Executor& ex, int fd, const T& addr)
 {
-    return RecvOp(ex, fd, buf, len, flags);
+    return ConnectOp(ex, fd, addr.get(), addr.addrlen);
 }
 
-inline auto send(Executor& ex, int fd, const void* buf, unsigned len, int flags = 0)
+inline auto recv(Executor& ex, int fd, std::span<char> buf, int flags = 0)
 {
-    return SendOp(ex, fd, buf, len, flags);
+    return RecvOp(ex, fd, buf.data(), buf.size_bytes(), flags);
+}
+
+inline auto send(Executor& ex, int fd, std::span<const char> buf, int flags = 0)
+{
+    return SendOp(ex, fd, buf.data(), buf.size_bytes(), flags);
 }
 
 inline auto close(Executor& ex, int fd)
@@ -687,14 +659,20 @@ inline auto close(Executor& ex, int fd)
     return CloseOp(ex, fd);
 }
 
-inline auto timeout(Executor& ex, uint64_t ns)
+// Modern Timeout: Accepts std::chrono
+template <typename Rep, typename Period>
+auto timeout(Executor& ex, std::chrono::duration<Rep, Period> d)
 {
-    return TimeoutOp(ex, ns);
+    auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(d).count();
+    __kernel_timespec ts;
+    ts.tv_sec = static_cast<int64_t>(ns / 1'000'000'000ULL);
+    ts.tv_nsec = static_cast<long long>(ns % 1'000'000'000ULL);
+    return TimeoutOp(ex, ts);
 }
 
 inline auto timeout_ms(Executor& ex, uint64_t ms)
 {
-    return TimeoutOp::ms(ex, ms);
+    return timeout(ex, std::chrono::milliseconds(ms));
 }
 
 inline auto cancel(Executor& ex, void* target)

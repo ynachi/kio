@@ -6,6 +6,7 @@
 
 #include <cerrno>
 #include <cstring>
+#include <span>
 #include <vector>
 
 #include <fcntl.h>
@@ -25,9 +26,9 @@ using namespace uring;
 ////////////////////////////////////////////////////////////////////////////////
 
 // Simulates writing a WAL entry then syncing
-static Task<> write_wal_entry(Executor& ex, int fd, uint64_t offset, const void* data, size_t len)
+static Task<> write_wal_entry(Executor& ex, int fd, uint64_t offset, std::span<const char> buf)
 {
-    auto res = co_await write(ex, fd, data, len, offset);
+    auto res = co_await write(ex, fd, buf, offset);
     if (!res)
     {
         // NEW: Use  from std::error_code
@@ -47,11 +48,11 @@ static Task<> write_wal_entry(Executor& ex, int fd, uint64_t offset, const void*
 }
 
 // Batched read pattern (common in storage engines)
-static Task<> read_blocks(Executor& ex, int fd, std::vector<std::pair<uint64_t, std::vector<char>>>& blocks)
+static Task<> read_blocks(Executor& ex, int fd, std::vector<std::pair<uint64_t, std::span<char>>>& blocks)
 {
     for (auto& [offset, buffer] : blocks)
     {
-        auto res = co_await read(ex, fd, buffer.data(), buffer.size(), offset);
+        auto res = co_await read(ex, fd, buffer, offset);
         if (!res)
         {
             Log::error("read at {} failed: {}", offset, res.error().message());
@@ -76,14 +77,19 @@ static void storage_example()
     Executor ex;
 
     // Write some data
-    const char* data = "Hello, io_uring storage!";
-    ex.spawn(write_wal_entry(ex, fd, 0, data, std::strlen(data)));
+    std::string text("Hello, io_uring storage!");
+    std::span data(text);
+    ex.spawn(write_wal_entry(ex, fd, 0, data));
     ex.loop();
 
     // Read it back with a block pattern
-    std::vector<std::pair<uint64_t, std::vector<char>>> blocks = {
-        {0, std::vector<char>(8)},
-        {8, std::vector<char>(8)},
+    auto vec1 = std::vector<char>(8);
+    auto vec2 = std::vector<char>(8);
+    auto span1 = std::span(vec1.data(), vec1.size());
+    auto span2 = std::span(vec2.data(), vec2.size());
+    std::vector<std::pair<uint64_t, std::span<char>>> blocks = {
+        {0, span1},
+        {8, span2},
     };
     ex.spawn(read_blocks(ex, fd, blocks));
     ex.loop();
