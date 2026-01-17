@@ -1,7 +1,9 @@
 //
-// Created by Yao ACHI on 04/10/2025.
+// tcp_fast.cpp - Benchmark version WITHOUT OpPool
+// WARNING: Not safe with cancellation - for performance testing only
 //
 #include "kio/core/async_logger.h"
+#include "kio/core/worker.h"
 #include "kio/core/worker_pool.h"
 #include "kio/net/net.h"
 
@@ -9,15 +11,22 @@
 #include <format>
 #include <iostream>
 
+#include <netinet/tcp.h>
+
 using namespace kio::io;
 using namespace kio;
 
-DetachedTask HandleClientHttp(Worker& worker, const int client_fd)
+DetachedTask HandleClientHttp(WorkerFast& worker, const int client_fd)
 {
-    char buffer[8192];
+    // TCP optimizations (matching async_simple version)
+    int flag = 1;
+    setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
 
-    // Critical! We want any client code to be stopped when the worker exits.
-    // So the loop below will be synchronized on the worker's top token.
+    int bufsize = 256 * 1024;
+    setsockopt(client_fd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
+    setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
+
+    char buffer[8192];
     const auto st = worker.GetStopToken();
 
     while (!st.stop_requested())
@@ -48,13 +57,12 @@ DetachedTask HandleClientHttp(Worker& worker, const int client_fd)
     close(client_fd);
 }
 
-// Accept loop - runs on each worker independently
-DetachedTask accept_loop(Worker& worker)
+// Fast accept loop - using WorkerFast
+DetachedTask accept_loop(WorkerFast& worker)
 {
     ALOG_INFO("Worker accepting connections");
     const auto st = worker.GetStopToken();
 
-    // Create a listening socket
     auto server_fd_exp = net::create_tcp_server_socket("0.0.0.0", 8080, 4096);
     if (!server_fd_exp.has_value())
     {
@@ -64,6 +72,16 @@ DetachedTask accept_loop(Worker& worker)
 
     auto server_fd = *server_fd_exp;
 
+    // TCP optimizations (matching async_simple version)
+    int opt = 1;
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
+
+    int bufsize = 2 * 1024 * 1024;
+    setsockopt(server_fd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
+    setsockopt(server_fd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
+    int qlen = 1024;
+    setsockopt(server_fd, SOL_TCP, TCP_FASTOPEN, &qlen, sizeof(qlen));
+
     ALOG_INFO("Listening on port 8080");
 
     while (!st.stop_requested())
@@ -71,7 +89,6 @@ DetachedTask accept_loop(Worker& worker)
         sockaddr_storage client_addr{};
         socklen_t addr_len = sizeof(client_addr);
 
-        // Accept connection - blocks this coroutine until a client connects
         auto client_fd = co_await worker.AsyncAccept(server_fd, reinterpret_cast<sockaddr*>(&client_addr), &addr_len);
 
         if (!client_fd.has_value())
@@ -80,41 +97,29 @@ DetachedTask accept_loop(Worker& worker)
             continue;
         }
 
-        // Spawn coroutine to handle this client
-        // Call .detach() to keep the task alive!
+        // Spawn detached task
         HandleClientHttp(worker, client_fd.value());
     }
-    ALOG_INFO("Worker {} stop accepting connexions", worker.GetId());
+    ALOG_INFO("Worker {} stop accepting connections", worker.GetId());
 }
 
 int main()
 {
-    // ignore
     signal(SIGPIPE, SIG_IGN);
-    // Setup logging
     alog::Configure(4096, LogLevel::kDisabled);
 
-    // Configure workers
     WorkerConfig config{};
-    config.uring_queue_depth = 16800;
+    config.uring_queue_depth = 32768;  // Match async_simple
 
-    // Create a pool with 4 workers
-    IOPool pool(4, config,
-                [](Worker& worker)
-                {
-                    // Call .detach() to keep the accept loop running!
-                    accept_loop(worker);
-                });
+    IOPoolFast pool(4, config, [](WorkerFast& worker) { accept_loop(worker); });
 
-    ALOG_INFO("Server running with 4 workers. Press Ctrl+C to stop.");
+    ALOG_INFO("FAST Server running with 4 workers (NO OpPool). Press Ctrl+C to stop.");
+    std::cout << "FAST Server running (NO OpPool). Press Enter to stop..." << std::endl;
 
-    // Main thread waits (or handles signals)
-    std::cout << "Server running. Press Enter to stop..." << std::endl;
-    std::cin.get();  // Blocks until user presses Enter
+    std::cin.get();
     pool.Stop();
 
-    ALOG_INFO("Server stopped from main");
+    ALOG_INFO("Server stopped");
 
-    // Pool destructor stops all workers gracefully
     return 0;
 }
