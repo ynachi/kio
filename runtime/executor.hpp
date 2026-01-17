@@ -67,11 +67,13 @@ struct Promise : PromiseBase
 
     Task<T> get_return_object();
 
-    template <typename U>
-    void return_value(U&& value)
-    {
-        result = std::forward<U>(value);
-    }
+    // OPTIMIZED: Use overloads to handle lvalues and rvalues efficiently.
+    // 1. fixes the `co_return {};` deduction issue (binds to T&&).
+    // 2. avoids the extra move overhead of pass-by-value.
+
+    void return_value(const T& value) { result = value; }
+
+    void return_value(T&& value) { result = std::move(value); }
 };
 
 template <>
@@ -1142,10 +1144,7 @@ inline Task<Result<void>> write_exact_at(Executor& exec, int fd, std::span<const
     co_return {};
 }
 
-////////////////////////////////////////////////////////////////////////////////
 // Sendfile using splice (similar to Worker::AsyncSendfile)
-////////////////////////////////////////////////////////////////////////////////
-
 inline Task<Result<void>> sendfile(Executor& exec, int out_fd, int in_fd, off_t offset, size_t count)
 {
     // Create pipe for splice

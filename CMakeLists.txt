@@ -209,7 +209,7 @@ endif ()
 # Includes
 #----------------------------------------------
 include_directories(${CMAKE_SOURCE_DIR})
-add_subdirectory(third_party)
+add_subdirectory(external_libraries)
 add_subdirectory(utilities)
 add_subdirectory(runtime)
 add_subdirectory(kio)

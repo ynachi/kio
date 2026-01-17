@@ -6,7 +6,7 @@
 // Each thread owns its ring - no contention on the hot path.
 // Cross-thread scheduling is explicit and opt-in.
 ////////////////////////////////////////////////////////////////////////////////
-#include "third_party/concurrentqueue.h"
+#include "external_libraries/concurrentqueue.h"
 
 #include <atomic>
 #include <functional>
