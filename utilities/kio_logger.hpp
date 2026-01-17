@@ -18,6 +18,7 @@
 #include <source_location>
 #include <format>
 #include <chrono>
+#include <cstring>
 #include <thread>
 #include <print>
 #include <string_view>
@@ -49,6 +50,12 @@ namespace detail {
         {"WRN", "\033[33m"}, {"ERR", "\033[31m"}
     };
 
+// Optimized: Uses a single assembly instruction (on x64) to find the slash
+inline const char* get_basename(const char* path) {
+    const char* slash = std::strrchr(path, '/');
+    return slash ? slash + 1 : path;
+}
+
 // --- Thread ID Caching ---
 // Returns a pointer to a thread-local static string.
 inline const char* get_thread_id() {
@@ -76,6 +83,7 @@ inline void output(Level lvl, std::source_location loc, std::string_view msg) {
     // 2. Thread ID
     const char* tid = get_thread_id();
 
+    const char* file = get_basename(loc.file_name());
     // 3. Print
     // Format: [LABEL] [TIME] [TID] FILE:LINE | MSG
     if (g_colors) {
@@ -84,7 +92,7 @@ inline void output(Level lvl, std::source_location loc, std::string_view msg) {
             time_buf,               // Time
             tid,                    // Thread ID
             RESET,                  // Reset Color
-            loc.file_name(),        // File
+            file,        // File
             loc.line(),             // Line
             msg);                   // Message
     } else {
@@ -92,7 +100,7 @@ inline void output(Level lvl, std::source_location loc, std::string_view msg) {
             cfg.label,
             time_buf,
             tid,
-            loc.file_name(),
+            file,
             loc.line(),
             msg);
     }
