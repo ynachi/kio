@@ -29,7 +29,7 @@ static Task<> write_wal_entry(Executor& ex, int fd, uint64_t offset, const void*
     auto res = co_await write(ex, fd, data, len, offset);
     if (!res)
     {
-        Log::error("write failed: {}", res.error());
+        Log::error("write failed: {}", res.error().message());
         co_return;
     }
     Log::info("Wrote {} bytes at offset {}", *res, offset);
@@ -38,7 +38,7 @@ static Task<> write_wal_entry(Executor& ex, int fd, uint64_t offset, const void*
     auto sync_res = co_await fsync(ex, fd, /*datasync=*/true);
     if (!sync_res)
     {
-        Log::error("fsync failed: {}", sync_res.error());
+        Log::error("fsync failed: {}", sync_res.error().message());
         co_return;
     }
     Log::info("Synced successfully");
@@ -52,7 +52,7 @@ static Task<> read_blocks(Executor& ex, int fd, std::vector<std::pair<uint64_t, 
         auto res = co_await read(ex, fd, buffer.data(), buffer.size(), offset);
         if (!res)
         {
-            Log::error("read at {} failed: {}", offset, res.error());
+            Log::error("read at {} failed: {}", offset, res.error().message());
             continue;
         }
         Log::info("Read {} bytes from offset {}", *res, offset);
@@ -104,7 +104,7 @@ static Task<> handle_connection(Executor& ex, int client_fd)
         if (!recv_res || *recv_res == 0)
         {
             if (!recv_res)
-                Log::error("recv failed: {}", recv_res.error());
+                Log::error("recv failed: {}", recv_res.error().message());
             // Error or connection closed
             break;
         }
@@ -116,7 +116,7 @@ static Task<> handle_connection(Executor& ex, int client_fd)
         auto send_res = co_await send(ex, client_fd, buf, n);
         if (!send_res)
         {
-            Log::error("send failed: {}", send_res.error());
+            Log::error("send failed: {}", send_res.error().message());
             break;
         }
     }
@@ -135,7 +135,7 @@ static Task<> accept_loop(Executor& ex, int listen_fd, int max_connections)
         auto res = co_await accept(ex, listen_fd, reinterpret_cast<sockaddr*>(&client_addr), &addr_len);
         if (!res)
         {
-            Log::error("accept failed: {}", res.error());
+            Log::error("accept failed: {}", res.error().message());
             continue;
         }
 

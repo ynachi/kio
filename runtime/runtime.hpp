@@ -12,7 +12,6 @@
 #include <functional>
 #include <latch>
 #include <memory>
-#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -177,7 +176,7 @@ private:
 
         while (!stop_requested_.load(std::memory_order_relaxed) || exec_.pending() > 0)
         {
-            if (!exec_.run_once(exec_.pending() > 0))
+            if (!exec_.loop_once(exec_.pending() > 0))
             {
                 if (!stop_requested_.load(std::memory_order_relaxed))
                 {

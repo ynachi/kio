@@ -23,16 +23,16 @@ namespace uring
 class Executor;
 
 ////////////////////////////////////////////////////////////////////////////////
-// Error handling: std::expected<T, int> where error is errno
+// Error handling: std::expected<T, std::error_code>
 ////////////////////////////////////////////////////////////////////////////////
 
 template <typename T>
-using Result = std::expected<T, int>;
+using Result = std::expected<T, std::error_code>;
 
-// Convenience: create error result
-inline std::unexpected<int> error(int e)
+// Convenience: create error result from a raw errno (positive int)
+inline std::unexpected<std::error_code> error(int errno_val)
 {
-    return std::unexpected(e);
+    return std::unexpected(std::error_code(errno_val, std::system_category()));
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -271,15 +271,13 @@ public:
         }
     }
 
-    // Run one iteration
-    // Returns: true if work was done, false if idle/stopped
     /**
      * Process all available io operations in one iteration
      * @param wait Weather to wait for requests
      * // TODO: we might want to add a timeout
      * @return return true if work was done, false if not
      */
-    bool run_once(const bool wait = true)
+    bool loop_once(const bool wait = true)
     {
         if (stopped_)
         {
@@ -370,7 +368,7 @@ struct ReadOp : BaseOp
     Result<int> await_resume()
     {
         if (result < 0)
-            return std::unexpected(-result);
+            return std::unexpected(std::error_code(-result, std::system_category()));
         return result;
     }
 };
@@ -399,7 +397,7 @@ struct WriteOp : BaseOp
     Result<int> await_resume()
     {
         if (result < 0)
-            return std::unexpected(-result);
+            return std::unexpected(std::error_code(-result, std::system_category()));
         return result;
     }
 };
@@ -423,7 +421,7 @@ struct FsyncOp : BaseOp
     Result<void> await_resume()
     {
         if (result < 0)
-            return std::unexpected(-result);
+            return std::unexpected(std::error_code(-result, std::system_category()));
         return {};
     }
 };
@@ -455,7 +453,7 @@ struct AcceptOp : BaseOp
     Result<int> await_resume()
     {
         if (result < 0)
-            return std::unexpected(-result);
+            return std::unexpected(std::error_code(-result, std::system_category()));
         return result;
     }
 };
@@ -483,7 +481,7 @@ struct ConnectOp : BaseOp
     Result<void> await_resume()
     {
         if (result < 0)
-            return std::unexpected(-result);
+            return std::unexpected(std::error_code(-result, std::system_category()));
         return {};
     }
 };
@@ -512,7 +510,7 @@ struct RecvOp : BaseOp
     Result<int> await_resume()
     {
         if (result < 0)
-            return std::unexpected(-result);
+            return std::unexpected(std::error_code(-result, std::system_category()));
         return result;
     }
 };
@@ -541,7 +539,7 @@ struct SendOp : BaseOp
     Result<int> await_resume()
     {
         if (result < 0)
-            return std::unexpected(-result);
+            return std::unexpected(std::error_code(-result, std::system_category()));
         return result;
     }
 };
@@ -564,7 +562,7 @@ struct CloseOp : BaseOp
     Result<void> await_resume()
     {
         if (result < 0)
-            return std::unexpected(-result);
+            return std::unexpected(std::error_code(-result, std::system_category()));
         return {};
     }
 };
@@ -601,7 +599,7 @@ struct TimeoutOp : BaseOp
         // -ETIME is expected for timeout expiry
         if (result == -ETIME || result == 0)
             return {};
-        return std::unexpected(-result);
+        return std::unexpected(std::error_code(-result, std::system_category()));
     }
 };
 
@@ -629,7 +627,7 @@ struct CancelOp : BaseOp
         // -ENOENT = already completed, -EALREADY = cancel in progress
         if (result == 0 || result == -ENOENT || result == -EALREADY)
             return {};
-        return std::unexpected(-result);
+        return std::unexpected(std::error_code(-result, std::system_category()));
     }
 };
 
@@ -650,9 +648,9 @@ struct CancelFdOp : BaseOp
 
     Result<int> await_resume()
     {
-        // Returns number of cancelled operations
+        // Returns number of cancelled operations on success, or error code
         if (result < 0)
-            return std::unexpected(-result);
+            return std::unexpected(std::error_code(-result, std::system_category()));
         return result;
     }
 };
