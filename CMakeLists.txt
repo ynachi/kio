@@ -1,8 +1,8 @@
-cmake_minimum_required(VERSION 3.28yoa)
+cmake_minimum_required(VERSION 3.28)
 project(kio)
 
 set(CMAKE_CXX_STANDARD 23)
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)  # For clang-tidy
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(GTEST_GIT_TAG v1.17.0)
 
 # For Google CRC32
@@ -15,14 +15,70 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 # Common Build Functions
 #------------------------------------------
 function(kio_target_compile_options target_name)
-    target_compile_options(${target_name} PRIVATE
+    # Check if target is an INTERFACE library
+    get_target_property(target_type ${target_name} TYPE)
+
+    # Common flags for both Interface and Normal targets
+    set(COMMON_COMPILE_FLAGS
             -Wall
             -Wextra
             -Wpedantic
             -Wno-gnu-statement-expression
+            -Wno-missing-field-initializers
+
+            "-fmacro-prefix-map=${CMAKE_SOURCE_DIR}=."
+
+            #"-DLOG_BUILD_LEVEL=${LOG_BUILD_LEVEL}"
+
             $<$<CONFIG:Debug>:-g -O0>
             $<$<CONFIG:Release>:-O3>
     )
+
+    if(target_type STREQUAL "INTERFACE_LIBRARY")
+        target_compile_options(${target_name} INTERFACE ${COMMON_COMPILE_FLAGS})
+    else()
+        target_compile_options(${target_name} PRIVATE ${COMMON_COMPILE_FLAGS})
+    endif()
+endfunction()
+
+# -----------------------------------------------------------------------------
+# Function: kio_add_demo
+# Usage: kio_add_demo(demo_name source.cpp TAGS core network LIBS <libs to link>)
+# -----------------------------------------------------------------------------
+function(kio_add_demo target_name source_file)
+    # Parse Arguments (supports optional TAGS list)
+    set(options "")
+    set(oneValueArgs "")
+    set(multiValueArgs TAGS LIBS)
+    cmake_parse_arguments(ARG "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+
+    # 2. Check Global Toggle
+    if(NOT KIO_BUILD_DEMOS)
+        return()
+    endif()
+
+    # Check Tag Filtering
+    # If KIO_DEMO_FILTER is set (and not "all"), we check if this demo has a matching tag.
+    if(DEFINED KIO_DEMO_FILTER AND NOT "${KIO_DEMO_FILTER}" STREQUAL "all")
+        set(MATCH_FOUND FALSE)
+        foreach(tag IN LISTS ARG_TAGS)
+            if("${tag}" IN_LIST KIO_DEMO_FILTER)
+                set(MATCH_FOUND TRUE)
+                break()
+            endif()
+        endforeach()
+
+        if(NOT MATCH_FOUND)
+            return() # Skip this target
+        endif()
+    endif()
+
+    # Create the Target (If we passed the checks)
+    add_executable(${target_name} ${source_file})
+    target_link_libraries(${target_name} PRIVATE ${ARG_LIBS})
+    kio_target_compile_options(${target_name})
+
+    message(STATUS "Enabled Demo: ${target_name} [${ARG_TAGS}]")
 endfunction()
 
 function(kio_add_sanitizers target_name)
@@ -36,9 +92,11 @@ endfunction()
 # -----------------------------------------
 # Optional Components
 #------------------------------------------
+set(KIO_DEMO_FILTER "all" CACHE STRING "List of tags to build (or 'all')")
 option(KIO_BUILD_TESTS "Build the kio test suite" ON)
 option(KIO_BUILD_BITCASK "Build bitcask storage engine" ON)
 option(KIO_BUILD_DEMOS "Build the kio demo executables" ON)
+# pass -DKIO_DEMO_FILTER="core;http" to build specific subsets of demo.
 option(KIO_BUILD_BENCHMARK "Build codes used to benchmark kio against other libs" ON)
 option(ENABLE_CLANG_TIDY "Run clang-tidy during compilation" OFF)
 
@@ -153,6 +211,9 @@ endif ()
 # Includes
 #----------------------------------------------
 include_directories(${CMAKE_SOURCE_DIR})
+add_subdirectory(third_party)
+add_subdirectory(utilities)
+add_subdirectory(runtime)
 add_subdirectory(kio)
 
 if (KIO_BUILD_BITCASK)
