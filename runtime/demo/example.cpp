@@ -14,12 +14,14 @@
 
 #include <sys/socket.h>
 
+#include "runtime/io.hpp"
 #include "runtime/runtime.hpp"
 #include "utilities/kio_logger.hpp"
 #include <arpa/inet.h>
 #include <netinet/in.h>
 
 using namespace uring;
+using namespace uring::io;
 
 ////////////////////////////////////////////////////////////////////////////////
 // Example 1: Simple Storage Engine Pattern
@@ -233,7 +235,7 @@ static void timeout_example()
 
 static Task<int> delayed_value(Executor& ex, int value, uint64_t delay_ms)
 {
-    co_await timeout_ms(ex, delay_ms);
+    co_await io::timeout_ms(ex, delay_ms);
     Log::info("Returning value {} after {}ms", value, delay_ms);
     co_return value;
 }

@@ -263,7 +263,7 @@ private:
 
         running_.store(true, std::memory_order_release);
 
-        // Ensure we always have an eventfd read pending (for foreign-thread wake).
+        // Ensure we always have an eventfd read pending (for a foreign-thread wake).
         exec_.spawn(park_task());
 
         std::vector<WorkItem> work_buf;

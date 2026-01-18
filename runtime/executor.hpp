@@ -7,12 +7,10 @@
 ////////////////////////////////////////////////////////////////////////////////
 
 #include <chrono>
-#include <concepts>
 #include <coroutine>
 #include <expected>
 #include <filesystem>
 #include <optional>
-#include <span>
 #include <system_error>
 #include <utility>
 
@@ -300,7 +298,9 @@ public:
         params.sq_thread_idle = cfg.sq_thread_idle_ms;
 
         if (const int ret = io_uring_queue_init_params(cfg.entries, &ring_, &params); ret < 0)
+        {
             throw std::system_error(-ret, std::system_category(), "io_uring_queue_init");
+        }
     }
 
     ~Executor() { io_uring_queue_exit(&ring_); }
@@ -348,7 +348,9 @@ public:
             io_uring_submit(&ring_);
             sqe = io_uring_get_sqe(&ring_);
             if (sqe)
+            {
                 break;
+            }
             std::this_thread::yield();
         }
 
@@ -384,24 +386,34 @@ public:
         while (!stopped_)
         {
             if (pending_ > 0)
+            {
                 loop_once(true);
+            }
             else
+            {
                 break;
+            }
         }
     }
 
     bool loop_once(const bool wait = true)
     {
         if (stopped_)
+        {
             return false;
+        }
 
         io_uring_submit(&ring_);
 
         if (pending_ == 0)
+        {
             return false;
+        }
 
         if (wait)
+        {
             io_uring_submit_and_wait(&ring_, 1);
+        }
 
         return process_completions() > 0;
     }
