@@ -234,6 +234,55 @@ public:
         ::write(eventfd_, &val, sizeof(val));
     }
 
+    // -------------------------------------------------------------------------
+    // Spawn Blocking - Offload heavy tasks to a background thread
+    // -------------------------------------------------------------------------
+    template <typename F>
+    auto spawn_blocking(F&& func) -> Task<Result<std::invoke_result_t<std::decay_t<F>>>>
+    {
+        using ReturnType = std::invoke_result_t<std::decay_t<F>>;
+
+        // Shared state to hold the result across the thread boundary
+        struct State {
+            Result<ReturnType> value;
+        };
+        auto state = std::make_shared<State>();
+
+        // Custom Awaiter to suspend/resume the coroutine
+        struct BlockingAwaiter {
+            ThreadContext& ctx;
+            std::decay_t<F> func;
+            std::shared_ptr<State> state;
+
+            bool await_ready() const noexcept { return false; }
+
+            void await_suspend(std::coroutine_handle<> h) {
+                // Spawn a detached thread for the blocking work.
+                // NOTE: For high throughput, replace std::thread with a thread pool.
+                std::thread([this, h, s = state]() mutable {
+                    try {
+                        if constexpr (std::is_void_v<ReturnType>) {
+                            func();
+                            s->value = {};
+                        } else {
+                            s->value = func();
+                        }
+                    } catch (...) {
+                        // Capture exception as a generic error code
+                        s->value = std::unexpected(std::make_error_code(std::errc::interrupted));
+                    }
+
+                    // Schedule resumption back onto the specific I/O thread
+                    ctx.schedule([h]() { h.resume(); });
+                }).detach();
+            }
+
+            Result<ReturnType> await_resume() { return std::move(state->value); }
+        };
+
+        co_return co_await BlockingAwaiter{*this, std::forward<F>(func), state};
+    }
+
 private:
     void start(bool pin)
     {

@@ -24,6 +24,9 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 
+// forward declaration for ThreadContext
+namespace uring { class ThreadContext; }
+
 namespace uring::net
 {
 
@@ -157,7 +160,7 @@ struct SocketAddress
         return sa;
     }
 
-    // Resolves hostname (Synchronous - OK for startup)
+    // Resolves hostname (Synchronous - OK for now)
     static Result<SocketAddress> resolve(std::string_view host, uint16_t port)
     {
         addrinfo hints{}, *res;
@@ -181,6 +184,21 @@ struct SocketAddress
             freeaddrinfo(res);
         }
         return out;
+    }
+
+    // Async Resolution (Non-blocking)
+    // Requires the ThreadContext to offload the work
+    static Task<Result<SocketAddress>> resolve_async(ThreadContext& ctx, std::string host, uint16_t port)
+    {
+        // We capture 'host' by value (std::string) to ensure it survives the thread switch
+        auto result = co_await ctx.spawn_blocking([h = std::move(host), port]() -> SocketAddress {
+            // This runs on a background thread, so blocking is fine
+            auto res = resolve(h, port);
+            if (!res) throw std::runtime_error("resolution failed"); // Caught by spawn_blocking
+            return *res;
+        });
+
+        co_return result;
     }
 
     const sockaddr* get() const { return reinterpret_cast<const sockaddr*>(&addr); }

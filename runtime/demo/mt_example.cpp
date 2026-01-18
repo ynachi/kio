@@ -25,7 +25,7 @@ using namespace uring;
 ////////////////////////////////////////////////////////////////////////////////
 
 // Simulates writing a WAL entry then syncing
-static Task<> write_wal_entry(Executor& ex, int fd, uint64_t offset, std::span<const char> buf)
+static Task<> write_wal_entry(Executor& ex, const int fd, uint64_t offset, std::span<const char> buf)
 {
     auto res = co_await write(ex, fd, buf, offset);
     if (!res)

@@ -32,6 +32,110 @@ class Task;
 namespace detail
 {
 
+/**
+ * @brief Pipe pool
+ */
+class SplicePipePool
+{
+public:
+    // RAII wrapper: returns FDs to the pool on destruction
+    struct Lease
+    {
+        int read_fd = -1;
+        int write_fd = -1;
+
+        Lease() = default;
+        Lease(int r, int w) : read_fd(r), write_fd(w) {}
+
+        // Move-only implementation
+        Lease(Lease&& other) noexcept
+            : read_fd(std::exchange(other.read_fd, -1)),
+              write_fd(std::exchange(other.write_fd, -1))
+        {
+        }
+
+        Lease& operator=(Lease&& other) noexcept
+        {
+            if (this != &other)
+            {
+                recycle(); // Return current pipe to pool before taking new one
+                read_fd = std::exchange(other.read_fd, -1);
+                write_fd = std::exchange(other.write_fd, -1);
+            }
+            return *this;
+        }
+
+        ~Lease() { recycle(); }
+
+        // Logic deferred to keep header clean
+        void recycle();
+    };
+
+    static Result<Lease> acquire()
+    {
+        // 1. Try to pop from thread-local cache
+        auto& pool = get_cache();
+        if (!pool.empty())
+        {
+            auto [r, w] = pool.back();
+            pool.pop_back();
+            return Lease{r, w};
+        }
+
+        // 2. Cache miss: Create a new pipe
+        int fds[2];
+        // pipe2 saves us the extra fcntl calls for O_NONBLOCK
+        if (::pipe2(fds, O_NONBLOCK | O_CLOEXEC) < 0)
+        {
+            return error_from_errno(errno);
+        }
+
+        return Lease{fds[0], fds[1]};
+    }
+
+private:
+    friend struct Lease;
+
+    using PipePair = std::pair<int, int>;
+
+    static std::vector<PipePair>& get_cache()
+    {
+        static thread_local std::vector<PipePair> cache_;
+        return cache_;
+    }
+
+    static void return_to_pool(int r, int w)
+    {
+        auto& pool = get_cache();
+        // Optional: Cap the cache size to prevent FD hoarding
+        if (pool.size() < 64)
+        {
+            pool.emplace_back(r, w);
+        }
+        else
+        {
+            ::close(r);
+            ::close(w);
+        }
+    }
+};
+
+// Out-of-line implementation to handle visibility
+inline void SplicePipePool::Lease::recycle()
+{
+    if (read_fd != -1)
+    {
+        SplicePipePool::return_to_pool(read_fd, write_fd);
+        read_fd = -1;
+        write_fd = -1;
+    }
+}
+
+// =====================================================
+// Base promise type
+// =====================================================
+
+
 struct PromiseBase
 {
     std::coroutine_handle<> continuation;
@@ -221,13 +325,28 @@ public:
     io_uring_sqe* get_sqe()
     {
         io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
-        if (!sqe)
+
+        // Loop until we get a slot.
+        // This handles backpressure if the kernel is slow to consume the SQ.
+        while (!sqe)
         {
+            // 1. Force submission of any pending items to the kernel.
+            // This alerts the kernel to consume items from the SQ ring,
+            // which frees up slots for us.
             io_uring_submit(&ring_);
+
+            // 2. Try to get a fresh SQE again.
             sqe = io_uring_get_sqe(&ring_);
-            if (!sqe)
-                throw std::runtime_error("SQ ring full even after submit");
+            if (sqe)
+                break;
+
+            // 3. Backoff.
+            // If the ring is still full, the kernel is busy.
+            // We yield the CPU to allow the kernel threads (or other processes)
+            // to run and consume the submitted work.
+            std::this_thread::yield();
         }
+
         ++pending_;
         return sqe;
     }
@@ -1119,7 +1238,7 @@ inline Task<Result<void>> write_exact(Executor& exec, int fd, std::span<const ch
     co_return {};
 }
 
-// Write exact number of bytes at offset (loops until complete)
+// Write the exact number of bytes at offset (loops until complete)
 inline Task<Result<void>> write_exact_at(Executor& exec, int fd, std::span<const char> buf, uint64_t offset)
 {
     size_t total_bytes_written = 0;
@@ -1144,56 +1263,42 @@ inline Task<Result<void>> write_exact_at(Executor& exec, int fd, std::span<const
     co_return {};
 }
 
-// Sendfile using splice (similar to Worker::AsyncSendfile)
+// Sendfile using splice with cached pipes
 inline Task<Result<void>> sendfile(Executor& exec, int out_fd, int in_fd, off_t offset, size_t count)
 {
-    // Create pipe for splice
-    int raw_pipe[2];
-    if (::pipe(raw_pipe) < 0)
-        co_return error_from_errno(errno);
+    // 1. Acquire pipe from thread-local pool (Zero syscalls in hot path)
+    auto pipe_lease = detail::SplicePipePool::acquire();
+    if (!pipe_lease)
+        co_return std::unexpected(pipe_lease.error());
 
-    // RAII guard for pipe fds
-    struct PipeGuard
-    {
-        int fds[2];
-        ~PipeGuard()
-        {
-            if (fds[0] >= 0)
-                ::close(fds[0]);
-            if (fds[1] >= 0)
-                ::close(fds[1]);
-        }
-    } pipe_guard{
-        {raw_pipe[0], raw_pipe[1]}
-    };
-
-    // Set non-blocking
-    ::fcntl(raw_pipe[0], F_SETFL, O_NONBLOCK);
-    ::fcntl(raw_pipe[1], F_SETFL, O_NONBLOCK);
+    const int pipe_rd = pipe_lease->read_fd;
+    const int pipe_wr = pipe_lease->write_fd;
 
     size_t remaining = count;
     off_t current_offset = offset;
 
     while (remaining > 0)
     {
+        // Default pipe buffer on Linux is usually 64KB (16 pages)
         constexpr size_t chunk_size = 65536;
         const size_t to_splice = std::min(remaining, chunk_size);
 
-        // Splice from input file to pipe
-        auto res_in = co_await splice(exec, in_fd, current_offset, raw_pipe[1], static_cast<off_t>(-1),
+        // 2. Splice from FILE -> PIPE
+        auto res_in = co_await splice(exec, in_fd, current_offset, pipe_wr, static_cast<off_t>(-1),
                                       static_cast<unsigned int>(to_splice), 0);
         if (!res_in)
             co_return std::unexpected(res_in.error());
 
         const int bytes_in = *res_in;
         if (bytes_in == 0)
-            co_return error_from_errno(EPIPE);
+            co_return error_from_errno(EPIPE); // EOF unexpected here
 
-        // Splice from pipe to output fd
+        // 3. Splice from PIPE -> SOCKET/FILE
+        // We must loop here because the pipe might be full or the socket might not accept all data at once
         auto pipe_remaining = static_cast<size_t>(bytes_in);
         while (pipe_remaining > 0)
         {
-            auto res_out = co_await splice(exec, raw_pipe[0], static_cast<off_t>(-1), out_fd, static_cast<off_t>(-1),
+            auto res_out = co_await splice(exec, pipe_rd, static_cast<off_t>(-1), out_fd, static_cast<off_t>(-1),
                                            static_cast<unsigned int>(pipe_remaining), 0);
             if (!res_out)
                 co_return std::unexpected(res_out.error());
@@ -1209,6 +1314,7 @@ inline Task<Result<void>> sendfile(Executor& exec, int out_fd, int in_fd, off_t 
         remaining -= bytes_in;
     }
 
+    // Lease destructor automatically returns the pipe to the pool here
     co_return {};
 }
 }  // namespace uring

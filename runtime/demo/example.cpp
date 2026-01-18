@@ -37,7 +37,7 @@ static Task<> write_wal_entry(Executor& ex, int fd, uint64_t offset, std::span<c
     }
     Log::info("Wrote {} bytes at offset {}", *res, offset);
 
-    // Datasync is usually sufficient for WAL (metadata doesn't matter)
+    // Datasync is usually enough for WAL (metadata doesn't matter)
     auto sync_res = co_await fsync(ex, fd, /*datasync=*/true);
     if (!sync_res)
     {
