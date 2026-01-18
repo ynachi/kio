@@ -12,8 +12,10 @@
 #include "runtime/runtime.hpp"
 #include "utilities/kio_logger.hpp"
 #include "utilities/net.hpp"
+#include "runtime/io.hpp"
 
 using namespace uring;
+using namespace uring::io;
 using namespace uring::net;
 
 // Global counters
