@@ -32,6 +32,25 @@ namespace uring
 class Runtime;
 class ThreadContext;
 
+// ----------------------------------------------------------------------------
+// Runtime Configuration (User Facing)
+// ----------------------------------------------------------------------------
+struct RuntimeConfig
+{
+    // Threading
+    size_t num_threads = std::thread::hardware_concurrency();
+    bool pin_threads = false;
+
+    // Executor / io_uring Settings
+    unsigned entries = 256;
+    unsigned uring_flags = 0;        // e.g. IORING_SETUP_SQPOLL
+    unsigned sq_thread_idle_ms = 0;  // Only if SQPOLL is set
+
+    // Blocking pool configuration (used by ThreadContext::spawn_blocking)
+    size_t blocking_threads = std::max<size_t>(1, std::thread::hardware_concurrency() / 2);
+    size_t blocking_queue = 4096;
+};
+
 namespace detail
 {
 // TLS pointer set by each runtime I/O thread.
@@ -173,7 +192,8 @@ private:
         void await_suspend(std::coroutine_handle<> h)
         {
             handle = h;
-            io_uring_sqe* sqe = ctx.exec_.get_sqe();
+            // Use Passkey to access restricted Executor methods
+            io_uring_sqe* sqe = ctx.exec_.get_sqe(access_key());
             io_uring_prep_read(sqe, ctx.eventfd_, &buf, sizeof(buf), 0);
             io_uring_sqe_set_data(sqe, this);
         }
@@ -246,7 +266,8 @@ private:
     // Internal wakeup path (runtime thread -> runtime thread): MSG_RING.
     void wake_msg_ring_from(ThreadContext& source) const noexcept
     {
-        source.exec_.msg_ring_wake(exec_.ring_fd(), 1, 0);
+        // Use Passkey
+        source.exec_.msg_ring_wake(detail::ExecutorPasskey{}, exec_.ring_fd(detail::ExecutorPasskey{}), 1, 0);
     }
 
     void run_thread(const bool pin, const size_t cpu_index)
@@ -277,7 +298,8 @@ private:
 
             // If we have queued work, don't block waiting for I/O; poll completions and run work.
             // If we don't have work, it's fine to block (park op + msg_ring will wake us).
-            (void)exec_.loop_once(!have_work);
+            // Use Passkey to call loop_once
+            (void)exec_.loop_once(detail::ExecutorPasskey{}, !have_work);
 
             // Run queued work. If there's lots of it, this will loop without blocking
             // because have_work will stay true.
@@ -297,7 +319,7 @@ private:
 
 public:
     explicit ThreadContext(const size_t index,
-                           const ExecutorConfig cfg = ExecutorConfig{},
+                           const ExecutorConfig cfg,
                            detail::BlockingThreadPool* blocking = nullptr)
         : exec_(cfg),
           eventfd_(eventfd(0, EFD_CLOEXEC)),
@@ -317,8 +339,12 @@ public:
     ThreadContext(const ThreadContext&) = delete;
     ThreadContext& operator=(const ThreadContext&) = delete;
 
-    Executor& executor() { return exec_; }
+    // --- Safe Accessor to Executor ---
+    // This is safe because the user cannot call dangerous methods (get_sqe)
+    // without the Passkey, which they cannot construct.
+    ThreadContext& executor() { return exec_; }
     const Executor& executor() const { return exec_; }
+
     size_t index() const { return index_; }
     bool running() const { return running_.load(std::memory_order_acquire); }
 
@@ -481,17 +507,6 @@ inline ScheduleOnAwaiter schedule_on(ThreadContext& target)
 // Runtime - Manages multiple threads
 ////////////////////////////////////////////////////////////////////////////////
 
-struct RuntimeConfig
-{
-    size_t num_threads = std::thread::hardware_concurrency();
-    bool pin_threads = false;
-    ExecutorConfig executor_config = {};
-
-    // Blocking pool configuration (used by ThreadContext::spawn_blocking)
-    size_t blocking_threads = std::max<size_t>(1, std::thread::hardware_concurrency() / 2);
-    size_t blocking_queue = 4096;
-};
-
 class Runtime
 {
     detail::BlockingThreadPool blocking_pool_;
@@ -506,10 +521,16 @@ public:
         if (cfg.num_threads == 0)
             cfg.num_threads = 1;
 
+        // Map RuntimeConfig options to internal ExecutorConfig
+        ExecutorConfig excfg;
+        excfg.entries = cfg.entries;
+        excfg.uring_flags = cfg.uring_flags;
+        excfg.sq_thread_idle_ms = cfg.sq_thread_idle_ms;
+
         threads_.reserve(cfg.num_threads);
         for (size_t i = 0; i < cfg.num_threads; ++i)
         {
-            auto ctx = std::make_unique<ThreadContext>(i, cfg.executor_config, &blocking_pool_);
+            auto ctx = std::make_unique<ThreadContext>(i, excfg, &blocking_pool_);
             ctx->runtime_ = this;
             threads_.push_back(std::move(ctx));
         }

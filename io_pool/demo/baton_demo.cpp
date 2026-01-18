@@ -7,10 +7,11 @@
 // 3. Waking up a blocking thread from a coroutine
 ////////////////////////////////////////////////////////////////////////////////
 
-#include "runtime/runtime.hpp"
-#include "utilities/kio_logger.hpp"
-#include "utilities/baton.hpp"
 #include <memory>
+
+#include "io_pool/runtime.hpp"
+#include "utilities/baton.hpp"
+#include "utilities/kio_logger.hpp"
 
 using namespace uring;
 

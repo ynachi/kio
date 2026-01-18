@@ -13,6 +13,7 @@
 #include <optional>
 #include <system_error>
 #include <utility>
+#include <thread>
 
 #include <liburing.h>
 
@@ -21,13 +22,27 @@
 namespace uring
 {
 
-class Executor;
-
-template <typename T>
-class Task;
+// Forward declarations
+class ThreadContext;
+struct BaseOp;
+template <typename T> class Task;
 
 namespace detail
 {
+
+/**
+ * @brief The "Passkey" to restrict access to dangerous Executor methods.
+ * Only friends (ThreadContext and Operations) can construct this key.
+ */
+class ExecutorPasskey
+{
+    ExecutorPasskey() = default;
+
+    // Whitelist authorized internals
+    // We use qualified names relative to 'uring' namespace for clarity
+    friend class uring::ThreadContext;
+    friend struct uring::BaseOp;
+};
 
 /**
  * @brief Pipe pool
@@ -157,7 +172,8 @@ struct Promise : PromiseBase
 {
     std::optional<T> result;
 
-    Task<T> get_return_object();
+    // Explicitly qualify uring::Task<T> to avoid lookup issues in detail namespace
+    uring::Task<T> get_return_object();
 
     void return_value(const T& value) { result = value; }
     void return_value(T&& value) { result = std::move(value); }
@@ -166,7 +182,8 @@ struct Promise : PromiseBase
 template <>
 struct Promise<void> : PromiseBase
 {
-    Task<void> get_return_object();
+    // Explicitly qualify uring::Task<void>
+    uring::Task<void> get_return_object();
     void return_void() {}
 };
 
@@ -247,14 +264,14 @@ public:
 namespace detail
 {
 template <typename T>
-Task<T> Promise<T>::get_return_object()
+uring::Task<T> Promise<T>::get_return_object()
 {
-    return Task<T>{std::coroutine_handle<Promise>::from_promise(*this)};
+    return uring::Task<T>{std::coroutine_handle<Promise>::from_promise(*this)};
 }
 
-inline Task<> Promise<void>::get_return_object()
+inline uring::Task<> Promise<void>::get_return_object()
 {
-    return Task{std::coroutine_handle<Promise>::from_promise(*this)};
+    return uring::Task<>{std::coroutine_handle<Promise>::from_promise(*this)};
 }
 }  // namespace detail
 
@@ -269,12 +286,18 @@ struct BaseOp
     std::coroutine_handle<> handle;
 
     bool await_ready() const noexcept { return false; }
+
+protected:
+    // Safe access to the executor key for derived Operations
+    // Protected static helper allows derived Ops to construct the key
+    static detail::ExecutorPasskey access_key() { return {}; }
 };
 
 ////////////////////////////////////////////////////////////////////////////////
-// Executor - The event loop
+// Executor - The event loop (Safe/Locked Down Version)
 ////////////////////////////////////////////////////////////////////////////////
 
+// Minimal internal config struct. The public one is now in Runtime.
 struct ExecutorConfig
 {
     unsigned entries = 256;
@@ -308,28 +331,33 @@ public:
     Executor(const Executor&) = delete;
     Executor& operator=(const Executor&) = delete;
 
+    // --- Safe Public API ---
+
+    void stop() { stopped_ = true; }
+    bool stopped() const { return stopped_; }
+    unsigned pending() const { return pending_; }
+
+    // Spawn is safe as it doesn't touch the ring directly
+    template <typename T>
+    void spawn(Task<T> task)
+    {
+        task.release().resume();
+    }
+
+    // --- Restricted API (Requires Passkey) ---
+    // These methods can only be called by ThreadContext and Op structs.
+
     // Tracks a pending completion (normal ops).
-    io_uring_sqe* get_sqe()
+    io_uring_sqe* get_sqe(detail::ExecutorPasskey)
     {
         io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
 
-        // Loop until we get a slot.
-        // This handles backpressure if the kernel is slow to consume the SQ.
         while (!sqe)
         {
-            // Submission of any pending items to the kernel.
-            // This alerts the kernel to consume items from the SQ ring,
-            // which frees up slots for us.
             io_uring_submit(&ring_);
-
             sqe = io_uring_get_sqe(&ring_);
             if (sqe)
                 break;
-
-            // Backoff.
-            // If the ring is still full, the kernel is busy.
-            // We yield the CPU to allow the kernel threads
-            // to run and consume the submitted work.
             std::this_thread::yield();
         }
 
@@ -337,9 +365,8 @@ public:
         return sqe;
     }
 
-    // Untracked SQE (for “fire-and-forget” submissions where we don't want to
-    // affect pending_). Only safe when user_data is nullptr and/or CQE is skipped.
-    io_uring_sqe* get_sqe_untracked()
+    // Untracked SQE.
+    io_uring_sqe* get_sqe_untracked(detail::ExecutorPasskey)
     {
         io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
 
@@ -348,67 +375,52 @@ public:
             io_uring_submit(&ring_);
             sqe = io_uring_get_sqe(&ring_);
             if (sqe)
-            {
                 break;
-            }
             std::this_thread::yield();
         }
 
         return sqe;
     }
 
-    int submit() { return io_uring_submit(&ring_); }
+    int submit(detail::ExecutorPasskey) { return io_uring_submit(&ring_); }
 
-    // Wake another ring by posting a CQE onto it via MSG_RING.
-    // This is “fire-and-forget”: user_data is nullptr, and we try to skip CQE on success.
-    void msg_ring_wake(const int target_ring_fd, const unsigned int len = 1, const __u64 data = 0) noexcept
+    // Wake another ring.
+    void msg_ring_wake(detail::ExecutorPasskey, const int target_ring_fd, const unsigned int len = 1, const __u64 data = 0) noexcept
     {
-        io_uring_sqe* sqe = get_sqe_untracked();
+        io_uring_sqe* sqe = get_sqe_untracked({});
         io_uring_prep_msg_ring(sqe, target_ring_fd, len, data, 0);
         io_uring_sqe_set_data(sqe, nullptr);
 
         sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
-
-        // Ensure it gets out immediately; don't rely on later submissions.
         (void)io_uring_submit(&ring_);
     }
 
-    void loop()
+    void loop(detail::ExecutorPasskey)
     {
         while (!stopped_ && pending_ > 0)
         {
-            loop_once(true);
+            loop_once({}, true);
         }
     }
 
-    void loop_forever()
+    void loop_forever(detail::ExecutorPasskey)
     {
         while (!stopped_)
         {
             if (pending_ > 0)
-            {
-                loop_once(true);
-            }
+                loop_once({}, true);
             else
-            {
                 break;
-            }
         }
     }
 
-    bool loop_once(const bool wait = true)
+    bool loop_once(detail::ExecutorPasskey, const bool wait = true)
     {
-        if (stopped_)
-        {
-            return false;
-        }
+        if (stopped_) return false;
 
         io_uring_submit(&ring_);
 
-        if (pending_ == 0)
-        {
-            return false;
-        }
+        if (pending_ == 0) return false;
 
         if (wait)
         {
@@ -418,17 +430,9 @@ public:
         return process_completions() > 0;
     }
 
-    template <typename T>
-    void spawn(Task<T> task)
-    {
-        task.release().resume();
-    }
+    int ring_fd(detail::ExecutorPasskey) const { return ring_.ring_fd; }
 
-    void stop() { stopped_ = true; }
-    bool stopped() const { return stopped_; }
-    unsigned pending() const { return pending_; }
-    io_uring* ring() { return &ring_; }
-    int ring_fd() const { return ring_.ring_fd; }
+    void stop(detail::ExecutorPasskey) { stopped_ = true; }
 
 private:
     unsigned process_completions()
@@ -456,6 +460,7 @@ private:
 
 ////////////////////////////////////////////////////////////////////////////////
 // Operations (Low Level - Raw Types)
+// All Ops now use access_key() to call restricted methods on Executor
 ////////////////////////////////////////////////////////////////////////////////
 
 struct ReadOp : BaseOp
@@ -474,7 +479,7 @@ struct ReadOp : BaseOp
     void await_suspend(std::coroutine_handle<> h)
     {
         handle = h;
-        io_uring_sqe* sqe = exec.get_sqe();
+        io_uring_sqe* sqe = exec.get_sqe(access_key());
         io_uring_prep_read(sqe, fd, buf, len, offset);
         io_uring_sqe_set_data(sqe, this);
     }
@@ -503,7 +508,7 @@ struct WriteOp : BaseOp
     void await_suspend(std::coroutine_handle<> h)
     {
         handle = h;
-        io_uring_sqe* sqe = exec.get_sqe();
+        io_uring_sqe* sqe = exec.get_sqe(access_key());
         io_uring_prep_write(sqe, fd, buf, len, offset);
         io_uring_sqe_set_data(sqe, this);
     }
@@ -527,7 +532,7 @@ struct FsyncOp : BaseOp
     void await_suspend(std::coroutine_handle<> h)
     {
         handle = h;
-        io_uring_sqe* sqe = exec.get_sqe();
+        io_uring_sqe* sqe = exec.get_sqe(access_key());
         io_uring_prep_fsync(sqe, fd, datasync ? IORING_FSYNC_DATASYNC : 0);
         io_uring_sqe_set_data(sqe, this);
     }
@@ -555,7 +560,7 @@ struct AcceptOp : BaseOp
     void await_suspend(std::coroutine_handle<> h)
     {
         handle = h;
-        io_uring_sqe* sqe = exec.get_sqe();
+        io_uring_sqe* sqe = exec.get_sqe(access_key());
         io_uring_prep_accept(sqe, listen_fd, addr, addrlen, 0);
         io_uring_sqe_set_data(sqe, this);
     }
@@ -583,7 +588,7 @@ struct ConnectOp : BaseOp
     void await_suspend(std::coroutine_handle<> h)
     {
         handle = h;
-        io_uring_sqe* sqe = exec.get_sqe();
+        io_uring_sqe* sqe = exec.get_sqe(access_key());
         io_uring_prep_connect(sqe, fd, addr, addrlen);
         io_uring_sqe_set_data(sqe, this);
     }
@@ -612,7 +617,7 @@ struct RecvOp : BaseOp
     void await_suspend(std::coroutine_handle<> h)
     {
         handle = h;
-        io_uring_sqe* sqe = exec.get_sqe();
+        io_uring_sqe* sqe = exec.get_sqe(access_key());
         io_uring_prep_recv(sqe, fd, buf, len, msg_flags);
         io_uring_sqe_set_data(sqe, this);
     }
@@ -641,7 +646,7 @@ struct SendOp : BaseOp
     void await_suspend(std::coroutine_handle<> h)
     {
         handle = h;
-        io_uring_sqe* sqe = exec.get_sqe();
+        io_uring_sqe* sqe = exec.get_sqe(access_key());
         io_uring_prep_send(sqe, fd, buf, len, msg_flags);
         io_uring_sqe_set_data(sqe, this);
     }
@@ -664,7 +669,7 @@ struct CloseOp : BaseOp
     void await_suspend(std::coroutine_handle<> h)
     {
         handle = h;
-        io_uring_sqe* sqe = exec.get_sqe();
+        io_uring_sqe* sqe = exec.get_sqe(access_key());
         io_uring_prep_close(sqe, fd);
         io_uring_sqe_set_data(sqe, this);
     }
@@ -687,7 +692,7 @@ struct TimeoutOp : BaseOp
     void await_suspend(std::coroutine_handle<> h)
     {
         handle = h;
-        io_uring_sqe* sqe = exec.get_sqe();
+        io_uring_sqe* sqe = exec.get_sqe(access_key());
         io_uring_prep_timeout(sqe, &ts, 0, 0);
         io_uring_sqe_set_data(sqe, this);
     }
@@ -710,7 +715,7 @@ struct CancelOp : BaseOp
     void await_suspend(std::coroutine_handle<> h)
     {
         handle = h;
-        io_uring_sqe* sqe = exec.get_sqe();
+        io_uring_sqe* sqe = exec.get_sqe(access_key());
         io_uring_prep_cancel(sqe, target, 0);
         io_uring_sqe_set_data(sqe, this);
     }
@@ -733,7 +738,7 @@ struct CancelFdOp : BaseOp
     void await_suspend(std::coroutine_handle<> h)
     {
         handle = h;
-        io_uring_sqe* sqe = exec.get_sqe();
+        io_uring_sqe* sqe = exec.get_sqe(access_key());
         io_uring_prep_cancel_fd(sqe, fd, 0);
         io_uring_sqe_set_data(sqe, this);
     }
@@ -762,7 +767,7 @@ struct ReadvOp : BaseOp
     void await_suspend(std::coroutine_handle<> h)
     {
         handle = h;
-        io_uring_sqe* sqe = exec.get_sqe();
+        io_uring_sqe* sqe = exec.get_sqe(access_key());
         io_uring_prep_readv(sqe, fd, iov, iovcnt, offset);
         io_uring_sqe_set_data(sqe, this);
     }
@@ -794,7 +799,7 @@ struct WritevOp : BaseOp
     void await_suspend(std::coroutine_handle<> h)
     {
         handle = h;
-        io_uring_sqe* sqe = exec.get_sqe();
+        io_uring_sqe* sqe = exec.get_sqe(access_key());
         io_uring_prep_writev(sqe, fd, iov, iovcnt, offset);
         io_uring_sqe_set_data(sqe, this);
     }
@@ -821,7 +826,7 @@ struct PollOp : BaseOp
     void await_suspend(std::coroutine_handle<> h)
     {
         handle = h;
-        io_uring_sqe* sqe = exec.get_sqe();
+        io_uring_sqe* sqe = exec.get_sqe(access_key());
         io_uring_prep_poll_add(sqe, fd, static_cast<unsigned>(events));
         io_uring_sqe_set_data(sqe, this);
     }
@@ -849,7 +854,7 @@ struct SendmsgOp : BaseOp
     void await_suspend(std::coroutine_handle<> h)
     {
         handle = h;
-        io_uring_sqe* sqe = exec.get_sqe();
+        io_uring_sqe* sqe = exec.get_sqe(access_key());
         io_uring_prep_sendmsg(sqe, fd, msg, flags);
         io_uring_sqe_set_data(sqe, this);
     }
@@ -876,7 +881,7 @@ struct RecvmsgOp : BaseOp
     void await_suspend(std::coroutine_handle<> h)
     {
         handle = h;
-        io_uring_sqe* sqe = exec.get_sqe();
+        io_uring_sqe* sqe = exec.get_sqe(access_key());
         io_uring_prep_recvmsg(sqe, fd, msg, flags);
         io_uring_sqe_set_data(sqe, this);
     }
@@ -907,7 +912,7 @@ struct OpenAtOp : BaseOp
     void await_suspend(std::coroutine_handle<> h)
     {
         handle = h;
-        io_uring_sqe* sqe = exec.get_sqe();
+        io_uring_sqe* sqe = exec.get_sqe(access_key());
         io_uring_prep_openat(sqe, dirfd, path.c_str(), flags, mode);
         io_uring_sqe_set_data(sqe, this);
     }
@@ -937,7 +942,7 @@ struct UnlinkAtOp : BaseOp
     void await_suspend(std::coroutine_handle<> h)
     {
         handle = h;
-        io_uring_sqe* sqe = exec.get_sqe();
+        io_uring_sqe* sqe = exec.get_sqe(access_key());
         io_uring_prep_unlinkat(sqe, dirfd, path.c_str(), flags);
         io_uring_sqe_set_data(sqe, this);
     }
@@ -968,7 +973,7 @@ struct FallocateOp : BaseOp
     void await_suspend(std::coroutine_handle<> h)
     {
         handle = h;
-        io_uring_sqe* sqe = exec.get_sqe();
+        io_uring_sqe* sqe = exec.get_sqe(access_key());
         io_uring_prep_fallocate(sqe, fd, mode, offset, len);
         io_uring_sqe_set_data(sqe, this);
     }
@@ -994,7 +999,7 @@ struct FtruncateOp : BaseOp
     void await_suspend(std::coroutine_handle<> h)
     {
         handle = h;
-        io_uring_sqe* sqe = exec.get_sqe();
+        io_uring_sqe* sqe = exec.get_sqe(access_key());
         io_uring_prep_ftruncate(sqe, fd, length);
         io_uring_sqe_set_data(sqe, this);
     }
@@ -1028,7 +1033,7 @@ struct SpliceOp : BaseOp
     void await_suspend(std::coroutine_handle<> h)
     {
         handle = h;
-        io_uring_sqe* sqe = exec.get_sqe();
+        io_uring_sqe* sqe = exec.get_sqe(access_key());
         io_uring_prep_splice(sqe, fd_in, off_in, fd_out, off_out, len, flags);
         io_uring_sqe_set_data(sqe, this);
     }
