@@ -148,10 +148,8 @@ int main()
 
         Runtime rt(config);
 
-        // --- NEW: UTILITY USAGE ---
         Log::info("Binding port {}...", PORT);
 
-        // One line setup!
         auto listener = TcpListener::bind(PORT);
         if (!listener)
         {

@@ -13,6 +13,7 @@ kio_add_demo(tcp_demo_v5 demo/tcp_demo.cpp
         TAGS runtime
         LIBS kio_runtime_lib kio_utilities
 )
+kio_add_sanitizers(tcp_demo_v5)
 
 kio_add_demo(runtime_example demo/example.cpp
         TAGS runtime

@@ -7,8 +7,8 @@ using namespace uring;
 
 class ExecutorTest : public ::testing::Test {
 protected:
-    Executor ex;
-    ExecutorTest() : ex(RuntimeConfig{.num_threads = 1}) {
+    Runtime rt;
+    ExecutorTest() : rt(RuntimeConfig{.num_threads = 1}) {
         rt.loop_forever(); // Start the background thread
     }
     ~ExecutorTest() { rt.stop(); }

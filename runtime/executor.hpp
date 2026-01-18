@@ -57,7 +57,7 @@ public:
         {
             if (this != &other)
             {
-                recycle(); // Return current pipe to pool before taking new one
+                recycle();
                 read_fd = std::exchange(other.read_fd, -1);
                 write_fd = std::exchange(other.write_fd, -1);
             }
@@ -66,13 +66,11 @@ public:
 
         ~Lease() { recycle(); }
 
-        // Logic deferred to keep the header clean
         void recycle();
     };
 
     static Result<Lease> acquire()
     {
-        // Try to pop from the thread-local cache
         if (auto& pool = get_cache(); !pool.empty())
         {
             auto [r, w] = pool.back();
@@ -80,9 +78,7 @@ public:
             return Lease{r, w};
         }
 
-        // Cache miss: Create a new pipe
         int fds[2];
-        // pipe2 saves us the extra fcntl calls for O_NONBLOCK
         if (::pipe2(fds, O_NONBLOCK | O_CLOEXEC) < 0)
         {
             return error_from_errno(errno);
@@ -104,7 +100,6 @@ private:
 
     static void return_to_pool(int r, int w)
     {
-        // Optional: Cap the cache size to prevent FD hoarding
         if (auto& pool = get_cache(); pool.size() < 64)
         {
             pool.emplace_back(r, w);
@@ -166,12 +161,7 @@ struct Promise : PromiseBase
 
     Task<T> get_return_object();
 
-    // OPTIMIZED: Use overloads to handle lvalues and rvalues efficiently.
-    // 1. fixes the `co_return {};` deduction issue (binds to T&&).
-    // 2. avoids the extra move overhead of pass-by-value.
-
     void return_value(const T& value) { result = value; }
-
     void return_value(T&& value) { result = std::move(value); }
 };
 
@@ -242,6 +232,7 @@ public:
                         h.destroy();
                 }
             } guard{handle};
+
             if (handle.promise().exception)
                 std::rethrow_exception(handle.promise().exception);
             if constexpr (!std::is_void_v<T>)
@@ -265,7 +256,7 @@ Task<T> Promise<T>::get_return_object()
 
 inline Task<> Promise<void>::get_return_object()
 {
-    return Task<>{std::coroutine_handle<Promise>::from_promise(*this)};
+    return Task{std::coroutine_handle<Promise>::from_promise(*this)};
 }
 }  // namespace detail
 
@@ -317,6 +308,7 @@ public:
     Executor(const Executor&) = delete;
     Executor& operator=(const Executor&) = delete;
 
+    // Tracks a pending completion (normal ops).
     io_uring_sqe* get_sqe()
     {
         io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
@@ -345,7 +337,39 @@ public:
         return sqe;
     }
 
+    // Untracked SQE (for “fire-and-forget” submissions where we don't want to
+    // affect pending_). Only safe when user_data is nullptr and/or CQE is skipped.
+    io_uring_sqe* get_sqe_untracked()
+    {
+        io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
+
+        while (!sqe)
+        {
+            io_uring_submit(&ring_);
+            sqe = io_uring_get_sqe(&ring_);
+            if (sqe)
+                break;
+            std::this_thread::yield();
+        }
+
+        return sqe;
+    }
+
     int submit() { return io_uring_submit(&ring_); }
+
+    // Wake another ring by posting a CQE onto it via MSG_RING.
+    // This is “fire-and-forget”: user_data is nullptr, and we try to skip CQE on success.
+    void msg_ring_wake(const int target_ring_fd, const unsigned int len = 1, const __u64 data = 0) noexcept
+    {
+        io_uring_sqe* sqe = get_sqe_untracked();
+        io_uring_prep_msg_ring(sqe, target_ring_fd, len, data, 0);
+        io_uring_sqe_set_data(sqe, nullptr);
+
+        sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
+
+        // Ensure it gets out immediately; don't rely on later submissions.
+        (void)io_uring_submit(&ring_);
+    }
 
     void loop()
     {
@@ -392,6 +416,7 @@ public:
     bool stopped() const { return stopped_; }
     unsigned pending() const { return pending_; }
     io_uring* ring() { return &ring_; }
+    int ring_fd() const { return ring_.ring_fd; }
 
 private:
     unsigned process_completions()
