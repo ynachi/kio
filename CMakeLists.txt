@@ -87,11 +87,58 @@ function(kio_add_sanitizers target_name)
     endif ()
 endfunction()
 
+
+# -----------------------------------------------------------------------------
+# Function: kio_add_test
+# Usage: kio_add_test(test_name source.cpp TAGS core network LIBS <libs to link>)
+# -----------------------------------------------------------------------------
+function(kio_add_test target_name source_file)
+    # Parse Arguments (supports optional TAGS list)
+    set(options "")
+    set(oneValueArgs "")
+    set(multiValueArgs TAGS LIBS)
+    cmake_parse_arguments(ARG "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+
+    # 2. Check Global Toggle
+    if(NOT KIO_BUILD_TESTS)
+        return()
+    endif()
+
+    # Check Tag Filtering
+    # If KIO_TEST_FILTER is set (and not "all"), we check if this demo has a matching tag.
+    if(DEFINED KIO_TEST_FILTER AND NOT "${KIO_TEST_FILTER}" STREQUAL "all")
+        set(MATCH_FOUND FALSE)
+        foreach(tag IN LISTS ARG_TAGS)
+            if("${tag}" IN_LIST KIO_TEST_FILTER)
+                set(MATCH_FOUND TRUE)
+                break()
+            endif()
+        endforeach()
+
+        if(NOT MATCH_FOUND)
+            return() # Skip this target
+        endif()
+    endif()
+
+    # Create the Target (If we passed the checks)
+    add_executable(${target_name} ${source_file})
+    target_link_libraries(${target_name} PRIVATE ${ARG_LIBS})
+    kio_target_compile_options(${target_name})
+    # always enable sanitizer on debug builds
+    kio_add_sanitizers(${target_name})
+
+    add_test(NAME ${target_name} COMMAND ${target_name})
+    gtest_discover_tests(${target_name})
+
+    message(STATUS "Enabled Test: ${target_name} [${ARG_TAGS}]")
+endfunction()
+
 # -----------------------------------------
 # Optional Components
 #------------------------------------------
 set(KIO_DEMO_FILTER "all" CACHE STRING "List of tags to build (or 'all')")
 option(KIO_BUILD_TESTS "Build the kio test suite" ON)
+set(KIO_TEST_FILTER "all" CACHE STRING "List of tags to build (or 'all')")
 option(KIO_BUILD_BITCASK "Build bitcask storage engine" ON)
 option(KIO_BUILD_DEMOS "Build the kio demo executables" ON)
 # pass -DKIO_DEMO_FILTER="core;http" to build specific subsets of demo.

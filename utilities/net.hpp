@@ -67,7 +67,8 @@ public:
     [[nodiscard]] bool is_valid() const { return fd_ >= 0; }
     explicit operator bool() const { return is_valid(); }
 
-    // Release ownership (caller must close)
+    /// @brief Releases ownership of the file descriptor.
+    /// @return The raw file descriptor. Caller must close it.
     int release() { return std::exchange(fd_, -1); }
 
     // Close explicitly
@@ -141,7 +142,9 @@ struct SocketAddress
 
     SocketAddress() = default;
 
-    // Helper for IPv4 loopback/any
+    /// @brief Creates an IPv4 address helper.
+    /// @param port The port number (host byte order).
+    /// @param ip The IP string (e.g., "127.0.0.1"). If null, uses INADDR_ANY.
     static SocketAddress v4(uint16_t port, const char* ip = nullptr)
     {
         SocketAddress sa;
@@ -160,7 +163,11 @@ struct SocketAddress
         return sa;
     }
 
-    // Resolves hostname (Synchronous - OK for now)
+    /// @brief Synchronously resolves a hostname to an address.
+    /// @param host The hostname (e.g., "google.com").
+    /// @param port The port number.
+    /// @return A Result containing the SocketAddress.
+    /// @note This is a BLOCKING call. Use resolve_async in hot paths.
     static Result<SocketAddress> resolve(std::string_view host, uint16_t port)
     {
         addrinfo hints{}, *res;
@@ -186,8 +193,11 @@ struct SocketAddress
         return out;
     }
 
-    // Async Resolution (Non-blocking)
-    // Requires the ThreadContext to offload the work
+    /// @brief Asynchronously resolves a hostname without blocking the reactor.
+    /// @param ctx The ThreadContext (to offload the work).
+    /// @param host The hostname.
+    /// @param port The port number.
+    /// @return A Task containing the resolved SocketAddress.
     static Task<Result<SocketAddress>> resolve_async(ThreadContext& ctx, std::string host, uint16_t port)
     {
         // We capture 'host' by value (std::string) to ensure it survives the thread switch
@@ -209,7 +219,10 @@ struct SocketAddress
 ////////////////////////////////////////////////////////////////////////////////
 struct TcpListener
 {
-    // Creates a bound, non-blocking, listening socket
+    /// @brief Creates, binds, and listens on a socket with high-performance defaults.
+    /// @param addr The address to bind to.
+    /// @param backlog Pending connection queue size (default 4096).
+    /// @return A Result containing the bound listening Socket.
     static Result<Socket> bind(const SocketAddress& addr, int backlog = 4096)
     {
         int fd = ::socket(addr.addr.ss_family, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);

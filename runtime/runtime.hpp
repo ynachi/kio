@@ -390,7 +390,7 @@ public:
     bool running() const
     {
         return started_ &&
-               std::any_of(threads_.begin(), threads_.end(), [](const auto& ctx) { return ctx->running(); });
+               std::ranges::any_of(threads_, [](const auto& ctx) { return ctx->running(); });
     }
 
     void schedule(Task<> task) { next_thread().schedule(std::move(task)); }

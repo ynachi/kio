@@ -6,6 +6,9 @@ target_link_libraries(kio_runtime_lib INTERFACE
 )
 kio_target_compile_options(kio_runtime_lib)
 
+#-----------------------------------------
+# DEMO TARGETS
+#-----------------------------------------
 kio_add_demo(tcp_demo_v5 demo/tcp_demo.cpp
         TAGS runtime
         LIBS kio_runtime_lib kio_utilities
@@ -22,3 +25,18 @@ kio_add_demo(runtime_mt_example demo/mt_example.cpp
 )
 kio_add_sanitizers(runtime_mt_example)
 
+
+kio_add_demo(baton_demo demo/baton_demo.cpp
+        TAGS runtime
+        LIBS kio_runtime_lib kio_utilities
+)
+kio_add_sanitizers(baton_demo)
+
+#-----------------------------------------
+# TEST TARGETS
+# kio_add_test has everything, nothing more to add
+#-----------------------------------------
+kio_add_test(executor_test tests/executor_test.cpp
+        TAGS runtime
+        LIBS GTest::gtest GTest::gtest_main kio_runtime_lib kio_utilities
+)
