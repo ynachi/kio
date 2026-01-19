@@ -258,7 +258,7 @@ endif ()
 include_directories(${CMAKE_SOURCE_DIR})
 add_subdirectory(external_libraries)
 add_subdirectory(utilities)
-add_subdirectory(runtime)
+add_subdirectory(io_pool)
 add_subdirectory(kio)
 
 if (KIO_BUILD_BITCASK)
