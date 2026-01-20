@@ -187,10 +187,11 @@ int main()
         log::info("Shutting down...");
 
         // Clean shutdown: Close socket to cancel acceptances
+        // Note: Closing the FD should wake up io_uring accept calls with EBADF/ECANCELED.
         listener->close();
 
         // Give threads a moment to wake up from accept() cancellation
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
         rt.stop();
         log::info("Bye.");

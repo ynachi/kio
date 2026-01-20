@@ -35,7 +35,7 @@ kio_add_sanitizers(baton_demo)
 
 kio_add_demo(dns_demo demo/dns_demo.cpp
         TAGS runtime
-        LIBS kio_runtime_lib
+        LIBS kio
 )
 kio_add_sanitizers(dns_demo)
 

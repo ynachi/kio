@@ -4,14 +4,14 @@
 #include <utility>
 #include <vector>
 
-#include "../kio_logger.hpp"
-#include "../net.hpp"
-#include "io_pool/io.hpp"
-#include "io_pool/runtime.hpp"
+#include "kio/kio_logger.hpp"
+#include "kio/net.hpp"
+#include "kio/io.hpp"
+#include "kio/runtime.hpp"
 #include <arpa/inet.h>
 
-using namespace uring;
-using namespace uring::net;
+using namespace kio;
+using namespace kio::net;
 
 const std::vector<std::string> domains = {
     // Original 10
@@ -60,7 +60,7 @@ std::string ip_to_string(const SocketAddress& addr)
 // -----------------------------------------------------------------------------
 Task<> bench_blocking(ThreadContext& ctx)
 {
-    Log::info("--- Starting BLOCKING Benchmark (Sequential) ---");
+    log::info("--- Starting BLOCKING Benchmark (Sequential) ---");
     std::vector<std::pair<std::string, std::string>> results;
     results.reserve(domains.size());
 
@@ -76,19 +76,19 @@ Task<> bench_blocking(ThreadContext& ctx)
         }
         else
         {
-            Log::error("Failed {}", domain);
+            log::error("Failed {}", domain);
             results.emplace_back(domain, "FAILED");
         }
     }
 
     auto end = std::chrono::high_resolution_clock::now();
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-    Log::info("Blocking Total Time: {} ms", ms);
+    log::info("Blocking Total Time: {} ms", ms);
 
-    Log::info("--- Results (Blocking) ---");
+    log::info("--- Results (Blocking) ---");
     for (const auto& [dom, ip] : results)
     {
-        Log::info("{}: {}", dom, ip);
+        log::info("{}: {}", dom, ip);
     }
     co_return;
 }
@@ -112,7 +112,7 @@ Task<> resolve_wrapper(ThreadContext& ctx, std::string domain, std::atomic<int>&
     }
     else
     {
-        Log::error("Failed {}", domain);
+        log::error("Failed {}", domain);
         results.emplace_back(domain, "FAILED");
     }
 
@@ -121,7 +121,7 @@ Task<> resolve_wrapper(ThreadContext& ctx, std::string domain, std::atomic<int>&
 
 Task<> bench_async(ThreadContext& ctx)
 {
-    Log::info("--- Starting ASYNC Benchmark (Parallel) ---");
+    log::info("--- Starting ASYNC Benchmark (Parallel) ---");
     std::vector<std::pair<std::string, std::string>> results;
     results.reserve(domains.size());
 
@@ -139,17 +139,17 @@ Task<> bench_async(ThreadContext& ctx)
     // Wait for completion (Simple polling for demo purposes)
     while (pending.load(std::memory_order_acquire) > 0)
     {
-        co_await uring::io::timeout_ms(ctx, 1);
+        co_await kio::io::timeout_ms(ctx, 1);
     }
 
     auto end = std::chrono::high_resolution_clock::now();
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-    Log::info("Async Total Time: {} ms", ms);
+    log::info("Async Total Time: {} ms", ms);
 
-    Log::info("--- Results (Async) ---");
+    log::info("--- Results (Async) ---");
     for (const auto& [dom, ip] : results)
     {
-        Log::info("{}: {}", dom, ip);
+        log::info("{}: {}", dom, ip);
     }
 }
 
@@ -182,7 +182,7 @@ int main()
     }
     catch (const std::exception& e)
     {
-        Log::error("Exception: {}", e.what());
+        log::error("Exception: {}", e.what());
         return 1;
     }
 
