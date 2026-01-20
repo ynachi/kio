@@ -7,19 +7,6 @@
 // Cross-thread scheduling is explicit and opt-in.
 ////////////////////////////////////////////////////////////////////////////////
 
-// Fix: Linux kernel headers (via liburing) define a macro BLOCK_SIZE (in linux/fs.h).
-// This conflicts with concurrentqueue.h which uses BLOCK_SIZE as a member.
-// We undefine it here to prevent the collision.
-#ifdef BLOCK_SIZE
-#undef BLOCK_SIZE
-#endif
-
-// NOTE: moodycamel::ConcurrentQueue has built-in TSAN support.
-// When compiled with -fsanitize=thread, the compiler defines __SANITIZE_THREAD__
-// which enables the queue's internal TSAN annotations automatically.
-// No manual annotations needed!
-#include "external_libraries/concurrentqueue.h"
-
 #include <atomic>
 #include <condition_variable>
 #include <functional>
@@ -29,8 +16,10 @@
 #include <thread>
 #include <utility>
 #include <vector>
+#include <algorithm>
 
-#include "kio/executor.hpp"
+#include "mpsc_ring.hpp"
+#include "executor.hpp"
 
 namespace kio
 {
@@ -55,6 +44,9 @@ struct RuntimeConfig
     // Blocking pool configuration (used by ThreadContext::spawn_blocking)
     size_t blocking_threads = std::max<size_t>(1, std::thread::hardware_concurrency() / 2);
     size_t blocking_queue = 4096;
+    /// capacity of the local io queue
+    // TODO: use the same for ring entries to avoid confusion on user side ?
+    size_t task_queue_capacity = 1 << 15; // 32768
 };
 
 namespace detail
@@ -82,7 +74,7 @@ public:
 private:
     void worker_loop();
 
-    moodycamel::ConcurrentQueue<Job> queue_;
+    MpscRing<Job> queue_;
 
     std::counting_semaphore<> slots_available_;
     std::counting_semaphore<> tasks_available_;
@@ -128,7 +120,7 @@ private:
 
     Runtime* runtime_ = nullptr;
 
-    moodycamel::ConcurrentQueue<WorkItem> incoming_;
+    MpscRing<WorkItem> incoming_;
     std::atomic<size_t> pending_work_{0};
     std::thread thread_;
     std::atomic<bool> running_{false};
@@ -179,7 +171,7 @@ private:
 
     // Drain a bounded number of queued WorkItems.
     // Returns the number executed.
-    size_t drain_incoming(std::vector<WorkItem>& buf, size_t max_items);
+    size_t drain_incoming(size_t max_items);
 
     // Internal wakeup path (runtime thread -> runtime thread): MSG_RING.
     void wake_msg_ring_from(ThreadContext& source) const noexcept;
@@ -189,12 +181,14 @@ private:
 public:
     explicit ThreadContext(size_t index,
                            RuntimeConfig cfg,
-                           detail::BlockingThreadPool* blocking = nullptr);
+                           detail::BlockingThreadPool* blocking = nullptr,
+                           size_t task_queue_cap = 1 << 15);
 
     // Helper for Runtime to construct with mapped config
     explicit ThreadContext(size_t index,
                            detail::ExecutorConfig cfg,
-                           detail::BlockingThreadPool* blocking = nullptr);
+                           detail::BlockingThreadPool* blocking = nullptr,
+                           size_t task_queue_cap = 1 << 15);
 
     ~ThreadContext() noexcept;
 

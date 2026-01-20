@@ -1,4 +1,5 @@
 #include "kio/runtime.hpp"
+#include "kio/executor.hpp"
 
 #include <pthread.h>
 #include <sched.h>
@@ -15,9 +16,10 @@ namespace detail
 // ----------------------------------------------------------------------------
 
 BlockingThreadPool::BlockingThreadPool(size_t threads, const size_t max_queue)
-    : slots_available_(max_queue),
+    : queue_(max_queue),
+      slots_available_(max_queue),
       tasks_available_(0),
-      max_queue_(max_queue)
+max_queue_(max_queue)
 {
     if (threads == 0)
     {
@@ -55,7 +57,7 @@ bool BlockingThreadPool::try_submit(Job job)
         return false;
     }
 
-    if (!queue_.enqueue(std::move(job)))
+    if (!queue_.try_push(std::move(job)))
     {
         // If enqueue fails (e.g. OOM), return the token
         slots_available_.release();
@@ -84,18 +86,14 @@ void BlockingThreadPool::worker_loop()
             return;
         }
 
-        if (Job job; queue_.try_dequeue(job))
+        auto run = [&](Job&& job) noexcept
+        {
+            try { job(); } catch (...) {}
+        };
+
+        if (queue_.try_consume_one(run))
         {
             slots_available_.release();
-
-            try
-            {
-                job();
-            }
-            catch (...)
-            {
-                // Ensure the worker thread survives even if the job throws.
-            }
         }
     }
 }
@@ -108,8 +106,11 @@ void BlockingThreadPool::worker_loop()
 
 ThreadContext::ThreadContext(const size_t index,
                              const RuntimeConfig cfg,
-                             detail::BlockingThreadPool* blocking)
+                             detail::BlockingThreadPool* blocking,
+                             const size_t task_queue_cap
+                             )
     : eventfd_(eventfd(0, EFD_CLOEXEC)),
+      incoming_(task_queue_cap),
       blocking_(blocking),
       index_(index)
 {
@@ -127,11 +128,15 @@ ThreadContext::ThreadContext(const size_t index,
 
 ThreadContext::ThreadContext(const size_t index,
                              const detail::ExecutorConfig cfg,
-                             detail::BlockingThreadPool* blocking)
+                             detail::BlockingThreadPool* blocking,
+                             const size_t task_queue_cap
+                             )
     : exec_(cfg),
       eventfd_(eventfd(0, EFD_CLOEXEC)),
+      incoming_(task_queue_cap),
       blocking_(blocking),
       index_(index)
+
 {
     if (eventfd_ < 0)
     {
@@ -149,17 +154,25 @@ ThreadContext::~ThreadContext()
 
 void ThreadContext::schedule(WorkItem work)
 {
-    // Enqueue the work item.
-    // moodycamel::ConcurrentQueue has built-in TSAN annotations that trigger
-    // when __SANITIZE_THREAD__ is defined (via -fsanitize=thread).
-    // No manual annotations needed!
-    incoming_.enqueue(std::move(work));
+    // NOTE: in our MpscRing, the move into the slot happens only on success.
+    int spins = 0;
+    while (!incoming_.try_push(std::move(work)))
+    {
+        // Overload: produces back off. Keep it simple for now
+        // TODO: make it configurable ?
+        if (++spins < 64)
+        {
+            ; // tigh spin a bit
+        } else
+        {
+            std::this_thread::yield();
+        }
+    }
 
-    // Signal that work is available
-    const size_t prev = pending_work_.fetch_add(1, std::memory_order_release);
+    // Now account + wake-on-transition
 
     // Only wake on transition 0 -> 1.
-    if (prev != 0)
+    if (const size_t prev = pending_work_.fetch_add(1, std::memory_order_release); prev != 0)
     {
         return;
     }
@@ -204,38 +217,28 @@ void ThreadContext::wake_eventfd() const noexcept
     }
 }
 
-size_t ThreadContext::drain_incoming(std::vector<WorkItem>& buf, const size_t max_items)
+size_t ThreadContext::drain_incoming(const size_t max_items)
 {
-    // moodycamel::ConcurrentQueue has built-in TSAN annotations
-    // No manual annotations needed!
-    size_t total = 0;
 
-    while (total < max_items)
+
+    size_t n = 0;
+
+    auto run = [&](WorkItem&& w) noexcept
     {
-        buf.clear();
-        const size_t want = std::min<size_t>(64, max_items - total);
+        try { w(); } catch (...) {}
+    };
 
-        incoming_.try_dequeue_bulk(std::back_inserter(buf), want);
-        if (buf.empty())
-            break;
-
-        for (auto& w : buf)
-        {
-            try
-            {
-                w();
-            }
-            catch (...)
-            {
-                // Runtime-level scheduled callbacks should not crash the loop.
-            }
-        }
-
-        total += buf.size();
-        pending_work_.fetch_sub(buf.size(), std::memory_order_acq_rel);
+    while (n < max_items && incoming_.try_consume_one(run))
+    {
+        ++n;
     }
 
-    return total;
+    if (n > 0)
+    {
+        pending_work_.fetch_sub(n, std::memory_order_seq_cst);
+    }
+
+    return n;
 }
 
 void ThreadContext::wake_msg_ring_from(ThreadContext& source) const noexcept
@@ -260,9 +263,6 @@ void ThreadContext::run_thread(const bool pin, const size_t cpu_index)
     // Ensure we always have an eventfd read pending (for a foreign-thread wake).
     exec_.spawn(park_task());
 
-    std::vector<WorkItem> work_buf;
-    work_buf.reserve(64);
-
     while (!stop_requested_.load(std::memory_order_relaxed) ||
            exec_.pending() > 0 ||
            pending_work_.load(std::memory_order_acquire) > 0)
@@ -274,7 +274,8 @@ void ThreadContext::run_thread(const bool pin, const size_t cpu_index)
         (void)exec_.loop_once(!have_work);
 
         // Run queued work.
-        (void)drain_incoming(work_buf, 1024);
+        // TODO : make configurabe ?
+        (void)drain_incoming(64);
 
         // If totally idle and not stopping, yield a touch to avoid pathological spins
         // in unusual cases.
@@ -336,7 +337,7 @@ Runtime::Runtime(RuntimeConfig cfg)
     threads_.reserve(cfg.num_threads);
     for (size_t i = 0; i < cfg.num_threads; ++i)
     {
-        auto ctx = std::make_unique<ThreadContext>(i, excfg, &blocking_pool_);
+        auto ctx = std::make_unique<ThreadContext>(i, excfg, &blocking_pool_, cfg.task_queue_capacity);
         ctx->runtime_ = this;
         threads_.push_back(std::move(ctx));
     }

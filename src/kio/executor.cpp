@@ -5,7 +5,7 @@
 namespace kio::detail
 {
 
-void SplicePipePool::Lease::recycle()
+void SplicePipePool::Lease::recycle() noexcept
 {
     if (read_fd != -1)
     {

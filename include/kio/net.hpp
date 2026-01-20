@@ -37,7 +37,7 @@ public:
     Socket() = default;
     explicit Socket(int fd) : fd_(fd) {}
 
-    ~Socket()
+    ~Socket() noexcept
     {
         if (fd_ >= 0)
             ::close(fd_);

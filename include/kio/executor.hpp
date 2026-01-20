@@ -285,11 +285,19 @@ public:
     io_uring_sqe* get_sqe()
     {
         io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
+        int retries = 0;
         while (!sqe)
         {
             io_uring_submit(&ring_);
             sqe = io_uring_get_sqe(&ring_);
             if (sqe) break;
+
+            // If we've spun too long, force wait for a completion
+            if (++retries > 100)
+            {
+                io_uring_submit_and_wait(&ring_, 1);
+                retries = 0;
+            }
             std::this_thread::yield();
         }
         ++pending_;
@@ -415,6 +423,10 @@ struct ReadOp : BaseOp
         if (result < 0) return error_from_errno(-result);
         return result;
     }
+
+    // Prevent moves (operations are meant to be temporaries)
+    ReadOp(ReadOp&&) = delete;
+    ReadOp& operator=(ReadOp&&) = delete;
 };
 
 struct WriteOp : BaseOp
@@ -442,6 +454,10 @@ struct WriteOp : BaseOp
         if (result < 0) return error_from_errno(-result);
         return result;
     }
+
+    // Prevent moves (operations are meant to be temporaries)
+    WriteOp(WriteOp&&) = delete;
+    WriteOp& operator=(WriteOp&&) = delete;
 };
 
 struct FsyncOp : BaseOp
@@ -466,6 +482,9 @@ struct FsyncOp : BaseOp
         if (result < 0) return error_from_errno(-result);
         return {};
     }
+
+    FsyncOp(FsyncOp&&) = delete;
+    FsyncOp& operator=(FsyncOp&&) = delete;
 };
 
 struct AcceptOp : BaseOp
@@ -492,6 +511,9 @@ struct AcceptOp : BaseOp
         if (result < 0) return error_from_errno(-result);
         return result;
     }
+
+    AcceptOp(AcceptOp&&) = delete;
+    AcceptOp& operator=(AcceptOp&&) = delete;
 };
 
 struct ConnectOp : BaseOp
@@ -500,6 +522,9 @@ struct ConnectOp : BaseOp
     int fd;
     const sockaddr* addr;
     socklen_t addrlen;
+
+    ConnectOp(ConnectOp&&) = delete;
+    ConnectOp& operator=(ConnectOp&&) = delete;
 
     ConnectOp(Executor& ex, int fd_, const sockaddr* addr_, socklen_t len)
         : exec(ex), fd(fd_), addr(addr_), addrlen(len)
@@ -528,6 +553,9 @@ struct RecvOp : BaseOp
     unsigned len;
     int msg_flags;
 
+    RecvOp(RecvOp&&) = delete;
+    RecvOp& operator=(RecvOp&&) = delete;
+
     RecvOp(Executor& ex, int fd_, void* buf_, unsigned len_, int flags = 0)
         : exec(ex), fd(fd_), buf(buf_), len(len_), msg_flags(flags)
     {}
@@ -555,6 +583,9 @@ struct SendOp : BaseOp
     unsigned len;
     int msg_flags;
 
+    SendOp(SendOp&&) = delete;
+    SendOp& operator=(SendOp&&) = delete;
+
     SendOp(Executor& ex, int fd_, const void* buf_, unsigned len_, int flags = 0)
         : exec(ex), fd(fd_), buf(buf_), len(len_), msg_flags(flags)
     {}
@@ -579,6 +610,9 @@ struct CloseOp : BaseOp
     Executor& exec;
     int fd;
 
+    CloseOp(CloseOp&&) = delete;
+    CloseOp& operator=(CloseOp&&) = delete;
+
     CloseOp(Executor& ex, int fd_) : exec(ex), fd(fd_) {}
 
     void await_suspend(std::coroutine_handle<> h)
@@ -600,6 +634,9 @@ struct TimeoutOp : BaseOp
 {
     Executor& exec;
     __kernel_timespec ts;
+
+    TimeoutOp(TimeoutOp&&) = delete;
+    TimeoutOp& operator=(TimeoutOp&&) = delete;
 
     TimeoutOp(Executor& ex, __kernel_timespec t) : exec(ex), ts(t) {}
 
@@ -623,6 +660,9 @@ struct CancelOp : BaseOp
     Executor& exec;
     void* target;
 
+    CancelOp(CancelOp&&) = delete;
+    CancelOp& operator=(CancelOp&&) = delete;
+
     CancelOp(Executor& ex, void* user_data) : exec(ex), target(user_data) {}
 
     void await_suspend(std::coroutine_handle<> h)
@@ -645,6 +685,9 @@ struct CancelFdOp : BaseOp
     Executor& exec;
     int fd;
     int flags;
+
+    CancelFdOp(CancelFdOp&&) = delete;
+    CancelFdOp& operator=(CancelFdOp&&) = delete;
 
     // use IORING_ASYNC_CANCEL_ALL to cancel all operations related to the FD
     CancelFdOp(Executor& ex, int fd_, int flags_=0) : exec(ex), fd(fd_), flags(flags_) {}
@@ -671,6 +714,9 @@ struct ReadvOp : BaseOp
     const iovec* iov;
     int iovcnt;
     uint64_t offset;
+
+    ReadvOp(ReadvOp&&) = delete;
+    ReadvOp& operator=(ReadvOp&&) = delete;
 
     ReadvOp(Executor& ex, int fd_, const iovec* iov_, int iovcnt_, uint64_t off)
         : exec(ex), fd(fd_), iov(iov_), iovcnt(iovcnt_), offset(off)
@@ -699,6 +745,9 @@ struct WritevOp : BaseOp
     int iovcnt;
     uint64_t offset;
 
+    WritevOp(WritevOp&&) = delete;
+    WritevOp& operator=(WritevOp&&) = delete;
+
     WritevOp(Executor& ex, int fd_, const iovec* iov_, int iovcnt_, uint64_t off)
         : exec(ex), fd(fd_), iov(iov_), iovcnt(iovcnt_), offset(off)
     {}
@@ -724,6 +773,9 @@ struct PollOp : BaseOp
     int fd;
     int events;
 
+    PollOp(PollOp&&) = delete;
+    PollOp& operator=(PollOp&&) = delete;
+
     PollOp(Executor& ex, int fd_, int events_) : exec(ex), fd(fd_), events(events_) {}
 
     void await_suspend(std::coroutine_handle<> h)
@@ -747,6 +799,9 @@ struct SendmsgOp : BaseOp
     int fd;
     const msghdr* msg;
     int flags;
+
+    SendmsgOp(SendmsgOp&&) = delete;
+    SendmsgOp& operator=(SendmsgOp&&) = delete;
 
     SendmsgOp(Executor& ex, int fd_, const msghdr* msg_, int flags_)
         : exec(ex), fd(fd_), msg(msg_), flags(flags_) {}
@@ -772,6 +827,9 @@ struct RecvmsgOp : BaseOp
     int fd;
     msghdr* msg;
     int flags;
+
+    RecvmsgOp(RecvmsgOp&&) = delete;
+    RecvmsgOp& operator=(RecvmsgOp&&) = delete;
 
     RecvmsgOp(Executor& ex, int fd_, msghdr* msg_, int flags_)
         : exec(ex), fd(fd_), msg(msg_), flags(flags_) {}
@@ -799,6 +857,9 @@ struct OpenAtOp : BaseOp
     int flags;
     mode_t mode;
 
+    OpenAtOp(OpenAtOp&&) = delete;
+    OpenAtOp& operator=(OpenAtOp&&) = delete;
+
     OpenAtOp(Executor& ex, int dirfd_, std::filesystem::path path_, int flags_, mode_t mode_)
         : exec(ex), dirfd(dirfd_), path(std::move(path_)), flags(flags_), mode(mode_)
     {}
@@ -824,6 +885,9 @@ struct UnlinkAtOp : BaseOp
     int dirfd;
     std::filesystem::path path;
     int flags;
+
+    UnlinkAtOp(UnlinkAtOp&&) = delete;
+    UnlinkAtOp& operator=(UnlinkAtOp&&) = delete;
 
     UnlinkAtOp(Executor& ex, int dirfd_, std::filesystem::path path_, int flags_)
         : exec(ex), dirfd(dirfd_), path(std::move(path_)), flags(flags_)
@@ -852,6 +916,9 @@ struct FallocateOp : BaseOp
     off_t offset;
     off_t len;
 
+    FallocateOp(FallocateOp&&) = delete;
+    FallocateOp& operator=(FallocateOp&&) = delete;
+
     FallocateOp(Executor& ex, int fd_, int mode_, off_t offset_, off_t len_)
         : exec(ex), fd(fd_), mode(mode_), offset(offset_), len(len_)
     {}
@@ -876,6 +943,9 @@ struct FtruncateOp : BaseOp
     Executor& exec;
     int fd;
     off_t length;
+
+    FtruncateOp(FtruncateOp&&) = delete;
+    FtruncateOp& operator=(FtruncateOp&&) = delete;
 
     FtruncateOp(Executor& ex, int fd_, off_t length_) : exec(ex), fd(fd_), length(length_) {}
 
@@ -904,6 +974,9 @@ struct SpliceOp : BaseOp
     unsigned int len;
     unsigned int flags;
 
+    SpliceOp(SpliceOp&&) = delete;
+    SpliceOp& operator=(SpliceOp&&) = delete;
+
     SpliceOp(Executor& ex, int fd_in_, off_t off_in_, int fd_out_, off_t off_out_, unsigned int len_,
              unsigned int flags_ = 0)
         : exec(ex), fd_in(fd_in_), off_in(off_in_), fd_out(fd_out_), off_out(off_out_), len(len_), flags(flags_)
@@ -925,4 +998,4 @@ struct SpliceOp : BaseOp
 };
 
 }  // namespace detail
-}  // namespace uring
+}  // namespace kio

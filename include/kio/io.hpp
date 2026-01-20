@@ -25,6 +25,23 @@ inline detail::Executor& get_exec(ThreadContext& ctx) {
     return ctx.executor();
 }
 
+/// @brief Reads data from a file descriptor.
+/// @param ctx The thread context to run on
+/// @param fd File descriptor to read from
+/// @param buf Buffer to read into. MUST remain valid until operation completes.
+/// @param off Offset to read from (default: current position)
+/// @return Awaitable that yields Result<int> with bytes read
+///
+/// @warning The buffer must remain valid until co_await returns!
+/// @code
+///   std::vector<char> buffer(1024);
+///   auto result = co_await read(ctx, fd, buffer);  // OK
+///
+///   // WRONG - buffer destroyed before read completes:
+///   auto op = read(ctx, fd, temp_buffer);
+///   // temp_buffer destroyed here
+///   co_await op;  // ⚠️ Undefined behavior
+///   @endcode
 inline auto read(ThreadContext& ctx, int fd, std::span<char> buf, uint64_t off = 0)
 {
     return detail::ReadOp(get_exec(ctx), fd, buf.data(), buf.size_bytes(), off);
