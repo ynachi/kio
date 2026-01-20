@@ -9,29 +9,41 @@ kio_target_compile_options(kio_runtime_lib)
 #-----------------------------------------
 # DEMO TARGETS
 #-----------------------------------------
-kio_add_demo(tcp_demo_v5 demo/tcp_demo.cpp
+kio_add_demo(tcp_demo_v5 demo/tcp_demo_old.cpp
         TAGS runtime
-        LIBS kio_runtime_lib kio_utilities
+        LIBS kio_runtime_lib
 )
 kio_add_sanitizers(tcp_demo_v5)
 
 kio_add_demo(runtime_example demo/example.cpp
         TAGS runtime
-        LIBS kio_runtime_lib kio_utilities
+        LIBS kio_runtime_lib
 )
 
 kio_add_demo(runtime_mt_example demo/mt_example.cpp
         TAGS runtime
-        LIBS kio_runtime_lib kio_utilities
+        LIBS kio_runtime_lib
 )
 kio_add_sanitizers(runtime_mt_example)
 
 
 kio_add_demo(baton_demo demo/baton_demo.cpp
         TAGS runtime
-        LIBS kio_runtime_lib kio_utilities
+        LIBS kio_runtime_lib
 )
 kio_add_sanitizers(baton_demo)
+
+kio_add_demo(dns_demo demo/dns_demo.cpp
+        TAGS runtime
+        LIBS kio_runtime_lib
+)
+kio_add_sanitizers(dns_demo)
+
+kio_add_demo(02_file_server demo/02_file_server.cpp
+        TAGS runtime
+        LIBS kio_runtime_lib
+)
+kio_add_sanitizers(02_file_server)
 
 #-----------------------------------------
 # TEST TARGETS
@@ -39,5 +51,5 @@ kio_add_sanitizers(baton_demo)
 #-----------------------------------------
 kio_add_test(executor_test tests/executor_test.cpp
         TAGS runtime
-        LIBS GTest::gtest GTest::gtest_main kio_runtime_lib kio_utilities
+        LIBS GTest::gtest GTest::gtest_main kio_runtime_lib
 )

@@ -14,6 +14,10 @@
 #undef BLOCK_SIZE
 #endif
 
+// NOTE: moodycamel::ConcurrentQueue has built-in TSAN support.
+// When compiled with -fsanitize=thread, the compiler defines __SANITIZE_THREAD__
+// which enables the queue's internal TSAN annotations automatically.
+// No manual annotations needed!
 #include "external_libraries/concurrentqueue.h"
 
 #include <atomic>
@@ -26,15 +30,9 @@
 #include <utility>
 #include <vector>
 
-#include <pthread.h>
-#include <sched.h>
-#include <unistd.h>
+#include "kio/executor.hpp"
 
-#include <sys/eventfd.h>
-
-#include "executor.hpp"
-
-namespace uring
+namespace kio
 {
 
 class Runtime;
@@ -72,99 +70,17 @@ class BlockingThreadPool
 public:
     using Job = std::move_only_function<void()>;
 
-    explicit BlockingThreadPool(size_t threads, const size_t max_queue = 1)
-        : slots_available_(max_queue),
-          // Semaphore tracking free space in the queue (Backpressure)
-          tasks_available_(0),
-          // Semaphore tracking items to be processed (Wakeup)
-          max_queue_(max_queue)
-    {
-        if (threads == 0)
-        {
-            threads = 1;
-        }
-        workers_.reserve(threads);
-        for (size_t i = 0; i < threads; ++i)
-        {
-            workers_.emplace_back([this] { worker_loop(); });
-        }
-    }
-
-    ~BlockingThreadPool()
-    {
-        stop_.store(true, std::memory_order_release);
-
-        // Wake up all workers so they can exit.
-        // We release 'threads' tokens. Workers will wake up, check stop_, and exit.
-        tasks_available_.release(workers_.size());
-
-        for (auto& t : workers_)
-            if (t.joinable())
-            {
-                t.join();
-            }
-    }
+    explicit BlockingThreadPool(size_t threads, size_t max_queue = 1);
+    ~BlockingThreadPool() noexcept;
 
     BlockingThreadPool(const BlockingThreadPool&) = delete;
     BlockingThreadPool& operator=(const BlockingThreadPool&) = delete;
 
-    bool try_submit(Job job)
-    {
-        if (stop_.load(std::memory_order_acquire))
-            return false;
-
-        // Try to acquire a "free slot" token without blocking.
-        if (!slots_available_.try_acquire())
-        {
-            return false;
-        }
-
-        if (!queue_.enqueue(std::move(job)))
-        {
-            // If enqueue fails (e.g. OOM), return the token
-            slots_available_.release();
-            return false;
-        }
-
-        // Wake up a worker
-        tasks_available_.release();
-        return true;
-    }
-
-    size_t get_queue_size() const { return max_queue_;}
+    bool try_submit(Job job);
+    size_t get_queue_size() const;
 
 private:
-    void worker_loop()
-    {
-        while (true)
-        {
-            // Wait for work (or shutdown signal)
-            tasks_available_.acquire();
-
-            if (stop_.load(std::memory_order_acquire))
-            {
-                return;
-            }
-
-            if (Job job; queue_.try_dequeue(job))
-            {
-                slots_available_.release();
-
-                try
-                {
-                    job();
-                }
-                catch (...)
-                {
-                    // Ensure the worker thread survives even if the job throws.
-                    // Ideally, jobs should handle their own exceptions (like spawn_blocking does).
-                }
-            }
-            // Note: If try_dequeue returns false, it means we were woken up
-            // but the queue was empty (likely a race or spurious wake, or during shutdown).
-            // We just loop back and wait again.
-        }
-    }
+    void worker_loop();
 
     moodycamel::ConcurrentQueue<Job> queue_;
 
@@ -175,6 +91,7 @@ private:
     size_t max_queue_;
     std::atomic<bool> stop_{false};
 };
+
 }  // namespace detail
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -258,154 +175,28 @@ private:
     }
 
     // Foreign-thread wakeup path.
-    void wake_eventfd() const noexcept
-    {
-        constexpr uint64_t val = 1;
-        for (;;)
-        {
-            const ssize_t n = ::write(eventfd_, &val, sizeof(val));
-            if (std::cmp_equal(n ,sizeof(val)))
-            {
-                return;
-            }
-            if (n < 0 && errno == EINTR)
-            {
-                continue;
-            }
-            // Saturation (EAGAIN) or other errors: best-effort wake.
-            return;
-        }
-    }
+    void wake_eventfd() const noexcept;
 
     // Drain a bounded number of queued WorkItems.
     // Returns the number executed.
-    size_t drain_incoming(std::vector<WorkItem>& buf, const size_t max_items)
-    {
-        size_t total = 0;
-
-        while (total < max_items)
-        {
-            buf.clear();
-            const size_t want = std::min<size_t>(64, max_items - total);
-
-            incoming_.try_dequeue_bulk(std::back_inserter(buf), want);
-            if (buf.empty())
-                break;
-
-            for (auto& w : buf)
-            {
-                try
-                {
-                    w();
-                }
-                catch (...)
-                {
-                    // Runtime-level scheduled callbacks should not crash the loop.
-                }
-            }
-
-            total += buf.size();
-            pending_work_.fetch_sub(buf.size(), std::memory_order_acq_rel);
-        }
-
-        return total;
-    }
+    size_t drain_incoming(std::vector<WorkItem>& buf, size_t max_items);
 
     // Internal wakeup path (runtime thread -> runtime thread): MSG_RING.
-    void wake_msg_ring_from(ThreadContext& source) const noexcept
-    {
-        source.exec_.msg_ring_wake(exec_.ring_fd(), 1, 0);
-    }
+    void wake_msg_ring_from(ThreadContext& source) const noexcept;
 
-    void run_thread(const bool pin, const size_t cpu_index)
-    {
-        detail::tls_current_ctx = this;
-
-        if (pin)
-        {
-            cpu_set_t cpuset;
-            CPU_ZERO(&cpuset);
-            CPU_SET(cpu_index % std::thread::hardware_concurrency(), &cpuset);
-            pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
-        }
-
-        running_.store(true, std::memory_order_release);
-
-        // Ensure we always have an eventfd read pending (for a foreign-thread wake).
-        exec_.spawn(park_task());
-
-        std::vector<WorkItem> work_buf;
-        work_buf.reserve(64);
-
-        while (!stop_requested_.load(std::memory_order_relaxed) ||
-               exec_.pending() > 0 ||
-               pending_work_.load(std::memory_order_acquire) > 0)
-        {
-            const bool have_work = pending_work_.load(std::memory_order_acquire) > 0;
-
-            // If we have queued work, don't block waiting for I/O; poll completions and run work.
-            // If we don't have work, it's fine to block (park op + msg_ring will wake us).
-            (void)exec_.loop_once(!have_work);
-
-            // Run queued work. If there's lots of it, this will loop without blocking
-            // because have_work will stay true.
-            (void)drain_incoming(work_buf, 1024);
-
-            // If totally idle and not stopping, yield a touch to avoid pathological spins
-            // in unusual cases.
-            if (!have_work && exec_.pending() == 0 && !stop_requested_.load(std::memory_order_relaxed))
-            {
-                std::this_thread::yield();
-            }
-        }
-
-        running_.store(false, std::memory_order_release);
-        detail::tls_current_ctx = nullptr;
-    }
+    void run_thread(bool pin, size_t cpu_index);
 
 public:
-    explicit ThreadContext(const size_t index,
-                           const RuntimeConfig cfg,
-                           detail::BlockingThreadPool* blocking = nullptr)
-        : eventfd_(eventfd(0, EFD_CLOEXEC)),
-          blocking_(blocking),
-          index_(index)
-    {
-        detail::ExecutorConfig excfg;
-        excfg.entries = cfg.entries;
-        excfg.uring_flags = cfg.uring_flags;
-        excfg.sq_thread_idle_ms = cfg.sq_thread_idle_ms;
-        new (&exec_) detail::Executor(excfg);
-
-        if (eventfd_ < 0)
-        {
-            throw std::system_error(errno, std::system_category(), "eventfd");
-        }
-    }
+    explicit ThreadContext(size_t index,
+                           RuntimeConfig cfg,
+                           detail::BlockingThreadPool* blocking = nullptr);
 
     // Helper for Runtime to construct with mapped config
-    explicit ThreadContext(const size_t index,
-                           const detail::ExecutorConfig cfg,
-                           detail::BlockingThreadPool* blocking = nullptr)
-        : exec_(cfg),
-          eventfd_(eventfd(0, EFD_CLOEXEC)),
-          blocking_(blocking),
-          index_(index)
-    {
-        if (eventfd_ < 0)
-        {
-            throw std::system_error(errno, std::system_category(), "eventfd");
-        }
-    }
+    explicit ThreadContext(size_t index,
+                           detail::ExecutorConfig cfg,
+                           detail::BlockingThreadPool* blocking = nullptr);
 
-
-    ~ThreadContext()
-    {
-        if (eventfd_ >= 0)
-        {
-            ::close(eventfd_);
-        }
-    }
+    ~ThreadContext() noexcept;
 
     ThreadContext(const ThreadContext&) = delete;
     ThreadContext& operator=(const ThreadContext&) = delete;
@@ -420,38 +211,8 @@ public:
     bool running() const { return running_.load(std::memory_order_acquire); }
 
     // Schedule work on this thread
-    void schedule(WorkItem work)
-    {
-        // Increment first so the consumer sees "work exists" before any wake decisions.
-        const size_t prev = pending_work_.fetch_add(1, std::memory_order_release);
-        incoming_.enqueue(std::move(work));
-
-        // Only wake on transition 0 -> 1.
-        if (prev != 0)
-        {
-            return;
-        }
-
-        if (ThreadContext* src = current(); src != nullptr && src->runtime_ == runtime_)
-        {
-            // do not wakup self
-            if (src != this)
-            {
-                wake_msg_ring_from(*src);
-            }
-        }
-        else
-        {
-            // Foreign thread: use eventfd fallback (park op will complete and wake the ring).
-            wake_eventfd();
-        }
-    }
-
-    void schedule(Task<> task)
-    {
-        auto handle = task.release();
-        schedule([handle]() { handle.resume(); });
-    }
+    void schedule(WorkItem work);
+    void schedule(Task<> task);
 
     // -------------------------------------------------------------------------
     // Spawn Blocking - bounded offload to background pool, resume on this ctx
@@ -540,36 +301,15 @@ public:
     }
 
 private:
-    void start(bool pin)
-    {
-        thread_ = std::thread([this, pin]() { run_thread(pin, index_); });
-    }
-
-    void request_stop()
-    {
-        stop_requested_.store(true, std::memory_order_release);
-        // request_stop is typically called from a foreign thread; eventfd is the safe wake.
-        wake_eventfd();
-    }
-
-    void join()
-    {
-        if (thread_.joinable())
-        {
-            thread_.join();
-        }
-    }
+    void start(bool pin);
+    void request_stop();
+    void join();
 };
 
 
 ////////////////////////////////////////////////////////////////////////////////
-// ScheduleOnAwaiter implementation
+// ScheduleOnAwaiter helper
 ////////////////////////////////////////////////////////////////////////////////
-
-inline void ScheduleOnAwaiter::await_suspend(std::coroutine_handle<> h) const
-{
-    target_.schedule([h]() { h.resume(); });
-}
 
 inline ScheduleOnAwaiter schedule_on(ThreadContext& target)
 {
@@ -588,33 +328,13 @@ class Runtime
     bool started_ = false;
 
 public:
-    explicit Runtime(RuntimeConfig cfg = RuntimeConfig{})
-        : blocking_pool_(cfg.blocking_threads, cfg.blocking_queue)
-    {
-        if (cfg.num_threads == 0)
-            cfg.num_threads = 1;
-
-        // Map RuntimeConfig options to internal ExecutorConfig
-        detail::ExecutorConfig excfg;
-        excfg.entries = cfg.entries;
-        excfg.uring_flags = cfg.uring_flags;
-        excfg.sq_thread_idle_ms = cfg.sq_thread_idle_ms;
-
-        threads_.reserve(cfg.num_threads);
-        for (size_t i = 0; i < cfg.num_threads; ++i)
-        {
-            auto ctx = std::make_unique<ThreadContext>(i, excfg, &blocking_pool_);
-            ctx->runtime_ = this;
-            threads_.push_back(std::move(ctx));
-        }
-    }
-
-    ~Runtime() { stop(); }
+    explicit Runtime(RuntimeConfig cfg = RuntimeConfig{});
+    ~Runtime();
 
     size_t size() const { return threads_.size(); }
 
-    ThreadContext& thread(const size_t index) { return *threads_.at(index); }
-    const ThreadContext& thread(const size_t index) const { return *threads_.at(index); }
+    ThreadContext& thread(size_t index) { return *threads_.at(index); }
+    const ThreadContext& thread(size_t index) const { return *threads_.at(index); }
 
     ThreadContext& next_thread()
     {
@@ -622,34 +342,8 @@ public:
         return *threads_[idx];
     }
 
-    void loop_forever(const bool pin_threads = false)
-    {
-        if (started_)
-            return;
-        started_ = true;
-
-        for (const auto& ctx : threads_)
-            ctx->start(pin_threads);
-
-        for (const auto& ctx : threads_)
-        {
-            while (!ctx->running())
-                std::this_thread::yield();
-        }
-    }
-
-    void stop()
-    {
-        if (!started_)
-            return;
-
-        for (const auto& ctx : threads_)
-            ctx->request_stop();
-        for (const auto& ctx : threads_)
-            ctx->join();
-
-        started_ = false;
-    }
+    void loop_forever(bool pin_threads = false);
+    void stop();
 
     bool running() const
     {

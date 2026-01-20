@@ -17,9 +17,9 @@
 
 #include <liburing.h>
 
-#include "result.hpp"
+#include "kio/result.hpp"
 
-namespace uring
+namespace kio
 {
 
 // Forward declarations for public types
@@ -59,9 +59,9 @@ public:
             return *this;
         }
 
-        ~Lease() { recycle(); }
+        ~Lease() noexcept { recycle(); }
 
-        void recycle();
+        void recycle() noexcept;
     };
 
     static Result<Lease> acquire()
@@ -103,16 +103,6 @@ private:
         }
     }
 };
-
-inline void SplicePipePool::Lease::recycle()
-{
-    if (read_fd != -1)
-    {
-        return_to_pool(read_fd, write_fd);
-        read_fd = -1;
-        write_fd = -1;
-    }
-}
 
 // -----------------------------------------------------------------------------
 // Internal: Coroutine Promise
@@ -197,7 +187,7 @@ public:
     Task(const Task&) = delete;
     Task& operator=(const Task&) = delete;
 
-    ~Task()
+    ~Task() noexcept
     {
         if (handle_)
         {
@@ -241,7 +231,7 @@ namespace detail
 template <typename T>
 Task<T> Promise<T>::get_return_object()
 {
-    return uring::Task<T>{std::coroutine_handle<Promise>::from_promise(*this)};
+    return kio::Task<T>{std::coroutine_handle<Promise>::from_promise(*this)};
 }
 
 inline Task<> Promise<void>::get_return_object()
@@ -282,7 +272,7 @@ public:
         }
     }
 
-    ~Executor() { io_uring_queue_exit(&ring_); }
+    ~Executor() noexcept { io_uring_queue_exit(&ring_); }
 
     Executor(const Executor&) = delete;
     Executor& operator=(const Executor&) = delete;

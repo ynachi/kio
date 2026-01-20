@@ -9,9 +9,9 @@
 
 #include <memory>
 
+#include "../kio_logger.hpp"
 #include "io_pool/runtime.hpp"
 #include "utilities/baton.hpp"
-#include "utilities/kio_logger.hpp"
 
 using namespace uring;
 

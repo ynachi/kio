@@ -15,14 +15,14 @@
 #include <vector>
 
 // Assumes these files are in the same directory
-#include "kio/kio_logger.hpp"
-#include "kio/net.hpp"
-#include "kio/io.hpp"
-#include "kio/runtime.hpp"
+#include "../kio_logger.hpp"
+#include "../net.hpp"
+#include "io_pool/io.hpp"
+#include "io_pool/runtime.hpp"
 
-using namespace kio;
-using namespace kio::io;
-using namespace kio::net;
+using namespace uring;
+using namespace uring::io;
+using namespace uring::net;
 
 // Global counters
 std::atomic<uint64_t> g_requests{0};
@@ -149,19 +149,19 @@ int main()
 
         Runtime rt(config);
 
-        log::info("Binding port {}...", PORT);
+        Log::info("Binding port {}...", PORT);
 
         auto listener = TcpListener::bind(PORT);
         if (!listener)
         {
-            log::error("Failed to bind: {}", listener.error().message());
+            Log::error("Failed to bind: {}", listener.error().message());
             return 1;
         }
 
         // Keep the raw FD for the workers (shared), but keep the RAII object alive in main
         int listen_fd = listener->get();
 
-        log::info("Server started on port {} (Threads: {})", PORT, config.num_threads);
+        Log::info("Server started on port {} (Threads: {})", PORT, config.num_threads);
 
         rt.loop_forever(config.pin_threads);
 
@@ -180,11 +180,11 @@ int main()
             uint64_t reqs = g_requests.exchange(0, std::memory_order_relaxed);
             if (conns > 0 || reqs > 0)
             {
-                log::info("[Stats] New Conns: {}, Reqs: {}", conns, reqs);
+                Log::info("[Stats] New Conns: {}, Reqs: {}", conns, reqs);
             }
         }
 
-        log::info("Shutting down...");
+        Log::info("Shutting down...");
 
         // Clean shutdown: Close socket to cancel acceptances
         listener->close();
@@ -193,11 +193,11 @@ int main()
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
         rt.stop();
-        log::info("Bye.");
+        Log::info("Bye.");
     }
     catch (const std::exception& e)
     {
-        log::error("Fatal: {}", e.what());
+        Log::error("Fatal: {}", e.what());
         return 1;
     }
 }

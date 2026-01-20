@@ -6,10 +6,11 @@
 // Allows usage of Result<int> or Result<> (defaults to void).
 ////////////////////////////////////////////////////////////////////////////////
 
+#pragma once
 #include <expected>
 #include <system_error>
 
-namespace uring
+namespace kio
 {
 
 // Single definition. Defaults to void for simple success/fail functions.
@@ -22,4 +23,4 @@ inline std::unexpected<std::error_code> error_from_errno(int err)
     return std::unexpected(std::error_code(err, std::system_category()));
 }
 
-}  // namespace uring
+}  // namespace kio

@@ -81,10 +81,25 @@ endfunction()
 
 function(kio_add_sanitizers target_name)
     if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-        target_compile_options(${target_name} PRIVATE -fsanitize=thread -g)
+        message(STATUS "🔍 ThreadSanitizer enabled")
+
+        # Check if we're using moodycamel
+        target_compile_options(${target_name}
+                PRIVATE
+                -fsanitize=thread
+                -g -o1
+        )
         target_link_options(${target_name} PRIVATE -fsanitize=thread)
-        target_compile_definitions(${target_name} PRIVATE MOODYCAMEL_NO_TSAN)
-    endif ()
+
+        # Default: Disable moodycamel TSAN (fixes false positives)
+        target_compile_definitions(${target_name} PUBLIC MOODYCAMEL_NO_TSAN=1)
+
+        # But also enable general thread sanitizer flag for other code
+        target_compile_definitions(${target_name} PUBLIC __SANITIZE_THREAD__=1)
+
+        message(STATUS "   ✅ moodycamel TSAN: disabled (MOODYCAMEL_NO_TSAN=1)")
+        message(STATUS "   ✅ general TSAN: enabled (__SANITIZE_THREAD__=1)")
+    endif()
 endfunction()
 
 
@@ -253,13 +268,42 @@ else ()
 endif ()
 
 #-----------------------------------------------
+# Kio lib
+#----------------------------------------------
+# Library definition
+add_library(kio
+        src/kio/executor.cpp
+        src/kio/runtime.cpp
+        src/kio/net.cpp
+        src/kio/io.cpp
+)
+# Include directories
+target_include_directories(kio PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>
+)
+# Link dependencies
+target_link_libraries(kio PUBLIC
+        PkgConfig::LibUring
+        pthread
+)
+kio_target_compile_options(kio)
+
+kio_add_demo(tcp_demo_v6 io_pool/demo/tcp_demo.cpp
+        TAGS runtime
+        LIBS kio
+)
+kio_add_sanitizers(tcp_demo_v6)
+
+#-----------------------------------------------
 # Includes
 #----------------------------------------------
 include_directories(${CMAKE_SOURCE_DIR})
 add_subdirectory(external_libraries)
-add_subdirectory(utilities)
 add_subdirectory(io_pool)
-add_subdirectory(kio)
+
+# TODO: remove for now
+# add_subdirectory(kio)
 
 if (KIO_BUILD_BITCASK)
     add_subdirectory(bitcask)
