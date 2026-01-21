@@ -1,174 +1,173 @@
-// examples/dns_bench.cpp
-#include <atomic>
+// DNS Resolution Benchmark
+// Demonstrates: blocking vs async (offload) DNS, task fan-out, blocking_pool
+
 #include <chrono>
-#include <cstdio>
-#include <cstring>
-#include <exception>
-#include <mutex>
-#include <condition_variable>
-#include <deque>
-#include <optional>
+#include <iostream>
 #include <string>
-#include <string_view>
-#include <thread>
-#include <type_traits>
 #include <utility>
 #include <vector>
+#include <atomic>
 
 #include <arpa/inet.h>
 #include <netdb.h>
-#include <sys/socket.h>
 
 #include "aio/aio.hpp"
-
 #include "aio/logger.hpp"
-// -----------------------------------------------------------------------------
-// Domain list
-// -----------------------------------------------------------------------------
+
+using namespace std::chrono_literals;
+
 static const std::vector<std::string> domains = {
-    "google.com","github.com","stackoverflow.com","reddit.com","amazon.com",
-    "microsoft.com","wikipedia.org","youtube.com","x.com","instagram.com",
-    "netflix.com","twitch.tv","linkedin.com","apple.com","adobe.com",
-    "openai.com","zoom.us","spotify.com","ebay.com","pinterest.com"
+    "google.com",
+    "github.com",
+    "stackoverflow.com",
+    "reddit.com",
+    "amazon.com",
+    "microsoft.com",
+    "wikipedia.org",
+    "youtube.com",
+    "x.com",
+    "instagram.com",
+    "netflix.com",
+    "twitch.tv",
+    "linkedin.com",
+    "apple.com",
+    "adobe.com",
+    "openai.com",
+    "zoom.us",
+    "spotify.com",
+    "ebay.com",
+    "pinterest.com"
 };
 
+// Blocking DNS resolution (uses getaddrinfo)
+static std::string resolve_blocking(const std::string& host) {
+    addrinfo hints{}, *res = nullptr;
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
 
-static std::string ip_to_string(const SocketAddress& a) {
-    char buf[INET6_ADDRSTRLEN] = {0};
-    const sockaddr* sa = a.get();
-    if (sa->sa_family == AF_INET) {
-        const auto* in = reinterpret_cast<const sockaddr_in*>(sa);
-        ::inet_ntop(AF_INET, &in->sin_addr, buf, sizeof(buf));
-    } else if (sa->sa_family == AF_INET6) {
-        const auto* in6 = reinterpret_cast<const sockaddr_in6*>(sa);
-        ::inet_ntop(AF_INET6, &in6->sin6_addr, buf, sizeof(buf));
+    if (getaddrinfo(host.c_str(), "80", &hints, &res) != 0 || !res) {
+        return "FAILED";
     }
-    return std::string(buf);
+
+    char buf[INET6_ADDRSTRLEN] = {};
+    if (res->ai_family == AF_INET) {
+        inet_ntop(AF_INET, &reinterpret_cast<sockaddr_in*>(res->ai_addr)->sin_addr, buf, sizeof(buf));
+    } else if (res->ai_family == AF_INET6) {
+        inet_ntop(AF_INET6, &reinterpret_cast<sockaddr_in6*>(res->ai_addr)->sin6_addr, buf, sizeof(buf));
+    }
+
+    freeaddrinfo(res);
+    return buf;
 }
 
-} // namespace aio::net
-
-
 // -----------------------------------------------------------------------------
-// Benchmarks
+// Blocking Benchmark - Sequential, blocks the IO thread
 // -----------------------------------------------------------------------------
-static aio::task<void> bench_blocking(aio::io_context& ctx) {
-    (void)ctx; // ctx unused but signature keeps symmetry
+aio::task<void> bench_blocking(aio::io_context& ctx) {
+    aio::alog::info("--- Starting BLOCKING Benchmark (Sequential) ---");
 
-    alog::info("--- Starting BLOCKING Benchmark (Sequential) ---");
+    std::vector<std::pair<std::string, std::string>> results;
+    results.reserve(domains.size());
 
-    std::vector<std::string> ips(domains.size());
-    auto t0 = std::chrono::high_resolution_clock::now();
+    auto start = std::chrono::high_resolution_clock::now();
 
-    for (size_t i = 0; i < domains.size(); ++i) {
-        auto r = aio::net::SocketAddress::resolve(domains[i], 80);
-        if (r) ips[i] = aio::net::ip_to_string(*r);
-        else   ips[i] = "FAILED";
+    for (const auto& domain : domains) {
+        // This blocks the IO thread!
+        auto ip = resolve_blocking(domain);
+        results.emplace_back(domain, ip);
     }
 
-    auto t1 = std::chrono::high_resolution_clock::now();
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    auto end = std::chrono::high_resolution_clock::now();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
 
-    alog::info("Blocking Total Time: {} ms", ms);
-    alog::info("--- Results (Blocking) ---");
-    for (size_t i = 0; i < domains.size(); ++i) {
-        alog::info("{}: {}", domains[i], ips[i]);
+    aio::alog::info("Blocking Total Time: {} ms", ms);
+    aio::alog::info("--- Results (Blocking) ---");
+    for (const auto& [dom, ip] : results) {
+        aio::alog::info("{}: {}", dom, ip);
     }
 
     co_return;
 }
 
-static aio::task<void> resolve_one(aio::io_context& ctx,
-                                  aio::blocking_pool& pool,
-                                  std::string domain,
-                                  size_t index,
-                                  std::vector<std::string>& ips,
-                                  std::atomic<int>& pending) {
-    try {
-        // Offload getaddrinfo to pool; resume on ctx via MSG_RING completion.
-        auto r = co_await aio::offload(ctx, pool, [d = std::move(domain)]() {
-            return aio::net::SocketAddress::resolve(d, 80);
-        });
+// -----------------------------------------------------------------------------
+// Async Benchmark - Parallel via blocking_pool
+// -----------------------------------------------------------------------------
 
-        if (r) ips[index] = aio::net::ip_to_string(*r);
-        else   ips[index] = "FAILED";
-    } catch (...) {
-        ips[index] = "FAILED";
-    }
+aio::task<void> resolve_one(aio::io_context& ctx, aio::blocking_pool& pool,
+                            std::string domain,
+                            std::vector<std::pair<std::string, std::string>>& results,
+                            std::atomic<int>& pending) {
+    // Offload blocking DNS to thread pool
+    // IMPORTANT: capture domain by value - the coroutine frame may be destroyed
+    auto ip = co_await aio::offload(ctx, pool, [domain] {
+        return resolve_blocking(domain);
+    });
 
+    // Back on IO thread - safe to touch results
+    results.emplace_back(domain, ip);
     pending.fetch_sub(1, std::memory_order_release);
-    co_return;
 }
 
-static aio::task<void> bench_async(aio::io_context& ctx, aio::blocking_pool& pool) {
-    alog::info("--- Starting ASYNC Benchmark (Parallel) ---");
+aio::task<> bench_async(aio::io_context& ctx, aio::blocking_pool& pool) {
+    aio::alog::info("--- Starting ASYNC Benchmark (Parallel) ---");
 
-    std::vector<std::string> ips(domains.size());
-    std::vector<aio::task<void>> tasks;
-    tasks.reserve(domains.size());
+    std::vector<std::pair<std::string, std::string>> results;
+    results.reserve(domains.size());
+
+    auto start = std::chrono::high_resolution_clock::now();
 
     std::atomic<int> pending{static_cast<int>(domains.size())};
 
-    auto t0 = std::chrono::high_resolution_clock::now();
+    // Keep tasks alive
+    std::vector<aio::task<>> tasks;
+    tasks.reserve(domains.size());
 
-    // Fan-out: start all tasks quickly; they immediately offload + suspend.
-    for (size_t i = 0; i < domains.size(); ++i) {
-        auto t = resolve_one(ctx, pool, domains[i], i, ips, pending);
+    // Fan-out: spawn all tasks
+    for (const auto& domain : domains) {
+        auto t = resolve_one(ctx, pool, domain, results, pending);
         t.start();
         tasks.push_back(std::move(t));
     }
 
-    // Wait for completion (cheap polling using io_uring timer)
+    // Wait for completion
     while (pending.load(std::memory_order_acquire) > 0) {
-        (void)co_await aio::async_sleep(&ctx, std::chrono::milliseconds(1));
+        co_await aio::async_sleep(&ctx, 1ms);
     }
 
-    auto t1 = std::chrono::high_resolution_clock::now();
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    auto end = std::chrono::high_resolution_clock::now();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
 
-    alog::info("Async Total Time: {} ms", ms);
-    alog::info("--- Results (Async) ---");
-    for (size_t i = 0; i < domains.size(); ++i) {
-        alog::info("{}: {}", domains[i], ips[i]);
+    aio::alog::info("Async Total Time: {} ms", ms);
+    aio::alog::info("--- Results (Async) ---");
+    for (const auto& [dom, ip] : results) {
+        aio::alog::info("{}: {}", dom, ip);
     }
 
     co_return;
 }
 
-// -----------------------------------------------------------------------------
-// main
-// -----------------------------------------------------------------------------
 int main() {
-    #if __has_include("aio/logger.hpp")
-    aio::alog::start();
-    aio::alog::g_level.store(aio::alog::Level::Info, std::memory_order_relaxed);
-    #endif
-
     try {
-        aio::io_context ctx(1024);
-        aio::blocking_pool pool(/*threads=*/20);
+        aio::alog::start();
 
-        {
-            auto t = bench_blocking(ctx);
-            ctx.run_until_done(t);
-        }
+        aio::io_context ctx;
+        aio::blocking_pool pool{20};  // 20 threads for parallel DNS
 
-        std::fprintf(stderr, "\n");
+        // Run blocking benchmark
+        auto t1 = bench_blocking(ctx);
+        ctx.run_until_done(t1);
 
-        {
-            auto t = bench_async(ctx, pool);
-            ctx.run_until_done(t);
-        }
+       // std::cout << std::endl;
 
-        // Ensure nothing pending before destruction (demo hygiene)
-        ctx.cancel_all_pending();
+        // Run async benchmark
+        auto t2 = bench_async(ctx, pool);
+        ctx.run_until_done(t2);
 
         aio::alog::stop();
-
-        return 0;
     } catch (const std::exception& e) {
-        std::fprintf(stderr, "Fatal: %s\n", e.what());
-        aio::alog::stop();
+        std::cerr << "Exception: " << e.what() << std::endl;
         return 1;
     }
+
+    return 0;
 }

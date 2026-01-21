@@ -13,8 +13,8 @@ kio_add_sanitizers(02_work_queue)
 kio_add_demo(03_m_server_gemini aio/03_m_server_gemini.cpp TAGS core LIBS aio)
 kio_add_sanitizers(03_m_server_gemini)
 
-#kio_add_demo(04_dns_resolve aio/04_dns_resolve.cpp TAGS core LIBS aio)
-#kio_add_sanitizers(04_dns_resolve)
+kio_add_demo(04_dns_resolve aio/04_dns_resolve.cpp TAGS core LIBS aio)
+kio_add_sanitizers(04_dns_resolve)
 
 kio_add_demo(05_file_copy aio/05_file_copy.cpp TAGS core LIBS aio)
 kio_add_sanitizers(05_file_copy)

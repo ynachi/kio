@@ -1,5 +1,5 @@
-// HTTP “Hello World” benchmark server
-// Demonstrates: async_accept/recv/send/close, task lifetime container + sweeping, clean-ish shutdown, MSG_RING WAKE_TAG wake.
+// HTTP "Hello World" benchmark server
+// Demonstrates: async_accept/recv/send/close, task lifetime container + sweeping, clean shutdown via ring_waker.
 // Notes: ignores SIGPIPE; handles partial sends.
 
 #include <atomic>
@@ -123,21 +123,8 @@ static aio::task<void> accept_loop(aio::io_context& ctx, int listen_fd,
     co_return;
 }
 
-// A tiny “waker ring” to post MSG_RING wake CQEs to workers.
-static void wake_ring(io_uring& waker, int target_ring_fd) {
-    io_uring_sqe* sqe = io_uring_get_sqe(&waker);
-    if (!sqe) {
-        io_uring_submit(&waker);
-        sqe = io_uring_get_sqe(&waker);
-        if (!sqe) return;
-    }
-    io_uring_prep_msg_ring(sqe, target_ring_fd, /*res*/0u, /*user_data*/aio::WAKE_TAG, 0);
-    io_uring_sqe_set_data(sqe, nullptr);
-}
-
 struct Worker {
     std::unique_ptr<aio::io_context> ctx;
-    int ring_fd = -1;
     std::thread th;
 };
 
@@ -163,7 +150,6 @@ int main(int argc, char** argv) {
     for (int i = 0; i < threads; ++i) {
         Worker w;
         w.ctx = std::make_unique<aio::io_context>(4096);
-        w.ring_fd = w.ctx->ring_fd();
         workers.push_back(std::move(w));
     }
 
@@ -176,10 +162,7 @@ int main(int argc, char** argv) {
             auto acc = accept_loop(*w.ctx, listen_fd, conns);
             acc.start();
 
-            // run until stopped (ctx.stop() is invoked by main)
             w.ctx->run();
-
-            // Destruction safety: ensure kernel ops are drained before tasks die.
             w.ctx->cancel_all_pending();
         });
     }
@@ -195,24 +178,18 @@ int main(int argc, char** argv) {
 
     std::fprintf(stderr, "shutdown...\n");
 
-    ::close(listen_fd); // cancels accept() with EBADF on workers
+    ::close(listen_fd);
 
-    // wake + stop workers
-    io_uring waker{};
-    int ret = io_uring_queue_init(64, &waker, 0);
-    if (ret >= 0) {
-        for (auto& w : workers) {
-            w.ctx->stop();
-            wake_ring(waker, w.ring_fd);
-        }
-        io_uring_submit(&waker);
-        io_uring_queue_exit(&waker);
-    } else {
-        // even if waker fails, stop flags + listen_fd close usually wakes accepts
-        for (auto& w : workers) w.ctx->stop();
+    // Clean shutdown using ring_waker
+    aio::ring_waker waker;
+    for (auto& w : workers) {
+        w.ctx->stop();
+        waker.wake(*w.ctx);
     }
 
-    for (auto& w : workers) if (w.th.joinable()) w.th.join();
+    for (auto& w : workers) {
+        if (w.th.joinable()) w.th.join();
+    }
 
     std::fprintf(stderr, "bye.\n");
     return 0;

@@ -35,29 +35,30 @@
  *   - C++23
  */
 
-#include <liburing.h>
-#include <coroutine>
-#include <expected>
-#include <chrono>
-#include <vector>
-#include <span>
-#include <cstdint>
-#include <cstring>
-#include <system_error>
-#include <stdexcept>
-#include <utility>
-#include <type_traits>
-#include <optional>
 #include <atomic>
-#include <mutex>
+#include <chrono>
 #include <condition_variable>
-#include <thread>
+#include <coroutine>
+#include <cstring>
 #include <exception>
-#include <sys/signalfd.h>
-#include <sys/eventfd.h>
-#include <sys/socket.h>
+#include <expected>
+#include <mutex>
+#include <optional>
+#include <span>
+#include <stdexcept>
+#include <system_error>
+#include <thread>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+#include <liburing.h>
 #include <signal.h>
 #include <unistd.h>
+
+#include <sys/eventfd.h>
+#include <sys/signalfd.h>
+#include <sys/socket.h>
 
 #include "aio/result.hpp"
 
@@ -99,7 +100,7 @@ struct operation_state {
     int32_t res = 0;
     std::coroutine_handle<> handle;
 
-    // Intrusive doubly-linked list pointers
+    // Intrusive doubly linked list pointers
     operation_state* next = nullptr;
     operation_state* prev = nullptr;
     bool tracked = false;
@@ -108,8 +109,7 @@ struct operation_state {
 
     // Move allowed only when not tracked
     operation_state(operation_state&& other) noexcept
-        : ctx(other.ctx), res(other.res), handle(other.handle),
-          next(nullptr), prev(nullptr), tracked(false) {
+        : ctx(other.ctx), res(other.res), handle(other.handle) {
         // Source must not be tracked
         if (other.tracked) {
             std::terminate();
@@ -298,7 +298,7 @@ public:
         io_uring_params params{};
         // Note: SINGLE_ISSUER omitted since we don't enforce thread affinity.
         // Add it back with thread-id checks if you want the optimization.
-        //params.flags = IORING_SETUP_COOP_TASKRUN;
+        params.flags = IORING_SETUP_COOP_TASKRUN;
 
         int ret = io_uring_queue_init_params(entries, &ring_, &params);
         if (ret < 0) {
@@ -431,7 +431,7 @@ public:
      * to ensure the event loop wakes up.
      */
     bool enqueue_external_done(operation_state* op) {
-        std::lock_guard<std::mutex> lk(ext_mtx_);
+        std::lock_guard lk(ext_mtx_);
         ext_done_.push_back(op);
         ext_hint_.store(true, std::memory_order_relaxed);
         if (!ext_wake_pending_) {
@@ -448,7 +448,7 @@ public:
     io_uring* ring() { return &ring_; }
     int ring_fd() const { return ring_.ring_fd; }
 
-    void ensure_sqes(unsigned n) {
+    void ensure_sqes(const unsigned n) {
         if (io_uring_sq_space_left(&ring_) < n) {
             io_uring_submit(&ring_);
             if (io_uring_sq_space_left(&ring_) < n) {
@@ -469,7 +469,7 @@ private:
 
         std::vector<operation_state*> local;
         {
-            std::lock_guard<std::mutex> lk(ext_mtx_);
+            std::scoped_lock lk(ext_mtx_);
             if (ext_done_.empty()) {
                 ext_wake_pending_ = false;
                 ext_hint_.store(false, std::memory_order_relaxed);
@@ -494,7 +494,7 @@ private:
 
         std::vector<operation_state*> local;
         {
-            std::lock_guard<std::mutex> lk(ext_mtx_);
+            std::scoped_lock lk(ext_mtx_);
             if (ext_done_.empty()) {
                 ext_wake_pending_ = false;
                 ext_hint_.store(false, std::memory_order_relaxed);
@@ -519,8 +519,7 @@ private:
     void drain_without_resume() {
         while (pending_head_) {
             io_uring_cqe* cqe;
-            int ret = io_uring_wait_cqe(&ring_, &cqe);
-            if (ret < 0) {
+            if (int ret = io_uring_wait_cqe(&ring_, &cqe); ret < 0) {
                 // Error waiting — can't safely continue
                 // In practice this shouldn't happen
                 break;
@@ -584,7 +583,7 @@ private:
         }
     }
 
-    io_uring ring_;
+    io_uring ring_{};
     std::vector<std::coroutine_handle<>> ready_;
     operation_state* pending_head_ = nullptr;
     std::atomic<bool> running_ = false;
@@ -907,7 +906,7 @@ struct async_wait_signal : uring_op<async_wait_signal> {
 template<typename Op>
 struct with_timeout_op {
     Op op;
-    __kernel_timespec ts;
+    __kernel_timespec ts{};
 
     template<typename Rep, typename Period>
     with_timeout_op(Op&& o, std::chrono::duration<Rep, Period> dur)
@@ -961,30 +960,37 @@ auto timeout(Op&& op, std::chrono::duration<Rep, Period> dur) {
 }
 
 // -----------------------------------------------------------------------------
-// Blocking Pool + Offload (for DNS, disk metadata, etc.)
+// ring_waker - Cross-thread wake via MSG_RING
 // -----------------------------------------------------------------------------
 
-namespace detail {
-
-// Pool threads need a way to wake an io_context thread that might be sleeping
-// in io_uring_submit_and_wait(). We do that by sending a MSG_RING with
-// user_data = WAKE_TAG. To avoid cross-thread submissions into the worker's
-// ring, each pool thread owns a tiny io_uring used only for MSG_RING.
-class msg_ring_waker {
+/**
+ * Sends a wake signal to an io_context on another thread.
+ *
+ * Usage (e.g., for shutdown):
+ *   ring_waker waker;
+ *   for (auto& w : workers) {
+ *       w.ctx->stop();
+ *       waker.wake(*w.ctx);
+ *   }
+ *
+ * Each ring_waker owns a small io_uring used only for MSG_RING.
+ * Thread-safe to call wake() from any thread.
+ */
+class ring_waker {
 public:
-    msg_ring_waker() {
+    ring_waker() {
         int ret = io_uring_queue_init(32, &ring_, 0);
         if (ret < 0) {
-            throw std::system_error(-ret, std::system_category(), "msg_ring_waker: io_uring_queue_init");
+            throw std::system_error(-ret, std::system_category(), "ring_waker");
         }
     }
 
-    ~msg_ring_waker() {
+    ~ring_waker() {
         io_uring_queue_exit(&ring_);
     }
 
-    msg_ring_waker(const msg_ring_waker&) = delete;
-    msg_ring_waker& operator=(const msg_ring_waker&) = delete;
+    ring_waker(const ring_waker&) = delete;
+    ring_waker& operator=(const ring_waker&) = delete;
 
     void wake(int target_ring_fd) noexcept {
         io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
@@ -994,7 +1000,6 @@ public:
             if (!sqe) return; // best-effort
         }
 
-        // Target will receive a CQE with user_data=WAKE_TAG.
         io_uring_prep_msg_ring(sqe, target_ring_fd, /*res*/ 0u, /*user_data*/ WAKE_TAG, 0);
         io_uring_sqe_set_data(sqe, nullptr);
         (void)io_uring_submit(&ring_);
@@ -1005,11 +1010,22 @@ public:
         if (n) io_uring_cq_advance(&ring_, n);
     }
 
+    void wake(io_context& ctx) noexcept {
+        wake(ctx.ring_fd());
+    }
+
 private:
     io_uring ring_{};
 };
 
-inline thread_local msg_ring_waker tls_waker;
+// -----------------------------------------------------------------------------
+// Blocking Pool + Offload (for DNS, disk metadata, etc.)
+// -----------------------------------------------------------------------------
+
+namespace detail {
+
+// Thread-local waker for blocking pool threads
+inline thread_local ring_waker tls_waker;
 
 } // namespace detail
 
@@ -1043,7 +1059,7 @@ public:
             return;
         }
         {
-            std::lock_guard<std::mutex> lk(m_);
+            std::scoped_lock lk(m_);
             cv_.notify_all();
         }
         for (auto& t : workers_) {
@@ -1054,7 +1070,7 @@ public:
     // Non-blocking submission (safe for io_uring worker threads).
     // Returns false if the queue is full.
     bool try_submit(job j) {
-        std::lock_guard<std::mutex> lk(m_);
+        std::scoped_lock lk(m_);
         if (count_ == cap_) return false;
         q_[tail_] = j;
         tail_ = (tail_ + 1) % cap_;
@@ -1134,8 +1150,7 @@ struct offload_op : operation_state {
 
         // Hand completion back to the owning io_context thread.
         // enqueue_external_done() coalesces wakes, so we don't spam MSG_RING.
-        const bool need_wake = self->ctx->enqueue_external_done(self);
-        if (need_wake) {
+        if (self->ctx->enqueue_external_done(self)) {
             detail::tls_waker.wake(self->ctx->ring_fd());
         }
     }
@@ -1184,8 +1199,8 @@ auto offload(io_context& ctx, blocking_pool& pool, Fn&& fn) {
  */
 class event {
 public:
-    explicit event(io_context* ctx) : ctx_(ctx) {
-        fd_ = eventfd(0, EFD_CLOEXEC);
+    explicit event(io_context* ctx) : ctx_(ctx), fd_(eventfd(0, EFD_CLOEXEC)) {
+
         if (fd_ < 0) {
             throw std::system_error(errno, std::system_category(), "eventfd");
         }
