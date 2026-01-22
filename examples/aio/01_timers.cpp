@@ -1,4 +1,5 @@
 #include "aio/aio.hpp"
+#include "aio/io.hpp"
 
 #include <iostream>
 #include <chrono>
@@ -8,7 +9,7 @@ using namespace std::chrono_literals;
 
 task<> ticker(io_context& ctx, int id, std::chrono::milliseconds interval, int count) {
     for (int i = 0; i < count; ++i) {
-        co_await async_sleep{&ctx, interval};
+        co_await async_sleep(ctx, interval);
         std::cout << "Tick " << id << ": " << (i + 1) << "/" << count << "\n";
     }
     std::cout << "Ticker " << id << " done\n";
@@ -34,7 +35,7 @@ task<> run_demo(io_context& ctx) {
     // Wait for all to complete using simple polling
     // (In a real app, you'd use a proper join mechanism)
     while (!t1.done() || !t2.done() || !t3.done()) {
-        co_await async_sleep{&ctx, 50ms};
+        co_await async_sleep(ctx, 50ms);
     }
 
     auto elapsed = std::chrono::steady_clock::now() - start;
