@@ -28,7 +28,6 @@ function(kio_target_compile_options target_name)
 
             #"-DLOG_BUILD_LEVEL=${LOG_BUILD_LEVEL}"
 
-            $<$<CONFIG:Debug>:-g -O0>
             $<$<CONFIG:Release>:-O3>
     )
 
@@ -86,24 +85,20 @@ endfunction()
 
 function(kio_add_sanitizers target_name)
     if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-        message(STATUS "🔍 ThreadSanitizer enabled")
+        message(STATUS "🔍 ThreadSanitizer enabled on target ${target_name}")
 
         # Check if we're using moodycamel
         target_compile_options(${target_name}
                 PRIVATE
                 -fsanitize=thread
                 -g -o1
+                -fno-omit-frame-pointer
         )
         target_link_options(${target_name} PRIVATE -fsanitize=thread)
 
-        # Default: Disable moodycamel TSAN (fixes false positives)
-        target_compile_definitions(${target_name} PUBLIC MOODYCAMEL_NO_TSAN=1)
 
         # But also enable general thread sanitizer flag for other code
         target_compile_definitions(${target_name} PUBLIC __SANITIZE_THREAD__=1)
-
-        message(STATUS "   ✅ moodycamel TSAN: disabled (MOODYCAMEL_NO_TSAN=1)")
-        message(STATUS "   ✅ general TSAN: enabled (__SANITIZE_THREAD__=1)")
     endif()
 endfunction()
 
@@ -323,8 +318,6 @@ target_link_libraries(aio PUBLIC
 # Includes
 #----------------------------------------------
 include_directories(${CMAKE_SOURCE_DIR})
-add_subdirectory(external_libraries)
-add_subdirectory(io_pool)
 
 # TODO: remove for now
 # add_subdirectory(kio)
@@ -347,6 +340,7 @@ if (KIO_BUILD_TESTS)
     include(CTest)
     enable_testing()
     add_subdirectory(kio/tests)
+    add_subdirectory(tests)
 
     # Check target - runs all tests
     add_custom_target(check

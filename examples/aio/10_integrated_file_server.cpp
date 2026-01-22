@@ -25,7 +25,7 @@ namespace fs = std::filesystem;
 using namespace std::chrono_literals;
 
 // Helper: send complete string
-aio::task<void> send_full(aio::io_context& ctx, int fd, std::string_view data) {
+aio::task<> send_full(aio::io_context& ctx, int fd, std::string_view data) {
     size_t sent = 0;
     while (sent < data.size()) {
         auto result = co_await aio::async_send(ctx, fd,
@@ -36,7 +36,7 @@ aio::task<void> send_full(aio::io_context& ctx, int fd, std::string_view data) {
 }
 
 // Helper: send byte buffer
-aio::task<void> send_bytes(aio::io_context& ctx, int fd,
+aio::task<> send_bytes(aio::io_context& ctx, int fd,
                           std::span<const std::byte> data) {
     size_t sent = 0;
     while (sent < data.size()) {

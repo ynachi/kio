@@ -1,69 +1,51 @@
-// HTTP "Hello World" benchmark server
-// Demonstrates: async_accept/recv/send/close, task lifetime container + sweeping, clean shutdown via ring_waker.
-// Notes: ignores SIGPIPE; handles partial sends.
+// examples/08_hello_http_v2.cpp
+// HTTP "Hello World" server - Modernized version
+//
+// Changes from original:
+// 1. std::span for buffer safety
+// 2. io_context& instead of io_context*
+// 3. task_group for automatic lifetime management
+// 4. std::array instead of C-style arrays
+// 5. std::string_view for zero-copy responses
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <csignal>
-#include <cstdint>
 #include <cstdio>
-#include <cstdlib>
-#include <cstring>
 #include <string_view>
 #include <thread>
 #include <vector>
-#include <algorithm>
 
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <sys/socket.h>
 #include <unistd.h>
 
-#include "aio/aio.hpp"
+#include <sys/socket.h>
 
-static std::atomic<bool>     g_running{true};
+#include "aio/events.hpp"
+#include "aio/io.hpp"
+#include "aio/io_context.hpp"
+#include "aio/logger.hpp"
+#include "aio/net.hpp"
+#include "aio/task.hpp"
+#include "aio/task_group.hpp"
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+
+using namespace std::chrono_literals;
+
+static std::atomic     g_running{true};
 static std::atomic<uint64_t> g_connections{0};
 static std::atomic<uint64_t> g_requests{0};
 
 static void on_signal(int) { g_running.store(false, std::memory_order_relaxed); }
 static void ignore_sigpipe() { std::signal(SIGPIPE, SIG_IGN); }
 
-static void set_nodelay(int fd) {
-    int one = 1;
-    (void)::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-}
+static aio::task<> handle_client(aio::io_context& ctx, int fd) {
 
-static int make_listen_socket(uint16_t port) {
-    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return -1;
+    alignas(64) std::array<std::byte, 4096> buffer{};
 
-    int one = 1;
-    (void)::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-#ifdef SO_REUSEPORT
-    (void)::setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one));
-#endif
-
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    addr.sin_port = htons(port);
-
-    if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-        ::close(fd);
-        return -1;
-    }
-    if (::listen(fd, 1024) < 0) {
-        ::close(fd);
-        return -1;
-    }
-    return fd;
-}
-
-static aio::task<void> handle_client(aio::io_context& ctx, int fd) {
-    set_nodelay(fd);
-
-    alignas(64) char buf[4096];
-
+    // CHANGE 2: std::string_view for zero-copy response
     static constexpr std::string_view resp =
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: text/plain\r\n"
@@ -73,58 +55,71 @@ static aio::task<void> handle_client(aio::io_context& ctx, int fd) {
         "Hello, World!";
 
     while (true) {
-        auto rr = co_await aio::async_recv(&ctx, fd, buf, sizeof(buf), 0);
+        auto rr = co_await aio::async_recv(ctx, fd, buffer, 0);
         if (!rr || *rr == 0) break;
 
         g_requests.fetch_add(1, std::memory_order_relaxed);
 
         size_t sent = 0;
         while (sent < resp.size()) {
-            auto sr = co_await aio::async_send(&ctx, fd, resp.data() + sent, resp.size() - sent, 0);
+            // Subspan for partial sending
+            const auto remaining = std::string_view{resp.data() + sent, resp.size() - sent};
+            auto sr = co_await aio::async_send(ctx, fd, remaining, 0);
             if (!sr || *sr == 0) goto out;
             sent += *sr;
         }
     }
 
 out:
-    (void)co_await aio::async_close(&ctx, fd);
+    (void)co_await aio::async_close(ctx, fd);
     co_return;
 }
 
-static aio::task<void> accept_loop(aio::io_context& ctx, int listen_fd,
-                                  std::vector<aio::task<void>>& conns) {
-    uint64_t sweep = 0;
+// =============================================================================
+// Modernized Accept Loop
+// =============================================================================
+
+static aio::task<> accept_loop(aio::io_context& ctx, int listen_fd) {
+    aio::task_group connections(&ctx, 1024);
+    connections.set_sweep_interval(256);  // Sweep every 256 connections
 
     while (g_running.load(std::memory_order_relaxed)) {
-        auto ar = co_await aio::async_accept(&ctx, listen_fd);
+        auto ar = co_await aio::async_accept(ctx, listen_fd);
         if (!ar) {
             const int e = ar.error().value();
             if (e == EBADF || e == ECANCELED) break;
 
             if (e == EMFILE || e == ENFILE) {
-                (void)co_await aio::async_sleep(&ctx, std::chrono::milliseconds(10));
+                (void)co_await aio::async_sleep(ctx, 10ms);
             }
             continue;
         }
 
         g_connections.fetch_add(1, std::memory_order_relaxed);
 
-        // SAFETY: keep task alive in container until done
-        auto t = handle_client(ctx, *ar);
-        t.start();
-        conns.push_back(std::move(t));
+        connections.spawn(handle_client(ctx, *ar));
 
-        // periodic sweep to avoid unbounded growth
-        if ((++sweep & 0x3FFu) == 0) {
-            std::erase_if(conns, [](aio::task<void>& t) { return t.done(); });
+        // Optional manual sweep (automatic happens every 256)
+        if (connections.size() > 2048) {
+            const size_t removed = connections.sweep();
+            (void)removed;  // Could log this
         }
     }
 
-    co_return;
+    std::fprintf(stderr, "Waiting for %zu active connections to close...\n",
+                 connections.active_count());
+
+    co_await connections.join_all(ctx, 50ms);
+
+    std::fprintf(stderr, "All connections closed.\n");
 }
 
+// =============================================================================
+// Worker Thread
+// =============================================================================
+
 struct Worker {
-    std::unique_ptr<aio::io_context> ctx;
+    std::unique_ptr<aio::io_context> ctx;  // Already using smart pointers!
     std::thread th;
 };
 
@@ -136,30 +131,36 @@ int main(int argc, char** argv) {
     const uint16_t port = (argc >= 2) ? static_cast<uint16_t>(std::atoi(argv[1])) : 8080;
     const int threads = (argc >= 3) ? std::max(1, std::atoi(argv[2])) : 4;
 
-    int listen_fd = make_listen_socket(port);
+    auto socket_res = aio::net::TcpListener::bind(port);
+    if (!socket_res.has_value())
+    {
+        aio::alog::fatal("failed to bind to {}", port);
+    }
+
+
+    int listen_fd = socket_res.value().get();
     if (listen_fd < 0) {
         std::perror("bind/listen");
         return 1;
     }
 
-    std::fprintf(stderr, "http_hello: port=%u threads=%d\n", port, threads);
+    std::fprintf(stderr, "http_hello_v2: port=%u threads=%d\n", port, threads);
 
     std::vector<Worker> workers;
     workers.reserve(static_cast<size_t>(threads));
 
+    // Create workers
     for (int i = 0; i < threads; ++i) {
         Worker w;
         w.ctx = std::make_unique<aio::io_context>(4096);
         workers.push_back(std::move(w));
     }
 
-    for (int i = 0; i < threads; ++i) {
-        Worker& w = workers[static_cast<size_t>(i)];
-        w.th = std::thread([&, i] {
-            std::vector<aio::task<void>> conns;
-            conns.reserve(1024);
-
-            auto acc = accept_loop(*w.ctx, listen_fd, conns);
+    // Start worker threads
+    for (auto& w : workers) {
+        w.th = std::thread([&w, listen_fd] {
+            // CHANGE 10: Reference semantics throughout
+            auto acc = accept_loop(*w.ctx, listen_fd);
             acc.start();
 
             w.ctx->run();
@@ -167,13 +168,15 @@ int main(int argc, char** argv) {
         });
     }
 
-    // stats
+    // Stats reporting
     while (g_running.load(std::memory_order_relaxed)) {
-        std::this_thread::sleep_for(std::chrono::seconds(1));
+        std::this_thread::sleep_for(1s);
         auto c = g_connections.exchange(0, std::memory_order_relaxed);
         auto r = g_requests.exchange(0, std::memory_order_relaxed);
-        if (c || r) std::fprintf(stderr, "[stats] conns=%llu reqs=%llu\n",
-                                 (unsigned long long)c, (unsigned long long)r);
+        if (c || r) {
+            std::fprintf(stderr, "[stats] conns=%llu reqs=%llu\n",
+                        static_cast<unsigned long long>(c), static_cast<unsigned long long>(r));
+        }
     }
 
     std::fprintf(stderr, "shutdown...\n");
@@ -184,7 +187,7 @@ int main(int argc, char** argv) {
     aio::ring_waker waker;
     for (auto& w : workers) {
         w.ctx->stop();
-        waker.wake(*w.ctx);
+        waker.wake(*w.ctx);  // Reference deref!
     }
 
     for (auto& w : workers) {

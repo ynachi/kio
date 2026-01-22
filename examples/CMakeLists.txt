@@ -25,8 +25,8 @@ kio_add_sanitizers(05_file_copy)
 #kio_add_demo(07_signal_shutdown aio/07_signal_shutdown.cpp TAGS core LIBS aio)
 #kio_add_sanitizers(07_signal_shutdown)
 #
-#kio_add_demo(08_hello_http aio/08_hello_http.cpp TAGS core LIBS aio)
-#kio_add_sanitizers(08_hello_http)
+kio_add_demo(08_hello_http aio/08_hello_http.cpp TAGS core LIBS aio)
+kio_add_sanitizers(08_hello_http)
 
 kio_add_demo(09_blocking_pool aio/09_blocking_pool.cpp TAGS core LIBS aio)
 kio_add_sanitizers(09_blocking_pool)
@@ -46,7 +46,7 @@ add_custom_target(examples
         05_file_copy
 #        06_worker_wackup
 #        07_signal_shutdown
-#        08_hello_http
+        08_hello_http
         09_blocking_pool
         10_integrated_file_server
 )

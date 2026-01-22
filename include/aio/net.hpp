@@ -109,6 +109,27 @@ struct SocketAddress
         return sa;
     }
 
+    /// @brief Creates an IPv6 address helper.
+    /// @param port The port number (host byte order).
+    /// @param ip The IP string (e.g., "::1"). If null, uses in6addr_any.
+    static SocketAddress v6(uint16_t port, const char* ip = nullptr)
+    {
+        SocketAddress sa;
+        auto* in6 = reinterpret_cast<sockaddr_in6*>(&sa.addr);
+        in6->sin6_family = AF_INET6;
+        in6->sin6_port = htons(port);
+        if (ip && *ip)
+        {
+            inet_pton(AF_INET6, ip, &in6->sin6_addr);
+        }
+        else
+        {
+            in6->sin6_addr = in6addr_any;
+        }
+        sa.addrlen = sizeof(sockaddr_in6);
+        return sa;
+    }
+
     /// @brief Synchronously resolves a hostname to an address.
     /// @param host The hostname (e.g., "google.com").
     /// @param port The port number.
@@ -125,11 +146,9 @@ struct SocketAddress
     static task<Result<SocketAddress>> resolve_async(io_context& ctx, blocking_pool& pool, std::string host, uint16_t port)
     {
         // We capture 'host' by value (std::string) to ensure it survives the thread switch
-        auto result = co_await aio::offload(ctx, pool, [h = std::move(host), port]() -> SocketAddress {
+        auto result = co_await offload(ctx, pool, [h = std::move(host), port]() -> Result<SocketAddress> {
             // This runs on a background thread, so blocking is fine
-                                                const auto res = resolve(h, port);
-            if (!res) throw std::runtime_error("resolution failed");
-            return *res;
+            return resolve(h, port);
         });
 
         co_return result;

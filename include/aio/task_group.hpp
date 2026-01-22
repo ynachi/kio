@@ -40,10 +40,7 @@ public:
         return *this;
     }
     
-    ~task_group() {
-        // Tasks with pending I/O will be caught by io_context::cancel_all_pending()
-        // No need to do anything special here
-    }
+    ~task_group() noexcept = default;
     
     // -------------------------------------------------------------------------
     // Task Spawning
@@ -78,13 +75,6 @@ public:
         size_t pow2 = 1;
         while (pow2 < interval) pow2 <<= 1;
         sweep_interval_ = pow2;
-    }
-    
-    void cancel_all() {
-        // If we have a context, it will handle cancellation of pending ops
-        // We just clear our container
-        tasks_.clear();
-        spawn_count_ = 0;
     }
     
     // -------------------------------------------------------------------------
