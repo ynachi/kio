@@ -12,12 +12,12 @@ kio_add_sanitizers(01_aio_timers)
 #
 #kio_add_demo(03_m_server_gemini aio/03_m_server_gemini.cpp TAGS core LIBS aio)
 #kio_add_sanitizers(03_m_server_gemini)
-#
-#kio_add_demo(04_dns_resolve aio/04_dns_resolve.cpp TAGS core LIBS aio)
-#kio_add_sanitizers(04_dns_resolve)
-#
-#kio_add_demo(05_file_copy aio/05_file_copy.cpp TAGS core LIBS aio)
-#kio_add_sanitizers(05_file_copy)
+
+kio_add_demo(04_dns_resolve aio/04_dns_resolve.cpp TAGS core LIBS aio)
+kio_add_sanitizers(04_dns_resolve)
+
+kio_add_demo(05_file_copy aio/05_file_copy.cpp TAGS core LIBS aio)
+kio_add_sanitizers(05_file_copy)
 #
 #kio_add_demo(06_worker_wackup aio/06_worker_wackup.cpp TAGS core LIBS aio)
 #kio_add_sanitizers(06_worker_wackup)
@@ -28,6 +28,11 @@ kio_add_sanitizers(01_aio_timers)
 #kio_add_demo(08_hello_http aio/08_hello_http.cpp TAGS core LIBS aio)
 #kio_add_sanitizers(08_hello_http)
 
+kio_add_demo(09_blocking_pool aio/09_blocking_pool.cpp TAGS core LIBS aio)
+kio_add_sanitizers(09_blocking_pool)
+
+kio_add_demo(10_integrated_file_server aio/10_integrated_file_server.cpp TAGS core LIBS aio)
+kio_add_sanitizers(10_integrated_file_server)
 
 
 # Create a custom target to build all examples
@@ -37,10 +42,12 @@ add_custom_target(examples
         01_aio_timers
 #        02_echo_server
 #        03_m_server_gemini
-#        04_dns_resolve
-#        05_file_copy
+        04_dns_resolve
+        05_file_copy
 #        06_worker_wackup
 #        07_signal_shutdown
 #        08_hello_http
+        09_blocking_pool
+        10_integrated_file_server
 )
 message(STATUS "  Examples will be installed to: ${CMAKE_INSTALL_PREFIX}/bin/examples")

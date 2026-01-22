@@ -1,18 +1,20 @@
 // DNS Resolution Benchmark
 // Demonstrates: blocking vs async (offload) DNS, task fan-out, blocking_pool
 
+#include <atomic>
 #include <chrono>
 #include <iostream>
 #include <string>
 #include <utility>
 #include <vector>
-#include <atomic>
 
-#include <arpa/inet.h>
 #include <netdb.h>
 
-#include "aio/aio.hpp"
+#include "aio/blocking_pool.hpp"
+#include "aio/io.hpp"
+#include "aio/io_context.hpp"
 #include "aio/logger.hpp"
+#include <arpa/inet.h>
 
 using namespace std::chrono_literals;
 
@@ -131,7 +133,7 @@ aio::task<> bench_async(aio::io_context& ctx, aio::blocking_pool& pool) {
 
     // Wait for completion
     while (pending.load(std::memory_order_acquire) > 0) {
-        co_await aio::async_sleep(&ctx, 1ms);
+        co_await aio::async_sleep(ctx, 1ms);
     }
 
     auto end = std::chrono::high_resolution_clock::now();

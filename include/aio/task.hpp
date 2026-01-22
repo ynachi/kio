@@ -1,0 +1,197 @@
+#pragma once
+
+#include <coroutine>
+#include <optional>
+#include <exception>
+
+namespace aio
+{
+// -----------------------------------------------------------------------------
+// task<T> - Minimal Coroutine Return Type
+// -----------------------------------------------------------------------------
+
+template <typename T = void>
+class task
+{
+public:
+    struct promise_type
+    {
+        std::optional<T> value;
+        std::exception_ptr exception;
+        std::coroutine_handle<> continuation;
+
+        task get_return_object() { return task{std::coroutine_handle<promise_type>::from_promise(*this)}; }
+
+        std::suspend_always initial_suspend() noexcept { return {}; }
+
+        struct final_awaiter
+        {
+            bool await_ready() noexcept { return false; }
+            std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_type> h) noexcept
+            {
+                if (h.promise().continuation)
+                    return h.promise().continuation;
+                return std::noop_coroutine();
+            }
+            void await_resume() noexcept {}
+        };
+
+        final_awaiter final_suspend() noexcept { return {}; }
+        void return_value(T v) { value = std::move(v); }
+        void unhandled_exception() { exception = std::current_exception(); }
+    };
+
+    using handle_type = std::coroutine_handle<promise_type>;
+
+    explicit task(handle_type h) : handle_(h) {}
+    task(task&& other) noexcept : handle_(std::exchange(other.handle_, {})) {}
+    task& operator=(task&& other) noexcept
+    {
+        if (this != &other)
+        {
+            if (handle_)
+                handle_.destroy();
+            handle_ = std::exchange(other.handle_, {});
+        }
+        return *this;
+    }
+
+    ~task() noexcept
+    {
+        if (handle_)
+            handle_.destroy();
+    }
+
+    task(const task&) = delete;
+    task& operator=(const task&) = delete;
+
+    bool done() const { return handle_ && handle_.done(); }
+
+    T result()
+    {
+        if (handle_.promise().exception)
+            std::rethrow_exception(handle_.promise().exception);
+        return std::move(*handle_.promise().value);
+    }
+
+    void resume()
+    {
+        if (handle_ && !handle_.done())
+            handle_.resume();
+    }
+
+    // Alias resume for clarity: Starts the task concurrently.
+    // WARNING: You must still keep the 'task' object alive!
+    void start() { resume(); }
+
+    // Awaitable interface
+    bool await_ready() const noexcept { return false; }
+
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<> cont) noexcept
+    {
+        handle_.promise().continuation = cont;
+        return handle_;
+    }
+
+    T await_resume()
+    {
+        if (handle_.promise().exception)
+            std::rethrow_exception(handle_.promise().exception);
+        return std::move(*handle_.promise().value);
+    }
+
+private:
+    handle_type handle_;
+};
+
+template <>
+class task<void>
+{
+public:
+    struct promise_type
+    {
+        std::exception_ptr exception;
+        std::coroutine_handle<> continuation;
+
+        task get_return_object() { return task{std::coroutine_handle<promise_type>::from_promise(*this)}; }
+
+        std::suspend_always initial_suspend() noexcept { return {}; }
+
+        struct final_awaiter
+        {
+            bool await_ready() noexcept { return false; }
+            std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_type> h) noexcept
+            {
+                if (h.promise().continuation)
+                    return h.promise().continuation;
+                return std::noop_coroutine();
+            }
+            void await_resume() noexcept {}
+        };
+
+        final_awaiter final_suspend() noexcept { return {}; }
+        void return_void() {}
+        void unhandled_exception() { exception = std::current_exception(); }
+    };
+
+    using handle_type = std::coroutine_handle<promise_type>;
+
+    explicit task(handle_type h) : handle_(h) {}
+    task(task&& other) noexcept : handle_(std::exchange(other.handle_, {})) {}
+    task& operator=(task&& other) noexcept
+    {
+        if (this != &other)
+        {
+            if (handle_)
+                handle_.destroy();
+            handle_ = std::exchange(other.handle_, {});
+        }
+        return *this;
+    }
+
+    ~task()
+    {
+        if (handle_)
+            handle_.destroy();
+    }
+
+    task(const task&) = delete;
+    task& operator=(const task&) = delete;
+
+    bool done() const { return handle_ && handle_.done(); }
+
+    void result()
+    {
+        if (handle_.promise().exception)
+            std::rethrow_exception(handle_.promise().exception);
+    }
+
+    void resume()
+    {
+        if (handle_ && !handle_.done())
+            handle_.resume();
+    }
+
+    // Alias resume for clarity: Starts the task concurrently.
+    // WARNING: You must still keep the 'task' object alive!
+    void start() { resume(); }
+
+    // Awaitable interface
+    bool await_ready() const noexcept { return false; }
+
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<> cont) noexcept
+    {
+        handle_.promise().continuation = cont;
+        return handle_;
+    }
+
+    void await_resume()
+    {
+        if (handle_.promise().exception)
+            std::rethrow_exception(handle_.promise().exception);
+    }
+
+private:
+    handle_type handle_;
+};
+}  // namespace aio

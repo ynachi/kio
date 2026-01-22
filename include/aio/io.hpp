@@ -10,9 +10,8 @@
 #include <concepts>
 #include <cstddef>
 #include <span>
-#include <type_traits>
 
-#include "aio.hpp"
+#include "io_context.hpp"
 
 namespace aio
 {
@@ -58,13 +57,6 @@ struct RecvOp : uring_op<RecvOp>
     }
 
     void prepare_sqe(io_uring_sqe* sqe) { io_uring_prep_recv(sqe, fd, buffer.data(), buffer.size(), flags); }
-
-    Result<size_t> await_resume()
-    {
-        if (res < 0)
-            return std::unexpected(make_error_code(res));
-        return static_cast<size_t>(res);
-    }
 };
 
 // Primary API: std::span<std::byte>
@@ -103,13 +95,6 @@ struct SendOp : uring_op<SendOp>
     }
 
     void prepare_sqe(io_uring_sqe* sqe) { io_uring_prep_send(sqe, fd, buffer.data(), buffer.size(), flags); }
-
-    Result<size_t> await_resume()
-    {
-        if (res < 0)
-            return std::unexpected(make_error_code(res));
-        return static_cast<size_t>(res);
-    }
 };
 
 // Primary API
@@ -149,13 +134,6 @@ struct ReadOp : uring_op<ReadOp>
     }
 
     void prepare_sqe(io_uring_sqe* sqe) { io_uring_prep_read(sqe, fd, buffer.data(), buffer.size(), offset); }
-
-    Result<size_t> await_resume()
-    {
-        if (res < 0)
-            return std::unexpected(make_error_code(res));
-        return static_cast<size_t>(res);
-    }
 };
 
 inline ReadOp async_read(io_context& ctx, int fd, std::span<std::byte> buffer, uint64_t offset = 0)
@@ -175,13 +153,6 @@ struct WriteOp : uring_op<WriteOp>
     }
 
     void prepare_sqe(io_uring_sqe* sqe) { io_uring_prep_write(sqe, fd, buffer.data(), buffer.size(), offset); }
-
-    Result<size_t> await_resume()
-    {
-        if (res < 0)
-            return std::unexpected(make_error_code(res));
-        return static_cast<size_t>(res);
-    }
 };
 
 inline WriteOp async_write(io_context& ctx, int fd, std::span<const std::byte> buffer, uint64_t offset = 0)
@@ -191,6 +162,8 @@ inline WriteOp async_write(io_context& ctx, int fd, std::span<const std::byte> b
 
 struct CloseOp : uring_op<CloseOp>
 {
+    using uring_op::await_resume;
+
     int fd;
 
     CloseOp(io_context& ctx, int fd) : uring_op(&ctx), fd(fd) {}
@@ -260,6 +233,8 @@ inline CloseOp async_close(io_context& ctx, int fd)
 
 struct ConnectOp : uring_op<ConnectOp>
 {
+    using uring_op::await_resume;
+
     int fd;
     sockaddr_storage addr_store{};
     socklen_t addrlen;
@@ -289,6 +264,8 @@ inline ConnectOp async_connect(io_context& ctx, int fd, const sockaddr* addr, so
 
 struct AcceptOp : uring_op<AcceptOp>
 {
+    using uring_op::await_resume;
+
     int fd;
     sockaddr_storage addr{};
     socklen_t addrlen = sizeof(addr);
@@ -315,6 +292,8 @@ inline AcceptOp async_accept(io_context& ctx, int fd)
 
 struct SleepOp : uring_op<SleepOp>
 {
+    using uring_op::await_resume;
+
     __kernel_timespec ts;
 
     template <typename Rep, typename Period>
