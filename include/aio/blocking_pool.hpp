@@ -147,6 +147,8 @@ struct offload_op : operation_state {
         
         // Create lambda that captures 'this' - safe because we track lifetime
         auto job = [this]() noexcept {
+            auto* ctx_local = ctx;
+            const int ring_fd = ctx_local->ring_fd();
             try {
                 if constexpr (std::is_void_v<R>) {
                     fn();
@@ -159,8 +161,8 @@ struct offload_op : operation_state {
             }
             
             // Resume on io_context thread
-            if (ctx->enqueue_external_done(this)) {
-                detail::tls_waker.wake(ctx->ring_fd());
+            if (ctx_local->enqueue_external_done(this)) {
+                detail::tls_waker.wake(ring_fd);
             }
         };
         
