@@ -18,6 +18,8 @@
 #include <thread>
 #include <vector>
 
+#include <pthread.h>
+#include <sched.h>
 #include <unistd.h>
 
 #include <sys/socket.h>
@@ -40,6 +42,18 @@ static std::atomic<uint64_t> g_requests{0};
 
 static void on_signal(int) { g_running.store(false, std::memory_order_relaxed); }
 static void ignore_sigpipe() { std::signal(SIGPIPE, SIG_IGN); }
+
+static void pin_to_cpu(int cpu_id) {
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(cpu_id % static_cast<int>(std::thread::hardware_concurrency()), &cpuset);
+
+    if (int rc = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset); rc != 0) {
+        std::fprintf(stderr, "Warning: Failed to pin thread to CPU %d: %s\n", cpu_id, strerror(rc));
+    } else {
+        std::fprintf(stderr, "Thread pinned to CPU %d\n", cpu_id);
+    }
+}
 
 static aio::task<> handle_client(aio::io_context& ctx, int fd) {
 
@@ -156,10 +170,12 @@ int main(int argc, char** argv) {
         workers.push_back(std::move(w));
     }
 
-    // Start worker threads
-    for (auto& w : workers) {
-        w.th = std::thread([&w, listen_fd] {
-            // CHANGE 10: Reference semantics throughout
+    // Start worker threads with CPU pinning
+    for (int i = 0; i < threads; ++i) {
+        auto& w = workers[static_cast<size_t>(i)];
+        w.th = std::thread([&w, listen_fd, i] {
+            pin_to_cpu(i);
+
             auto acc = accept_loop(*w.ctx, listen_fd);
             acc.start();
 
