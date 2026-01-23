@@ -18,12 +18,12 @@ template <typename T = void>
 using Result = std::expected<T, std::error_code>;
 
 // Helper to convert errno (int) to the standardized error type
-inline std::unexpected<std::error_code> error_from_errno(int err)
+inline std::unexpected<std::error_code> ErrorFromErrno(int err)
 {
     return std::unexpected(std::error_code(err, std::system_category()));
 }
 
-inline std::error_code make_error_code(int err) {
+inline std::error_code MakeErrorCode(int err) {
     return std::error_code{err > 0 ? err : -err, std::system_category()};
 }
 

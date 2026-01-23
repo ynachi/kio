@@ -58,9 +58,9 @@
 #include <sys/eventfd.h>
 #include <sys/signalfd.h>
 
+#include "aio/Task.hpp"
 #include "aio/operation_base.hpp"
 #include "aio/result.hpp"
-#include "aio/task.hpp"
 
 namespace aio
 {
@@ -73,21 +73,20 @@ namespace aio
 constexpr uint64_t WAKE_TAG = 1;
 
 // -----------------------------------------------------------------------------
-// io_context - The Event Loop
+// IoContext - The Event Loop
 // -----------------------------------------------------------------------------
 
-class io_context
+class IoContext
 {
 public:
-    explicit io_context(unsigned entries = 256)
+    explicit IoContext(unsigned entries = 256)
     {
         io_uring_params params{};
         // Note: SINGLE_ISSUER omitted since we don't enforce thread affinity.
         // Add it back with thread-id checks if you want the optimization.
         // params.flags = IORING_SETUP_COOP_TASKRUN;
 
-        int ret = io_uring_queue_init_params(entries, &ring_, &params);
-        if (ret < 0)
+        if (int ret = io_uring_queue_init_params(entries, &ring_, &params); ret < 0)
         {
             throw std::system_error(-ret, std::system_category(), "io_uring_queue_init_params");
         }
@@ -97,20 +96,20 @@ public:
         ext_done_.reserve(entries);
     }
 
-    ~io_context()
+    ~IoContext()
     {
-        cancel_all_pending();
+        CancelAllPending();
         io_uring_queue_exit(&ring_);
     }
 
-    io_context(const io_context&) = delete;
-    io_context& operator=(const io_context&) = delete;
+    IoContext(const IoContext&) = delete;
+    IoContext& operator=(const IoContext&) = delete;
 
     // -------------------------------------------------------------------------
     // Operation Tracking
     // -------------------------------------------------------------------------
 
-    void track(operation_state* op)
+    void Track(OperationState* op)
     {
         op->tracked = true;
         op->next = pending_head_;
@@ -122,7 +121,7 @@ public:
         pending_head_ = op;
     }
 
-    void untrack(operation_state* op)
+    void Untrack(OperationState* op)
     {
         if (op->prev)
         {
@@ -153,7 +152,7 @@ public:
      * the operation already completed). We handle this by draining until
      * pending_head_ is empty, regardless of cancel success/failure.
      */
-    void cancel_all_pending()
+    void CancelAllPending()
     {
         // Submit cancel requests for all tracked operations
         for (auto* op = pending_head_; op; op = op->next)
@@ -173,18 +172,19 @@ public:
 
         // Drain until all operations are untracked
         // Do NOT resume coroutines — we're in destruction
-        drain_without_resume();
+        DrainWithoutResume();
     }
 
     // -------------------------------------------------------------------------
     // File Registration
     // -------------------------------------------------------------------------
 
-    void register_files(std::span<const int> fds)
+    void RegisterFiles(std::span<const int> fds)
     {
         int ret = io_uring_register_files(&ring_, fds.data(), fds.size());
         if (ret < 0)
         {
+            // TODO: not fatal, return result instead
             throw std::system_error(-ret, std::system_category(), "io_uring_register_files");
         }
     }
@@ -194,37 +194,37 @@ public:
     // -------------------------------------------------------------------------
 
     template <typename T>
-    void run_until_done(task<T>& t)
+    void RunUntilDone(Task<T>& t)
     {
         running_ = true;
         t.resume();
         while (running_ && !t.done())
         {
-            step();
+            Step();
         }
     }
 
-    void run()
+    void Run()
     {
         running_ = true;
         while (running_)
         {
-            step();
+            Step();
         }
     }
 
     template <typename Tick>
-    void run(Tick&& tick)
+    void Run(Tick&& tick)
     {
         running_ = true;
         while (running_)
         {
-            step();
+            Step();
             tick();
         }
     }
 
-    void stop() { running_ = false; }
+    void Stop() { running_ = false; }
 
     // ---------------------------------------------------------------------
     // Cross-thread completion injection (for blocking pool offload, etc.)
@@ -235,7 +235,7 @@ public:
      * thread. Returns true if the caller should send a WAKE_TAG (MSG_RING)
      * to ensure the event loop wakes up.
      */
-    bool enqueue_external_done(operation_state* op)
+    bool EnqueueExternalDone(OperationState* op)
     {
         std::scoped_lock lk(ext_mtx_);
         ext_done_.push_back(op);
@@ -252,10 +252,11 @@ public:
     // Low-level Access
     // -------------------------------------------------------------------------
 
-    io_uring* ring() { return &ring_; }
-    int ring_fd() const { return ring_.ring_fd; }
+    // TODO: maybe private ?
+    io_uring* Ring() { return &ring_; }
+    int RingFd() const { return ring_.ring_fd; }
 
-    void ensure_sqes(const unsigned n)
+    void EnsureSqes(const unsigned n)
     {
         if (io_uring_sq_space_left(&ring_) < n)
         {
@@ -267,17 +268,17 @@ public:
         }
     }
 
-    io_uring_sqe* get_sqe() { return io_uring_get_sqe(&ring_); }
+    io_uring_sqe* GetSqe() { return io_uring_get_sqe(&ring_); }
 
 private:
-    void drain_external(std::vector<std::coroutine_handle<>>& out)
+    void DrainExternal(std::vector<std::coroutine_handle<>>& out)
     {
         if (!ext_hint_.load(std::memory_order_relaxed))
         {
             return;
         }
 
-        std::vector<operation_state*> local;
+        std::vector<OperationState*> local;
         {
             std::scoped_lock lk(ext_mtx_);
             if (ext_done_.empty())
@@ -295,19 +296,19 @@ private:
         {
             if (!op)
                 continue;
-            untrack(op);
+            Untrack(op);
             out.push_back(op->handle);
         }
     }
 
-    void drain_external_without_resume()
+    void DrainExternalWithoutResume()
     {
         if (!ext_hint_.load(std::memory_order_relaxed))
         {
             return;
         }
 
-        std::vector<operation_state*> local;
+        std::vector<OperationState*> local;
         {
             std::scoped_lock lk(ext_mtx_);
             if (ext_done_.empty())
@@ -325,7 +326,7 @@ private:
         {
             if (!op)
                 continue;
-            untrack(op);
+            Untrack(op);
             op->handle = {};
         }
     }
@@ -334,11 +335,11 @@ private:
      * Drain completions without resuming coroutines.
      * Used during destruction to safely untrack all pending ops.
      */
-    void drain_without_resume()
+    void DrainWithoutResume()
     {
-        while (pending_head_)
+        while (pending_head_ != nullptr)
         {
-            io_uring_cqe* cqe;
+            io_uring_cqe* cqe = nullptr;
             if (int ret = io_uring_wait_cqe(&ring_, &cqe); ret < 0)
             {
                 // Error waiting — can't safely continue
@@ -346,23 +347,22 @@ private:
                 break;
             }
 
-            auto ud = io_uring_cqe_get_data64(cqe);
-            if (ud == WAKE_TAG)
+            if (const auto ud = io_uring_cqe_get_data64(cqe); ud == WAKE_TAG)
             {
                 // A cross-thread wake. Drain any externally completed ops.
-                drain_external_without_resume();
+                DrainExternalWithoutResume();
             }
             else if (ud)
             {
-                auto* op = reinterpret_cast<operation_state*>(static_cast<uintptr_t>(ud));
-                untrack(op);
+                auto* op = reinterpret_cast<OperationState*>(static_cast<uintptr_t>(ud));
+                Untrack(op);
                 // Do NOT resume op->handle — we're draining, not running
             }
             io_uring_cqe_seen(&ring_, cqe);
         }
     }
 
-    void step()
+    void Step()
     {
         io_uring_submit_and_wait(&ring_, 1);
 
@@ -390,8 +390,8 @@ private:
                 continue;
             }
 
-            auto* op = reinterpret_cast<operation_state*>(static_cast<uintptr_t>(user_data));
-            untrack(op);
+            auto* op = reinterpret_cast<OperationState*>(static_cast<uintptr_t>(user_data));
+            Untrack(op);
             op->res = cqe->res;
             ready_.push_back(op->handle);
         }
@@ -403,7 +403,7 @@ private:
         // Drain them and resume their coroutines on this thread.
         if (saw_wake || ext_hint_.load(std::memory_order_relaxed))
         {
-            drain_external(ready_);
+            DrainExternal(ready_);
         }
 
         // Resume outside CQE iteration (flat, no stack growth)
@@ -416,12 +416,13 @@ private:
 
     io_uring ring_{};
     std::vector<std::coroutine_handle<>> ready_;
-    operation_state* pending_head_ = nullptr;
+    OperationState* pending_head_ = nullptr;
+    // TODO: use std::stop_token
     std::atomic<bool> running_ = false;
 
     // External completions (from blocking pool, etc.).
     std::mutex ext_mtx_;
-    std::vector<operation_state*> ext_done_;
+    std::vector<OperationState*> ext_done_;
     bool ext_wake_pending_ = false;       // protected by ext_mtx_
     std::atomic<bool> ext_hint_ = false;  // fast-path hint (may be stale)
 };
@@ -431,13 +432,13 @@ private:
 // -----------------------------------------------------------------------------
 
 template <typename Derived>
-struct uring_op : operation_state
+struct UringOp : OperationState
 {
 private:
-    explicit uring_op(io_context* c) { ctx = c; }
+    explicit UringOp(IoContext* c) { ctx = c; }
 
     // Movable (delegates to operation_state move ctor)
-    uring_op(uring_op&&) = default;
+    UringOp(UringOp&&) = default;
 
 public:
     bool await_ready() const noexcept { return false; }
@@ -445,9 +446,9 @@ public:
     void await_suspend(std::coroutine_handle<> h)
     {
         handle = h;
-        ctx->track(this);
-        ctx->ensure_sqes(1);
-        auto* sqe = ctx->get_sqe();
+        ctx->Track(this);
+        ctx->EnsureSqes(1);
+        auto* sqe = ctx->GetSqe();
         static_cast<Derived*>(this)->prepare_sqe(sqe);
         io_uring_sqe_set_data(sqe, this);
     }
@@ -456,12 +457,12 @@ public:
     Result<size_t> await_resume()
     {
         if (res < 0)
-            return std::unexpected(make_error_code(res));
+            return std::unexpected(MakeErrorCode(res));
         return static_cast<size_t>(res);
     }
 
     template <typename Rep, typename Period>
-    auto with_timeout(std::chrono::duration<Rep, Period> dur) &&;
+    auto WithTimeout(std::chrono::duration<Rep, Period> dur) &&;
     friend Derived;
 };
 
@@ -479,14 +480,14 @@ public:
  * Use WAKE_TAG as msg_user_data if you just want to wake the target
  * without triggering any operation completion logic.
  */
-struct async_msg_ring : uring_op<async_msg_ring>
+struct MsgRingOp : UringOp<MsgRingOp>
 {
     int target_fd;
     uint32_t msg_result;     // Target sees this as cqe->res
     uint64_t msg_user_data;  // Target sees this as cqe->user_data
 
-    async_msg_ring(io_context* ctx, int target_ring_fd, uint32_t result, uint64_t user_data)
-        : uring_op(ctx), target_fd(target_ring_fd), msg_result(result), msg_user_data(user_data)
+    MsgRingOp(IoContext& ctx, int target_ring_fd, uint32_t result, uint64_t user_data)
+        : UringOp(&ctx), target_fd(target_ring_fd), msg_result(result), msg_user_data(user_data)
     {
     }
 
@@ -495,10 +496,15 @@ struct async_msg_ring : uring_op<async_msg_ring>
     Result<void> await_resume()
     {
         if (res < 0)
-            return std::unexpected(make_error_code(res));
+            return std::unexpected(MakeErrorCode(res));
         return {};
     }
 };
+
+inline MsgRingOp async_msg_ring(IoContext& ctx, int target_ring_fd, uint32_t result, uint64_t user_data)
+{
+    return MsgRingOp(ctx, target_ring_fd, result, user_data);
+}
 
 // -----------------------------------------------------------------------------
 // Signal Handling
@@ -511,10 +517,10 @@ struct async_msg_ring : uring_op<async_msg_ring>
  * with io_uring — it causes spurious EAGAIN completions when no signal is
  * pending. io_uring handles the blocking internally.
  */
-class signal_set
+class SignalSet
 {
 public:
-    signal_set(std::initializer_list<int> sigs)
+    SignalSet(std::initializer_list<int> sigs)
     {
         sigset_t mask;
         sigemptyset(&mask);
@@ -534,10 +540,10 @@ public:
         }
     }
 
-    ~signal_set() { ::close(fd_); }
+    ~SignalSet() { ::close(fd_); }
 
-    signal_set(const signal_set&) = delete;
-    signal_set& operator=(const signal_set&) = delete;
+    SignalSet(const SignalSet&) = delete;
+    SignalSet& operator=(const SignalSet&) = delete;
 
     int fd() const { return fd_; }
 
@@ -545,35 +551,40 @@ private:
     int fd_;
 };
 
-struct async_wait_signal : uring_op<async_wait_signal>
+struct WaitSignalOp : UringOp<WaitSignalOp>
 {
     int fd;
     signalfd_siginfo info{};
 
-    async_wait_signal(io_context* ctx, int signal_fd) : uring_op(ctx), fd(signal_fd) {}
+    WaitSignalOp(IoContext& ctx, int signal_fd) : UringOp(&ctx), fd(signal_fd) {}
 
     void prepare_sqe(io_uring_sqe* sqe) { io_uring_prep_read(sqe, fd, &info, sizeof(info), 0); }
 
     Result<int> await_resume()
     {
         if (res < 0)
-            return std::unexpected(make_error_code(res));
+            return std::unexpected(MakeErrorCode(res));
         return static_cast<int>(info.ssi_signo);
     }
 };
+
+inline WaitSignalOp AsyncWaitSignal(IoContext& ctx, int signal_fd)
+{
+    return WaitSignalOp(ctx, signal_fd);
+}
 
 // -----------------------------------------------------------------------------
 // Timeout Wrapper
 // -----------------------------------------------------------------------------
 
 template <typename Op>
-struct with_timeout_op
+struct WithTimeoutOp
 {
     Op op;
     __kernel_timespec ts{};
 
     template <typename Rep, typename Period>
-    with_timeout_op(Op&& o, std::chrono::duration<Rep, Period> dur) : op(std::move(o))
+    WithTimeoutOp(Op&& o, std::chrono::duration<Rep, Period> dur) : op(std::move(o))
     {
         auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(dur).count();
         ts.tv_sec = ns / 1'000'000'000;
@@ -612,19 +623,19 @@ struct with_timeout_op
     }
 };
 
-// Define the builder method now that with_timeout_op is complete
+// Builder method to apply a timeout to an io operation
 template <typename Derived>
 template <typename Rep, typename Period>
-auto uring_op<Derived>::with_timeout(std::chrono::duration<Rep, Period> dur) &&
+auto UringOp<Derived>::WithTimeout(std::chrono::duration<Rep, Period> dur) &&
 {
-    return with_timeout_op<Derived>(std::move(*static_cast<Derived*>(this)), dur);
+    return WithTimeoutOp<Derived>(std::move(*static_cast<Derived*>(this)), dur);
 }
 
 // Standalone helper
 template <typename Op, typename Rep, typename Period>
-auto timeout(Op&& op, std::chrono::duration<Rep, Period> dur)
+auto Timeout(Op&& op, std::chrono::duration<Rep, Period> dur)
 {
-    return with_timeout_op<std::remove_reference_t<Op>>(std::forward<Op>(op), dur);
+    return WithTimeoutOp<std::remove_reference_t<Op>>(std::forward<Op>(op), dur);
 }
 
 }  // namespace aio

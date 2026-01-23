@@ -17,18 +17,18 @@
 #include <string_view>
 #include <thread>
 
-#include "aio/blocking_pool.hpp"
+#include "aio/BlockingPool.hpp"
+#include "aio/TaskGroup.hpp"
 #include "aio/net.hpp"
-#include "aio/task_group.hpp"
 
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
 
 // Helper: send complete string
-aio::task<> send_full(aio::io_context& ctx, int fd, std::string_view data) {
+aio::Task<> send_full(aio::IoContext& ctx, int fd, std::string_view data) {
     size_t sent = 0;
     while (sent < data.size()) {
-        auto result = co_await aio::async_send(ctx, fd,
+        auto result = co_await aio::AsyncSend(ctx, fd,
             data.substr(sent), 0);
         if (!result || *result == 0) break;
         sent += *result;
@@ -36,11 +36,11 @@ aio::task<> send_full(aio::io_context& ctx, int fd, std::string_view data) {
 }
 
 // Helper: send byte buffer
-aio::task<> send_bytes(aio::io_context& ctx, int fd,
+aio::Task<> send_bytes(aio::IoContext& ctx, int fd,
                           std::span<const std::byte> data) {
     size_t sent = 0;
     while (sent < data.size()) {
-        auto result = co_await aio::async_send(ctx, fd,
+        auto result = co_await aio::AsyncSend(ctx, fd,
             data.subspan(sent), 0);
         if (!result || *result == 0) break;
         sent += *result;
@@ -71,13 +71,13 @@ struct FileContent {
 
 class FileService {
 public:
-    explicit FileService(aio::blocking_pool& pool, std::string root)
+    explicit FileService(aio::BlockingPool& pool, std::string root)
         : pool_(pool), root_(std::move(root)) {}
 
     // Async file read using blocking pool
-    aio::task<FileContent> read_file(aio::io_context& ctx, std::string path) {
+    aio::Task<FileContent> read_file(aio::IoContext& ctx, std::string path) {
         // Move path into lambda - this is where move_only_function shines!
-        auto content = co_await aio::offload(ctx, pool_,
+        auto content = co_await aio::Offload(ctx, pool_,
             [root = root_, requested = std::move(path)]() -> FileContent {
 
                 // Build full path
@@ -128,7 +128,7 @@ public:
     }
 
 private:
-    aio::blocking_pool& pool_;
+    aio::BlockingPool& pool_;
     std::string root_;
 };
 
@@ -209,8 +209,8 @@ public:
 // Connection Handler (uses both task_group and blocking_pool)
 // =============================================================================
 
-aio::task<void> handle_connection(
-    aio::io_context& ctx,
+aio::Task<void> handle_connection(
+    aio::IoContext& ctx,
     int fd,
     FileService& files,
     std::atomic<uint64_t>& request_count) {
@@ -219,7 +219,7 @@ aio::task<void> handle_connection(
 
     while (true) {
         // Read request
-        auto recv_result = co_await aio::async_recv(ctx, fd, buffer, 0);
+        auto recv_result = co_await aio::AsyncRecv(ctx, fd, buffer, 0);
         if (!recv_result || *recv_result == 0) {
             break;  // Connection closed
         }
@@ -259,15 +259,15 @@ aio::task<void> handle_connection(
         if (!request.keep_alive) break;
     }
 
-    co_await aio::async_close(ctx, fd);
+    co_await aio::AsyncClose(ctx, fd);
 }
 
 // =============================================================================
 // Accept Loop (uses task_group for connection management)
 // =============================================================================
 
-aio::task<void> accept_loop(
-    aio::io_context& ctx,
+aio::Task<void> accept_loop(
+    aio::IoContext& ctx,
     int listen_fd,
     FileService& files,
     std::atomic<bool>& running,
@@ -275,11 +275,11 @@ aio::task<void> accept_loop(
 
     // THIS IS THE KEY INTEGRATION:
     // task_group automatically manages connection lifetimes
-    aio::task_group<void> connections{&ctx, 2048};
-    connections.set_sweep_interval(256);  // Sweep every 256 accepts
+    aio::TaskGroup<void> connections{&ctx, 2048};
+    connections.SetSweepInterval(256);  // Sweep every 256 accepts
 
     while (running.load(std::memory_order_relaxed)) {
-        auto fd_result = co_await aio::async_accept(ctx, listen_fd);
+        auto fd_result = co_await aio::AsyncAccept(ctx, listen_fd);
 
         if (!fd_result) {
             int err = fd_result.error().value();
@@ -287,19 +287,19 @@ aio::task<void> accept_loop(
 
             // Backpressure on file descriptor exhaustion
             if (err == EMFILE || err == ENFILE) {
-                co_await aio::async_sleep(ctx, 10ms);
+                co_await aio::AsyncSleep(ctx, 10ms);
             }
             continue;
         }
 
         // Spawn connection handler - task_group keeps it alive
-        connections.spawn(
+        connections.Spawn(
             handle_connection(ctx, *fd_result, files, request_count)
         );
 
         // Optional: manual sweep if too many connections
-        if (connections.size() > 4096) {
-            size_t removed = connections.sweep();
+        if (connections.Size() > 4096) {
+            size_t removed = connections.Sweep();
             if (removed > 0) {
                 std::cerr << "Swept " << removed << " completed connections\n";
             }
@@ -307,10 +307,10 @@ aio::task<void> accept_loop(
     }
 
     std::cerr << "Accept loop stopping, waiting for "
-              << connections.active_count() << " active connections...\n";
+              << connections.ActiveCount() << " active connections...\n";
 
     // Graceful shutdown: wait for all connections to complete
-    co_await connections.join_all(ctx, 100ms);
+    co_await connections.JoinAll(ctx, 100ms);
 
     std::cerr << "All connections closed\n";
 }
@@ -320,7 +320,7 @@ aio::task<void> accept_loop(
 // =============================================================================
 
 struct Worker {
-    std::unique_ptr<aio::io_context> ctx;
+    std::unique_ptr<aio::IoContext> ctx;
     std::unique_ptr<FileService> files;
     std::thread thread;
 };
@@ -348,17 +348,17 @@ int main(int argc, char** argv) {
     );
 
     // Create listen socket
-    auto addr = aio::net::SocketAddress::v4(8080, "127.0.0.1");
-    auto listen_res = aio::net::TcpListener::bind(addr);
+    auto addr = aio::net::SocketAddress::V4(8080, "127.0.0.1");
+    auto listen_res = aio::net::TcpListener::Bind(addr);
     if (!listen_res.has_value()) {
         std::cerr << "Failed to create listen socket\n";
         return 1;
     }
 
-    auto listen_fd = std::move(listen_res.value()).get();
+    auto listen_fd = std::move(listen_res.value()).Get();
 
     // Shared blocking pool for all workers
-    aio::blocking_pool file_pool{config.blocking_threads};
+    aio::BlockingPool file_pool{config.blocking_threads};
 
     std::atomic<bool> running{true};
     std::atomic<uint64_t> total_requests{0};
@@ -369,7 +369,7 @@ int main(int argc, char** argv) {
 
     for (size_t i = 0; i < config.io_threads; ++i) {
         Worker w;
-        w.ctx = std::make_unique<aio::io_context>(4096);
+        w.ctx = std::make_unique<aio::IoContext>(4096);
         w.files = std::make_unique<FileService>(file_pool, config.document_root);
         workers.push_back(std::move(w));
     }
@@ -385,9 +385,9 @@ int main(int argc, char** argv) {
                 total_requests
             );
 
-            accept_task.start();
-            w.ctx->run();
-            w.ctx->cancel_all_pending();
+            accept_task.Start();
+            w.ctx->Run();
+            w.ctx->CancelAllPending();
         });
     }
 
@@ -411,10 +411,10 @@ int main(int argc, char** argv) {
     running.store(false, std::memory_order_relaxed);
 
     // Wake all workers
-    aio::ring_waker waker;
+    aio::RingWaker waker;
     for (auto& w : workers) {
-        w.ctx->stop();
-        waker.wake(*w.ctx);
+        w.ctx->Stop();
+        waker.Wake(*w.ctx);
     }
 
     // Wait for workers

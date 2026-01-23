@@ -4,24 +4,24 @@
 #include <chrono>
 #include <vector>
 
-#include "aio/io_context.hpp"
-#include "aio/task.hpp"
+#include "aio/IoContext.hpp"
+#include "aio/Task.hpp"
 #include "aio/io.hpp"
 
 namespace aio {
 
 template<typename T = void>
-class task_group {
+class TaskGroup {
 public:
-    explicit task_group(io_context* ctx = nullptr, size_t reserve_capacity = 64)
+    explicit TaskGroup(IoContext* ctx = nullptr, size_t reserve_capacity = 64)
         : ctx_(ctx) {
         tasks_.reserve(reserve_capacity);
     }
     
-    task_group(const task_group&) = delete;
-    task_group& operator=(const task_group&) = delete;
+    TaskGroup(const TaskGroup&) = delete;
+    TaskGroup& operator=(const TaskGroup&) = delete;
     
-    task_group(task_group&& other) noexcept
+    TaskGroup(TaskGroup&& other) noexcept
         : ctx_(other.ctx_)
         , tasks_(std::move(other.tasks_))
         , sweep_interval_(other.sweep_interval_)
@@ -29,7 +29,7 @@ public:
         other.ctx_ = nullptr;
     }
     
-    task_group& operator=(task_group&& other) noexcept {
+    TaskGroup& operator=(TaskGroup&& other) noexcept {
         if (this != &other) {
             ctx_ = other.ctx_;
             tasks_ = std::move(other.tasks_);
@@ -40,24 +40,24 @@ public:
         return *this;
     }
     
-    ~task_group() noexcept = default;
+    ~TaskGroup() noexcept = default;
     
     // -------------------------------------------------------------------------
     // Task Spawning
     // -------------------------------------------------------------------------
     
-    void spawn(task<T>&& t) {
-        t.start();
+    void Spawn(Task<T>&& t) {
+        t.Start();
         tasks_.push_back(std::move(t));
         ++spawn_count_;
         
         if ((spawn_count_ & (sweep_interval_ - 1)) == 0) {
-            sweep();
+            Sweep();
         }
     }
     
     template<typename... Tasks>
-    void spawn_all(Tasks&&... tasks) {
+    void SpawnAll(Tasks&&... tasks) {
         (spawn(std::forward<Tasks>(tasks)), ...);
     }
     
@@ -65,13 +65,13 @@ public:
     // Lifetime Management
     // -------------------------------------------------------------------------
     
-    size_t sweep() {
+    size_t Sweep() {
         const size_t before = tasks_.size();
-        std::erase_if(tasks_, [](task<T>& t) { return t.done(); });
+        std::erase_if(tasks_, [](Task<T>& t) { return t.Done(); });
         return before - tasks_.size();
     }
     
-    void set_sweep_interval(size_t interval) {
+    void SetSweepInterval(size_t interval) {
         size_t pow2 = 1;
         while (pow2 < interval) pow2 <<= 1;
         sweep_interval_ = pow2;
@@ -81,66 +81,66 @@ public:
     // Waiting / Joining
     // -------------------------------------------------------------------------
     
-    task<> join_all(io_context& ctx, std::chrono::milliseconds poll = std::chrono::milliseconds(10));
+    Task<> JoinAll(IoContext& ctx, std::chrono::milliseconds poll = std::chrono::milliseconds(10));
     
-    task<bool> join_all_timeout(io_context& ctx, std::chrono::milliseconds timeout);
+    Task<bool> JoinAllTimeout(IoContext& ctx, std::chrono::milliseconds timeout);
     
     // -------------------------------------------------------------------------
     // Queries
     // -------------------------------------------------------------------------
     
-    size_t size() const { return tasks_.size(); }
+    size_t Size() const { return tasks_.size(); }
     
-    size_t active_count() const {
+    size_t ActiveCount() const {
         return std::count_if(tasks_.begin(), tasks_.end(),
-                            [](const task<T>& t) { return !t.done(); });
+                            [](const Task<T>& t) { return !t.Done(); });
     }
     
-    bool all_done() const {
+    bool AllDone() const {
         return std::all_of(tasks_.begin(), tasks_.end(),
-                          [](const task<T>& t) { return t.done(); });
+                          [](const Task<T>& t) { return t.Done(); });
     }
     
-    bool empty() const { return tasks_.empty(); }
+    bool Empty() const { return tasks_.empty(); }
     
-    uint64_t total_spawned() const { return spawn_count_; }
+    uint64_t TotalSpawned() const { return spawn_count_; }
     
-    std::vector<task<T>>& tasks() { return tasks_; }
-    const std::vector<task<T>>& tasks() const { return tasks_; }
+    std::vector<Task<T>>& Tasks() { return tasks_; }
+    const std::vector<Task<T>>& Tasks() const { return tasks_; }
 
 private:
-    io_context* ctx_;
-    std::vector<task<T>> tasks_;
+    IoContext* ctx_;
+    std::vector<Task<T>> tasks_;
     size_t sweep_interval_ = 1024;
     uint64_t spawn_count_ = 0;
 };
 
 // Out-of-line definitions (need full io_context definition)
 template<typename T>
-task<> task_group<T>::join_all(io_context& ctx, std::chrono::milliseconds poll) {
-    while (!all_done()) {
-        sweep();
-        co_await async_sleep(ctx, poll);
+Task<> TaskGroup<T>::JoinAll(IoContext& ctx, std::chrono::milliseconds poll) {
+    while (!AllDone()) {
+        Sweep();
+        co_await AsyncSleep(ctx, poll);
     }
-    sweep();
+    Sweep();
 }
 
 template<typename T>
-task<bool> task_group<T>::join_all_timeout(io_context& ctx, std::chrono::milliseconds timeout) {
+Task<bool> TaskGroup<T>::JoinAllTimeout(IoContext& ctx, std::chrono::milliseconds timeout) {
     auto deadline = std::chrono::steady_clock::now() + timeout;
     
-    while (!all_done()) {
+    while (!AllDone()) {
         if (std::chrono::steady_clock::now() >= deadline) {
             co_return false;
         }
-        sweep();
-        co_await async_sleep(ctx, std::chrono::milliseconds(10));
+        Sweep();
+        co_await AsyncSleep(ctx, std::chrono::milliseconds(10));
     }
     
-    sweep();
+    Sweep();
     co_return true;
 }
 
-using void_task_group = task_group<>;
+using void_task_group = TaskGroup<>;
 
 } // namespace aio

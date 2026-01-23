@@ -10,9 +10,9 @@
 
 #include <netdb.h>
 
-#include "aio/blocking_pool.hpp"
+#include "aio/BlockingPool.hpp"
+#include "aio/IoContext.hpp"
 #include "aio/io.hpp"
-#include "aio/io_context.hpp"
 #include "aio/logger.hpp"
 #include <arpa/inet.h>
 
@@ -65,7 +65,7 @@ static std::string resolve_blocking(const std::string& host) {
 // -----------------------------------------------------------------------------
 // Blocking Benchmark - Sequential, blocks the IO thread
 // -----------------------------------------------------------------------------
-aio::task<void> bench_blocking(aio::io_context& ctx) {
+aio::Task<void> bench_blocking(aio::IoContext& ctx) {
     aio::alog::info("--- Starting BLOCKING Benchmark (Sequential) ---");
 
     std::vector<std::pair<std::string, std::string>> results;
@@ -95,13 +95,13 @@ aio::task<void> bench_blocking(aio::io_context& ctx) {
 // Async Benchmark - Parallel via blocking_pool
 // -----------------------------------------------------------------------------
 
-aio::task<void> resolve_one(aio::io_context& ctx, aio::blocking_pool& pool,
+aio::Task<void> resolve_one(aio::IoContext& ctx, aio::BlockingPool& pool,
                             std::string domain,
                             std::vector<std::pair<std::string, std::string>>& results,
                             std::atomic<int>& pending) {
     // Offload blocking DNS to thread pool
     // IMPORTANT: capture domain by value - the coroutine frame may be destroyed
-    auto ip = co_await aio::offload(ctx, pool, [domain] {
+    auto ip = co_await aio::Offload(ctx, pool, [domain] {
         return resolve_blocking(domain);
     });
 
@@ -110,7 +110,7 @@ aio::task<void> resolve_one(aio::io_context& ctx, aio::blocking_pool& pool,
     pending.fetch_sub(1, std::memory_order_release);
 }
 
-aio::task<> bench_async(aio::io_context& ctx, aio::blocking_pool& pool) {
+aio::Task<> bench_async(aio::IoContext& ctx, aio::BlockingPool& pool) {
     aio::alog::info("--- Starting ASYNC Benchmark (Parallel) ---");
 
     std::vector<std::pair<std::string, std::string>> results;
@@ -121,19 +121,19 @@ aio::task<> bench_async(aio::io_context& ctx, aio::blocking_pool& pool) {
     std::atomic<int> pending{static_cast<int>(domains.size())};
 
     // Keep tasks alive
-    std::vector<aio::task<>> tasks;
+    std::vector<aio::Task<>> tasks;
     tasks.reserve(domains.size());
 
     // Fan-out: spawn all tasks
     for (const auto& domain : domains) {
         auto t = resolve_one(ctx, pool, domain, results, pending);
-        t.start();
+        t.Start();
         tasks.push_back(std::move(t));
     }
 
     // Wait for completion
     while (pending.load(std::memory_order_acquire) > 0) {
-        co_await aio::async_sleep(ctx, 1ms);
+        co_await aio::AsyncSleep(ctx, 1ms);
     }
 
     auto end = std::chrono::high_resolution_clock::now();
@@ -152,18 +152,18 @@ int main() {
     try {
         aio::alog::start();
 
-        aio::io_context ctx;
-        aio::blocking_pool pool{20};  // 20 threads for parallel DNS
+        aio::IoContext ctx;
+        aio::BlockingPool pool{20};  // 20 threads for parallel DNS
 
         // Run blocking benchmark
         auto t1 = bench_blocking(ctx);
-        ctx.run_until_done(t1);
+        ctx.RunUntilDone(t1);
 
        // std::cout << std::endl;
 
         // Run async benchmark
         auto t2 = bench_async(ctx, pool);
-        ctx.run_until_done(t2);
+        ctx.RunUntilDone(t2);
 
         aio::alog::stop();
     } catch (const std::exception& e) {

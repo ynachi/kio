@@ -15,7 +15,7 @@ namespace aio::net
 // Socket Implementation
 // ----------------------------------------------------------------------------
 
-void Socket::close()
+void Socket::Close()
 {
     if (fd_ >= 0)
     {
@@ -24,51 +24,51 @@ void Socket::close()
     }
 }
 
-Result<void> Socket::set_non_blocking() const
+Result<void> Socket::SetNonBlocking() const
 {
     int flags = ::fcntl(fd_, F_GETFL, 0);
     if (flags == -1)
-        return error_from_errno(errno);
+        return ErrorFromErrno(errno);
     if (::fcntl(fd_, F_SETFL, flags | O_NONBLOCK) == -1)
-        return error_from_errno(errno);
+        return ErrorFromErrno(errno);
     return {};
 }
 
-Result<> Socket::set_reuse_addr(bool enable) const
+Result<> Socket::SetReuseAddr(bool enable) const
 {
     int opt = enable ? 1 : 0;
     if (::setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
-        return error_from_errno(errno);
+        return ErrorFromErrno(errno);
     return {};
 }
 
-Result<> Socket::set_reuse_port(bool enable) const
+Result<> Socket::SetReusePort(bool enable) const
 {
     int opt = enable ? 1 : 0;
     if (::setsockopt(fd_, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0)
-        return error_from_errno(errno);
+        return ErrorFromErrno(errno);
     return {};
 }
 
-Result<> Socket::set_nodelay(bool enable) const
+Result<> Socket::SetNodelay(bool enable) const
 {
     int opt = enable ? 1 : 0;
     if (::setsockopt(fd_, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt)) < 0)
-        return error_from_errno(errno);
+        return ErrorFromErrno(errno);
     return {};
 }
 
-Result<> Socket::set_send_buffer(int size) const
+Result<> Socket::SetSendBuffer(int size) const
 {
     if (::setsockopt(fd_, SOL_SOCKET, SO_SNDBUF, &size, sizeof(size)) < 0)
-        return error_from_errno(errno);
+        return ErrorFromErrno(errno);
     return {};
 }
 
-Result<> Socket::set_recv_buffer(int size) const
+Result<> Socket::SetRecvBuffer(int size) const
 {
     if (::setsockopt(fd_, SOL_SOCKET, SO_RCVBUF, &size, sizeof(size)) < 0)
-        return error_from_errno(errno);
+        return ErrorFromErrno(errno);
     return {};
 }
 
@@ -76,7 +76,7 @@ Result<> Socket::set_recv_buffer(int size) const
 // SocketAddress Implementation
 // ----------------------------------------------------------------------------
 
-Result<SocketAddress> SocketAddress::resolve(std::string_view host, uint16_t port)
+Result<SocketAddress> SocketAddress::Resolve(std::string_view host, uint16_t port)
 {
     addrinfo hints{}, *res = nullptr;
     hints.ai_family = AF_UNSPEC;
@@ -105,37 +105,37 @@ Result<SocketAddress> SocketAddress::resolve(std::string_view host, uint16_t por
 // TcpListener Implementation
 // ----------------------------------------------------------------------------
 
-Result<Socket> TcpListener::bind(const SocketAddress& addr, int backlog)
+Result<Socket> TcpListener::Bind(const SocketAddress& addr, int backlog)
 {
     int fd = ::socket(addr.addr.ss_family, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if (fd < 0)
-        return error_from_errno(errno);
+        return ErrorFromErrno(errno);
 
     Socket sock(fd);
 
     // Standard high-perf defaults
-    if (auto r = sock.set_reuse_addr(); !r)
+    if (auto r = sock.SetReuseAddr(); !r)
         return std::unexpected(r.error());
-    if (auto r = sock.set_reuse_port(); !r)
+    if (auto r = sock.SetReusePort(); !r)
         return std::unexpected(r.error());
 
     // Explicit bind
-    if (::bind(fd, addr.get(), addr.addrlen) < 0)
+    if (::bind(fd, addr.Get(), addr.addrlen) < 0)
     {
-        return error_from_errno(errno);
+        return ErrorFromErrno(errno);
     }
 
     if (::listen(fd, backlog) < 0)
     {
-        return error_from_errno(errno);
+        return ErrorFromErrno(errno);
     }
 
     return sock;
 }
 
-Result<Socket> TcpListener::bind(uint16_t port)
+Result<Socket> TcpListener::Bind(uint16_t port)
 {
-    return bind(SocketAddress::v4(port));
+    return Bind(SocketAddress::V4(port));
 }
 
 }  // namespace aio::net

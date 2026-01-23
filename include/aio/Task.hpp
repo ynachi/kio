@@ -12,7 +12,7 @@ namespace aio
 // -----------------------------------------------------------------------------
 
 template <typename T = void>
-class task
+class Task
 {
 public:
     struct promise_type
@@ -21,7 +21,7 @@ public:
         std::exception_ptr exception;
         std::coroutine_handle<> continuation;
 
-        task get_return_object() { return task{std::coroutine_handle<promise_type>::from_promise(*this)}; }
+        Task get_return_object() { return Task{std::coroutine_handle<promise_type>::from_promise(*this)}; }
 
         std::suspend_always initial_suspend() noexcept { return {}; }
 
@@ -44,9 +44,9 @@ public:
 
     using handle_type = std::coroutine_handle<promise_type>;
 
-    explicit task(handle_type h) : handle_(h) {}
-    task(task&& other) noexcept : handle_(std::exchange(other.handle_, {})) {}
-    task& operator=(task&& other) noexcept
+    explicit Task(handle_type h) : handle_(h) {}
+    Task(Task&& other) noexcept : handle_(std::exchange(other.handle_, {})) {}
+    Task& operator=(Task&& other) noexcept
     {
         if (this != &other)
         {
@@ -57,14 +57,14 @@ public:
         return *this;
     }
 
-    ~task() noexcept
+    ~Task() noexcept
     {
         if (handle_)
             handle_.destroy();
     }
 
-    task(const task&) = delete;
-    task& operator=(const task&) = delete;
+    Task(const Task&) = delete;
+    Task& operator=(const Task&) = delete;
 
     bool done() const { return handle_ && handle_.done(); }
 
@@ -106,7 +106,7 @@ private:
 };
 
 template <>
-class task<void>
+class Task<void>
 {
 public:
     struct promise_type
@@ -114,7 +114,7 @@ public:
         std::exception_ptr exception;
         std::coroutine_handle<> continuation;
 
-        task get_return_object() { return task{std::coroutine_handle<promise_type>::from_promise(*this)}; }
+        Task get_return_object() { return Task{std::coroutine_handle<promise_type>::from_promise(*this)}; }
 
         std::suspend_always initial_suspend() noexcept { return {}; }
 
@@ -137,9 +137,9 @@ public:
 
     using handle_type = std::coroutine_handle<promise_type>;
 
-    explicit task(handle_type h) : handle_(h) {}
-    task(task&& other) noexcept : handle_(std::exchange(other.handle_, {})) {}
-    task& operator=(task&& other) noexcept
+    explicit Task(handle_type h) : handle_(h) {}
+    Task(Task&& other) noexcept : handle_(std::exchange(other.handle_, {})) {}
+    Task& operator=(Task&& other) noexcept
     {
         if (this != &other)
         {
@@ -150,18 +150,18 @@ public:
         return *this;
     }
 
-    ~task()
+    ~Task()
     {
         if (handle_)
             handle_.destroy();
     }
 
-    task(const task&) = delete;
-    task& operator=(const task&) = delete;
+    Task(const Task&) = delete;
+    Task& operator=(const Task&) = delete;
 
-    bool done() const { return handle_ && handle_.done(); }
+    bool Done() const { return handle_ && handle_.done(); }
 
-    void result()
+    void Result()
     {
         if (handle_.promise().exception)
             std::rethrow_exception(handle_.promise().exception);
@@ -175,7 +175,7 @@ public:
 
     // Alias resume for clarity: Starts the task concurrently.
     // WARNING: You must still keep the 'task' object alive!
-    void start() { resume(); }
+    void Start() { resume(); }
 
     // Awaitable interface
     bool await_ready() const noexcept { return false; }

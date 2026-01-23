@@ -4,7 +4,7 @@
 
 #include <liburing.h>
 
-#include "io_context.hpp"
+#include "IoContext.hpp"
 
 namespace aio
 {
@@ -25,24 +25,23 @@ namespace aio
  * Each ring_waker owns a small io_uring used only for MSG_RING.
  * Thread-safe to call wake() from any thread.
  */
-class ring_waker
+class RingWaker
 {
 public:
-    ring_waker()
+    RingWaker()
     {
-        int ret = io_uring_queue_init(32, &ring_, 0);
-        if (ret < 0)
+        if (const int ret = io_uring_queue_init(32, &ring_, 0); ret < 0)
         {
             throw std::system_error(-ret, std::system_category(), "ring_waker");
         }
     }
 
-    ~ring_waker() { io_uring_queue_exit(&ring_); }
+    ~RingWaker() { io_uring_queue_exit(&ring_); }
 
-    ring_waker(const ring_waker&) = delete;
-    ring_waker& operator=(const ring_waker&) = delete;
+    RingWaker(const RingWaker&) = delete;
+    RingWaker& operator=(const RingWaker&) = delete;
 
-    void wake(int target_ring_fd) noexcept
+    void Wake(int target_ring_fd) noexcept
     {
         io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
         if (!sqe)
@@ -59,12 +58,11 @@ public:
 
         // Reap CQEs so this tiny ring doesn't fill up.
         io_uring_cqe* cqes[32];
-        unsigned n = io_uring_peek_batch_cqe(&ring_, cqes, 32);
-        if (n)
+        if (const unsigned n = io_uring_peek_batch_cqe(&ring_, cqes, 32))
             io_uring_cq_advance(&ring_, n);
     }
 
-    void wake(io_context& ctx) noexcept { wake(ctx.ring_fd()); }
+    void Wake(const IoContext& ctx) noexcept { Wake(ctx.RingFd()); }
 
 private:
     io_uring ring_{};
@@ -86,10 +84,10 @@ private:
  *   // Signaler (any thread):
  *   evt.signal();
  */
-class event
+class Event
 {
 public:
-    explicit event(io_context* ctx) : ctx_(ctx), fd_(eventfd(0, EFD_CLOEXEC))
+    explicit Event(IoContext* ctx) : ctx_(ctx), fd_(eventfd(0, EFD_CLOEXEC))
     {
         if (fd_ < 0)
         {
@@ -97,37 +95,30 @@ public:
         }
     }
 
-    ~event() { ::close(fd_); }
+    ~Event() { ::close(fd_); }
 
-    event(const event&) = delete;
-    event& operator=(const event&) = delete;
+    Event(const Event&) = delete;
+    Event& operator=(const Event&) = delete;
 
-    struct wait_op : uring_op<wait_op>
+    struct WaitOp : UringOp<WaitOp>
     {
         int fd;
-        uint64_t value{};
+        size_t value{};
 
-        wait_op(io_context* ctx, int fd) : uring_op(ctx), fd(fd) {}
+        WaitOp(IoContext* ctx, const int fd) : UringOp(ctx), fd(fd) {}
 
         void prepare_sqe(io_uring_sqe* sqe) { io_uring_prep_read(sqe, fd, &value, sizeof(value), 0); }
-
-        Result<uint64_t> await_resume()
-        {
-            if (res < 0)
-                return std::unexpected(make_error_code(res));
-            return value;
-        }
     };
 
-    wait_op wait() { return {ctx_, fd_}; }
+    WaitOp Wait() { return {ctx_, fd_}; }
 
-    void signal(uint64_t count = 1) { [[maybe_unused]] auto r = ::write(fd_, &count, sizeof(count)); }
+    void Signal(const uint64_t count = 1) const { [[maybe_unused]] auto r = ::write(fd_, &count, sizeof(count)); }
 
-    int fd() const { return fd_; }
+    int Fd() const { return fd_; }
 
 private:
-    io_context* ctx_;
+    IoContext* ctx_;
     int fd_;
 };
 
-}
+}  // namespace aio

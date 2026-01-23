@@ -1,4 +1,3 @@
----
 Checks:
   "-*\
   ,boost-*\
@@ -112,7 +111,7 @@ Checks:
   "
 
 WarningsAsErrors: '*'
-HeaderFilterRegex: '/kio/(next|core)/,bitcask'
+#HeaderFilterRegex: '/include/(aio|core)/,bitcask'
 CheckOptions:
   - key: misc-non-private-member-variables-in-classes.IgnoreClassesWithAllMemberVariablesBeingPublic
     value: '1'
@@ -146,9 +145,15 @@ CheckOptions:
     value: CamelCase
   - key: readability-identifier-naming.ParameterCase
     value: lower_case
+  # --- ADDED: Explicitly force const parameters to be lower_case ---
+  - key: readability-identifier-naming.ConstantParameterCase
+    value: lower_case
   - key: readability-identifier-naming.ParameterPackCase
     value: lower_case
   - key: readability-identifier-naming.VariableCase
+    value: lower_case
+  # --- ADDED: Explicitly force local constants to be lower_case ---
+  - key: readability-identifier-naming.LocalConstantCase
     value: lower_case
   - key: readability-identifier-naming.ConstexprVariableCase
     value: CamelCase

@@ -11,15 +11,15 @@
 #include <cstddef>
 #include <span>
 
-#include "io_context.hpp"
+#include "IoContext.hpp"
 
 namespace aio
 {
 
 // Forward declarations
-class io_context;
+class IoContext;
 template <typename Derived>
-struct uring_op;
+struct UringOp;
 
 // -----------------------------------------------------------------------------
 // Concepts & Helpers
@@ -32,7 +32,7 @@ concept FileDescriptor = std::convertible_to<T, int> || requires(const T& t) {
 };
 
 // Helper to extract the raw fd
-constexpr int get_raw_fd(const FileDescriptor auto& fd)
+constexpr int GetRawFd(const FileDescriptor auto& fd)
 {
     if constexpr (std::convertible_to<decltype(fd), int>)
     {
@@ -44,15 +44,15 @@ constexpr int get_raw_fd(const FileDescriptor auto& fd)
     }
 }
 
-struct RecvOp : uring_op<RecvOp>
+struct RecvOp : UringOp<RecvOp>
 {
     int fd;
     std::span<std::byte> buffer;
     int flags;
 
     template <FileDescriptor F>
-    RecvOp(io_context& ctx, const F& f, std::span<std::byte> buf, int flags)
-        : uring_op(&ctx), fd(get_raw_fd(f)), buffer(buf), flags(flags)
+    RecvOp(IoContext& ctx, const F& f, std::span<std::byte> buf, int flags)
+        : UringOp(&ctx), fd(GetRawFd(f)), buffer(buf), flags(flags)
     {
     }
 
@@ -61,14 +61,14 @@ struct RecvOp : uring_op<RecvOp>
 
 // Primary API: std::span<std::byte>
 template <FileDescriptor F>
-inline RecvOp async_recv(io_context& ctx, const F& f, std::span<std::byte> buffer, int flags = 0)
+RecvOp AsyncRecv(IoContext& ctx, const F& f, std::span<std::byte> buffer, int flags = 0)
 {
     return RecvOp{ctx, f, buffer, flags};
 }
 
 // Convenience: char array
 template <FileDescriptor F, size_t N>
-inline RecvOp async_recv(io_context& ctx, const F& f, char (&buf)[N], int flags = 0)
+RecvOp AsyncRecv(IoContext& ctx, const F& f, char (&buf)[N], int flags = 0)
 {
     return RecvOp{
         ctx, f, std::span{reinterpret_cast<std::byte*>(buf), N},
@@ -78,19 +78,19 @@ inline RecvOp async_recv(io_context& ctx, const F& f, char (&buf)[N], int flags 
 
 // Convenience: std::array
 template <FileDescriptor F, size_t N>
-inline RecvOp async_recv(io_context& ctx, const F& f, std::array<std::byte, N>& buf, int flags = 0)
+RecvOp AsyncRecv(IoContext& ctx, const F& f, std::array<std::byte, N>& buf, int flags = 0)
 {
     return RecvOp{ctx, f, std::span{buf}, flags};
 }
 
-struct SendOp : uring_op<SendOp>
+struct SendOp : UringOp<SendOp>
 {
     int fd;
     std::span<const std::byte> buffer;
     int flags;
 
-    SendOp(io_context& ctx, int fd, std::span<const std::byte> buf, int flags)
-        : uring_op(&ctx), fd(fd), buffer(buf), flags(flags)
+    SendOp(IoContext& ctx, int fd, std::span<const std::byte> buf, int flags)
+        : UringOp(&ctx), fd(fd), buffer(buf), flags(flags)
     {
     }
 
@@ -98,13 +98,13 @@ struct SendOp : uring_op<SendOp>
 };
 
 // Primary API
-inline SendOp async_send(io_context& ctx, int fd, std::span<const std::byte> buffer, int flags = 0)
+inline SendOp AsyncSend(IoContext& ctx, int fd, std::span<const std::byte> buffer, int flags = 0)
 {
     return SendOp{ctx, fd, buffer, flags};
 }
 
 // Convenience: string_view → perfect for HTTP responses
-inline SendOp async_send(io_context& ctx, int fd, std::string_view str, int flags = 0)
+inline SendOp AsyncSend(IoContext& ctx, int fd, std::string_view str, int flags = 0)
 {
     return SendOp{
         ctx, fd, std::span{reinterpret_cast<const std::byte*>(str.data()), str.size()},
@@ -114,7 +114,7 @@ inline SendOp async_send(io_context& ctx, int fd, std::string_view str, int flag
 
 // Convenience: const char array
 template <size_t N>
-SendOp async_send(io_context& ctx, int fd, const char (&buf)[N], int flags = 0)
+SendOp AsyncSend(IoContext& ctx, int fd, const char (&buf)[N], int flags = 0)
 {
     return SendOp{
         ctx, fd, std::span{reinterpret_cast<const std::byte*>(buf), N - 1}, // Skip null terminator
@@ -122,71 +122,71 @@ SendOp async_send(io_context& ctx, int fd, const char (&buf)[N], int flags = 0)
     };
 }
 
-struct ReadOp : uring_op<ReadOp>
+struct ReadOp : UringOp<ReadOp>
 {
     int fd;
     std::span<std::byte> buffer;
     uint64_t offset;
 
-    ReadOp(io_context& ctx, int fd, std::span<std::byte> buf, uint64_t off)
-        : uring_op(&ctx), fd(fd), buffer(buf), offset(off)
+    ReadOp(IoContext& ctx, int fd, std::span<std::byte> buf, uint64_t off)
+        : UringOp(&ctx), fd(fd), buffer(buf), offset(off)
     {
     }
 
     void prepare_sqe(io_uring_sqe* sqe) { io_uring_prep_read(sqe, fd, buffer.data(), buffer.size(), offset); }
 };
 
-inline ReadOp async_read(io_context& ctx, int fd, std::span<std::byte> buffer, uint64_t offset = 0)
+inline ReadOp AsyncRead(IoContext& ctx, int fd, std::span<std::byte> buffer, uint64_t offset = 0)
 {
     return ReadOp{ctx, fd, buffer, offset};
 }
 
-struct WriteOp : uring_op<WriteOp>
+struct WriteOp : UringOp<WriteOp>
 {
     int fd;
     std::span<const std::byte> buffer;
     uint64_t offset;
 
-    WriteOp(io_context& ctx, int fd, std::span<const std::byte> buf, uint64_t off)
-        : uring_op(&ctx), fd(fd), buffer(buf), offset(off)
+    WriteOp(IoContext& ctx, int fd, std::span<const std::byte> buf, uint64_t off)
+        : UringOp(&ctx), fd(fd), buffer(buf), offset(off)
     {
     }
 
     void prepare_sqe(io_uring_sqe* sqe) { io_uring_prep_write(sqe, fd, buffer.data(), buffer.size(), offset); }
 };
 
-inline WriteOp async_write(io_context& ctx, int fd, std::span<const std::byte> buffer, uint64_t offset = 0)
+inline WriteOp AsyncWrite(IoContext& ctx, int fd, std::span<const std::byte> buffer, uint64_t offset = 0)
 {
     return WriteOp{ctx, fd, buffer, offset};
 }
 
-struct CloseOp : uring_op<CloseOp>
+struct CloseOp : UringOp<CloseOp>
 {
-    using uring_op::await_resume;
+    using UringOp::await_resume;
 
     int fd;
 
-    CloseOp(io_context& ctx, int fd) : uring_op(&ctx), fd(fd) {}
+    CloseOp(IoContext& ctx, int fd) : UringOp(&ctx), fd(fd) {}
 
     void prepare_sqe(io_uring_sqe* sqe) { io_uring_prep_close(sqe, fd); }
 
     Result<void> await_resume()
     {
         if (res < 0)
-            return std::unexpected(make_error_code(res));
+            return std::unexpected(MakeErrorCode(res));
         return {};
     }
 };
 
-struct ReadFixedOp : uring_op<ReadFixedOp>
+struct ReadFixedOp : UringOp<ReadFixedOp>
 {
     int file_index;
     void* buffer;
     size_t len;
     off_t offset;
 
-    ReadFixedOp(io_context& ctx, int idx, std::span<std::byte> buf, off_t off)
-        : uring_op(&ctx), file_index(idx), buffer(buf.data()), len(buf.size()), offset(off)
+    ReadFixedOp(IoContext& ctx, int idx, std::span<std::byte> buf, off_t off)
+        : UringOp(&ctx), file_index(idx), buffer(buf.data()), len(buf.size()), offset(off)
     {
     }
 
@@ -197,20 +197,20 @@ struct ReadFixedOp : uring_op<ReadFixedOp>
     }
 };
 
-inline ReadFixedOp async_read_fixed(io_context& ctx, int idx, std::span<std::byte> buf, off_t off)
+inline ReadFixedOp AsyncReadFixed(IoContext& ctx, int idx, std::span<std::byte> buf, off_t off)
 {
     return ReadFixedOp(ctx, idx, buf, off);
 }
 
-struct WriteFixedOp : uring_op<WriteFixedOp>
+struct WriteFixedOp : UringOp<WriteFixedOp>
 {
     int file_index;
     const void* buffer;
     size_t len;
     off_t offset;
 
-    WriteFixedOp(io_context& ctx, int idx, std::span<const std::byte> buf, off_t off)
-        : uring_op(&ctx), file_index(idx), buffer(buf.data()), len(buf.size()), offset(off)
+    WriteFixedOp(IoContext& ctx, int idx, std::span<const std::byte> buf, off_t off)
+        : UringOp(&ctx), file_index(idx), buffer(buf.data()), len(buf.size()), offset(off)
     {
     }
 
@@ -221,25 +221,25 @@ struct WriteFixedOp : uring_op<WriteFixedOp>
     }
 };
 
-inline WriteFixedOp async_write_fixed(io_context& ctx, int idx, std::span<const std::byte> buf, off_t off)
+inline WriteFixedOp AsyncWriteFixed(IoContext& ctx, int idx, std::span<const std::byte> buf, off_t off)
 {
     return WriteFixedOp(ctx, idx, buf, off);
 }
 
-inline CloseOp async_close(io_context& ctx, int fd)
+inline CloseOp AsyncClose(IoContext& ctx, int fd)
 {
     return CloseOp(ctx, fd);
 }
 
-struct ConnectOp : uring_op<ConnectOp>
+struct ConnectOp : UringOp<ConnectOp>
 {
-    using uring_op::await_resume;
+    using UringOp::await_resume;
 
     int fd;
     sockaddr_storage addr_store{};
     socklen_t addrlen;
 
-    ConnectOp(io_context& ctx, int fd, const sockaddr* addr, socklen_t len) : uring_op(&ctx), fd(fd), addrlen(len)
+    ConnectOp(IoContext& ctx, int fd, const sockaddr* addr, socklen_t len) : UringOp(&ctx), fd(fd), addrlen(len)
     {
         std::memcpy(&addr_store, addr, len);
     }
@@ -252,25 +252,25 @@ struct ConnectOp : uring_op<ConnectOp>
     Result<void> await_resume()
     {
         if (res < 0)
-            return std::unexpected(make_error_code(res));
+            return std::unexpected(MakeErrorCode(res));
         return {};
     }
 };
 
-inline ConnectOp async_connect(io_context& ctx, int fd, const sockaddr* addr, socklen_t len)
+inline ConnectOp AsyncConnect(IoContext& ctx, int fd, const sockaddr* addr, socklen_t len)
 {
     return ConnectOp(ctx, fd, addr, len);
 }
 
-struct AcceptOp : uring_op<AcceptOp>
+struct AcceptOp : UringOp<AcceptOp>
 {
-    using uring_op::await_resume;
+    using UringOp::await_resume;
 
     int fd;
     sockaddr_storage addr{};
     socklen_t addrlen = sizeof(addr);
 
-    AcceptOp(io_context& ctx, int fd) : uring_op(&ctx), fd(fd) {}
+    AcceptOp(IoContext& ctx, int fd) : UringOp(&ctx), fd(fd) {}
 
     void prepare_sqe(io_uring_sqe* sqe)
     {
@@ -280,24 +280,24 @@ struct AcceptOp : uring_op<AcceptOp>
     Result<int> await_resume()
     {
         if (res < 0)
-            return std::unexpected(make_error_code(res));
+            return std::unexpected(MakeErrorCode(res));
         return res;
     }
 };
 
-inline AcceptOp async_accept(io_context& ctx, int fd)
+inline AcceptOp AsyncAccept(IoContext& ctx, int fd)
 {
     return AcceptOp(ctx, fd);
 }
 
-struct SleepOp : uring_op<SleepOp>
+struct SleepOp : UringOp<SleepOp>
 {
-    using uring_op::await_resume;
+    using UringOp::await_resume;
 
     __kernel_timespec ts;
 
     template <typename Rep, typename Period>
-    SleepOp(io_context& ctx, std::chrono::duration<Rep, Period> dur) : uring_op(&ctx)
+    SleepOp(IoContext& ctx, std::chrono::duration<Rep, Period> dur) : UringOp(&ctx)
     {
         auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(dur).count();
         ts.tv_sec = ns / 1'000'000'000;
@@ -311,44 +311,15 @@ struct SleepOp : uring_op<SleepOp>
         if (res == -ETIME)
             return {};
         if (res < 0)
-            return std::unexpected(make_error_code(res));
+            return std::unexpected(MakeErrorCode(res));
         return {};
     }
 };
 
 template <typename Rep, typename Period>
-SleepOp async_sleep(io_context& ctx, std::chrono::duration<Rep, Period> dur)
+SleepOp AsyncSleep(IoContext& ctx, std::chrono::duration<Rep, Period> dur)
 {
     return SleepOp(ctx, dur);
 }
-
-// =============================================================================
-// Usage Examples (compile-time verification)
-// =============================================================================
-
-namespace examples
-{
-
-task<void> demo_buffer_safety(io_context& ctx, int fd)
-{
-    // Stack buffer with automatic size deduction
-    char buf[4096];
-    auto result = co_await async_recv(ctx, fd, buf);  // No size needed!
-
-    // std::array (recommended for modern code)
-    std::array<std::byte, 4096> buffer;
-    auto r2 = co_await async_recv(ctx, fd, buffer);
-
-    // Explicit span (when you need subranges)
-    auto r3 = co_await async_recv(ctx, fd, std::span{buffer}.subspan(0, 1024));
-
-    // String view for sends (zero copy)
-    co_await async_send(ctx, fd, "HTTP/1.1 200 OK\r\n");
-
-    // Compile error: size mismatch impossible!
-    // co_await async_recv(ctx, fd, buffer, 8192);  // Won't compile!
-}
-
-}  // namespace examples
 
 }  // namespace aio

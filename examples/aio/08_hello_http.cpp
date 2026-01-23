@@ -24,13 +24,13 @@
 
 #include <sys/socket.h>
 
+#include "aio/IoContext.hpp"
+#include "aio/Task.hpp"
+#include "aio/TaskGroup.hpp"
 #include "aio/events.hpp"
 #include "aio/io.hpp"
-#include "aio/io_context.hpp"
 #include "aio/logger.hpp"
 #include "aio/net.hpp"
-#include "aio/task.hpp"
-#include "aio/task_group.hpp"
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 
@@ -55,7 +55,7 @@ static void pin_to_cpu(int cpu_id) {
     }
 }
 
-static aio::task<> handle_client(aio::io_context& ctx, int fd) {
+static aio::Task<> handle_client(aio::IoContext& ctx, int fd) {
 
     alignas(64) std::array<std::byte, 4096> buffer{};
 
@@ -69,7 +69,7 @@ static aio::task<> handle_client(aio::io_context& ctx, int fd) {
         "Hello, World!";
 
     while (true) {
-        auto rr = co_await aio::async_recv(ctx, fd, buffer, 0);
+        auto rr = co_await aio::AsyncRecv(ctx, fd, buffer, 0);
         if (!rr || *rr == 0) break;
 
         g_requests.fetch_add(1, std::memory_order_relaxed);
@@ -78,14 +78,14 @@ static aio::task<> handle_client(aio::io_context& ctx, int fd) {
         while (sent < resp.size()) {
             // Subspan for partial sending
             const auto remaining = std::string_view{resp.data() + sent, resp.size() - sent};
-            auto sr = co_await aio::async_send(ctx, fd, remaining, 0);
+            auto sr = co_await aio::AsyncSend(ctx, fd, remaining, 0);
             if (!sr || *sr == 0) goto out;
             sent += *sr;
         }
     }
 
 out:
-    (void)co_await aio::async_close(ctx, fd);
+    (void)co_await aio::AsyncClose(ctx, fd);
     co_return;
 }
 
@@ -93,37 +93,37 @@ out:
 // Modernized Accept Loop
 // =============================================================================
 
-static aio::task<> accept_loop(aio::io_context& ctx, int listen_fd) {
-    aio::task_group connections(&ctx, 1024);
-    connections.set_sweep_interval(256);  // Sweep every 256 connections
+static aio::Task<> accept_loop(aio::IoContext& ctx, int listen_fd) {
+    aio::TaskGroup connections(&ctx, 1024);
+    connections.SetSweepInterval(256);  // Sweep every 256 connections
 
     while (g_running.load(std::memory_order_relaxed)) {
-        auto ar = co_await aio::async_accept(ctx, listen_fd);
+        auto ar = co_await aio::AsyncAccept(ctx, listen_fd);
         if (!ar) {
             const int e = ar.error().value();
             if (e == EBADF || e == ECANCELED) break;
 
             if (e == EMFILE || e == ENFILE) {
-                (void)co_await aio::async_sleep(ctx, 10ms);
+                (void)co_await aio::AsyncSleep(ctx, 10ms);
             }
             continue;
         }
 
         g_connections.fetch_add(1, std::memory_order_relaxed);
 
-        connections.spawn(handle_client(ctx, *ar));
+        connections.Spawn(handle_client(ctx, *ar));
 
         // Optional manual sweep (automatic happens every 256)
-        if (connections.size() > 2048) {
-            const size_t removed = connections.sweep();
+        if (connections.Size() > 2048) {
+            const size_t removed = connections.Sweep();
             (void)removed;  // Could log this
         }
     }
 
     std::fprintf(stderr, "Waiting for %zu active connections to close...\n",
-                 connections.active_count());
+                 connections.ActiveCount());
 
-    co_await connections.join_all(ctx, 50ms);
+    co_await connections.JoinAll(ctx, 50ms);
 
     std::fprintf(stderr, "All connections closed.\n");
 }
@@ -133,7 +133,7 @@ static aio::task<> accept_loop(aio::io_context& ctx, int listen_fd) {
 // =============================================================================
 
 struct Worker {
-    std::unique_ptr<aio::io_context> ctx;  // Already using smart pointers!
+    std::unique_ptr<aio::IoContext> ctx;  // Already using smart pointers!
     std::thread th;
 };
 
@@ -145,14 +145,14 @@ int main(int argc, char** argv) {
     const uint16_t port = (argc >= 2) ? static_cast<uint16_t>(std::atoi(argv[1])) : 8080;
     const int threads = (argc >= 3) ? std::max(1, std::atoi(argv[2])) : 4;
 
-    auto socket_res = aio::net::TcpListener::bind(port);
+    auto socket_res = aio::net::TcpListener::Bind(port);
     if (!socket_res.has_value())
     {
         aio::alog::fatal("failed to bind to {}", port);
     }
 
 
-    int listen_fd = socket_res.value().get();
+    int listen_fd = socket_res.value().Get();
     if (listen_fd < 0) {
         std::perror("bind/listen");
         return 1;
@@ -166,7 +166,7 @@ int main(int argc, char** argv) {
     // Create workers
     for (int i = 0; i < threads; ++i) {
         Worker w;
-        w.ctx = std::make_unique<aio::io_context>(4096);
+        w.ctx = std::make_unique<aio::IoContext>(4096);
         workers.push_back(std::move(w));
     }
 
@@ -177,10 +177,10 @@ int main(int argc, char** argv) {
             pin_to_cpu(i);
 
             auto acc = accept_loop(*w.ctx, listen_fd);
-            acc.start();
+            acc.Start();
 
-            w.ctx->run();
-            w.ctx->cancel_all_pending();
+            w.ctx->Run();
+            w.ctx->CancelAllPending();
         });
     }
 
@@ -200,10 +200,10 @@ int main(int argc, char** argv) {
     ::close(listen_fd);
 
     // Clean shutdown using ring_waker
-    aio::ring_waker waker;
+    aio::RingWaker waker;
     for (auto& w : workers) {
-        w.ctx->stop();
-        waker.wake(*w.ctx);  // Reference deref!
+        w.ctx->Stop();
+        waker.Wake(*w.ctx);  // Reference deref!
     }
 
     for (auto& w : workers) {

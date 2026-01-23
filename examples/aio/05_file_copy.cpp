@@ -15,8 +15,8 @@
 
 #include <sys/stat.h>
 
+#include "aio/IoContext.hpp"
 #include "aio/io.hpp"
-#include "aio/io_context.hpp"
 
 static int open_ro(const char* path) {
     int fd = ::open(path, O_RDONLY | O_CLOEXEC);
@@ -35,7 +35,7 @@ static off_t file_size(int fd) {
 }
 
 // Modernized: io_context& instead of io_context*
-static aio::task<int> copy_task(aio::io_context& ctx,
+static aio::Task<int> copy_task(aio::IoContext& ctx,
                                 int in_fd, int out_fd,
                                 bool fixed_files,
                                 size_t block_size) {
@@ -59,7 +59,7 @@ static aio::task<int> copy_task(aio::io_context& ctx,
             );
 
             // Read chunk - using span subrange
-            auto read_result = co_await aio::async_read_fixed(
+            auto read_result = co_await aio::AsyncReadFixed(
                 ctx,                                    // Reference, not pointer!
                 /*file_index=*/0,
                 std::span{buffer}.subspan(0, want),    // Explicit span subrange
@@ -77,7 +77,7 @@ static aio::task<int> copy_task(aio::io_context& ctx,
             // Write chunk - may need multiple writes for partial results
             size_t written = 0;
             while (written < got) {
-                auto write_result = co_await aio::async_write_fixed(
+                auto write_result = co_await aio::AsyncWriteFixed(
                     ctx,                                                // Reference!
                     /*file_index=*/1,
                     std::span{buffer}.subspan(written, got - written), // Remaining bytes
@@ -103,7 +103,7 @@ static aio::task<int> copy_task(aio::io_context& ctx,
             );
 
             // Read chunk
-            auto read_result = co_await aio::async_read(
+            auto read_result = co_await aio::AsyncRead(
                 ctx,                                 // Reference!
                 in_fd,
                 std::span{buffer}.subspan(0, want), // Span with exact size
@@ -121,7 +121,7 @@ static aio::task<int> copy_task(aio::io_context& ctx,
             // Write chunk
             size_t written = 0;
             while (written < got) {
-                auto write_result = co_await aio::async_write(
+                auto write_result = co_await aio::AsyncWrite(
                     ctx,                                             // Reference!
                     out_fd,
                     std::span{buffer}.subspan(written, got - written), // Remaining
@@ -169,17 +169,17 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    aio::io_context ctx(1024);
+    aio::IoContext ctx(1024);
 
     // Register files if using fixed file descriptors
     if (use_fixed) {
         std::array<int, 2> fds = { in_fd, out_fd };
-        ctx.register_files(fds);  // std::array converts to span automatically
+        ctx.RegisterFiles(fds);  // std::array converts to span automatically
     }
 
     // Run the copy task
     auto task = copy_task(ctx, in_fd, out_fd, use_fixed, block_kb * 1024);
-    ctx.run_until_done(task);
+    ctx.RunUntilDone(task);
 
     int result = task.result();
 

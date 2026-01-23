@@ -6,7 +6,7 @@
 
 namespace aio
 {
-class io_context;
+class IoContext;
 // -----------------------------------------------------------------------------
 // Operation State (Intrusive Tracking)
 // -----------------------------------------------------------------------------
@@ -24,21 +24,21 @@ class io_context;
  *
  * Movable only when not tracked (before await_suspend).
  */
-struct operation_state
+struct OperationState
 {
-    io_context* ctx = nullptr;
+    IoContext* ctx = nullptr;
     int32_t res = 0;
     std::coroutine_handle<> handle;
 
     // Intrusive doubly linked list pointers
-    operation_state* next = nullptr;
-    operation_state* prev = nullptr;
+    OperationState* next = nullptr;
+    OperationState* prev = nullptr;
     bool tracked = false;
 
-    operation_state() = default;
+    OperationState() = default;
 
     // Move allowed only when not tracked
-    operation_state(operation_state&& other) noexcept : ctx(other.ctx), res(other.res), handle(other.handle)
+    OperationState(OperationState&& other) noexcept : ctx(other.ctx), res(other.res), handle(other.handle)
     {
         // Source must not be tracked
         if (other.tracked)
@@ -49,13 +49,13 @@ struct operation_state
         other.handle = nullptr;
     }
 
-    operation_state& operator=(operation_state&&) = delete;
-    operation_state(const operation_state&) = delete;
-    operation_state& operator=(const operation_state&) = delete;
+    OperationState& operator=(OperationState&&) = delete;
+    OperationState(const OperationState&) = delete;
+    OperationState& operator=(const OperationState&) = delete;
 
-    ~operation_state()
+    ~OperationState()
     {
-        if (tracked)
+        if (tracked == true)
         {
             // Coroutine destroyed while I/O pending → memory corruption risk
             // Terminate loudly rather than corrupt silently

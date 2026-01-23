@@ -15,9 +15,9 @@
 
 #include <sys/socket.h>
 
+#include "IoContext.hpp"
+#include "aio/BlockingPool.hpp"
 #include "aio/result.hpp"
-#include "io_context.hpp"
-#include "aio/blocking_pool.hpp"
 #include <arpa/inet.h>
 #include <netinet/in.h>
 
@@ -57,25 +57,25 @@ public:
     Socket(const Socket&) = delete;
     Socket& operator=(const Socket&) = delete;
 
-    [[nodiscard]] int get() const { return fd_; }
-    [[nodiscard]] bool is_valid() const { return fd_ >= 0; }
-    explicit operator bool() const { return is_valid(); }
+    [[nodiscard]] int Get() const { return fd_; }
+    [[nodiscard]] bool IsValid() const { return fd_ >= 0; }
+    explicit operator bool() const { return IsValid(); }
 
     /// @brief Releases ownership of the file descriptor.
     /// @return The raw file descriptor. Caller must close it.
-    int release() { return std::exchange(fd_, -1); }
+    int Release() { return std::exchange(fd_, -1); }
 
     /// @brief Close the socket explicitly.
-    void close();
+    void Close();
 
     // --- Socket Options ---
 
-    Result<void> set_non_blocking() const;
-    Result<> set_reuse_addr(bool enable = true) const;
-    Result<> set_reuse_port(bool enable = true) const;
-    Result<> set_nodelay(bool enable = true) const;
-    Result<> set_send_buffer(int size) const;
-    Result<> set_recv_buffer(int size) const;
+    Result<void> SetNonBlocking() const;
+    Result<> SetReuseAddr(bool enable = true) const;
+    Result<> SetReusePort(bool enable = true) const;
+    Result<> SetNodelay(bool enable = true) const;
+    Result<> SetSendBuffer(int size) const;
+    Result<> SetRecvBuffer(int size) const;
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -91,7 +91,7 @@ struct SocketAddress
     /// @brief Creates an IPv4 address helper.
     /// @param port The port number (host byte order).
     /// @param ip The IP string (e.g., "127.0.0.1"). If null, uses INADDR_ANY.
-    static SocketAddress v4(uint16_t port, const char* ip = nullptr)
+    static SocketAddress V4(uint16_t port, const char* ip = nullptr)
     {
         SocketAddress sa;
         auto* in = reinterpret_cast<sockaddr_in*>(&sa.addr);
@@ -112,7 +112,7 @@ struct SocketAddress
     /// @brief Creates an IPv6 address helper.
     /// @param port The port number (host byte order).
     /// @param ip The IP string (e.g., "::1"). If null, uses in6addr_any.
-    static SocketAddress v6(uint16_t port, const char* ip = nullptr)
+    static SocketAddress V6(uint16_t port, const char* ip = nullptr)
     {
         SocketAddress sa;
         auto* in6 = reinterpret_cast<sockaddr_in6*>(&sa.addr);
@@ -135,7 +135,7 @@ struct SocketAddress
     /// @param port The port number.
     /// @return A Result containing the SocketAddress.
     /// @note This is a BLOCKING call. Use resolve_async in hot paths.
-    static Result<SocketAddress> resolve(std::string_view host, uint16_t port);
+    static Result<SocketAddress> Resolve(std::string_view host, uint16_t port);
 
     /// @brief Asynchronously resolves a hostname without blocking the reactor.
     /// @param ctx The io context to use.
@@ -143,18 +143,18 @@ struct SocketAddress
     /// @param host The hostname.
     /// @param port The port number.
     /// @return A Task containing the resolved SocketAddress.
-    static task<Result<SocketAddress>> resolve_async(io_context& ctx, blocking_pool& pool, std::string host, uint16_t port)
+    static Task<Result<SocketAddress>> ResolveAsync(IoContext& ctx, BlockingPool& pool, std::string host, uint16_t port)
     {
         // We capture 'host' by value (std::string) to ensure it survives the thread switch
-        auto result = co_await offload(ctx, pool, [h = std::move(host), port]() -> Result<SocketAddress> {
+        auto result = co_await Offload(ctx, pool, [h = std::move(host), port]() -> Result<SocketAddress> {
             // This runs on a background thread, so blocking is fine
-            return resolve(h, port);
+            return Resolve(h, port);
         });
 
         co_return result;
     }
 
-    const sockaddr* get() const { return reinterpret_cast<const sockaddr*>(&addr); }
+    const sockaddr* Get() const { return reinterpret_cast<const sockaddr*>(&addr); }
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -166,9 +166,9 @@ struct TcpListener
     /// @param addr The address to bind to.
     /// @param backlog Pending connection queue size (default 4096).
     /// @return A Result containing the bound listening Socket.
-    static Result<Socket> bind(const SocketAddress& addr, int backlog = 4096);
+    static Result<Socket> Bind(const SocketAddress& addr, int backlog = 4096);
 
-    static Result<Socket> bind(uint16_t port);
+    static Result<Socket> Bind(uint16_t port);
 };
 
 }  // namespace aio::net
