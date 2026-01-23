@@ -1,0 +1,247 @@
+#pragma once
+
+#include <algorithm>
+#include <span>
+
+#include "aio/IoContext.hpp"
+#include "aio/Task.hpp"
+#include "aio/io.hpp"
+#include "aio/result.hpp"
+
+namespace aio
+{
+
+// -----------------------------------------------------------------------------
+// Internal: Splice operation (not exposed publicly)
+// -----------------------------------------------------------------------------
+
+namespace detail
+{
+
+struct SpliceOp : UringOp<SpliceOp>
+{
+    int fd_in;
+    int64_t off_in;
+    int fd_out;
+    int64_t off_out;
+    unsigned int len;
+    unsigned int flags;
+
+    SpliceOp(IoContext& ctx, int in, int64_t off_in, int out, int64_t off_out, unsigned int length, unsigned int fl)
+        : UringOp(&ctx), fd_in(in), off_in(off_in), fd_out(out), off_out(off_out), len(length), flags(fl)
+    {
+    }
+
+    void prepare_sqe(io_uring_sqe* sqe)
+    {
+        io_uring_prep_splice(sqe, fd_in, off_in, fd_out, off_out, len, flags);
+    }
+};
+
+inline SpliceOp AsyncSplice(IoContext& ctx, int fd_in, int64_t off_in, int fd_out, int64_t off_out, unsigned int len,
+                            unsigned int flags = 0)
+{
+    return SpliceOp(ctx, fd_in, off_in, fd_out, off_out, len, flags);
+}
+
+}  // namespace detail
+
+// -----------------------------------------------------------------------------
+// Exact Read/Write/Recv/Send Helpers
+// -----------------------------------------------------------------------------
+
+/**
+ * Read exactly buffer.size() bytes, looping on partial reads.
+ * Returns error on EOF before buffer is filled.
+ */
+template <FileDescriptor F>
+Task<Result<void>> AsyncReadExact(IoContext& ctx, const F& f, std::span<std::byte> buffer, uint64_t offset = 0)
+{
+    size_t total = 0;
+    const size_t target = buffer.size();
+
+    while (total < target)
+    {
+        auto result = co_await AsyncRead(ctx, f, buffer.subspan(total), offset + total);
+        if (!result)
+        {
+            co_return std::unexpected(result.error());
+        }
+
+        if (*result == 0)
+        {
+            co_return std::unexpected(std::make_error_code(std::errc::no_message_available));  // EOF
+        }
+
+        total += *result;
+    }
+
+    co_return Result<void>{};
+}
+
+/**
+ * Write exactly buffer.size() bytes, looping on partial writes.
+ */
+template <FileDescriptor F>
+Task<Result<void>> AsyncWriteExact(IoContext& ctx, const F& f, std::span<const std::byte> buffer, uint64_t offset = 0)
+{
+    size_t total = 0;
+    const size_t target = buffer.size();
+
+    while (total < target)
+    {
+        auto result = co_await AsyncWrite(ctx, f, buffer.subspan(total), offset + total);
+        if (!result)
+        {
+            co_return std::unexpected(result.error());
+        }
+
+        if (*result == 0)
+        {
+            co_return std::unexpected(std::make_error_code(std::errc::no_message_available));
+        }
+
+        total += *result;
+    }
+
+    co_return Result<void>{};
+}
+
+/**
+ * Receive exactly buffer.size() bytes, looping on partial receives.
+ * Returns error on EOF (connection closed) before buffer is filled.
+ */
+template <FileDescriptor F>
+Task<Result<void>> AsyncRecvExact(IoContext& ctx, const F& f, std::span<std::byte> buffer, int flags = 0)
+{
+    size_t total = 0;
+    const size_t target = buffer.size();
+
+    while (total < target)
+    {
+        auto result = co_await AsyncRecv(ctx, f, buffer.subspan(total), flags);
+        if (!result)
+        {
+            co_return std::unexpected(result.error());
+        }
+
+        if (*result == 0)
+        {
+            co_return std::unexpected(std::make_error_code(std::errc::no_message_available));  // Connection closed
+        }
+
+        total += *result;
+    }
+
+    co_return Result<void>{};
+}
+
+/**
+ * Send exactly buffer.size() bytes, looping on partial sends.
+ */
+template <FileDescriptor F>
+Task<Result<void>> AsyncSendExact(IoContext& ctx, const F& f, std::span<const std::byte> buffer, int flags = 0)
+{
+    size_t total = 0;
+    const size_t target = buffer.size();
+
+    while (total < target)
+    {
+        auto result = co_await AsyncSend(ctx, f, buffer.subspan(total), flags);
+        if (!result)
+        {
+            co_return std::unexpected(result.error());
+        }
+
+        if (*result == 0)
+        {
+            co_return std::unexpected(std::make_error_code(std::errc::no_message_available));
+        }
+
+        total += *result;
+    }
+
+    co_return Result<void>{};
+}
+
+// -----------------------------------------------------------------------------
+// Sendfile Helper
+// -----------------------------------------------------------------------------
+
+/**
+ * Zero-copy file-to-socket transfer using splice via a pooled pipe.
+ *
+ * Transfers 'count' bytes from 'in_fd' starting at 'offset' to 'out_fd'.
+ * Uses the IoContext's pipe pool for efficiency across multiple calls.
+ *
+ * @param ctx      The IoContext
+ * @param out_fd   Destination (typically a socket)
+ * @param in_fd    Source file descriptor
+ * @param offset   Starting offset in the source file
+ * @param count    Number of bytes to transfer
+ */
+template <FileDescriptor Fout, FileDescriptor Fin>
+Task<Result<void>> AsyncSendfile(IoContext& ctx, const Fout& out_fd, const Fin& in_fd, off_t offset, size_t count)
+{
+    // Acquire a pipe from the pool
+    auto pipe_guard = ctx.GetPipePool().AcquireGuarded();
+    if (!pipe_guard)
+    {
+        co_return std::unexpected(std::make_error_code(std::errc::too_many_files_open));
+    }
+
+    auto& pipe = pipe_guard->get();
+    const int pipe_read = pipe.read_fd;
+    const int pipe_write = pipe.write_fd;
+
+    size_t remaining = count;
+    off_t current_offset = offset;
+
+    constexpr size_t kChunkSize = 65536;  // 64KB chunks
+
+    while (remaining > 0)
+    {
+        const auto to_splice = static_cast<unsigned int>(std::min(remaining, kChunkSize));
+
+        // Splice from input file to pipe
+        auto splice_in = co_await detail::AsyncSplice(ctx, GetRawFd(in_fd), current_offset, pipe_write, -1, to_splice, 0);
+        if (!splice_in)
+        {
+            co_return std::unexpected(splice_in.error());
+        }
+
+        if (*splice_in == 0)
+        {
+            // EOF on input file
+            co_return std::unexpected(std::make_error_code(std::errc::no_message_available));
+        }
+
+        auto pipe_remaining = *splice_in;
+
+        // Splice from pipe to output socket
+        while (pipe_remaining > 0)
+        {
+            auto splice_out =
+                co_await detail::AsyncSplice(ctx, pipe_read, -1, GetRawFd(out_fd), -1, static_cast<unsigned int>(pipe_remaining), 0);
+            if (!splice_out)
+            {
+                co_return std::unexpected(splice_out.error());
+            }
+
+            if (*splice_out == 0)
+            {
+                // Output closed
+                co_return std::unexpected(std::make_error_code(std::errc::broken_pipe));
+            }
+
+            pipe_remaining -= *splice_out;
+        }
+
+        current_offset += static_cast<off_t>(*splice_in);
+        remaining -= *splice_in;
+    }
+
+    co_return Result<void>{};
+}
+
+}  // namespace aio

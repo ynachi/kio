@@ -60,6 +60,7 @@
 
 #include "aio/Task.hpp"
 #include "aio/operation_base.hpp"
+#include "aio/pipe_pool.hpp"
 #include "aio/result.hpp"
 
 namespace aio
@@ -256,6 +257,19 @@ public:
     io_uring* Ring() { return &ring_; }
     int RingFd() const { return ring_.ring_fd; }
 
+    /**
+     * Get the pipe pool for sendfile operations.
+     * Created lazily on first access.
+     */
+    PipePool& GetPipePool()
+    {
+        if (!pipe_pool_)
+        {
+            pipe_pool_.emplace(4);  // Default pool size of 4 pipes
+        }
+        return *pipe_pool_;
+    }
+
     void EnsureSqes(const unsigned n)
     {
         if (io_uring_sq_space_left(&ring_) < n)
@@ -425,6 +439,9 @@ private:
     std::vector<OperationState*> ext_done_;
     bool ext_wake_pending_ = false;       // protected by ext_mtx_
     std::atomic<bool> ext_hint_ = false;  // fast-path hint (may be stale)
+
+    // Lazy pipe pool for sendfile operations
+    std::optional<PipePool> pipe_pool_;
 };
 
 // -----------------------------------------------------------------------------

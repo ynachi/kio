@@ -388,45 +388,49 @@ PollOp AsyncPoll(IoContext& ctx, const F& f, unsigned poll_mask)
 struct ReadvOp : UringOp<ReadvOp>
 {
     int fd;
-    const iovec* iovecs;
-    unsigned nr_vecs;
+    std::span<const iovec> iovecs;
     uint64_t offset;
 
     template <FileDescriptor F>
-    ReadvOp(IoContext& ctx, const F& f, const iovec* iov, unsigned nr, uint64_t off)
-        : UringOp(&ctx), fd(GetRawFd(f)), iovecs(iov), nr_vecs(nr), offset(off)
+    ReadvOp(IoContext& ctx, const F& f, std::span<const iovec> iov, uint64_t off)
+        : UringOp(&ctx), fd(GetRawFd(f)), iovecs(iov), offset(off)
     {
     }
 
-    void prepare_sqe(io_uring_sqe* sqe) { io_uring_prep_readv(sqe, fd, iovecs, nr_vecs, offset); }
+    void prepare_sqe(io_uring_sqe* sqe)
+    {
+        io_uring_prep_readv(sqe, fd, iovecs.data(), static_cast<unsigned>(iovecs.size()), offset);
+    }
 };
 
 template <FileDescriptor F>
-ReadvOp AsyncReadv(IoContext& ctx, const F& f, const iovec* iov, unsigned nr_vecs, uint64_t offset = 0)
+ReadvOp AsyncReadv(IoContext& ctx, const F& f, std::span<const iovec> iovecs, uint64_t offset = 0)
 {
-    return ReadvOp(ctx, f, iov, nr_vecs, offset);
+    return ReadvOp(ctx, f, iovecs, offset);
 }
 
 struct WritevOp : UringOp<WritevOp>
 {
     int fd;
-    const iovec* iovecs;
-    unsigned nr_vecs;
+    std::span<const iovec> iovecs;
     uint64_t offset;
 
     template <FileDescriptor F>
-    WritevOp(IoContext& ctx, const F& f, const iovec* iov, unsigned nr, uint64_t off)
-        : UringOp(&ctx), fd(GetRawFd(f)), iovecs(iov), nr_vecs(nr), offset(off)
+    WritevOp(IoContext& ctx, const F& f, std::span<const iovec> iov, uint64_t off)
+        : UringOp(&ctx), fd(GetRawFd(f)), iovecs(iov), offset(off)
     {
     }
 
-    void prepare_sqe(io_uring_sqe* sqe) { io_uring_prep_writev(sqe, fd, iovecs, nr_vecs, offset); }
+    void prepare_sqe(io_uring_sqe* sqe)
+    {
+        io_uring_prep_writev(sqe, fd, iovecs.data(), static_cast<unsigned>(iovecs.size()), offset);
+    }
 };
 
 template <FileDescriptor F>
-WritevOp AsyncWritev(IoContext& ctx, const F& f, const iovec* iov, unsigned nr_vecs, uint64_t offset = 0)
+WritevOp AsyncWritev(IoContext& ctx, const F& f, std::span<const iovec> iovecs, uint64_t offset = 0)
 {
-    return WritevOp(ctx, f, iov, nr_vecs, offset);
+    return WritevOp(ctx, f, iovecs, offset);
 }
 
 struct SendmsgOp : UringOp<SendmsgOp>
