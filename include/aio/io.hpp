@@ -297,6 +297,159 @@ ConnectOp AsyncConnect(IoContext& ctx, const F& f, const sockaddr* addr, socklen
     return ConnectOp(ctx, f, addr, len);
 }
 
+struct FsyncOp : UringOp<FsyncOp>
+{
+    int fd;
+
+    template <FileDescriptor F>
+    FsyncOp(IoContext& ctx, const F& f) : UringOp(&ctx), fd(GetRawFd(f)) {}
+
+    void prepare_sqe(io_uring_sqe* sqe) { io_uring_prep_fsync(sqe, fd, 0); }
+};
+
+template <FileDescriptor F>
+FsyncOp AsyncFsync(IoContext& ctx, const F& f)
+{
+    return FsyncOp(ctx, f);
+}
+
+struct FdatasyncOp : UringOp<FdatasyncOp>
+{
+    int fd;
+
+    template <FileDescriptor F>
+    FdatasyncOp(IoContext& ctx, const F& f) : UringOp(&ctx), fd(GetRawFd(f)) {}
+
+    void prepare_sqe(io_uring_sqe* sqe) { io_uring_prep_fsync(sqe, fd, IORING_FSYNC_DATASYNC); }
+};
+
+template <FileDescriptor F>
+FdatasyncOp AsyncFdatasync(IoContext& ctx, const F& f)
+{
+    return FdatasyncOp(ctx, f);
+}
+
+struct FallocateOp : UringOp<FallocateOp>
+{
+    int fd;
+    int mode;
+    off_t offset;
+    off_t len;
+
+    template <FileDescriptor F>
+    FallocateOp(IoContext& ctx, const F& f, int mode, off_t offset, off_t len)
+        : UringOp(&ctx), fd(GetRawFd(f)), mode(mode), offset(offset), len(len)
+    {
+    }
+
+    void prepare_sqe(io_uring_sqe* sqe) { io_uring_prep_fallocate(sqe, fd, mode, offset, len); }
+};
+
+template <FileDescriptor F>
+FallocateOp AsyncFallocate(IoContext& ctx, const F& f, int mode, off_t offset, off_t len)
+{
+    return FallocateOp(ctx, f, mode, offset, len);
+}
+
+struct FtruncateOp : UringOp<FtruncateOp>
+{
+    int fd;
+    off_t len;
+
+    template <FileDescriptor F>
+    FtruncateOp(IoContext& ctx, const F& f, off_t len) : UringOp(&ctx), fd(GetRawFd(f)), len(len) {}
+
+    void prepare_sqe(io_uring_sqe* sqe) { io_uring_prep_ftruncate(sqe, fd, len); }
+};
+
+template <FileDescriptor F>
+FtruncateOp AsyncFtruncate(IoContext& ctx, const F& f, off_t len)
+{
+    return FtruncateOp(ctx, f, len);
+}
+
+struct PollOp : UringOp<PollOp>
+{
+    int fd;
+    unsigned poll_mask;
+
+    template <FileDescriptor F>
+    PollOp(IoContext& ctx, const F& f, unsigned mask) : UringOp(&ctx), fd(GetRawFd(f)), poll_mask(mask) {}
+
+    void prepare_sqe(io_uring_sqe* sqe) { io_uring_prep_poll_add(sqe, fd, poll_mask); }
+};
+
+template <FileDescriptor F>
+PollOp AsyncPoll(IoContext& ctx, const F& f, unsigned poll_mask)
+{
+    return PollOp(ctx, f, poll_mask);
+}
+
+struct ReadvOp : UringOp<ReadvOp>
+{
+    int fd;
+    const iovec* iovecs;
+    unsigned nr_vecs;
+    uint64_t offset;
+
+    template <FileDescriptor F>
+    ReadvOp(IoContext& ctx, const F& f, const iovec* iov, unsigned nr, uint64_t off)
+        : UringOp(&ctx), fd(GetRawFd(f)), iovecs(iov), nr_vecs(nr), offset(off)
+    {
+    }
+
+    void prepare_sqe(io_uring_sqe* sqe) { io_uring_prep_readv(sqe, fd, iovecs, nr_vecs, offset); }
+};
+
+template <FileDescriptor F>
+ReadvOp AsyncReadv(IoContext& ctx, const F& f, const iovec* iov, unsigned nr_vecs, uint64_t offset = 0)
+{
+    return ReadvOp(ctx, f, iov, nr_vecs, offset);
+}
+
+struct WritevOp : UringOp<WritevOp>
+{
+    int fd;
+    const iovec* iovecs;
+    unsigned nr_vecs;
+    uint64_t offset;
+
+    template <FileDescriptor F>
+    WritevOp(IoContext& ctx, const F& f, const iovec* iov, unsigned nr, uint64_t off)
+        : UringOp(&ctx), fd(GetRawFd(f)), iovecs(iov), nr_vecs(nr), offset(off)
+    {
+    }
+
+    void prepare_sqe(io_uring_sqe* sqe) { io_uring_prep_writev(sqe, fd, iovecs, nr_vecs, offset); }
+};
+
+template <FileDescriptor F>
+WritevOp AsyncWritev(IoContext& ctx, const F& f, const iovec* iov, unsigned nr_vecs, uint64_t offset = 0)
+{
+    return WritevOp(ctx, f, iov, nr_vecs, offset);
+}
+
+struct SendmsgOp : UringOp<SendmsgOp>
+{
+    int fd;
+    const msghdr* msg;
+    unsigned flags;
+
+    template <FileDescriptor F>
+    SendmsgOp(IoContext& ctx, const F& f, const msghdr* m, unsigned fl)
+        : UringOp(&ctx), fd(GetRawFd(f)), msg(m), flags(fl)
+    {
+    }
+
+    void prepare_sqe(io_uring_sqe* sqe) { io_uring_prep_sendmsg(sqe, fd, msg, flags); }
+};
+
+template <FileDescriptor F>
+SendmsgOp AsyncSendmsg(IoContext& ctx, const F& f, const msghdr* msg, unsigned flags = 0)
+{
+    return SendmsgOp(ctx, f, msg, flags);
+}
+
 struct SleepOp : UringOp<SleepOp>
 {
     using UringOp::await_resume;
