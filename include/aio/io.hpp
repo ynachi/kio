@@ -129,20 +129,21 @@ inline SendOp AsyncSend(IoContext& ctx, const F& f, std::span<const std::byte> b
 }
 
 // Convenience: string_view → perfect for HTTP responses
-inline SendOp AsyncSend(IoContext& ctx, int fd, std::string_view str, int flags = 0)
+template <FileDescriptor F>
+SendOp AsyncSend(IoContext& ctx, const F& f, std::string_view str, int flags = 0)
 {
     return SendOp{
-        ctx, fd, std::span{reinterpret_cast<const std::byte*>(str.data()), str.size()},
+        ctx, f, std::span{reinterpret_cast<const std::byte*>(str.data()), str.size()},
           flags
     };
 }
 
 // Convenience: const char array
-template <size_t N>
-SendOp AsyncSend(IoContext& ctx, int fd, const char (&buf)[N], int flags = 0)
+template <FileDescriptor F, size_t N>
+SendOp AsyncSend(IoContext& ctx, const F& f, const char (&buf)[N], int flags = 0)
 {
     return SendOp{
-        ctx, fd, std::span{reinterpret_cast<const std::byte*>(buf), N - 1}, // Skip null terminator
+        ctx, f, std::span{reinterpret_cast<const std::byte*>(buf), N - 1}, // Skip null terminator
         flags
     };
 }
@@ -153,17 +154,19 @@ struct ReadOp : UringOp<ReadOp>
     std::span<std::byte> buffer;
     uint64_t offset;
 
-    ReadOp(IoContext& ctx, int fd, std::span<std::byte> buf, uint64_t off)
-        : UringOp(&ctx), fd(fd), buffer(buf), offset(off)
+    template <FileDescriptor F>
+    ReadOp(IoContext& ctx, const F& f, std::span<std::byte> buf, uint64_t off)
+        : UringOp(&ctx), fd(GetRawFd(f)), buffer(buf), offset(off)
     {
     }
 
     void prepare_sqe(io_uring_sqe* sqe) { io_uring_prep_read(sqe, fd, buffer.data(), buffer.size(), offset); }
 };
 
-inline ReadOp AsyncRead(IoContext& ctx, int fd, std::span<std::byte> buffer, uint64_t offset = 0)
+template <FileDescriptor F>
+ReadOp AsyncRead(IoContext& ctx, const F& f, std::span<std::byte> buffer, uint64_t offset = 0)
 {
-    return ReadOp{ctx, fd, buffer, offset};
+    return ReadOp{ctx, f, buffer, offset};
 }
 
 struct WriteOp : UringOp<WriteOp>
@@ -172,17 +175,19 @@ struct WriteOp : UringOp<WriteOp>
     std::span<const std::byte> buffer;
     uint64_t offset;
 
-    WriteOp(IoContext& ctx, int fd, std::span<const std::byte> buf, uint64_t off)
-        : UringOp(&ctx), fd(fd), buffer(buf), offset(off)
+    template <FileDescriptor F>
+    WriteOp(IoContext& ctx, const F& f, std::span<const std::byte> buf, uint64_t off)
+        : UringOp(&ctx), fd(GetRawFd(f)), buffer(buf), offset(off)
     {
     }
 
     void prepare_sqe(io_uring_sqe* sqe) { io_uring_prep_write(sqe, fd, buffer.data(), buffer.size(), offset); }
 };
 
-inline WriteOp AsyncWrite(IoContext& ctx, int fd, std::span<const std::byte> buffer, uint64_t offset = 0)
+template <FileDescriptor F>
+WriteOp AsyncWrite(IoContext& ctx, const F& f, std::span<const std::byte> buffer, uint64_t offset = 0)
 {
-    return WriteOp{ctx, fd, buffer, offset};
+    return WriteOp{ctx, f, buffer, offset};
 }
 
 struct CloseOp : UringOp<CloseOp>
@@ -191,7 +196,8 @@ struct CloseOp : UringOp<CloseOp>
 
     int fd;
 
-    CloseOp(IoContext& ctx, int fd) : UringOp(&ctx), fd(fd) {}
+    template <FileDescriptor F>
+    CloseOp(IoContext& ctx, const F& f) : UringOp(&ctx), fd(GetRawFd(f)) {}
 
     void prepare_sqe(io_uring_sqe* sqe) { io_uring_prep_close(sqe, fd); }
 
@@ -251,9 +257,10 @@ inline WriteFixedOp AsyncWriteFixed(IoContext& ctx, int idx, std::span<const std
     return WriteFixedOp(ctx, idx, buf, off);
 }
 
-inline CloseOp AsyncClose(IoContext& ctx, int fd)
+template <FileDescriptor F>
+CloseOp AsyncClose(IoContext& ctx, const F& f)
 {
-    return CloseOp(ctx, fd);
+    return CloseOp(ctx, f);
 }
 
 struct ConnectOp : UringOp<ConnectOp>
@@ -264,7 +271,9 @@ struct ConnectOp : UringOp<ConnectOp>
     sockaddr_storage addr_store{};
     socklen_t addrlen;
 
-    ConnectOp(IoContext& ctx, int fd, const sockaddr* addr, socklen_t len) : UringOp(&ctx), fd(fd), addrlen(len)
+    template <FileDescriptor F>
+    ConnectOp(IoContext& ctx, const F& f, const sockaddr* addr, socklen_t len)
+        : UringOp(&ctx), fd(GetRawFd(f)), addrlen(len)
     {
         std::memcpy(&addr_store, addr, len);
     }
@@ -282,9 +291,10 @@ struct ConnectOp : UringOp<ConnectOp>
     }
 };
 
-inline ConnectOp AsyncConnect(IoContext& ctx, int fd, const sockaddr* addr, socklen_t len)
+template <FileDescriptor F>
+ConnectOp AsyncConnect(IoContext& ctx, const F& f, const sockaddr* addr, socklen_t len)
 {
-    return ConnectOp(ctx, fd, addr, len);
+    return ConnectOp(ctx, f, addr, len);
 }
 
 struct SleepOp : UringOp<SleepOp>
