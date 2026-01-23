@@ -50,10 +50,23 @@ inline SpliceOp AsyncSplice(IoContext& ctx, int fd_in, int64_t off_in, int fd_ou
 // Exact Read/Write/Recv/Send Helpers
 // -----------------------------------------------------------------------------
 
-/**
- * Read exactly buffer.size() bytes, looping on partial reads.
- * Returns error on EOF before buffer is filled.
- */
+/// @brief Reads exactly buffer.size() bytes, looping on partial reads.
+/// @param ctx The IoContext to run on
+/// @param f File descriptor to read from
+/// @param buffer Buffer to read into. MUST remain valid until operation completes.
+/// @param offset Offset to read from (default: 0)
+/// @return Task yielding Result<void> - success means all bytes read
+///
+/// @warning The buffer must remain valid until co_await returns!
+/// @warning Returns error if EOF is reached before buffer is filled.
+///
+/// @code
+///   std::array<std::byte, 1024> buffer;
+///   auto result = co_await AsyncReadExact(ctx, fd, buffer);
+///   if (!result) {
+///       // Handle error (including unexpected EOF)
+///   }
+/// @endcode
 template <FileDescriptor F>
 Task<Result<void>> AsyncReadExact(IoContext& ctx, const F& f, std::span<std::byte> buffer, uint64_t offset = 0)
 {
@@ -79,9 +92,19 @@ Task<Result<void>> AsyncReadExact(IoContext& ctx, const F& f, std::span<std::byt
     co_return Result<void>{};
 }
 
-/**
- * Write exactly buffer.size() bytes, looping on partial writes.
- */
+/// @brief Writes exactly buffer.size() bytes, looping on partial writes.
+/// @param ctx The IoContext to run on
+/// @param f File descriptor to write to
+/// @param buffer Buffer to write from. MUST remain valid until operation completes.
+/// @param offset Offset to write at (default: 0)
+/// @return Task yielding Result<void> - success means all bytes written
+///
+/// @warning The buffer must remain valid until co_await returns!
+///
+/// @code
+///   std::span<const std::byte> data = get_data();
+///   co_await AsyncWriteExact(ctx, fd, data, file_offset);
+/// @endcode
 template <FileDescriptor F>
 Task<Result<void>> AsyncWriteExact(IoContext& ctx, const F& f, std::span<const std::byte> buffer, uint64_t offset = 0)
 {
@@ -107,10 +130,25 @@ Task<Result<void>> AsyncWriteExact(IoContext& ctx, const F& f, std::span<const s
     co_return Result<void>{};
 }
 
-/**
- * Receive exactly buffer.size() bytes, looping on partial receives.
- * Returns error on EOF (connection closed) before buffer is filled.
- */
+/// @brief Receives exactly buffer.size() bytes, looping on partial receives.
+/// @param ctx The IoContext to run on
+/// @param f Socket to receive from
+/// @param buffer Buffer to receive into. MUST remain valid until operation completes.
+/// @param flags Optional recv flags (default: 0)
+/// @return Task yielding Result<void> - success means all bytes received
+///
+/// @warning The buffer and socket must remain valid until co_await returns!
+/// @warning Returns error if connection closes before buffer is filled.
+///
+/// @code
+///   // Read a fixed-size header
+///   Header header;
+///   auto buf = std::as_writable_bytes(std::span(&header, 1));
+///   auto result = co_await AsyncRecvExact(ctx, socket, buf);
+///   if (!result) {
+///       // Connection closed or error
+///   }
+/// @endcode
 template <FileDescriptor F>
 Task<Result<void>> AsyncRecvExact(IoContext& ctx, const F& f, std::span<std::byte> buffer, int flags = 0)
 {
@@ -136,9 +174,20 @@ Task<Result<void>> AsyncRecvExact(IoContext& ctx, const F& f, std::span<std::byt
     co_return Result<void>{};
 }
 
-/**
- * Send exactly buffer.size() bytes, looping on partial sends.
- */
+/// @brief Sends exactly buffer.size() bytes, looping on partial sends.
+/// @param ctx The IoContext to run on
+/// @param f Socket to send to
+/// @param buffer Buffer to send from. MUST remain valid until operation completes.
+/// @param flags Optional send flags (default: 0)
+/// @return Task yielding Result<void> - success means all bytes sent
+///
+/// @warning The buffer and socket must remain valid until co_await returns!
+///
+/// @code
+///   std::string_view response = "HTTP/1.1 200 OK\r\n\r\n";
+///   auto data = std::as_bytes(std::span(response));
+///   co_await AsyncSendExact(ctx, client_socket, data);
+/// @endcode
 template <FileDescriptor F>
 Task<Result<void>> AsyncSendExact(IoContext& ctx, const F& f, std::span<const std::byte> buffer, int flags = 0)
 {
@@ -168,18 +217,34 @@ Task<Result<void>> AsyncSendExact(IoContext& ctx, const F& f, std::span<const st
 // Sendfile Helper
 // -----------------------------------------------------------------------------
 
-/**
- * Zero-copy file-to-socket transfer using splice via a pooled pipe.
- *
- * Transfers 'count' bytes from 'in_fd' starting at 'offset' to 'out_fd'.
- * Uses the IoContext's pipe pool for efficiency across multiple calls.
- *
- * @param ctx      The IoContext
- * @param out_fd   Destination (typically a socket)
- * @param in_fd    Source file descriptor
- * @param offset   Starting offset in the source file
- * @param count    Number of bytes to transfer
- */
+/// @brief Zero-copy file-to-socket transfer using splice via a pooled pipe.
+/// @param ctx The IoContext to run on
+/// @param out_fd Destination socket. MUST remain valid until operation completes.
+/// @param in_fd Source file descriptor. MUST remain valid until operation completes.
+/// @param offset Starting offset in the source file
+/// @param count Number of bytes to transfer
+/// @return Task yielding Result<void> - success means all bytes transferred
+///
+/// @details Transfers 'count' bytes from 'in_fd' starting at 'offset' to 'out_fd'.
+///          Uses the IoContext's pipe pool for efficiency across multiple calls,
+///          avoiding pipe creation overhead on each invocation.
+///
+/// @warning Both file descriptors must remain open until co_await returns!
+/// @warning Returns error if EOF on input file or output socket closes early.
+///
+/// @code
+///   // Serve a static file over a socket
+///   int file_fd = open("index.html", O_RDONLY);
+///   struct stat st;
+///   fstat(file_fd, &st);
+///
+///   auto result = co_await AsyncSendfile(ctx, client_socket, file_fd, 0, st.st_size);
+///   close(file_fd);
+///
+///   if (!result) {
+///       // Transfer failed (client disconnected, etc.)
+///   }
+/// @endcode
 template <FileDescriptor Fout, FileDescriptor Fin>
 Task<Result<void>> AsyncSendfile(IoContext& ctx, const Fout& out_fd, const Fin& in_fd, off_t offset, size_t count)
 {
