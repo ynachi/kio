@@ -1,8 +1,6 @@
 #pragma once
 
-#include <array>
 #include <optional>
-#include <utility>
 #include <vector>
 
 #include <fcntl.h>
@@ -43,7 +41,7 @@ struct Pipe
 class PipePool
 {
 public:
-    explicit PipePool(size_t max_size = 4) : max_size_(max_size) { pool_.reserve(max_size); }
+    explicit PipePool(const size_t max_size = 4) : max_size_(max_size) { pool_.reserve(max_size); }
 
     ~PipePool()
     {
@@ -71,7 +69,7 @@ public:
             return p;
         }
 
-        // Create new pipe
+        // Create a new pipe
         int fds[2];
         if (::pipe(fds) < 0)
         {

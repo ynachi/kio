@@ -3,8 +3,8 @@
 #include <algorithm>
 #include <span>
 
-#include "aio/IoContext.hpp"
-#include "aio/Task.hpp"
+#include "aio/io_context.hpp"
+#include "aio/task.hpp"
 #include "aio/io.hpp"
 #include "aio/result.hpp"
 
@@ -32,7 +32,7 @@ struct SpliceOp : UringOp<SpliceOp>
     {
     }
 
-    void prepare_sqe(io_uring_sqe* sqe)
+    void PrepareSqe(io_uring_sqe* sqe)
     {
         io_uring_prep_splice(sqe, fd_in, off_in, fd_out, off_out, len, flags);
     }
@@ -58,7 +58,7 @@ inline SpliceOp AsyncSplice(IoContext& ctx, int fd_in, int64_t off_in, int fd_ou
 /// @return Task yielding Result<void> - success means all bytes read
 ///
 /// @warning The buffer must remain valid until co_await returns!
-/// @warning Returns error if EOF is reached before buffer is filled.
+/// @warning Returns error if EOF is reached before the buffer is filled.
 ///
 /// @code
 ///   std::array<std::byte, 1024> buffer;

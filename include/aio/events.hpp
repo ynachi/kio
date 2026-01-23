@@ -4,7 +4,9 @@
 
 #include <liburing.h>
 
-#include "IoContext.hpp"
+#include <sys/eventfd.h>
+
+#include "io_context.hpp"
 
 namespace aio
 {
@@ -41,25 +43,33 @@ public:
     RingWaker(const RingWaker&) = delete;
     RingWaker& operator=(const RingWaker&) = delete;
 
-    void Wake(int target_ring_fd) noexcept
+    /// Wake returns true if succeeded and false otherwise
+    bool Wake(const int target_ring_fd) noexcept
     {
         io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
         if (!sqe)
         {
             (void)io_uring_submit(&ring_);
             sqe = io_uring_get_sqe(&ring_);
-            if (!sqe)
-                return;  // best-effort
+            if (sqe == nullptr)
+            {
+                return false;
+            }
         }
 
         io_uring_prep_msg_ring(sqe, target_ring_fd, /*res*/ 0u, /*user_data*/ WAKE_TAG, 0);
         io_uring_sqe_set_data(sqe, nullptr);
-        (void)io_uring_submit(&ring_);
+        if (const auto ret = io_uring_submit(&ring_); ret < 0)
+        {
+            return false;
+        }
 
         // Reap CQEs so this tiny ring doesn't fill up.
         io_uring_cqe* cqes[32];
         if (const unsigned n = io_uring_peek_batch_cqe(&ring_, cqes, 32))
             io_uring_cq_advance(&ring_, n);
+
+        return true;
     }
 
     void Wake(const IoContext& ctx) noexcept { Wake(ctx.RingFd()); }

@@ -4,9 +4,9 @@
 #include <chrono>
 #include <vector>
 
-#include "aio/IoContext.hpp"
-#include "aio/Task.hpp"
 #include "aio/io.hpp"
+#include "aio/io_context.hpp"
+#include "aio/task.hpp"
 
 namespace aio {
 
@@ -58,7 +58,7 @@ public:
     
     template<typename... Tasks>
     void SpawnAll(Tasks&&... tasks) {
-        (spawn(std::forward<Tasks>(tasks)), ...);
+        (Spawn(std::forward<Tasks>(tasks)), ...);
     }
     
     // -------------------------------------------------------------------------
@@ -118,6 +118,8 @@ private:
 // Out-of-line definitions (need full io_context definition)
 template<typename T>
 Task<> TaskGroup<T>::JoinAll(IoContext& ctx, std::chrono::milliseconds poll) {
+    // TODO: a bit inefficient but ok for now. Blocking_pool is for occasional cpu intensive
+    // tasks
     while (!AllDone()) {
         Sweep();
         co_await AsyncSleep(ctx, poll);

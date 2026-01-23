@@ -15,8 +15,8 @@
 
 #include <sys/stat.h>
 
-#include "aio/IoContext.hpp"
 #include "aio/io.hpp"
+#include "aio/io_context.hpp"
 
 static int open_ro(const char* path) {
     int fd = ::open(path, O_RDONLY | O_CLOEXEC);
@@ -181,7 +181,7 @@ int main(int argc, char** argv) {
     auto task = copy_task(ctx, in_fd, out_fd, use_fixed, block_kb * 1024);
     ctx.RunUntilDone(task);
 
-    int result = task.result();
+    int result = task.Result();
 
     // Cleanup
     ::close(in_fd);

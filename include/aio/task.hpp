@@ -66,9 +66,9 @@ public:
     Task(const Task&) = delete;
     Task& operator=(const Task&) = delete;
 
-    bool done() const { return handle_ && handle_.done(); }
+    bool Done() const { return handle_ && handle_.done(); }
 
-    T result()
+    T Result()
     {
         if (handle_.promise().exception)
             std::rethrow_exception(handle_.promise().exception);
@@ -83,7 +83,7 @@ public:
 
     // Alias resume for clarity: Starts the task concurrently.
     // WARNING: You must still keep the 'task' object alive!
-    void start() { resume(); }
+    void Start() { resume(); }
 
     // Awaitable interface
     bool await_ready() const noexcept { return false; }

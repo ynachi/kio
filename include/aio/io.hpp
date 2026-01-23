@@ -4,7 +4,7 @@
 #include <cstddef>
 #include <span>
 
-#include "IoContext.hpp"
+#include "io_context.hpp"
 
 namespace aio
 {
@@ -48,7 +48,7 @@ struct AcceptOp : UringOp<AcceptOp>
     template <FileDescriptor F>
     AcceptOp(IoContext& ctx, const F& f) : UringOp(&ctx), fd(GetRawFd(f)) {}
 
-    void prepare_sqe(io_uring_sqe* sqe)
+    void PrepareSqe(io_uring_sqe* sqe)
     {
         io_uring_prep_accept(sqe, fd, reinterpret_cast<sockaddr*>(&addr), &addrlen, 0);
     }
@@ -96,7 +96,7 @@ struct RecvOp : UringOp<RecvOp>
     {
     }
 
-    void prepare_sqe(io_uring_sqe* sqe) { io_uring_prep_recv(sqe, fd, buffer.data(), buffer.size(), flags); }
+    void PrepareSqe(io_uring_sqe* sqe) { io_uring_prep_recv(sqe, fd, buffer.data(), buffer.size(), flags); }
 };
 
 /// @brief Receives data from a socket.
@@ -153,7 +153,7 @@ struct SendOp : UringOp<SendOp>
     {
     }
 
-    void prepare_sqe(io_uring_sqe* sqe) { io_uring_prep_send(sqe, fd, buffer.data(), buffer.size(), flags); }
+    void PrepareSqe(io_uring_sqe* sqe) const { io_uring_prep_send(sqe, fd, buffer.data(), buffer.size(), flags); }
 };
 
 /// @brief Sends data to a socket.
@@ -213,7 +213,7 @@ struct ReadOp : UringOp<ReadOp>
     {
     }
 
-    void prepare_sqe(io_uring_sqe* sqe) { io_uring_prep_read(sqe, fd, buffer.data(), buffer.size(), offset); }
+    void PrepareSqe(io_uring_sqe* sqe) { io_uring_prep_read(sqe, fd, buffer.data(), buffer.size(), offset); }
 };
 
 /// @brief Reads data from a file descriptor.
@@ -250,7 +250,7 @@ struct WriteOp : UringOp<WriteOp>
     {
     }
 
-    void prepare_sqe(io_uring_sqe* sqe) { io_uring_prep_write(sqe, fd, buffer.data(), buffer.size(), offset); }
+    void PrepareSqe(io_uring_sqe* sqe) const { io_uring_prep_write(sqe, fd, buffer.data(), buffer.size(), offset); }
 };
 
 /// @brief Writes data to a file descriptor.
@@ -282,7 +282,7 @@ struct CloseOp : UringOp<CloseOp>
     template <FileDescriptor F>
     CloseOp(IoContext& ctx, const F& f) : UringOp(&ctx), fd(GetRawFd(f)) {}
 
-    void prepare_sqe(io_uring_sqe* sqe) { io_uring_prep_close(sqe, fd); }
+    void PrepareSqe(io_uring_sqe* sqe) const { io_uring_prep_close(sqe, fd); }
 
     Result<void> await_resume()
     {
@@ -304,7 +304,7 @@ struct ReadFixedOp : UringOp<ReadFixedOp>
     {
     }
 
-    void prepare_sqe(io_uring_sqe* sqe)
+    void PrepareSqe(io_uring_sqe* sqe) const
     {
         io_uring_prep_read(sqe, file_index, buffer, len, offset);
         sqe->flags |= IOSQE_FIXED_FILE;
@@ -347,7 +347,7 @@ struct WriteFixedOp : UringOp<WriteFixedOp>
     {
     }
 
-    void prepare_sqe(io_uring_sqe* sqe)
+    void PrepareSqe(io_uring_sqe* sqe)
     {
         io_uring_prep_write(sqe, file_index, buffer, len, offset);
         sqe->flags |= IOSQE_FIXED_FILE;
@@ -401,7 +401,7 @@ struct ConnectOp : UringOp<ConnectOp>
         std::memcpy(&addr_store, addr, len);
     }
 
-    void prepare_sqe(io_uring_sqe* sqe)
+    void PrepareSqe(io_uring_sqe* sqe)
     {
         io_uring_prep_connect(sqe, fd, reinterpret_cast<sockaddr*>(&addr_store), addrlen);
     }
@@ -447,7 +447,7 @@ struct FsyncOp : UringOp<FsyncOp>
     template <FileDescriptor F>
     FsyncOp(IoContext& ctx, const F& f) : UringOp(&ctx), fd(GetRawFd(f)) {}
 
-    void prepare_sqe(io_uring_sqe* sqe) { io_uring_prep_fsync(sqe, fd, 0); }
+    void PrepareSqe(io_uring_sqe* sqe) const { io_uring_prep_fsync(sqe, fd, 0); }
 };
 
 /// @brief Flushes file data and metadata to disk (fsync).
@@ -475,7 +475,7 @@ struct FdatasyncOp : UringOp<FdatasyncOp>
     template <FileDescriptor F>
     FdatasyncOp(IoContext& ctx, const F& f) : UringOp(&ctx), fd(GetRawFd(f)) {}
 
-    void prepare_sqe(io_uring_sqe* sqe) { io_uring_prep_fsync(sqe, fd, IORING_FSYNC_DATASYNC); }
+    void PrepareSqe(io_uring_sqe* sqe) const { io_uring_prep_fsync(sqe, fd, IORING_FSYNC_DATASYNC); }
 };
 
 /// @brief Flushes file data to disk, skipping metadata (fdatasync).
@@ -509,7 +509,7 @@ struct FallocateOp : UringOp<FallocateOp>
     {
     }
 
-    void prepare_sqe(io_uring_sqe* sqe) { io_uring_prep_fallocate(sqe, fd, mode, offset, len); }
+    void PrepareSqe(io_uring_sqe* sqe) const { io_uring_prep_fallocate(sqe, fd, mode, offset, len); }
 };
 
 /// @brief Pre-allocates or manipulates file space (fallocate).
@@ -541,7 +541,7 @@ struct FtruncateOp : UringOp<FtruncateOp>
     template <FileDescriptor F>
     FtruncateOp(IoContext& ctx, const F& f, off_t len) : UringOp(&ctx), fd(GetRawFd(f)), len(len) {}
 
-    void prepare_sqe(io_uring_sqe* sqe) { io_uring_prep_ftruncate(sqe, fd, len); }
+    void PrepareSqe(io_uring_sqe* sqe) const { io_uring_prep_ftruncate(sqe, fd, len); }
 };
 
 /// @brief Truncates or extends a file to the specified length.
@@ -571,7 +571,7 @@ struct PollOp : UringOp<PollOp>
     template <FileDescriptor F>
     PollOp(IoContext& ctx, const F& f, unsigned mask) : UringOp(&ctx), fd(GetRawFd(f)), poll_mask(mask) {}
 
-    void prepare_sqe(io_uring_sqe* sqe) { io_uring_prep_poll_add(sqe, fd, poll_mask); }
+    void PrepareSqe(io_uring_sqe* sqe) const { io_uring_prep_poll_add(sqe, fd, poll_mask); }
 };
 
 /// @brief Waits for events on a file descriptor (poll).
@@ -608,7 +608,7 @@ struct ReadvOp : UringOp<ReadvOp>
     {
     }
 
-    void prepare_sqe(io_uring_sqe* sqe)
+    void PrepareSqe(io_uring_sqe* sqe) const
     {
         io_uring_prep_readv(sqe, fd, iovecs.data(), static_cast<unsigned>(iovecs.size()), offset);
     }
@@ -650,7 +650,7 @@ struct WritevOp : UringOp<WritevOp>
     {
     }
 
-    void prepare_sqe(io_uring_sqe* sqe)
+    void PrepareSqe(io_uring_sqe* sqe) const
     {
         io_uring_prep_writev(sqe, fd, iovecs.data(), static_cast<unsigned>(iovecs.size()), offset);
     }
@@ -692,7 +692,7 @@ struct SendmsgOp : UringOp<SendmsgOp>
     {
     }
 
-    void prepare_sqe(io_uring_sqe* sqe) { io_uring_prep_sendmsg(sqe, fd, msg, flags); }
+    void PrepareSqe(io_uring_sqe* sqe) { io_uring_prep_sendmsg(sqe, fd, msg, flags); }
 };
 
 /// @brief Sends a message with optional ancillary data (sendmsg).
@@ -724,7 +724,7 @@ struct SleepOp : UringOp<SleepOp>
 {
     using UringOp::await_resume;
 
-    __kernel_timespec ts;
+    __kernel_timespec ts{};
 
     template <typename Rep, typename Period>
     SleepOp(IoContext& ctx, std::chrono::duration<Rep, Period> dur) : UringOp(&ctx)
@@ -734,7 +734,7 @@ struct SleepOp : UringOp<SleepOp>
         ts.tv_nsec = ns % 1'000'000'000;
     }
 
-    void prepare_sqe(io_uring_sqe* sqe) { io_uring_prep_timeout(sqe, &ts, 0, 0); }
+    void PrepareSqe(io_uring_sqe* sqe)  const{ io_uring_prep_timeout(sqe, &ts, 0, 0); }
 
     Result<void> await_resume()
     {

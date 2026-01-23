@@ -8,8 +8,8 @@
 
 #include <netdb.h>
 
-#include "aio/BlockingPool.hpp"
-#include "aio/TaskGroup.hpp"
+#include "aio/blocking_pool.hpp"
+#include "aio/task_group.hpp"
 #include <arpa/inet.h>
 
 // =============================================================================
@@ -222,8 +222,8 @@ aio::Task<std::vector<DNSResult>> parallel_dns_resolve(
     results.reserve(lookups.Size());
 
     for (auto& task : lookups.Tasks()) {
-        if (task.done()) {
-            results.push_back(task.result());
+        if (task.Done()) {
+            results.push_back(task.Result());
         }
     }
 
@@ -297,7 +297,7 @@ int main() {
 
     ctx.RunUntilDone(task);
 
-    auto results = task.result();
+    auto results = task.Result();
     for (const auto& r : results) {
         std::cout << r.hostname << " -> " << r.ip
                   << " (" << r.duration.count() << "ms)\n";

@@ -58,10 +58,10 @@
 #include <sys/eventfd.h>
 #include <sys/signalfd.h>
 
-#include "aio/Task.hpp"
 #include "aio/operation_base.hpp"
 #include "aio/pipe_pool.hpp"
 #include "aio/result.hpp"
+#include "aio/task.hpp"
 
 namespace aio
 {
@@ -199,7 +199,7 @@ public:
     {
         running_ = true;
         t.resume();
-        while (running_ && !t.done())
+        while (running_ && !t.Done())
         {
             Step();
         }
@@ -466,7 +466,7 @@ public:
         ctx->Track(this);
         ctx->EnsureSqes(1);
         auto* sqe = ctx->GetSqe();
-        static_cast<Derived*>(this)->prepare_sqe(sqe);
+        static_cast<Derived*>(this)->PrepareSqe(sqe);
         io_uring_sqe_set_data(sqe, this);
     }
 
@@ -518,7 +518,7 @@ struct MsgRingOp : UringOp<MsgRingOp>
     }
 };
 
-inline MsgRingOp async_msg_ring(IoContext& ctx, int target_ring_fd, uint32_t result, uint64_t user_data)
+inline MsgRingOp AsyncMsgRing(IoContext& ctx, int target_ring_fd, uint32_t result, uint64_t user_data)
 {
     return MsgRingOp(ctx, target_ring_fd, result, user_data);
 }
@@ -613,17 +613,17 @@ struct WithTimeoutOp
     void await_suspend(std::coroutine_handle<> h)
     {
         op.handle = h;
-        op.ctx->track(&op);
-        op.ctx->ensure_sqes(2);
+        op.ctx->Track(&op);
+        op.ctx->EnsureSqes(2);
 
         // Main operation with IOSQE_IO_LINK
-        auto* sqe_op = op.ctx->get_sqe();
-        op.prepare_sqe(sqe_op);
+        auto* sqe_op = op.ctx->GetSqe();
+        op.PrepareSqe(sqe_op);
         sqe_op->flags |= IOSQE_IO_LINK;
         io_uring_sqe_set_data(sqe_op, &op);
 
         // Linked timeout (user_data = nullptr so we skip its CQE)
-        auto* sqe_timer = op.ctx->get_sqe();
+        auto* sqe_timer = op.ctx->GetSqe();
         io_uring_prep_link_timeout(sqe_timer, &ts, 0);
         io_uring_sqe_set_data(sqe_timer, nullptr);
     }
