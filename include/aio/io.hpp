@@ -1,11 +1,4 @@
 #pragma once
-// aio/io_operations_v2.hpp
-// Proposed modernized I/O operations using std::span
-//
-// Changes from the current implementation:
-// 1. std::span<std::byte> for all buffer operations
-// 2. io_context& instead of io_context* where non-null
-// 3. Convenience overloads for common patterns
 
 #include <concepts>
 #include <cstddef>
@@ -42,6 +35,36 @@ constexpr int GetRawFd(const FileDescriptor auto& fd)
     {
         return fd.get();
     }
+}
+
+struct AcceptOp : UringOp<AcceptOp>
+{
+    using UringOp::await_resume;
+
+    int fd;
+    sockaddr_storage addr{};
+    socklen_t addrlen = sizeof(addr);
+
+    template <FileDescriptor F>
+    AcceptOp(IoContext& ctx, const F& f) : UringOp(&ctx), fd(GetRawFd(f)) {}
+
+    void prepare_sqe(io_uring_sqe* sqe)
+    {
+        io_uring_prep_accept(sqe, fd, reinterpret_cast<sockaddr*>(&addr), &addrlen, 0);
+    }
+
+    Result<int> await_resume()
+    {
+        if (res < 0)
+            return std::unexpected(MakeErrorCode(res));
+        return res;
+    }
+};
+
+template <FileDescriptor F>
+AcceptOp AsyncAccept(IoContext& ctx, const F& f)
+{
+    return AcceptOp(ctx, f);
 }
 
 struct RecvOp : UringOp<RecvOp>
@@ -89,8 +112,9 @@ struct SendOp : UringOp<SendOp>
     std::span<const std::byte> buffer;
     int flags;
 
-    SendOp(IoContext& ctx, int fd, std::span<const std::byte> buf, int flags)
-        : UringOp(&ctx), fd(fd), buffer(buf), flags(flags)
+    template <FileDescriptor F>
+    SendOp(IoContext& ctx, const F& f, std::span<const std::byte> buf, int flags)
+        : UringOp(&ctx), fd(GetRawFd(f)), buffer(buf), flags(flags)
     {
     }
 
@@ -98,9 +122,10 @@ struct SendOp : UringOp<SendOp>
 };
 
 // Primary API
-inline SendOp AsyncSend(IoContext& ctx, int fd, std::span<const std::byte> buffer, int flags = 0)
+template <FileDescriptor F>
+inline SendOp AsyncSend(IoContext& ctx, const F& f, std::span<const std::byte> buffer, int flags = 0)
 {
-    return SendOp{ctx, fd, buffer, flags};
+    return SendOp{ctx, f, buffer, flags};
 }
 
 // Convenience: string_view → perfect for HTTP responses
@@ -260,34 +285,6 @@ struct ConnectOp : UringOp<ConnectOp>
 inline ConnectOp AsyncConnect(IoContext& ctx, int fd, const sockaddr* addr, socklen_t len)
 {
     return ConnectOp(ctx, fd, addr, len);
-}
-
-struct AcceptOp : UringOp<AcceptOp>
-{
-    using UringOp::await_resume;
-
-    int fd;
-    sockaddr_storage addr{};
-    socklen_t addrlen = sizeof(addr);
-
-    AcceptOp(IoContext& ctx, int fd) : UringOp(&ctx), fd(fd) {}
-
-    void prepare_sqe(io_uring_sqe* sqe)
-    {
-        io_uring_prep_accept(sqe, fd, reinterpret_cast<sockaddr*>(&addr), &addrlen, 0);
-    }
-
-    Result<int> await_resume()
-    {
-        if (res < 0)
-            return std::unexpected(MakeErrorCode(res));
-        return res;
-    }
-};
-
-inline AcceptOp AsyncAccept(IoContext& ctx, int fd)
-{
-    return AcceptOp(ctx, fd);
 }
 
 struct SleepOp : UringOp<SleepOp>

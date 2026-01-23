@@ -127,7 +127,7 @@ Task<> TaskGroup<T>::JoinAll(IoContext& ctx, std::chrono::milliseconds poll) {
 
 template<typename T>
 Task<bool> TaskGroup<T>::JoinAllTimeout(IoContext& ctx, std::chrono::milliseconds timeout) {
-    auto deadline = std::chrono::steady_clock::now() + timeout;
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
     
     while (!AllDone()) {
         if (std::chrono::steady_clock::now() >= deadline) {
