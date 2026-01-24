@@ -18,6 +18,7 @@
 #include "aio/blocking_pool.hpp"
 #include "aio/result.hpp"
 #include "io_context.hpp"
+#include "ip_address.hpp"
 #include <arpa/inet.h>
 #include <netinet/in.h>
 
@@ -128,127 +129,49 @@ public:
     Result<> SetRecvBuffer(int size) const;
 };
 
-////////////////////////////////////////////////////////////////////////////////
-// SocketAddress - IPv4/IPv6 wrapper
-////////////////////////////////////////////////////////////////////////////////
-
-/// @brief Wrapper for sockaddr_storage supporting both IPv4 and IPv6.
+/// @brief Synchronously resolves a hostname to an address (BLOCKING).
+/// @param host Hostname to resolve (e.g., "example.com")
+/// @param port Port number in host byte order
+/// @return Result<SocketAddress> with resolved address or error
 ///
-/// Provides convenient factory methods for creating addresses and async DNS
-/// resolution that doesn't block the event loop.
+/// @warning This is a BLOCKING call that may take seconds for DNS resolution.
+///          Use ResolveAsync() in async code paths to avoid blocking the event loop.
 ///
 /// @code
-///   // Direct IPv4 address
-///   auto addr = SocketAddress::V4(8080, "0.0.0.0");
-///
-///   // Async DNS resolution (non-blocking)
-///   auto addr = co_await SocketAddress::ResolveAsync(ctx, pool, "example.com", 443);
+///   // OK in initialization code
+///   auto addr = SocketAddress::Resolve("database.local", 5432);
 /// @endcode
-struct SocketAddress
+static Result<SocketAddress> Resolve(std::string_view host, uint16_t port);
+
+/// @brief Asynchronously resolves a hostname without blocking the event loop.
+/// @param ctx The IoContext to run on
+/// @param pool BlockingPool to offload the DNS resolution
+/// @param host Hostname to resolve (copied internally)
+/// @param port Port number in host byte order
+/// @return Task<Result<SocketAddress>> with resolved address or error
+///
+/// @note Uses the blocking pool to run getaddrinfo() off the event loop thread.
+///       The hostname is captured by value to ensure it survives the thread switch.
+///
+/// @code
+///   auto addr = co_await SocketAddress::ResolveAsync(ctx, pool, "api.example.com", 443);
+///   if (!addr) {
+///       // DNS resolution failed
+///   }
+///   auto result = co_await AsyncConnect(ctx, socket, addr->Get(), addr->addrlen);
+/// @endcode
+static Task<Result<SocketAddress>> ResolveAsync(IoContext& ctx, BlockingPool& pool, std::string host, uint16_t port)
 {
-    sockaddr_storage addr{};
-    socklen_t addrlen = sizeof(sockaddr_storage);
+    // We capture 'host' by value (std::string) to ensure it survives the thread switch
+    auto result = co_await Offload(ctx, pool,
+                                   [h = std::move(host), port]() -> Result<SocketAddress>
+                                   {
+                                       // This runs on a background thread, so blocking is fine
+                                       return Resolve(h, port);
+                                   });
 
-    SocketAddress() = default;
-
-    /// @brief Creates an IPv4 address.
-    /// @param port Port number in host byte order (automatically converted to network order)
-    /// @param ip IPv4 address string (e.g., "127.0.0.1"). Pass nullptr for INADDR_ANY (0.0.0.0).
-    /// @return SocketAddress configured for IPv4
-    ///
-    /// @code
-    ///   auto any = SocketAddress::V4(8080);              // Bind to all interfaces
-    ///   auto local = SocketAddress::V4(8080, "127.0.0.1"); // Localhost only
-    /// @endcode
-    static SocketAddress V4(uint16_t port, const char* ip = nullptr)
-    {
-        SocketAddress sa;
-        auto* in = reinterpret_cast<sockaddr_in*>(&sa.addr);
-        in->sin_family = AF_INET;
-        in->sin_port = htons(port);
-        if (ip && *ip)
-        {
-            inet_pton(AF_INET, ip, &in->sin_addr);
-        }
-        else
-        {
-            in->sin_addr.s_addr = INADDR_ANY;
-        }
-        sa.addrlen = sizeof(sockaddr_in);
-        return sa;
-    }
-
-    /// @brief Creates an IPv6 address.
-    /// @param port Port number in host byte order (automatically converted to network order)
-    /// @param ip IPv6 address string (e.g., "::1"). Pass nullptr for in6addr_any (::).
-    /// @return SocketAddress configured for IPv6
-    ///
-    /// @code
-    ///   auto any = SocketAddress::V6(8080);         // Bind to all IPv6 interfaces
-    ///   auto local = SocketAddress::V6(8080, "::1"); // IPv6 localhost only
-    /// @endcode
-    static SocketAddress V6(uint16_t port, const char* ip = nullptr)
-    {
-        SocketAddress sa;
-        auto* in6 = reinterpret_cast<sockaddr_in6*>(&sa.addr);
-        in6->sin6_family = AF_INET6;
-        in6->sin6_port = htons(port);
-        if (ip && *ip)
-        {
-            inet_pton(AF_INET6, ip, &in6->sin6_addr);
-        }
-        else
-        {
-            in6->sin6_addr = in6addr_any;
-        }
-        sa.addrlen = sizeof(sockaddr_in6);
-        return sa;
-    }
-
-    /// @brief Synchronously resolves a hostname to an address (BLOCKING).
-    /// @param host Hostname to resolve (e.g., "example.com")
-    /// @param port Port number in host byte order
-    /// @return Result<SocketAddress> with resolved address or error
-    ///
-    /// @warning This is a BLOCKING call that may take seconds for DNS resolution.
-    ///          Use ResolveAsync() in async code paths to avoid blocking the event loop.
-    ///
-    /// @code
-    ///   // OK in initialization code
-    ///   auto addr = SocketAddress::Resolve("database.local", 5432);
-    /// @endcode
-    static Result<SocketAddress> Resolve(std::string_view host, uint16_t port);
-
-    /// @brief Asynchronously resolves a hostname without blocking the event loop.
-    /// @param ctx The IoContext to run on
-    /// @param pool BlockingPool to offload the DNS resolution
-    /// @param host Hostname to resolve (copied internally)
-    /// @param port Port number in host byte order
-    /// @return Task<Result<SocketAddress>> with resolved address or error
-    ///
-    /// @note Uses the blocking pool to run getaddrinfo() off the event loop thread.
-    ///       The hostname is captured by value to ensure it survives the thread switch.
-    ///
-    /// @code
-    ///   auto addr = co_await SocketAddress::ResolveAsync(ctx, pool, "api.example.com", 443);
-    ///   if (!addr) {
-    ///       // DNS resolution failed
-    ///   }
-    ///   auto result = co_await AsyncConnect(ctx, socket, addr->Get(), addr->addrlen);
-    /// @endcode
-    static Task<Result<SocketAddress>> ResolveAsync(IoContext& ctx, BlockingPool& pool, std::string host, uint16_t port)
-    {
-        // We capture 'host' by value (std::string) to ensure it survives the thread switch
-        auto result = co_await Offload(ctx, pool, [h = std::move(host), port]() -> Result<SocketAddress> {
-            // This runs on a background thread, so blocking is fine
-            return Resolve(h, port);
-        });
-
-        co_return result;
-    }
-
-    const sockaddr* Get() const { return reinterpret_cast<const sockaddr*>(&addr); }
-};
+    co_return result;
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 // TcpListener - Factory for server sockets

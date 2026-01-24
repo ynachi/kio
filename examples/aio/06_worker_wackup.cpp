@@ -1,42 +1,80 @@
-// examples/msg_ring_wakeup.cpp
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <future>
 #include <print>
 #include <thread>
 
 #include "aio/aio.hpp"
 
-// examples/msg_ring_wakeup.cpp — wake another ring (WAKE_TAG)
-// Demonstrates: IORING_OP_MSG_RING used purely as a wakeup mechanism.
-// Shows why you need wakeups: run() can be sleeping in submit_and_wait().
+// examples/msg_ring_wakeup.cpp
+// Demonstrates: Correctly waking a SINGLE_ISSUER ring from another thread.
+//
+// SAFETY NOTE:
+// When sharing a pointer to a stack-allocated IoContext (remote_ctx),
+// you must ensure the worker thread does not destroy the context while
+// the main thread is still trying to use it (call Notify).
+// We use a promise/future barrier to ensure safe destruction.
 
-static aio::task<> send_wake(aio::io_context& sender, int target_ring_fd) {
-    (void)co_await aio::async_msg_ring(&sender, target_ring_fd, /*res*/0u, /*user_data*/aio::WAKE_TAG);
-    co_return;
-}
+int main()
+{
+    std::atomic<bool> stop{false};
 
-int main() {
-    aio::io_context worker_ctx(256);
-    std::atomic stop{false};
+    std::promise<aio::IoContext*> ctx_promise;
+    auto ctx_future = ctx_promise.get_future();
 
-    std::thread worker([&] {
-        // No tasks: it will often block in submit_and_wait().
-        worker_ctx.run([&] {
-            if (stop.load(std::memory_order_relaxed)) worker_ctx.stop();
+    // Barrier to prevent Use-After-Free
+    std::promise<void> shutdown_barrier;
+    auto shutdown_complete = shutdown_barrier.get_future();
+
+    std::thread worker(
+        [&]
+        {
+            // 1. Create Context ON THE THREAD that will run the loop
+            aio::IoContext worker_ctx(256);
+
+            worker_ctx.WaitReady();
+
+            // 2. Expose the pointer to the main thread
+            ctx_promise.set_value(&worker_ctx);
+
+            std::println(stderr, "Worker loop starting...");
+
+            // 3. Run the loop
+            worker_ctx.Run(
+                [&]
+                {
+                    if (stop.load(std::memory_order_relaxed))
+                        worker_ctx.Stop();
+                });
+
+            // 4. WAIT for main thread to finish calling Notify()
+            // If we destroy worker_ctx now, the main thread's Notify() call
+            // might race with the destructor (close(wake_fd)).
+            shutdown_complete.wait();
+            worker_ctx.CancelAllPending();
+            std::println(stderr, "Worker exited");
         });
-        worker_ctx.cancel_all_pending();
-        std::println(stderr, "worker exited");
-    });
 
+    // Main thread waits until worker has created the context
+    aio::IoContext* remote_ctx = ctx_future.get();
+
+    std::println(stderr, "Main thread sleeping...");
     std::this_thread::sleep_for(std::chrono::seconds(1));
 
-    // Flip flag, then WAKE_TAG to force worker to return from wait and observe it.
+    std::println(stderr, "Main thread sending wake signal...");
+
+    // 5. Signal the worker to stop
     stop.store(true, std::memory_order_relaxed);
 
-    aio::io_context sender_ctx(32);
-    auto t = send_wake(sender_ctx, worker_ctx.ring_fd());
-    sender_ctx.run_until_done(t);
+    // 6. ERGONOMIC WAKE
+    if (!remote_ctx->Notify())
+    {
+        std::println(stderr, "Failed to notify worker!");
+    }
+
+    // 7. Signal worker it's safe to destroy the context
+    shutdown_barrier.set_value();
 
     worker.join();
     return 0;

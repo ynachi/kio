@@ -4,35 +4,35 @@
  * aio.hpp - Minimal async I/O library built on io_uring and C++23 coroutines
  *
  * Design:
- *   - Thread-per-core model: one io_context per thread, no cross-thread submission
- *   - Coroutine handle stored in user_data for direct resume
- *   - Intrusive tracking of pending operations for safe cancellation/shutdown
- *   - Caller owns buffers; library does not allocate
+ * - Thread-per-core model: one io_context per thread, no cross-thread submission
+ * - Coroutine handle stored in user_data for direct resume
+ * - Intrusive tracking of pending operations for safe cancellation/shutdown
+ * - Caller owns buffers; library does not allocate
  *
  * Safety:
- *   Operation lifetimes are tracked via an intrusive linked list. If a coroutine
- *   frame is destroyed while an I/O operation is still pending (kernel hasn't
- *   completed it), the program will terminate rather than risk silent memory
- *   corruption. This is detection, not prevention.
+ * Operation lifetimes are tracked via an intrusive linked list. If a coroutine
+ * frame is destroyed while an I/O operation is still pending (kernel hasn't
+ * completed it), the program will terminate rather than risk silent memory
+ * corruption. This is detection, not prevention.
  *
- *   !! IMPORTANT !!
- *   Operations are embedded in coroutine frames. If you destroy a task while its
- *   coroutine is suspended on I/O, you WILL hit std::terminate(). This is
- *   intentional — the alternative is silent memory corruption when the kernel
- *   writes to freed memory.
+ * !! IMPORTANT !!
+ * Operations are embedded in coroutine frames. If you destroy a task while its
+ * coroutine is suspended on I/O, you WILL hit std::terminate(). This is
+ * intentional — the alternative is silent memory corruption when the kernel
+ * writes to freed memory.
  *
- *   To safely cancel work:
- *   1. Use timeouts (.with_timeout()) so operations eventually complete
- *   2. Let io_context::cancel_all_pending() drain on destruction
- *   3. Don't destroy tasks with pending I/O — wait for them to complete
+ * To safely cancel work:
+ * 1. Use timeouts (.with_timeout()) so operations eventually complete
+ * 2. Let io_context::cancel_all_pending() drain on destruction
+ * 3. Don't destroy tasks with pending I/O — wait for them to complete
  *
- *   A future version may use a slab allocator to fully prevent UAF, but that
- *   adds complexity inappropriate for this minimal implementation.
+ * A future version may use a slab allocator to fully prevent UAF, but that
+ * adds complexity inappropriate for this minimal implementation.
  *
  * Requirements:
- *   - Linux kernel >= 6.0
- *   - liburing
- *   - C++23
+ * - Linux kernel >= 6.0
+ * - liburing
+ * - C++23
  */
 
 #include <atomic>
@@ -42,6 +42,7 @@
 #include <csignal>
 #include <exception>
 #include <expected>
+#include <latch>
 #include <mutex>
 #include <span>
 #include <stdexcept>
@@ -69,8 +70,11 @@ namespace aio
 // Constants
 // -----------------------------------------------------------------------------
 
-/// Reserved user_data value for a cross-thread wake via MSG_RING
+namespace detail
+{
+/// Reserved user_data value for internal eventfd wake
 constexpr uint64_t WAKE_TAG = 1;
+}  // namespace detail
 
 // -----------------------------------------------------------------------------
 // IoContext - The Event Loop
@@ -78,38 +82,32 @@ constexpr uint64_t WAKE_TAG = 1;
 
 class IoContext
 {
-    #ifndef NDEBUG
+#ifndef NDEBUG
     std::thread::id owner_thread_ = std::this_thread::get_id();
-    #endif
+#endif
 
     void AssertOwnerThread() const
     {
-        #ifndef NDEBUG
-        if (std::this_thread::get_id() != owner_thread_) {
+#ifndef NDEBUG
+        if (std::this_thread::get_id() != owner_thread_)
+        {
             // Could also use assert() but terminate is more visible
             std::fprintf(stderr, "IoContext accessed from wrong thread!\n");
             std::terminate();
         }
-        #endif
+#endif
     }
 
 public:
     // user can pass their own io uring flag.
     // Note: using single issuer must ensure single issuer constraints are met.
-    // There are some runtime checks in debug mode for that.
-    // Note: SINGLE_ISSUER omitted since we don't enforce thread affinity.
-    // Add it back with thread-id checks if you want the optimization.
-    // params.flags = IORING_SETUP_SINGLE_ISSUER;
-    // params.flags = IORING_SETUP_COOP_TASKRUN | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN;
-    //params.flags = IORING_SETUP_SQPOLL;
-    //params.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_COOP_TASKRUN;
-    explicit IoContext(unsigned entries = 256, int native_iouring_flags = 0)
+    explicit IoContext(const unsigned entries = 256)
     {
         io_uring_params params{};
 
-        params.flags |= native_iouring_flags;
+        params.flags |= IORING_SETUP_COOP_TASKRUN | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN;
 
-        if (int ret = io_uring_queue_init_params(entries, &ring_, &params); ret < 0)
+        if (const int ret = io_uring_queue_init_params(entries, &ring_, &params); ret < 0)
         {
             throw std::system_error(-ret, std::system_category(), "io_uring_queue_init_params");
         }
@@ -117,16 +115,57 @@ public:
         // Reduce allocations in the hot path.
         ready_.reserve(entries);
         ext_done_.reserve(entries);
+
+        // Initialize internal wake eventfd
+        wake_fd_ = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+        if (wake_fd_ < 0)
+        {
+            io_uring_queue_exit(&ring_);
+            throw std::system_error(errno, std::system_category(), "eventfd");
+        }
+
+        // Submit the initial read on the wake_fd
+        SubmitWakeRead();
+        io_uring_submit(&ring_);
+
+        // signal that we are up
+        ready_latch_.count_down();
     }
 
-    ~IoContext()
+    ~IoContext() noexcept
     {
         CancelAllPending();
+        if (wake_fd_ >= 0)
+        {
+            ::close(wake_fd_);
+            wake_fd_ = -1;
+        }
         io_uring_queue_exit(&ring_);
     }
 
     IoContext(const IoContext&) = delete;
     IoContext& operator=(const IoContext&) = delete;
+
+    // -------------------------------------------------------------------------
+    // Thread-Safe Signaling
+    // -------------------------------------------------------------------------
+
+    /**
+     * Wakes up the event loop from any thread.
+     * Safe to call concurrently.
+     * Safe to call with IORING_SETUP_SINGLE_ISSUER.
+     * * @return true if the signal was sent, false on error (check errno)
+     */
+    bool Notify() const noexcept
+    {
+        if (wake_fd_ == -1)
+        {
+            return false;
+        }
+        constexpr uint64_t val = 1;
+        // Direct write to eventfd is thread-safe and doesn't touch the ring
+        return ::write(wake_fd_, &val, sizeof(val)) == sizeof(val);
+    }
 
     // -------------------------------------------------------------------------
     // Operation Tracking
@@ -139,7 +178,7 @@ public:
         op->tracked = true;
         op->next = pending_head_;
         op->prev = nullptr;
-        if (pending_head_)
+        if (pending_head_ != nullptr)
         {
             pending_head_->prev = op;
         }
@@ -150,7 +189,7 @@ public:
     {
         AssertOwnerThread();
 
-        if (op->prev)
+        if (op->prev != nullptr)
         {
             op->prev->next = op->next;
         }
@@ -172,12 +211,6 @@ public:
      * Called automatically on destruction.
      *
      * IMPORTANT: This does NOT resume coroutines. Handles are dropped.
-     * This is safe during destruction but means coroutines won't see
-     * their final results. Use stop() + run() drain for graceful shutdown.
-     *
-     * Note: IORING_OP_ASYNC_CANCEL is itself async and may fail (e.g., if
-     * the operation is already completed). We handle this by draining until
-     * pending_head_ is empty, regardless of cancel success/failure.
      */
     void CancelAllPending()
     {
@@ -200,7 +233,6 @@ public:
         io_uring_submit(&ring_);
 
         // Drain until all operations are untracked
-        // Do NOT resume coroutines — we're in destruction
         DrainWithoutResume();
     }
 
@@ -234,6 +266,9 @@ public:
         {
             Step();
         }
+
+        // signal stopped
+        stopped_latch_.count_down();
     }
 
     void Run()
@@ -258,6 +293,8 @@ public:
             Step();
             tick();
         }
+
+        stopped_latch_.count_down();
     }
 
     void Stop() { running_ = false; }
@@ -268,7 +305,7 @@ public:
 
     /**
      * Enqueue a completed operation that must be resumed on this io_context
-     * thread. Returns true if the caller should send a WAKE_TAG (MSG_RING)
+     * thread. Returns true if the caller should send a signal to WakeFd()
      * to ensure the event loop wakes up.
      */
     bool EnqueueExternalDone(OperationState* op)
@@ -288,15 +325,18 @@ public:
     // Low-level Access
     // -------------------------------------------------------------------------
 
-    // TODO: maybe private ?
     io_uring* Ring() { return &ring_; }
     int RingFd() const { return ring_.ring_fd; }
+
+    // Returns the file descriptor used to wake this context from other threads.
+    int WakeFd() const { return wake_fd_; }
 
     /**
      * Get the pipe pool for sendfile operations.
      * Created lazily on first access.
      */
-    PipePool& GetPipePool() {
+    PipePool& GetPipePool()
+    {
         std::call_once(pipe_pool_flag_, [this] { pipe_pool_.emplace(4); });
         return *pipe_pool_;
     }
@@ -308,6 +348,7 @@ public:
         if (io_uring_sq_space_left(&ring_) < n)
         {
             io_uring_submit(&ring_);
+
             if (io_uring_sq_space_left(&ring_) < n)
             {
                 throw std::runtime_error("SQ full after submit");
@@ -318,8 +359,12 @@ public:
     io_uring_sqe* GetSqe()
     {
         AssertOwnerThread();
+
         return io_uring_get_sqe(&ring_);
     }
+
+    void WaitReady() const { ready_latch_.wait(); }
+    void WaitStop() const { stopped_latch_.wait(); }
 
 private:
     void DrainExternal(std::vector<std::coroutine_handle<>>& out)
@@ -390,19 +435,28 @@ private:
      * Drain completions without resuming coroutines.
      * Used during destruction to safely untrack all pending ops.
      */
+    // TODO: return error
     void DrainWithoutResume()
     {
         while (pending_head_ != nullptr)
         {
             io_uring_cqe* cqe = nullptr;
-            if (const int ret = io_uring_wait_cqe(&ring_, &cqe); ret < 0)
+            // Retry on EINTR
+            int ret = 0;
+            do
             {
-                // Error waiting — can't safely continue
-                // In practice this shouldn't happen
+                ret = io_uring_wait_cqe(&ring_, &cqe);
+            } while (ret == -EINTR);
+
+            if (ret < 0)
+            {
+                // Unrecoverable error in destruction path
                 break;
             }
 
-            if (const auto ud = io_uring_cqe_get_data64(cqe); ud == WAKE_TAG)
+            const auto ud = io_uring_cqe_get_data64(cqe);
+
+            if (ud == detail::WAKE_TAG)
             {
                 // A cross-thread wake. Drain any externally completed ops.
                 DrainExternalWithoutResume();
@@ -417,45 +471,47 @@ private:
         }
     }
 
+    void SubmitWakeRead()
+    {
+        // Must ensure we have space, though inside Step we typically do.
+        // We use a simple read on the eventfd.
+        auto* sqe = io_uring_get_sqe(&ring_);
+        if (!sqe)
+        {
+            // Force flush if full? This is rare in typical loop usage.
+            io_uring_submit(&ring_);
+            sqe = io_uring_get_sqe(&ring_);
+            if (!sqe)
+                return;  // Should fatal error really // TODO
+        }
+
+        io_uring_prep_read(sqe, wake_fd_, &wake_buffer_, sizeof(wake_buffer_), 0);
+        io_uring_sqe_set_data64(sqe, detail::WAKE_TAG);
+    }
+
     void Step()
     {
-        io_uring_submit_and_wait(&ring_, 1);
+        // Retry on EINTR
+        int ret = 0;
+        do
+        {
+            ret = io_uring_submit_and_wait(&ring_, 1);
+        } while (ret == -EINTR);
 
-        io_uring_cqe* cqe = nullptr;
-        unsigned head = 0;
-        unsigned count = 0;
+        if (ret < 0)
+        {
+            // If we failed to wait (and it wasn't EINTR), we can't really proceed.
+            // Returning here might spin the loop if the error persists,            // but throwing from Step() is also
+            // aggressive. For now, we assume transient errors or fatal ones we can't fix.
+            return;
+        }
 
         ready_.clear();
 
-        bool saw_wake = false;
-
-        io_uring_for_each_cqe(&ring_, head, cqe)
-        {
-            count++;
-            const auto user_data = io_uring_cqe_get_data64(cqe);
-
-            if (user_data == 0)
-            {
-                continue;
-            }
-
-            if (user_data == WAKE_TAG)
-            {
-                saw_wake = true;
-                continue;
-            }
-
-            auto* op = reinterpret_cast<OperationState*>(static_cast<uintptr_t>(user_data));
-            Untrack(op);
-            op->res = cqe->res;
-            ready_.push_back(op->handle);
-        }
-
-        io_uring_cq_advance(&ring_, count);
+        auto [_, saw_wake] = ProcessReadyCompletions();
 
         // If a pool thread (or any other producer) completed work for this
-        // context, it will have pushed ops into ext_done_ and sent WAKE_TAG.
-        // Drain them and resume their coroutines on this thread.
+        // context, it will have pushed ops into ext_done_ and signaled WakeFd.
         if (saw_wake || ext_hint_.load(std::memory_order_relaxed))
         {
             DrainExternal(ready_);
@@ -471,12 +527,55 @@ private:
         }
     }
 
+    // process ready completions, return the number of completions processed
+    // and if wake signal was seen for the caller to decide what to do about it
+    std::pair<unsigned, bool> ProcessReadyCompletions()
+    {
+        io_uring_cqe* cqe = nullptr;
+        unsigned head = 0;
+        unsigned count = 0;
+        bool saw_wake = false;
+
+        io_uring_for_each_cqe(&ring_, head, cqe)
+        {
+            count++;
+            const auto user_data = io_uring_cqe_get_data64(cqe);
+
+            if (user_data == 0)
+            {
+                continue;
+            }
+
+            if (user_data == detail::WAKE_TAG)
+            {
+                saw_wake = true;
+                // Re-arm the wake mechanism immediately for next wait
+                SubmitWakeRead();
+                continue;
+            }
+
+            auto* op = reinterpret_cast<OperationState*>(static_cast<uintptr_t>(user_data));
+            Untrack(op);
+            op->res = cqe->res;
+            ready_.push_back(op->handle);
+        }
+
+        io_uring_cq_advance(&ring_, count);
+
+        return {count, saw_wake};
+    }
+
     io_uring ring_{};
     std::vector<std::coroutine_handle<>> ready_;
     OperationState* pending_head_ = nullptr;
-    // TODO: use std::stop_token
     std::atomic<bool> running_ = false;
     std::once_flag pipe_pool_flag_;
+    std::latch ready_latch_{1};
+    std::latch stopped_latch_{1};
+
+    // Internal Wake Mechanism (eventfd)
+    int wake_fd_ = -1;
+    uint64_t wake_buffer_ = 0;
 
     // External completions (from blocking pool, etc.).
     std::mutex ext_mtx_;
@@ -498,7 +597,6 @@ struct UringOp : OperationState
 private:
     explicit UringOp(IoContext* c) { ctx = c; }
 
-    // Movable (delegates to operation_state move ctor)
     UringOp(UringOp&&) = default;
 
 public:
@@ -528,48 +626,6 @@ public:
     auto WithTimeout(std::chrono::duration<Rep, Period> dur) &&;
     friend Derived;
 };
-
-// -----------------------------------------------------------------------------
-// Concrete Operations: Cross-thread (MSG_RING)
-// -----------------------------------------------------------------------------
-
-/**
- * Send a message to another io_uring ring via MSG_RING.
- *
- * The target ring will receive a CQE with:
- *   - cqe->res = msg_result (32-bit)
- *   - cqe->user_data = msg_user_data (64-bit)
- *
- * Use WAKE_TAG as msg_user_data if you just want to wake the target
- * without triggering any operation completion logic.
- */
-struct MsgRingOp : UringOp<MsgRingOp>
-{
-    int target_fd;
-    uint32_t msg_result;     // Target sees this as cqe->res
-    uint64_t msg_user_data;  // Target sees this as cqe->user_data
-
-    MsgRingOp(IoContext& ctx, const int target_ring_fd, const uint32_t result, const uint64_t user_data)
-        : UringOp(&ctx), target_fd(target_ring_fd), msg_result(result), msg_user_data(user_data)
-    {
-    }
-
-    void prepare_sqe(io_uring_sqe* sqe) { io_uring_prep_msg_ring(sqe, target_fd, msg_result, msg_user_data, 0); }
-
-    Result<void> await_resume()
-    {
-        if (res < 0)
-        {
-            return std::unexpected(MakeErrorCode(res));
-        }
-        return {};
-    }
-};
-
-inline MsgRingOp AsyncMsgRing(IoContext& ctx, const int target_ring_fd, const uint32_t result, const uint64_t user_data)
-{
-    return MsgRingOp(ctx, target_ring_fd, result, user_data);
-}
 
 // -----------------------------------------------------------------------------
 // Signal Handling
@@ -607,7 +663,14 @@ public:
         }
     }
 
-    ~SignalSet() { ::close(fd_); }
+    ~SignalSet()
+    {
+        if (fd_ > 0)
+        {
+            ::close(fd_);
+            fd_ = -1;
+        }
+    }
 
     SignalSet(const SignalSet&) = delete;
     SignalSet& operator=(const SignalSet&) = delete;

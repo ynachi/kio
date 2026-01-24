@@ -2,9 +2,11 @@
 
 #include <concepts>
 #include <cstddef>
-#include <span>
 #include <cstring>
-#include "io_context.hpp"
+#include <span>
+
+#include "aio/io_context.hpp"
+#include "aio/ip_address.hpp"
 
 namespace aio
 {
@@ -37,27 +39,37 @@ constexpr int GetRawFd(const FileDescriptor auto& fd)
     }
 }
 
+struct AcceptResult
+{
+    int fd{-1};
+    net::SocketAddress addr;
+};
+
 struct AcceptOp : UringOp<AcceptOp>
 {
     using UringOp::await_resume;
 
     int fd;
-    sockaddr_storage addr{};
-    socklen_t addrlen = sizeof(addr);
+    net::SocketAddress client_addr{};
 
     template <FileDescriptor F>
-    AcceptOp(IoContext& ctx, const F& f) : UringOp(&ctx), fd(GetRawFd(f)) {}
+    AcceptOp(IoContext& ctx, const F& f) : UringOp(&ctx), fd(GetRawFd(f))
+    {
+    }
 
     void PrepareSqe(io_uring_sqe* sqe)
     {
-        io_uring_prep_accept(sqe, fd, reinterpret_cast<sockaddr*>(&addr), &addrlen, 0);
+        // Point directly to the SocketAddress internal storage
+        io_uring_prep_accept(sqe, fd, client_addr.GetMutable(), &client_addr.addrlen, 0);
     }
 
-    Result<int> await_resume()
+    Result<AcceptResult> await_resume()
     {
         if (res < 0)
+        {
             return std::unexpected(MakeErrorCode(res));
-        return res;
+        }
+        return AcceptResult{res, client_addr};
     }
 };
 
@@ -280,7 +292,9 @@ struct CloseOp : UringOp<CloseOp>
     int fd;
 
     template <FileDescriptor F>
-    CloseOp(IoContext& ctx, const F& f) : UringOp(&ctx), fd(GetRawFd(f)) {}
+    CloseOp(IoContext& ctx, const F& f) : UringOp(&ctx), fd(GetRawFd(f))
+    {
+    }
 
     void PrepareSqe(io_uring_sqe* sqe) const { io_uring_prep_close(sqe, fd); }
 
@@ -445,7 +459,9 @@ struct FsyncOp : UringOp<FsyncOp>
     int fd;
 
     template <FileDescriptor F>
-    FsyncOp(IoContext& ctx, const F& f) : UringOp(&ctx), fd(GetRawFd(f)) {}
+    FsyncOp(IoContext& ctx, const F& f) : UringOp(&ctx), fd(GetRawFd(f))
+    {
+    }
 
     void PrepareSqe(io_uring_sqe* sqe) const { io_uring_prep_fsync(sqe, fd, 0); }
 };
@@ -473,7 +489,9 @@ struct FdatasyncOp : UringOp<FdatasyncOp>
     int fd;
 
     template <FileDescriptor F>
-    FdatasyncOp(IoContext& ctx, const F& f) : UringOp(&ctx), fd(GetRawFd(f)) {}
+    FdatasyncOp(IoContext& ctx, const F& f) : UringOp(&ctx), fd(GetRawFd(f))
+    {
+    }
 
     void PrepareSqe(io_uring_sqe* sqe) const { io_uring_prep_fsync(sqe, fd, IORING_FSYNC_DATASYNC); }
 };
@@ -539,7 +557,9 @@ struct FtruncateOp : UringOp<FtruncateOp>
     off_t len;
 
     template <FileDescriptor F>
-    FtruncateOp(IoContext& ctx, const F& f, off_t len) : UringOp(&ctx), fd(GetRawFd(f)), len(len) {}
+    FtruncateOp(IoContext& ctx, const F& f, off_t len) : UringOp(&ctx), fd(GetRawFd(f)), len(len)
+    {
+    }
 
     void PrepareSqe(io_uring_sqe* sqe) const { io_uring_prep_ftruncate(sqe, fd, len); }
 };
@@ -569,7 +589,9 @@ struct PollOp : UringOp<PollOp>
     unsigned poll_mask;
 
     template <FileDescriptor F>
-    PollOp(IoContext& ctx, const F& f, unsigned mask) : UringOp(&ctx), fd(GetRawFd(f)), poll_mask(mask) {}
+    PollOp(IoContext& ctx, const F& f, unsigned mask) : UringOp(&ctx), fd(GetRawFd(f)), poll_mask(mask)
+    {
+    }
 
     void PrepareSqe(io_uring_sqe* sqe) const { io_uring_prep_poll_add(sqe, fd, poll_mask); }
 };
@@ -734,7 +756,7 @@ struct SleepOp : UringOp<SleepOp>
         ts.tv_nsec = ns % 1'000'000'000;
     }
 
-    void PrepareSqe(io_uring_sqe* sqe)  const{ io_uring_prep_timeout(sqe, &ts, 0, 0); }
+    void PrepareSqe(io_uring_sqe* sqe) const { io_uring_prep_timeout(sqe, &ts, 0, 0); }
 
     Result<void> await_resume()
     {

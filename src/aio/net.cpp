@@ -76,16 +76,16 @@ Result<> Socket::SetRecvBuffer(int size) const
 // SocketAddress Implementation
 // ----------------------------------------------------------------------------
 
-Result<SocketAddress> SocketAddress::Resolve(std::string_view host, uint16_t port)
+Result<SocketAddress> Resolve(std::string_view host, uint16_t port)
 {
     addrinfo hints{}, *res = nullptr;
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
 
-    std::string service = std::to_string(port);
-    std::string hostname(host);  // getaddrinfo needs null-terminated
+    const std::string service = std::to_string(port);
+    const std::string hostname(host);  // getaddrinfo needs null-terminated
 
-    if (int rc = getaddrinfo(hostname.c_str(), service.c_str(), &hints, &res); rc != 0)
+    if (const int rc = getaddrinfo(hostname.c_str(), service.c_str(), &hints, &res); rc != 0)
     {
         // getaddrinfo returns EAI_* errors, not errno, but we map to std::error_code generically
         return std::unexpected(std::make_error_code(std::errc::address_not_available));
@@ -109,15 +109,21 @@ Result<Socket> TcpListener::Bind(const SocketAddress& addr, int backlog)
 {
     int fd = ::socket(addr.addr.ss_family, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if (fd < 0)
+    {
         return ErrorFromErrno(errno);
+    }
 
     Socket sock(fd);
 
     // Standard high-perf defaults
     if (auto r = sock.SetReuseAddr(); !r)
+    {
         return std::unexpected(r.error());
+    }
     if (auto r = sock.SetReusePort(); !r)
+    {
         return std::unexpected(r.error());
+    }
 
     // Explicit bind
     if (::bind(fd, addr.Get(), addr.addrlen) < 0)
