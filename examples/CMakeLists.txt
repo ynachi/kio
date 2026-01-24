@@ -1,11 +1,19 @@
 # ============================================================================
-# Demo Executables
+# Examples
 # ============================================================================
+kio_add_demo(200_hello_sleep aio/200_hello_sleep.cpp TAGS core LIBS aio)
+kio_add_sanitizers(200_hello_sleep)
+
+kio_add_demo(201_aio_timers aio/201_timers.cpp TAGS core LIBS aio)
+kio_add_sanitizers(201_aio_timers)
+
+kio_add_demo(202_aio_timers aio/202_echo_server.cpp TAGS core LIBS aio)
+kio_add_sanitizers(202_aio_timers)
+
+
 kio_add_demo(00_logger aio/00_logger.cpp TAGS core LIBS aio)
 kio_add_sanitizers(00_logger)
 
-kio_add_demo(01_aio_timers aio/01_timers.cpp TAGS core LIBS aio)
-kio_add_sanitizers(01_aio_timers)
 
 kio_add_demo(02_work_queue aio/02_work_queue.cpp TAGS core LIBS aio)
 kio_add_sanitizers(02_work_queue)

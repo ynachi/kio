@@ -3,6 +3,7 @@
 #include <coroutine>
 #include <cstdint>
 #include <exception>
+#include <print>
 
 namespace aio
 {
@@ -43,6 +44,9 @@ struct OperationState
         // Source must not be tracked
         if (other.tracked)
         {
+            std::println(stderr,
+                         "[aio] FATAL: Attempted to move an OperationState that is currently tracked by "
+                         "IoContext.\n[aio]        This usually means a Task was moved while suspended on I/O.");
             std::terminate();
         }
         other.ctx = nullptr;
@@ -59,6 +63,10 @@ struct OperationState
         {
             // Coroutine destroyed while I/O pending → memory corruption risk
             // Terminate loudly rather than corrupt silently
+            std::println(stderr,
+                         "[aio] FATAL: OperationState destroyed while still tracked by IoContext (I/O pending).\n[aio] "
+                         "       CAUSE: A Task was destroyed while suspended on an async operation.\n[aio]        FIX: "
+                         "  Ensure the Task is kept alive (e.g., in a TaskGroup) until it completes.");
             std::terminate();
         }
     }

@@ -10,6 +10,7 @@
 #include "ip_address.hpp"
 #include "logger.hpp"
 #include "net.hpp"
+#include "notifier.hpp"
 #include "result.hpp"
 #include "task.hpp"
 #include "task_group.hpp"

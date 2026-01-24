@@ -35,7 +35,7 @@ static void ignore_sigpipe()
     std::signal(SIGPIPE, SIG_IGN);
 }
 
-static aio::Task<> handle_client(aio::IoContext& ctx, int fd)
+static aio::Task<> HandleClient(aio::IoContext& ctx, int fd)
 {
     alignas(64) std::array<std::byte, 4096> buffer{};
 
@@ -93,7 +93,7 @@ static aio::Task<> accept_loop(aio::IoContext& ctx, int listen_fd)
         }
 
         g_connections.fetch_add(1, std::memory_order_relaxed);
-        connections.Spawn(handle_client(ctx, ar.value().fd));
+        connections.Spawn(HandleClient(ctx, ar.value().fd));
 
         if (connections.Size() > 2048)
         {
