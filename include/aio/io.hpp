@@ -3,7 +3,7 @@
 #include <concepts>
 #include <cstddef>
 #include <span>
-
+#include <cstring>
 #include "io_context.hpp"
 
 namespace aio
@@ -21,7 +21,7 @@ struct UringOp;
 // Matches int, or any type with a .get() -> int method (like Socket)
 template <typename T>
 concept FileDescriptor = std::convertible_to<T, int> || requires(const T& t) {
-    { t.get() } -> std::convertible_to<int>;
+    { t.Get() } -> std::convertible_to<int>;
 };
 
 // Helper to extract the raw fd

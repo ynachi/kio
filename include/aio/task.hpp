@@ -30,8 +30,10 @@ public:
             bool await_ready() noexcept { return false; }
             std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_type> h) noexcept
             {
-                if (h.promise().continuation)
+                if (h.promise().continuation != nullptr)
+                {
                     return h.promise().continuation;
+                }
                 return std::noop_coroutine();
             }
             void await_resume() noexcept {}
@@ -50,8 +52,10 @@ public:
     {
         if (this != &other)
         {
-            if (handle_)
+            if (handle_ != nullptr)
+            {
                 handle_.destroy();
+            }
             handle_ = std::exchange(other.handle_, {});
         }
         return *this;
@@ -59,8 +63,10 @@ public:
 
     ~Task() noexcept
     {
-        if (handle_)
+        if (handle_ != nullptr)
+        {
             handle_.destroy();
+        }
     }
 
     Task(const Task&) = delete;
@@ -71,14 +77,18 @@ public:
     T Result()
     {
         if (handle_.promise().exception)
+        {
             std::rethrow_exception(handle_.promise().exception);
+        }
         return std::move(*handle_.promise().value);
     }
 
     void resume()
     {
-        if (handle_ && !handle_.done())
+        if (handle_ != nullptr && !handle_.done())
+        {
             handle_.resume();
+        }
     }
 
     // Alias resume for clarity: Starts the task concurrently.
@@ -97,7 +107,9 @@ public:
     T await_resume()
     {
         if (handle_.promise().exception)
+        {
             std::rethrow_exception(handle_.promise().exception);
+        }
         return std::move(*handle_.promise().value);
     }
 
@@ -124,7 +136,9 @@ public:
             std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_type> h) noexcept
             {
                 if (h.promise().continuation)
+                {
                     return h.promise().continuation;
+                }
                 return std::noop_coroutine();
             }
             void await_resume() noexcept {}
@@ -143,8 +157,10 @@ public:
     {
         if (this != &other)
         {
-            if (handle_)
+            if (handle_ != nullptr)
+            {
                 handle_.destroy();
+            }
             handle_ = std::exchange(other.handle_, {});
         }
         return *this;
@@ -152,8 +168,10 @@ public:
 
     ~Task()
     {
-        if (handle_)
+        if (handle_ != nullptr)
+        {
             handle_.destroy();
+        }
     }
 
     Task(const Task&) = delete;
@@ -164,13 +182,17 @@ public:
     void Result()
     {
         if (handle_.promise().exception)
+        {
             std::rethrow_exception(handle_.promise().exception);
+        }
     }
 
     void resume()
     {
         if (handle_ && !handle_.done())
+        {
             handle_.resume();
+        }
     }
 
     // Alias resume for clarity: Starts the task concurrently.
@@ -189,7 +211,9 @@ public:
     void await_resume()
     {
         if (handle_.promise().exception)
+        {
             std::rethrow_exception(handle_.promise().exception);
+        }
     }
 
 private:

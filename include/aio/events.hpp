@@ -117,7 +117,7 @@ public:
 
         WaitOp(IoContext* ctx, const int fd) : UringOp(ctx), fd(fd) {}
 
-        void prepare_sqe(io_uring_sqe* sqe) { io_uring_prep_read(sqe, fd, &value, sizeof(value), 0); }
+        void PrepareSqe(io_uring_sqe* sqe) { io_uring_prep_read(sqe, fd, &value, sizeof(value), 0); }
     };
 
     WaitOp Wait() { return {ctx_, fd_}; }

@@ -123,7 +123,7 @@ static aio::Task<> accept_loop(aio::IoContext& ctx, int listen_fd) {
     std::fprintf(stderr, "Waiting for %zu active connections to close...\n",
                  connections.ActiveCount());
 
-    co_await connections.JoinAll(ctx, 50ms);
+    co_await connections.JoinAll(ctx);
 
     std::fprintf(stderr, "All connections closed.\n");
 }
@@ -161,20 +161,17 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "http_hello_v2: port=%u threads=%d\n", port, threads);
 
     std::vector<Worker> workers;
-    workers.reserve(static_cast<size_t>(threads));
+    workers.resize(static_cast<size_t>(threads));  // Reserve space, don't construct yet
 
-    // Create workers
-    for (int i = 0; i < threads; ++i) {
-        Worker w;
-        w.ctx = std::make_unique<aio::IoContext>(4096);
-        workers.push_back(std::move(w));
-    }
+    auto uring_flags = IORING_SETUP_COOP_TASKRUN | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN;
 
-    // Start worker threads with CPU pinning
     for (int i = 0; i < threads; ++i) {
         auto& w = workers[static_cast<size_t>(i)];
-        w.th = std::thread([&w, listen_fd, i] {
+        w.th = std::thread([&w, listen_fd, i, uring_flags] {
             pin_to_cpu(i);
+
+            // Create IoContext on THIS thread
+            w.ctx = std::make_unique<aio::IoContext>(16800, uring_flags);
 
             auto acc = accept_loop(*w.ctx, listen_fd);
             acc.Start();

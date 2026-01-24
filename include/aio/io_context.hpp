@@ -40,7 +40,6 @@
 #include <condition_variable>
 #include <coroutine>
 #include <csignal>
-#include <cstring>
 #include <exception>
 #include <expected>
 #include <mutex>
@@ -79,13 +78,36 @@ constexpr uint64_t WAKE_TAG = 1;
 
 class IoContext
 {
+    #ifndef NDEBUG
+    std::thread::id owner_thread_ = std::this_thread::get_id();
+    #endif
+
+    void AssertOwnerThread() const
+    {
+        #ifndef NDEBUG
+        if (std::this_thread::get_id() != owner_thread_) {
+            // Could also use assert() but terminate is more visible
+            std::fprintf(stderr, "IoContext accessed from wrong thread!\n");
+            std::terminate();
+        }
+        #endif
+    }
+
 public:
-    explicit IoContext(unsigned entries = 256)
+    // user can pass their own io uring flag.
+    // Note: using single issuer must ensure single issuer constraints are met.
+    // There are some runtime checks in debug mode for that.
+    // Note: SINGLE_ISSUER omitted since we don't enforce thread affinity.
+    // Add it back with thread-id checks if you want the optimization.
+    // params.flags = IORING_SETUP_SINGLE_ISSUER;
+    // params.flags = IORING_SETUP_COOP_TASKRUN | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN;
+    //params.flags = IORING_SETUP_SQPOLL;
+    //params.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_COOP_TASKRUN;
+    explicit IoContext(unsigned entries = 256, int native_iouring_flags = 0)
     {
         io_uring_params params{};
-        // Note: SINGLE_ISSUER omitted since we don't enforce thread affinity.
-        // Add it back with thread-id checks if you want the optimization.
-        // params.flags = IORING_SETUP_COOP_TASKRUN;
+
+        params.flags |= native_iouring_flags;
 
         if (int ret = io_uring_queue_init_params(entries, &ring_, &params); ret < 0)
         {
@@ -112,6 +134,8 @@ public:
 
     void Track(OperationState* op)
     {
+        AssertOwnerThread();
+
         op->tracked = true;
         op->next = pending_head_;
         op->prev = nullptr;
@@ -124,6 +148,8 @@ public:
 
     void Untrack(OperationState* op)
     {
+        AssertOwnerThread();
+
         if (op->prev)
         {
             op->prev->next = op->next;
@@ -150,21 +176,23 @@ public:
      * their final results. Use stop() + run() drain for graceful shutdown.
      *
      * Note: IORING_OP_ASYNC_CANCEL is itself async and may fail (e.g., if
-     * the operation already completed). We handle this by draining until
+     * the operation is already completed). We handle this by draining until
      * pending_head_ is empty, regardless of cancel success/failure.
      */
     void CancelAllPending()
     {
         // Submit cancel requests for all tracked operations
-        for (auto* op = pending_head_; op; op = op->next)
+        for (const auto* op = pending_head_; op; op = op->next)
         {
             io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
-            if (!sqe)
+            if (sqe == nullptr)
             {
                 io_uring_submit(&ring_);
                 sqe = io_uring_get_sqe(&ring_);
-                if (!sqe)
+                if (sqe == nullptr)
+                {
                     break;
+                }
             }
             io_uring_prep_cancel(sqe, op, 0);
             io_uring_sqe_set_data(sqe, nullptr);
@@ -180,14 +208,15 @@ public:
     // File Registration
     // -------------------------------------------------------------------------
 
-    void RegisterFiles(std::span<const int> fds)
+    Result<> RegisterFiles(const std::span<const int> fds)
     {
-        int ret = io_uring_register_files(&ring_, fds.data(), fds.size());
-        if (ret < 0)
+        AssertOwnerThread();
+
+        if (const int ret = io_uring_register_files(&ring_, fds.data(), fds.size()); ret < 0)
         {
-            // TODO: not fatal, return result instead
-            throw std::system_error(-ret, std::system_category(), "io_uring_register_files");
+            return ErrorFromErrno(-ret);
         }
+        return {};
     }
 
     // -------------------------------------------------------------------------
@@ -197,6 +226,8 @@ public:
     template <typename T>
     void RunUntilDone(Task<T>& t)
     {
+        AssertOwnerThread();
+
         running_ = true;
         t.resume();
         while (running_ && !t.Done())
@@ -207,6 +238,8 @@ public:
 
     void Run()
     {
+        AssertOwnerThread();
+
         running_ = true;
         while (running_)
         {
@@ -217,6 +250,8 @@ public:
     template <typename Tick>
     void Run(Tick&& tick)
     {
+        AssertOwnerThread();
+
         running_ = true;
         while (running_)
         {
@@ -261,17 +296,15 @@ public:
      * Get the pipe pool for sendfile operations.
      * Created lazily on first access.
      */
-    PipePool& GetPipePool()
-    {
-        if (!pipe_pool_)
-        {
-            pipe_pool_.emplace(4);  // Default pool size of 4 pipes
-        }
+    PipePool& GetPipePool() {
+        std::call_once(pipe_pool_flag_, [this] { pipe_pool_.emplace(4); });
         return *pipe_pool_;
     }
 
     void EnsureSqes(const unsigned n)
     {
+        AssertOwnerThread();
+
         if (io_uring_sq_space_left(&ring_) < n)
         {
             io_uring_submit(&ring_);
@@ -282,7 +315,11 @@ public:
         }
     }
 
-    io_uring_sqe* GetSqe() { return io_uring_get_sqe(&ring_); }
+    io_uring_sqe* GetSqe()
+    {
+        AssertOwnerThread();
+        return io_uring_get_sqe(&ring_);
+    }
 
 private:
     void DrainExternal(std::vector<std::coroutine_handle<>>& out)
@@ -308,8 +345,10 @@ private:
 
         for (auto* op : local)
         {
-            if (!op)
+            if (op == nullptr)
+            {
                 continue;
+            }
             Untrack(op);
             out.push_back(op->handle);
         }
@@ -338,8 +377,10 @@ private:
 
         for (auto* op : local)
         {
-            if (!op)
+            if (op == nullptr)
+            {
                 continue;
+            }
             Untrack(op);
             op->handle = {};
         }
@@ -354,7 +395,7 @@ private:
         while (pending_head_ != nullptr)
         {
             io_uring_cqe* cqe = nullptr;
-            if (int ret = io_uring_wait_cqe(&ring_, &cqe); ret < 0)
+            if (const int ret = io_uring_wait_cqe(&ring_, &cqe); ret < 0)
             {
                 // Error waiting — can't safely continue
                 // In practice this shouldn't happen
@@ -391,7 +432,7 @@ private:
         io_uring_for_each_cqe(&ring_, head, cqe)
         {
             count++;
-            auto user_data = io_uring_cqe_get_data64(cqe);
+            const auto user_data = io_uring_cqe_get_data64(cqe);
 
             if (user_data == 0)
             {
@@ -424,7 +465,9 @@ private:
         for (auto h : ready_)
         {
             if (h && !h.done())
+            {
                 h.resume();
+            }
         }
     }
 
@@ -433,6 +476,7 @@ private:
     OperationState* pending_head_ = nullptr;
     // TODO: use std::stop_token
     std::atomic<bool> running_ = false;
+    std::once_flag pipe_pool_flag_;
 
     // External completions (from blocking pool, etc.).
     std::mutex ext_mtx_;
@@ -474,7 +518,9 @@ public:
     Result<size_t> await_resume()
     {
         if (res < 0)
+        {
             return std::unexpected(MakeErrorCode(res));
+        }
         return static_cast<size_t>(res);
     }
 
@@ -503,7 +549,7 @@ struct MsgRingOp : UringOp<MsgRingOp>
     uint32_t msg_result;     // Target sees this as cqe->res
     uint64_t msg_user_data;  // Target sees this as cqe->user_data
 
-    MsgRingOp(IoContext& ctx, int target_ring_fd, uint32_t result, uint64_t user_data)
+    MsgRingOp(IoContext& ctx, const int target_ring_fd, const uint32_t result, const uint64_t user_data)
         : UringOp(&ctx), target_fd(target_ring_fd), msg_result(result), msg_user_data(user_data)
     {
     }
@@ -513,12 +559,14 @@ struct MsgRingOp : UringOp<MsgRingOp>
     Result<void> await_resume()
     {
         if (res < 0)
+        {
             return std::unexpected(MakeErrorCode(res));
+        }
         return {};
     }
 };
 
-inline MsgRingOp AsyncMsgRing(IoContext& ctx, int target_ring_fd, uint32_t result, uint64_t user_data)
+inline MsgRingOp AsyncMsgRing(IoContext& ctx, const int target_ring_fd, const uint32_t result, const uint64_t user_data)
 {
     return MsgRingOp(ctx, target_ring_fd, result, user_data);
 }
@@ -541,8 +589,10 @@ public:
     {
         sigset_t mask;
         sigemptyset(&mask);
-        for (int s : sigs)
+        for (const int s : sigs)
+        {
             sigaddset(&mask, s);
+        }
 
         if (sigprocmask(SIG_BLOCK, &mask, nullptr) < 0)
         {
@@ -575,12 +625,14 @@ struct WaitSignalOp : UringOp<WaitSignalOp>
 
     WaitSignalOp(IoContext& ctx, int signal_fd) : UringOp(&ctx), fd(signal_fd) {}
 
-    void prepare_sqe(io_uring_sqe* sqe) { io_uring_prep_read(sqe, fd, &info, sizeof(info), 0); }
+    void PrepareSqe(io_uring_sqe* sqe) { io_uring_prep_read(sqe, fd, &info, sizeof(info), 0); }
 
     Result<int> await_resume()
     {
         if (res < 0)
+        {
             return std::unexpected(MakeErrorCode(res));
+        }
         return static_cast<int>(info.ssi_signo);
     }
 };

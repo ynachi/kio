@@ -2,6 +2,7 @@
 
 // Convenience umbrella header for the aio library.
 
+#include <liburing.h>
 #include "blocking_pool.hpp"
 #include "events.hpp"
 #include "io.hpp"
