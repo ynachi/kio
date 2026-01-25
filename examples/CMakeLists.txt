@@ -16,6 +16,9 @@ kio_add_sanitizers(203_file_copy)
 kio_add_demo(204_timeout aio/204_timeouts.cpp TAGS core LIBS aio)
 kio_add_sanitizers(204_timeout)
 
+kio_add_demo(205_task_group aio/205_task_group.cpp TAGS core LIBS aio)
+kio_add_sanitizers(205_task_group)
+
 kio_add_demo(00_logger aio/00_logger.cpp TAGS core LIBS aio)
 kio_add_sanitizers(00_logger)
 
