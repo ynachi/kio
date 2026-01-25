@@ -60,7 +60,7 @@ public:
         return *this;
     }
 
-    struct WaitOp : UringOp<WaitOp>
+    struct WaitOp : UringOp
     {
         int fd;
         uint64_t value{};
