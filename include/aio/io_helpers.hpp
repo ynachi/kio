@@ -18,7 +18,7 @@ namespace aio
 namespace detail
 {
 
-struct SpliceOp : UringOp<SpliceOp>
+struct SpliceOp : UringOp
 {
     int fd_in;
     int64_t off_in;

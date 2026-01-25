@@ -176,9 +176,9 @@ if (!result) {
 size_t bytes_read = *result;
 ```
 
-### UringOp<Derived>
+### UringOp
 
-CRTP base class for all io_uring operations. Handles:
+Explicit-object base class (C++23 deducing-this) for all io_uring operations. Handles:
 - Coroutine suspension/resumption
 - Operation tracking
 - SQE preparation

@@ -588,13 +588,12 @@ private:
 };
 
 // -----------------------------------------------------------------------------
-// CRTP Base for Operations
+// Base for Operations (explicit object parameter)
 // -----------------------------------------------------------------------------
 
-template <typename Derived>
 struct UringOp : OperationState
 {
-private:
+protected:
     explicit UringOp(IoContext* c) { ctx = c; }
 
     UringOp(UringOp&&) = default;
@@ -602,14 +601,15 @@ private:
 public:
     bool await_ready() const noexcept { return false; }
 
-    void await_suspend(std::coroutine_handle<> h)
+    void await_suspend(this auto& self, std::coroutine_handle<> h)
     {
-        handle = h;
-        ctx->Track(this);
-        ctx->EnsureSqes(1);
-        auto* sqe = ctx->GetSqe();
-        static_cast<Derived*>(this)->PrepareSqe(sqe);
-        io_uring_sqe_set_data(sqe, this);
+        self.handle = h;
+        auto* op = static_cast<OperationState*>(&self);
+        self.ctx->Track(op);
+        self.ctx->EnsureSqes(1);
+        auto* sqe = self.ctx->GetSqe();
+        self.PrepareSqe(sqe);
+        io_uring_sqe_set_data(sqe, op);
     }
 
     // Default: return size_t for read/write style ops
@@ -623,8 +623,9 @@ public:
     }
 
     template <typename Rep, typename Period>
-    auto WithTimeout(std::chrono::duration<Rep, Period> dur) &&;
-    friend Derived;
+    auto WithTimeout(this auto&& self, std::chrono::duration<Rep, Period> dur)
+        requires std::is_rvalue_reference_v<decltype(self)> &&
+                 (!std::is_const_v<std::remove_reference_t<decltype(self)>>);
 };
 
 // -----------------------------------------------------------------------------
@@ -681,7 +682,7 @@ private:
     int fd_;
 };
 
-struct WaitSignalOp : UringOp<WaitSignalOp>
+struct WaitSignalOp : UringOp
 {
     int fd;
     signalfd_siginfo info{};
@@ -756,11 +757,13 @@ struct WithTimeoutOp
 };
 
 // Builder method to apply a timeout to an io operation
-template <typename Derived>
 template <typename Rep, typename Period>
-auto UringOp<Derived>::WithTimeout(std::chrono::duration<Rep, Period> dur) &&
+auto UringOp::WithTimeout(this auto&& self, std::chrono::duration<Rep, Period> dur)
+    requires std::is_rvalue_reference_v<decltype(self)> &&
+             (!std::is_const_v<std::remove_reference_t<decltype(self)>>)
 {
-    return WithTimeoutOp<Derived>(std::move(*static_cast<Derived*>(this)), dur);
+    using Op = std::remove_cvref_t<decltype(self)>;
+    return WithTimeoutOp<Op>(std::forward<decltype(self)>(self), dur);
 }
 
 // Standalone helper

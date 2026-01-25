@@ -13,8 +13,24 @@ namespace aio
 
 // Forward declarations
 class IoContext;
-template <typename Derived>
 struct UringOp;
+
+struct FDGuard
+{
+    int fd = -1;
+    explicit FDGuard(const int f) : fd(f) {}
+    ~FDGuard()
+    {
+        if (fd >= 0)
+        {
+            ::close(fd);
+            fd = -1;
+        };
+    }
+    FDGuard(FDGuard&& other) noexcept : fd(other.fd) { other.fd = -1; }
+    FDGuard(const FDGuard&) = delete;
+    [[nodiscard]] int Get() const { return fd; }
+};
 
 // -----------------------------------------------------------------------------
 // Concepts & Helpers
@@ -45,7 +61,7 @@ struct AcceptResult
     net::SocketAddress addr;
 };
 
-struct AcceptOp : UringOp<AcceptOp>
+struct AcceptOp : UringOp
 {
     using UringOp::await_resume;
 
@@ -96,7 +112,7 @@ AcceptOp AsyncAccept(IoContext& ctx, const F& f)
     return AcceptOp(ctx, f);
 }
 
-struct RecvOp : UringOp<RecvOp>
+struct RecvOp : UringOp
 {
     int fd;
     std::span<std::byte> buffer;
@@ -153,7 +169,7 @@ RecvOp AsyncRecv(IoContext& ctx, const F& f, std::array<std::byte, N>& buf, int 
     return RecvOp{ctx, f, std::span{buf}, flags};
 }
 
-struct SendOp : UringOp<SendOp>
+struct SendOp : UringOp
 {
     int fd;
     std::span<const std::byte> buffer;
@@ -213,7 +229,7 @@ SendOp AsyncSend(IoContext& ctx, const F& f, const char (&buf)[N], int flags = 0
     };
 }
 
-struct OpenOp : UringOp<OpenOp>
+struct OpenOp : UringOp
 {
     using UringOp::await_resume;
 
@@ -252,7 +268,7 @@ inline OpenOp AsyncOpen(IoContext& ctx, const char* path, int flags, mode_t mode
     return OpenOp(ctx, path, flags, mode);
 }
 
-struct ReadOp : UringOp<ReadOp>
+struct ReadOp : UringOp
 {
     int fd;
     std::span<std::byte> buffer;
@@ -289,7 +305,7 @@ ReadOp AsyncRead(IoContext& ctx, const F& f, std::span<std::byte> buffer, uint64
     return ReadOp{ctx, f, buffer, offset};
 }
 
-struct WriteOp : UringOp<WriteOp>
+struct WriteOp : UringOp
 {
     int fd;
     std::span<const std::byte> buffer;
@@ -324,7 +340,7 @@ WriteOp AsyncWrite(IoContext& ctx, const F& f, std::span<const std::byte> buffer
     return WriteOp{ctx, f, buffer, offset};
 }
 
-struct CloseOp : UringOp<CloseOp>
+struct CloseOp : UringOp
 {
     using UringOp::await_resume;
 
@@ -345,7 +361,7 @@ struct CloseOp : UringOp<CloseOp>
     }
 };
 
-struct ReadFixedOp : UringOp<ReadFixedOp>
+struct ReadFixedOp : UringOp
 {
     int file_index;
     void* buffer;
@@ -388,7 +404,7 @@ inline ReadFixedOp AsyncReadFixed(IoContext& ctx, int idx, std::span<std::byte> 
     return ReadFixedOp(ctx, idx, buf, off);
 }
 
-struct WriteFixedOp : UringOp<WriteFixedOp>
+struct WriteFixedOp : UringOp
 {
     int file_index;
     const void* buffer;
@@ -439,7 +455,7 @@ CloseOp AsyncClose(IoContext& ctx, const F& f)
     return CloseOp(ctx, f);
 }
 
-struct ConnectOp : UringOp<ConnectOp>
+struct ConnectOp : UringOp
 {
     using UringOp::await_resume;
 
@@ -509,7 +525,7 @@ ConnectOp AsyncConnect(IoContext& ctx, const F& f, const net::SocketAddress& add
     return ConnectOp(ctx, f, addr.Get(), addr.addrlen);
 }
 
-struct FsyncOp : UringOp<FsyncOp>
+struct FsyncOp : UringOp
 {
     int fd;
 
@@ -539,7 +555,7 @@ FsyncOp AsyncFsync(IoContext& ctx, const F& f)
     return FsyncOp(ctx, f);
 }
 
-struct FdatasyncOp : UringOp<FdatasyncOp>
+struct FdatasyncOp : UringOp
 {
     int fd;
 
@@ -569,7 +585,7 @@ FdatasyncOp AsyncFdatasync(IoContext& ctx, const F& f)
     return FdatasyncOp(ctx, f);
 }
 
-struct FallocateOp : UringOp<FallocateOp>
+struct FallocateOp : UringOp
 {
     int fd;
     int mode;
@@ -606,7 +622,7 @@ FallocateOp AsyncFallocate(IoContext& ctx, const F& f, int mode, off_t offset, o
     return FallocateOp(ctx, f, mode, offset, len);
 }
 
-struct FtruncateOp : UringOp<FtruncateOp>
+struct FtruncateOp : UringOp
 {
     int fd;
     off_t len;
@@ -638,7 +654,7 @@ FtruncateOp AsyncFtruncate(IoContext& ctx, const F& f, off_t len)
     return FtruncateOp(ctx, f, len);
 }
 
-struct PollOp : UringOp<PollOp>
+struct PollOp : UringOp
 {
     int fd;
     unsigned poll_mask;
@@ -673,7 +689,7 @@ PollOp AsyncPoll(IoContext& ctx, const F& f, unsigned poll_mask)
     return PollOp(ctx, f, poll_mask);
 }
 
-struct ReadvOp : UringOp<ReadvOp>
+struct ReadvOp : UringOp
 {
     int fd;
     std::span<const iovec> iovecs;
@@ -715,7 +731,7 @@ ReadvOp AsyncReadv(IoContext& ctx, const F& f, std::span<const iovec> iovecs, ui
     return ReadvOp(ctx, f, iovecs, offset);
 }
 
-struct WritevOp : UringOp<WritevOp>
+struct WritevOp : UringOp
 {
     int fd;
     std::span<const iovec> iovecs;
@@ -757,7 +773,7 @@ WritevOp AsyncWritev(IoContext& ctx, const F& f, std::span<const iovec> iovecs, 
     return WritevOp(ctx, f, iovecs, offset);
 }
 
-struct SendmsgOp : UringOp<SendmsgOp>
+struct SendmsgOp : UringOp
 {
     int fd;
     const msghdr* msg;
@@ -797,7 +813,7 @@ SendmsgOp AsyncSendmsg(IoContext& ctx, const F& f, const msghdr* msg, unsigned f
     return SendmsgOp(ctx, f, msg, flags);
 }
 
-struct SleepOp : UringOp<SleepOp>
+struct SleepOp : UringOp
 {
     using UringOp::await_resume;
 
