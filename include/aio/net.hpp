@@ -158,7 +158,7 @@ static Result<SocketAddress> Resolve(std::string_view host, uint16_t port);
 ///   if (!addr) {
 ///       // DNS resolution failed
 ///   }
-///   auto result = co_await AsyncConnect(ctx, socket, addr->Get(), addr->addrlen);
+///   auto result = co_await AsyncConnect(ctx, socket, *addr);
 /// @endcode
 static Task<Result<SocketAddress>> ResolveAsync(IoContext& ctx, BlockingPool& pool, std::string host, uint16_t port)
 {

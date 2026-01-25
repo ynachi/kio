@@ -10,6 +10,11 @@ kio_add_sanitizers(201_aio_timers)
 kio_add_demo(202_aio_timers aio/202_echo_server.cpp TAGS core LIBS aio)
 kio_add_sanitizers(202_aio_timers)
 
+kio_add_demo(203_file_copy aio/203_file_copy.cpp TAGS core LIBS gflags::gflags aio)
+kio_add_sanitizers(203_file_copy)
+
+kio_add_demo(204_timeout aio/204_timeouts.cpp TAGS core LIBS aio)
+kio_add_sanitizers(204_timeout)
 
 kio_add_demo(00_logger aio/00_logger.cpp TAGS core LIBS aio)
 kio_add_sanitizers(00_logger)

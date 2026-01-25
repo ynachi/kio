@@ -35,7 +35,7 @@ constexpr int GetRawFd(const FileDescriptor auto& fd)
     }
     else
     {
-        return fd.get();
+        return fd.Get();
     }
 }
 
@@ -211,6 +211,45 @@ SendOp AsyncSend(IoContext& ctx, const F& f, const char (&buf)[N], int flags = 0
         ctx, f, std::span{reinterpret_cast<const std::byte*>(buf), N - 1}, // Skip null terminator
         flags
     };
+}
+
+struct OpenOp : UringOp<OpenOp>
+{
+    using UringOp::await_resume;
+
+    const char* path;
+    int flags;
+    mode_t mode;
+
+    OpenOp(IoContext& ctx, const char* p, int f, mode_t m) : UringOp(&ctx), path(p), flags(f), mode(m) {}
+
+    void PrepareSqe(io_uring_sqe* sqe) { io_uring_prep_openat(sqe, AT_FDCWD, path, flags, mode); }
+
+    Result<int> await_resume()
+    {
+        if (res < 0)
+            return std::unexpected(MakeErrorCode(res));
+        return res;
+    }
+};
+
+/// @brief Opens a file asynchronously.
+/// @param ctx The IoContext to run on
+/// @param path Path to the file
+/// @param flags Open flags (O_RDONLY, O_CREAT, etc.)
+/// @param mode File mode for creation (default 0644)
+/// @return Awaitable yielding Result<int> with the new file descriptor
+///
+/// @code
+///   auto fd_res = co_await AsyncOpen(ctx, "data.txt", O_RDONLY);
+///   if (fd_res) {
+///       int fd = *fd_res;
+///       // Use fd...
+///   }
+/// @endcode
+inline OpenOp AsyncOpen(IoContext& ctx, const char* path, int flags, mode_t mode = 0644)
+{
+    return OpenOp(ctx, path, flags, mode);
 }
 
 struct ReadOp : UringOp<ReadOp>
@@ -452,6 +491,22 @@ template <FileDescriptor F>
 ConnectOp AsyncConnect(IoContext& ctx, const F& f, const sockaddr* addr, socklen_t len)
 {
     return ConnectOp(ctx, f, addr, len);
+}
+
+/// @brief Connects a socket to a remote address using SocketAddress.
+/// @param ctx The IoContext to run on
+/// @param f Socket file descriptor (should be non-blocking)
+/// @param addr SocketAddress with destination address
+/// @return Awaitable yielding Result<void>
+///
+/// @code
+///   auto addr = aio::net::SocketAddress::V4(8080, "127.0.0.1");
+///   auto result = co_await AsyncConnect(ctx, socket, addr);
+/// @endcode
+template <FileDescriptor F>
+ConnectOp AsyncConnect(IoContext& ctx, const F& f, const net::SocketAddress& addr)
+{
+    return ConnectOp(ctx, f, addr.Get(), addr.addrlen);
 }
 
 struct FsyncOp : UringOp<FsyncOp>
