@@ -13,6 +13,29 @@
 namespace aio
 {
 
+/**
+ * task_group.hpp - Structured concurrency for tasks
+ *
+ * Purpose:
+ * Manages the lifetime of a collection of Tasks. It allows you to spawn multiple
+ * coroutines concurrently and wait for them all to complete. This is the primary
+ * mechanism for parallel/concurrent execution in this library.
+ *
+ * Key Features:
+ * - Ownership: Takes ownership of spawned Tasks, preventing destruction while running.
+ * - Synchronization: Provides JoinAll() to await completion of all tasks in the group.
+ * - Memory Management: Automatically sweeps completed tasks to free memory.
+ *
+ * Thread Safety:
+ * - Not thread-safe. A TaskGroup should generally be used from a single thread
+ * (typically the thread running the IoContext loop).
+ *
+ * Usage:
+ * TaskGroup<> group(&ctx);
+ * group.Spawn(MyTask(ctx));
+ * group.Spawn(MyOtherTask(ctx));
+ * co_await group.JoinAll(ctx);
+ */
 template <typename T = void>
 class TaskGroup
 {

@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdint>
 
+// Default to disabled if not defined
 #ifndef AIO_STATS
 #define AIO_STATS 0
 #endif

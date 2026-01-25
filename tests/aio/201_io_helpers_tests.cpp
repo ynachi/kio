@@ -1,4 +1,3 @@
-// tests/aio/io_helpers_tests.cpp
 // Tests for exact read/write helpers and sendfile
 
 #include <array>
@@ -31,7 +30,7 @@ TEST_F(IoHelpersTest, ReadExactSuccess) {
     auto file = MakeTempFileWithContent("hello world!");
     ASSERT_TRUE(file.Valid());
 
-    auto test = [&]() -> Task<void> {
+    auto test = [&]() -> Task<> {
         std::array<std::byte, 5> buf{};
         auto rr = co_await AsyncReadExact(ctx, file.Get(), buf, 0);
         EXPECT_TRUE(rr.has_value());

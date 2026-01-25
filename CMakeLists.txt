@@ -11,6 +11,11 @@ set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 # Cmake find modules
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 
+option(ENABLE_AIO_STATS "Enable AIO observability metrics" ON)
+if(ENABLE_AIO_STATS)
+    add_compile_definitions(AIO_STATS=1)
+endif()
+
 # -----------------------------------------
 # Common Build Functions
 #------------------------------------------
@@ -36,6 +41,7 @@ function(kio_target_compile_options target_name)
     else()
         target_compile_options(${target_name} PRIVATE ${COMMON_COMPILE_FLAGS})
     endif()
+
 endfunction()
 
 # -----------------------------------------------------------------------------

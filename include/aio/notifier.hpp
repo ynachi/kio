@@ -15,18 +15,25 @@ namespace aio
 
 /// Thread-safe notification primitive.
 ///
-/// Unlike Event, Notifier can be created without an IoContext,
-/// making it suitable for cross-thread signaling where the IoContext
-/// is created later (e.g., inside a Worker thread).
+/// Notifier allows a coroutine to wait for a signal from any thread.
+/// It is designed for one-to-one signaling: a single Signal() call wakes up
+/// exactly one waiting coroutine. This is NOT a broadcast mechanism (like
+/// std::condition_variable::notify_all). If multiple coroutines wait on the
+/// same Notifier, they will compete for signals.
+///
+/// It can be created without an IoContext, making it suitable for cross-thread
+/// signaling where the IoContext might be created later or lives on a different
+/// thread (e.g., inside a Worker).
+///
 /// @code
 ///   Notifier notifier;  // Created anywhere
 ///
 ///   // On worker thread:
-///  co_await notifier.Wait(ctx);
+///   co_await notifier.Wait(ctx);
 ///
 ///   // From any thread:
 ///   notifier.Signal();
-///@endcode
+/// @endcode
 class Notifier
 {
 public:
