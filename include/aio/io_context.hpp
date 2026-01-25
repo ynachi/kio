@@ -61,6 +61,7 @@
 #include "aio/operation_base.hpp"
 #include "aio/pipe_pool.hpp"
 #include "aio/result.hpp"
+#include "aio/stats.hpp"
 #include "aio/task.hpp"
 
 namespace aio
@@ -183,6 +184,12 @@ public:
             pending_head_->prev = op;
         }
         pending_head_ = op;
+
+#if AIO_STATS
+        AIO_STATS_INC(stats_, ops_submitted);
+        const uint64_t inflight = AIO_STATS_ADD(stats_, ops_inflight, 1) + 1;
+        AIO_STATS_SET_MAX(stats_, ops_max_inflight, inflight);
+#endif
     }
 
     void Untrack(OperationState* op)
@@ -204,6 +211,10 @@ public:
         op->next = nullptr;
         op->prev = nullptr;
         op->tracked = false;
+
+#if AIO_STATS
+        AIO_STATS_DEC(stats_, ops_inflight);
+#endif
     }
 
     /**
@@ -366,6 +377,11 @@ public:
     void WaitReady() const { ready_latch_.wait(); }
     void WaitStop() const { stopped_latch_.wait(); }
 
+#if AIO_STATS
+    IoContextStats& Stats() { return stats_; }
+    const IoContextStats& Stats() const { return stats_; }
+#endif
+
 private:
     void DrainExternal(std::vector<std::coroutine_handle<>>& out)
     {
@@ -373,6 +389,10 @@ private:
         {
             return;
         }
+
+#if AIO_STATS
+        uint64_t external_count = 0;
+#endif
 
         std::vector<OperationState*> local;
         {
@@ -394,9 +414,20 @@ private:
             {
                 continue;
             }
+#if AIO_STATS
+            external_count++;
+            AIO_STATS_INC(stats_, ops_completed);
+#endif
             Untrack(op);
             out.push_back(op->handle);
         }
+
+#if AIO_STATS
+        if (external_count != 0)
+        {
+            AIO_STATS_ADD(stats_, external_completions, external_count);
+        }
+#endif
     }
 
     void DrainExternalWithoutResume()
@@ -406,6 +437,10 @@ private:
             return;
         }
 
+#if AIO_STATS
+        uint64_t external_count = 0;
+#endif
+
         std::vector<OperationState*> local;
         {
             std::scoped_lock lk(ext_mtx_);
@@ -426,9 +461,20 @@ private:
             {
                 continue;
             }
+#if AIO_STATS
+            external_count++;
+            AIO_STATS_INC(stats_, ops_completed);
+#endif
             Untrack(op);
             op->handle = {};
         }
+
+#if AIO_STATS
+        if (external_count != 0)
+        {
+            AIO_STATS_ADD(stats_, external_completions, external_count);
+        }
+#endif
     }
 
     /**
@@ -464,6 +510,13 @@ private:
             else if (ud)
             {
                 auto* op = reinterpret_cast<OperationState*>(static_cast<uintptr_t>(ud));
+#if AIO_STATS
+                AIO_STATS_INC(stats_, ops_completed);
+                if (cqe->res < 0)
+                {
+                    AIO_STATS_INC(stats_, ops_errors);
+                }
+#endif
                 Untrack(op);
                 // Do NOT resume op->handle — we're draining, not running
             }
@@ -506,6 +559,10 @@ private:
             return;
         }
 
+#if AIO_STATS
+        AIO_STATS_INC(stats_, loop_iterations);
+#endif
+
         ready_.clear();
 
         auto [_, saw_wake] = ProcessReadyCompletions();
@@ -516,6 +573,24 @@ private:
         {
             DrainExternal(ready_);
         }
+
+#if AIO_STATS
+        if (saw_wake)
+        {
+            AIO_STATS_INC(stats_, loop_wakeups);
+        }
+        const uint64_t batch = static_cast<uint64_t>(ready_.size());
+        if (batch == 0)
+        {
+            AIO_STATS_INC(stats_, loop_idle_iterations);
+        }
+        else
+        {
+            AIO_STATS_INC(stats_, loop_busy_iterations);
+            AIO_STATS_ADD(stats_, loop_completions, batch);
+            AIO_STATS_SET_MAX(stats_, loop_max_batch, batch);
+        }
+#endif
 
         // Resume outside CQE iteration (flat, no stack growth)
         for (auto h : ready_)
@@ -558,6 +633,13 @@ private:
             Untrack(op);
             op->res = cqe->res;
             ready_.push_back(op->handle);
+#if AIO_STATS
+            AIO_STATS_INC(stats_, ops_completed);
+            if (cqe->res < 0)
+            {
+                AIO_STATS_INC(stats_, ops_errors);
+            }
+#endif
         }
 
         io_uring_cq_advance(&ring_, count);
@@ -585,6 +667,10 @@ private:
 
     // Lazy pipe pool for sendfile operations
     std::optional<PipePool> pipe_pool_;
+
+#if AIO_STATS
+    IoContextStats stats_{};
+#endif
 };
 
 // -----------------------------------------------------------------------------
@@ -750,6 +836,9 @@ struct WithTimeoutOp
         // Translate ECANCELED to timed_out for clarity
         if (!r && r.error().value() == ECANCELED)
         {
+#if AIO_STATS
+            AIO_STATS_INC(op.ctx->Stats(), timeouts);
+#endif
             return decltype(r)(std::unexpected(std::make_error_code(std::errc::timed_out)));
         }
         return r;

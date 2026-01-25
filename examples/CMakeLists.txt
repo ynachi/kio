@@ -53,6 +53,10 @@ kio_add_sanitizers(212_hello_http_worker)
 kio_add_demo(213_hello_http_worker_single_acceptor aio/213_hello_http_single_acceptor.cpp TAGS core LIBS aio)
 kio_add_sanitizers(213_hello_http_worker_single_acceptor)
 
+kio_add_demo(214_stats_demo aio/214_stats_demo.cpp TAGS core LIBS aio)
+kio_add_sanitizers(214_stats_demo)
+target_compile_definitions(214_stats_demo PRIVATE DAIO_STATS=1)
+
 
 # Create a custom target to build all examples
 add_custom_target(examples
