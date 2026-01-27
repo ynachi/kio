@@ -4,7 +4,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <functional>
 #include <latch>
 #include <optional>
 #include <stop_token>
@@ -14,8 +13,6 @@
 #include <sched.h>
 #include <unistd.h>
 
-#include <sys/syscall.h>
-
 #include "io_context.hpp"
 
 namespace aio
@@ -24,8 +21,8 @@ namespace aio
 class Worker
 {
 public:
-    explicit Worker(int id = next_id_++, std::stop_token external_st = {})
-        : id_(id), external_stop_token_(std::move(external_st))
+    explicit Worker(const int id = next_id_++, std::stop_token external_st = {})
+        : id_(id), stop_token_(std::move(external_st))
     {
     }
 
@@ -37,7 +34,7 @@ public:
           wake_fd_(std::exchange(other.wake_fd_, -1)),
           id_(std::exchange(other.id_, -1)),
           tid_(std::exchange(other.tid_, 0)),
-          external_stop_token_(std::move(other.external_stop_token_))
+          stop_token_(std::move(other.stop_token_))
     {
     }
 
@@ -50,7 +47,7 @@ public:
             wake_fd_ = std::exchange(other.wake_fd_, -1);
             id_ = std::exchange(other.id_, -1);
             tid_ = std::exchange(other.tid_, 0);
-            external_stop_token_ = std::move(other.external_stop_token_);
+            stop_token_ = std::move(other.stop_token_);
         }
         return *this;
     }
@@ -58,17 +55,17 @@ public:
     ~Worker() = default;
 
     /**
-     * Low-level: spawns thread, creates IoContext, runs user function.
+     * Low-level: spawns a thread, creates IoContext, runs user function.
      * User function receives IoContext& and is responsible for calling Run()/RunUntilDone().
      */
     template <typename F>
     void Start(F&& func, int cpu_id = -1)
     {
         std::latch ready{1};
-        std::atomic<int> fd_out{-1};
+        std::atomic fd_out{-1};
         std::atomic<uint32_t> tid_out{0};
 
-        auto ext_st = external_stop_token_;
+        auto ext_st = stop_token_;
 
         thread_ = std::jthread(
             [&ready, &fd_out, &tid_out, func = std::forward<F>(func), cpu_id, ext_st](std::stop_token st) mutable
@@ -89,9 +86,9 @@ public:
 
                 std::stop_callback cb_internal(st, stop_action);
 
-                std::optional<std::stop_callback<decltype(stop_action)>> cb_external;
                 if (ext_st.stop_possible())
                 {
+                    std::optional<std::stop_callback<decltype(stop_action)>> cb_external;
                     cb_external.emplace(ext_st, stop_action);
                 }
 
@@ -125,7 +122,7 @@ public:
     /**
      * Convenience: runs ctx.Run() with no tick.
      */
-    void RunLoop(int cpu_id = -1)
+    void RunLoop(const int cpu_id = -1)
     {
         Start(
             [](IoContext& ctx)
@@ -147,7 +144,7 @@ public:
             [factory = std::forward<TaskFactory>(factory)](IoContext& ctx) mutable
             {
                 auto task = factory(ctx);
-                ctx.RunUntilDone(task);
+                ctx.RunUntilDone(std::move(task));
                 ctx.CancelAllPending();
             },
             cpu_id);
@@ -174,6 +171,7 @@ public:
     [[nodiscard]] int Id() const { return id_; }
     [[nodiscard]] uint32_t ThreadId() const { return tid_; }
     [[nodiscard]] int WakeFd() const { return wake_fd_; }
+    [[nodiscard]] std::stop_token ExternalStopToken() const { return stop_token_; }
 
 private:
     static void PinToCpu(int cpu_id)
@@ -182,9 +180,9 @@ private:
         CPU_ZERO(&cpuset);
         CPU_SET(cpu_id % static_cast<int>(std::thread::hardware_concurrency()), &cpuset);
 
-        if (int rc = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset); rc != 0)
+        if (const int rc = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset); rc != 0)
         {
-            std::fprintf(stderr, "Warning: Failed to pin to CPU %d: %s\n", cpu_id, std::strerror(rc));
+            ALOG_ERROR("Warning: Failed to pin to CPU {}: {}", cpu_id, std::strerror(rc));
         }
     }
 
@@ -194,7 +192,7 @@ private:
     int wake_fd_ = -1;
     int id_;
     uint32_t tid_ = 0;
-    std::stop_token external_stop_token_;
+    std::stop_token stop_token_;
 };
 
 }  // namespace aio

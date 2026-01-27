@@ -25,7 +25,8 @@ struct Config
 
 namespace
 {
-aio::Task<> HandleClient(aio::IoContext& ctx, int fd, aio::tls::TlsContext& tls_ctx, int file_fd, size_t file_size)
+aio::Task<> HandleClient(aio::IoContext& ctx, int fd, aio::tls::TlsContext& tls_ctx, const int file_fd,
+                         size_t file_size)
 {
     aio::net::Socket client_sock(fd);
 

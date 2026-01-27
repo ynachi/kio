@@ -32,6 +32,17 @@ DEFINE_string(ca, "/home/ynachi/test_certs/ca.crt", "CA certificate path");
 namespace
 {
 
+// Global flag for signal handling
+std::atomic g_stop_requested{false};
+
+void SignalHandler(int signum)
+{
+    if (signum == SIGINT || signum == SIGTERM)
+    {
+        g_stop_requested.store(true);
+    }
+}
+
 void PrintKtlsDiagnostics()
 {
     ALOG_INFO("=== KTLS Diagnostics ===");
@@ -121,7 +132,7 @@ aio::Task<> Server(aio::IoContext& ctx, uint16_t port)
     auto& tls_ctx = *tls_ctx_res;
 
     // 3. Bind TCP Listener
-    auto listener = aio::net::TcpListener::Bind(port);
+    const auto listener = aio::net::TcpListener::Bind(port);
     if (!listener)
     {
         std::println(stderr, "Failed to bind to port {}", port);
@@ -152,18 +163,36 @@ int main(int argc, char* argv[])
 {
     gflags::ParseCommandLineFlags(&argc, &argv, true);
 
+    // Install signal handlers
+    std::signal(SIGINT, SignalHandler);
+    std::signal(SIGTERM, SignalHandler);
+
     PrintKtlsDiagnostics();
 
-    // Create a worker pinned to CPU 0 (optional CPU pinning)
-    aio::Worker worker(0);
+    // External stop source to control the worker
+    const std::stop_source stop_source;
+    // Create a worker with the stop token
+    aio::Worker worker(0, stop_source.get_token());
 
-    // Run the server task on the worker
-    // RunTask starts the thread, runs the task, and keeps the loop alive until the task completes
-    // Since 'Server' loops forever, this will run until the process is killed.
+    // Run the server task
     worker.RunTask([&](aio::IoContext& ctx) { return Server(ctx, static_cast<uint16_t>(FLAGS_port)); }, /*cpu_id=*/0);
 
-    // Wait for the worker thread to finish (it won't, in this case)
+    // Main thread loop: Wait for signal
+    ALOG_INFO("Server running. Press Ctrl+C to stop.");
+    while (!g_stop_requested.load())
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    ALOG_INFO("Signal received, stopping worker...");
+
+    // Stop the worker!
+    (void)stop_source.request_stop();
+
+    // Wait for cleanup
     worker.Join();
+
+    ALOG_INFO("Server stopped cleanly.");
 
     return 0;
 }
