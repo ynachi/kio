@@ -128,7 +128,7 @@ int main()
     ALOG_INFO("OpenSSL version: {}", OpenSSL_version(OPENSSL_VERSION));
 
     tls::ListenerConfig listener_cfg{};
-    listener_cfg.port = 8080;
+    listener_cfg.port = 8443;
 
     tls::TlsConfig tls_cfg{};
     // TODO: make it configurable

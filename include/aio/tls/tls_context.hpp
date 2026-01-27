@@ -71,14 +71,17 @@ private:
     // Must be unique_ptr so the address of the vector on the heap    // remains valid even if TlsContext is moved after
     // creation.
     std::unique_ptr<std::vector<unsigned char>> alpn_store_;
+    bool verify_hostname_ = true;
 
     // Static ALPN Callback for Server mode
     static int AlpnSelectCb(SSL* ssl, const unsigned char** out, unsigned char* outlen, const unsigned char* in,
                             unsigned int inlen, void* arg);
 
     // Constructor taking ownership of both Context and ALPN storage
-    explicit TlsContext(SSLCtxPtr&& ctx, std::unique_ptr<std::vector<unsigned char>>&& alpn_store = nullptr)
-        : ctx_(std::move(ctx)), alpn_store_(std::move(alpn_store))
+    explicit TlsContext(SSLCtxPtr&& ctx,
+                        std::unique_ptr<std::vector<unsigned char>>&& alpn_store = nullptr,
+                        bool verify_hostname = true)
+        : ctx_(std::move(ctx)), alpn_store_(std::move(alpn_store)), verify_hostname_(verify_hostname)
     {
     }
 
@@ -88,6 +91,7 @@ public:
 
     // Accessor
     [[nodiscard]] SSL_CTX* NativeHandle() const { return ctx_.get(); }
+    [[nodiscard]] bool VerifyHostname() const { return verify_hostname_; }
 };
 
 }  // namespace aio::tls

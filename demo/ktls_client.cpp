@@ -35,8 +35,10 @@ openssl x509 -req -days 365 -in server.csr \
 #include <gflags/gflags.h>
 
 // CLI flags
+DEFINE_string(client_cert, "/home/ynachi/test_certs/client.crt", "Path to client certificate (for mTLS)");
+DEFINE_string(client_key, "/home/ynachi/test_certs/client.key", "Path to client private key (for mTLS)");
 DEFINE_string(host, "127.0.0.1", "Server host");
-DEFINE_uint32(port, 8080, "Server port");
+DEFINE_uint32(port, 8443, "Server port");
 DEFINE_string(mode, "echo", "Test mode: raw, simple, echo, or perf");
 DEFINE_string(path, "/", "HTTP path for http mode");
 DEFINE_uint64(bytes, 10 * 1024 * 1024, "Bytes to transfer for perf mode");
@@ -319,6 +321,13 @@ int main(int argc, char* argv[])
     {
         tls_cfg.verify_mode = SSL_VERIFY_NONE;
         ALOG_INFO("Certificate verification: DISABLED (testing mode)");
+    }
+
+    if (!FLAGS_client_cert.empty() && !FLAGS_client_key.empty())
+    {
+        tls_cfg.cert_path = FLAGS_client_cert;
+        tls_cfg.key_path = FLAGS_client_key;
+        ALOG_INFO("mTLS: Enabled (Sending client cert)");
     }
 
     // Parse ALPN flags

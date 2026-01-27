@@ -17,7 +17,7 @@ bool HaveKtls()
         std::string line;
         while (std::getline(modules, line))
         {
-            if (line.find("tls") != std::string::npos)  // .contains is C++20, using find for compat
+            if (const std::string_view view = line; view.starts_with("tls "))
             {
                 return true;
             }
@@ -53,7 +53,7 @@ std::string GetKtlsInfo()
 }
 
 // Helper: Convert {"h2", "http/1.1"} -> \x02h2\x08http/1.1 (Wire format)
-std::vector<unsigned char> SerializeAlpn(const std::vector<std::string>& protos)
+static std::vector<unsigned char> SerializeAlpn(const std::vector<std::string>& protos)
 {
     if (protos.empty())
         return {};
@@ -79,7 +79,7 @@ std::vector<unsigned char> SerializeAlpn(const std::vector<std::string>& protos)
     return wire;
 }
 
-Result<> SetCiphers(SSL_CTX* ctx, const TlsConfig& config)
+static Result<> SetCiphers(SSL_CTX* ctx, const TlsConfig& config)
 {
     // Cipher Suites (TLS 1.2)
     if (!config.cipher_suites.empty())
@@ -102,7 +102,7 @@ Result<> SetCiphers(SSL_CTX* ctx, const TlsConfig& config)
     return {};
 }
 
-Result<> LoadCerts(SSL_CTX* ctx, const TlsConfig& config, const bool server_mode)
+static Result<> LoadCerts(SSL_CTX* ctx, const TlsConfig& config, const bool server_mode)
 {
     if (!config.cert_path.empty() && !config.key_path.empty())
     {
@@ -134,12 +134,14 @@ Result<> LoadCerts(SSL_CTX* ctx, const TlsConfig& config, const bool server_mode
 }
 
 // Updated to take server_mode: mTLS requires sending the CA names list to the client
-Result<> TrustStore(SSL_CTX* ctx, const TlsConfig& config, const bool server_mode)
+static Result<> TrustStore(SSL_CTX* ctx, const TlsConfig& config, const bool server_mode)
 {
     if (!config.ca_cert_path.empty() || !config.ca_dir_path.empty())
     {
-        const char* ca_file = config.ca_cert_path.empty() ? nullptr : config.ca_cert_path.string().c_str();
-        const char* ca_dir = config.ca_dir_path.empty() ? nullptr : config.ca_dir_path.string().c_str();
+        std::string ca_file_str = config.ca_cert_path.string();
+        std::string ca_dir_str = config.ca_dir_path.string();
+        const char* ca_file = config.ca_cert_path.empty() ? nullptr : ca_file_str.c_str();
+        const char* ca_dir = config.ca_dir_path.empty() ? nullptr : ca_dir_str.c_str();
 
         // 1. Load for Verification (Check signature)
         if (SSL_CTX_load_verify_locations(ctx, ca_file, ca_dir) != 1)
@@ -167,8 +169,8 @@ Result<> TrustStore(SSL_CTX* ctx, const TlsConfig& config, const bool server_mod
 
 using AlpnCallback = int (*)(SSL*, const unsigned char**, unsigned char*, const unsigned char*, unsigned int, void*);
 
-Result<std::unique_ptr<std::vector<unsigned char>>> SetupAlpn(SSL_CTX* ctx, const TlsConfig& config,
-                                                              const bool server_mode, AlpnCallback alpn_cb)
+static Result<std::unique_ptr<std::vector<unsigned char>>> SetupAlpn(SSL_CTX* ctx, const TlsConfig& config,
+                                                                     const bool server_mode, AlpnCallback alpn_cb)
 {
     std::unique_ptr<std::vector<unsigned char>> alpn_storage = nullptr;
 
@@ -249,7 +251,15 @@ Result<TlsContext> TlsContext::Create(const TlsConfig& config, const bool server
     }
 
     // 3. Set Options (Enforce KTLS)
-    SSL_CTX_set_options(ctx.get(), SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_COMPRESSION | SSL_OP_ENABLE_KTLS);
+    SSL_CTX_set_options(ctx.get(), SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_COMPRESSION | SSL_OP_ENABLE_KTLS |
+                                       SSL_OP_NO_RENEGOTIATION);
+
+    // TLS 1.3 post-handshake tickets break KTLS; disable for servers.
+    if (server_mode)
+    {
+        SSL_CTX_set_num_tickets(ctx.get(), 0);
+        SSL_CTX_set_options(ctx.get(), SSL_OP_NO_TICKET);
+    }
 
     // 4. Certificates & Trust
     if (auto err = detail::LoadCerts(ctx.get(), config, server_mode); !err.has_value())
@@ -266,14 +276,14 @@ Result<TlsContext> TlsContext::Create(const TlsConfig& config, const bool server
     SSL_CTX_set_verify(ctx.get(), config.verify_mode, nullptr);
 
     // 5. ALPN Setup
-    auto alpn_res = detail::SetupAlpn(ctx.get(), config, server_mode, TlsContext::AlpnSelectCb);
+    auto alpn_res = detail::SetupAlpn(ctx.get(), config, server_mode, AlpnSelectCb);
     if (!alpn_res.has_value())
     {
         return std::unexpected(alpn_res.error());
     }
     std::unique_ptr<std::vector<unsigned char>> alpn_storage = std::move(alpn_res.value());
 
-    return TlsContext(std::move(ctx), std::move(alpn_storage));
+    return TlsContext(std::move(ctx), std::move(alpn_storage), config.verify_hostname);
 }
 
 }  // namespace aio::tls

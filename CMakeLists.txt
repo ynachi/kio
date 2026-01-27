@@ -12,9 +12,9 @@ set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 
 option(ENABLE_AIO_STATS "Enable AIO observability metrics" ON)
-if(ENABLE_AIO_STATS)
+if (ENABLE_AIO_STATS)
     add_compile_definitions(AIO_STATS=1)
-endif()
+endif ()
 
 # -----------------------------------------
 # Common Build Functions
@@ -36,11 +36,11 @@ function(kio_target_compile_options target_name)
             $<$<CONFIG:Release>:-O3>
     )
 
-    if(target_type STREQUAL "INTERFACE_LIBRARY")
+    if (target_type STREQUAL "INTERFACE_LIBRARY")
         target_compile_options(${target_name} INTERFACE ${COMMON_COMPILE_FLAGS})
-    else()
+    else ()
         target_compile_options(${target_name} PRIVATE ${COMMON_COMPILE_FLAGS})
-    endif()
+    endif ()
 
 endfunction()
 
@@ -56,25 +56,25 @@ function(kio_add_demo target_name source_file)
     cmake_parse_arguments(ARG "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
 
     # 2. Check Global Toggle
-    if(NOT KIO_BUILD_DEMOS)
+    if (NOT KIO_BUILD_DEMOS)
         return()
-    endif()
+    endif ()
 
     # Check Tag Filtering
     # If KIO_DEMO_FILTER is set (and not "all"), we check if this demo has a matching tag.
-    if(DEFINED KIO_DEMO_FILTER AND NOT "${KIO_DEMO_FILTER}" STREQUAL "all")
+    if (DEFINED KIO_DEMO_FILTER AND NOT "${KIO_DEMO_FILTER}" STREQUAL "all")
         set(MATCH_FOUND FALSE)
-        foreach(tag IN LISTS ARG_TAGS)
-            if("${tag}" IN_LIST KIO_DEMO_FILTER)
+        foreach (tag IN LISTS ARG_TAGS)
+            if ("${tag}" IN_LIST KIO_DEMO_FILTER)
                 set(MATCH_FOUND TRUE)
                 break()
-            endif()
-        endforeach()
+            endif ()
+        endforeach ()
 
-        if(NOT MATCH_FOUND)
+        if (NOT MATCH_FOUND)
             return() # Skip this target
-        endif()
-    endif()
+        endif ()
+    endif ()
 
     # Create the Target (If we passed the checks)
     add_executable(${target_name} ${source_file})
@@ -105,7 +105,7 @@ function(kio_add_sanitizers target_name)
 
         # But also enable general thread sanitizer flag for other code
         target_compile_definitions(${target_name} PUBLIC __SANITIZE_THREAD__=1)
-    endif()
+    endif ()
 endfunction()
 
 
@@ -121,25 +121,25 @@ function(kio_add_test target_name source_file)
     cmake_parse_arguments(ARG "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
 
     # 2. Check Global Toggle
-    if(NOT KIO_BUILD_TESTS)
+    if (NOT KIO_BUILD_TESTS)
         return()
-    endif()
+    endif ()
 
     # Check Tag Filtering
     # If KIO_TEST_FILTER is set (and not "all"), we check if this demo has a matching tag.
-    if(DEFINED KIO_TEST_FILTER AND NOT "${KIO_TEST_FILTER}" STREQUAL "all")
+    if (DEFINED KIO_TEST_FILTER AND NOT "${KIO_TEST_FILTER}" STREQUAL "all")
         set(MATCH_FOUND FALSE)
-        foreach(tag IN LISTS ARG_TAGS)
-            if("${tag}" IN_LIST KIO_TEST_FILTER)
+        foreach (tag IN LISTS ARG_TAGS)
+            if ("${tag}" IN_LIST KIO_TEST_FILTER)
                 set(MATCH_FOUND TRUE)
                 break()
-            endif()
-        endforeach()
+            endif ()
+        endforeach ()
 
-        if(NOT MATCH_FOUND)
+        if (NOT MATCH_FOUND)
             return() # Skip this target
-        endif()
-    endif()
+        endif ()
+    endif ()
 
     # Create the Target (If we passed the checks)
     add_executable(${target_name} ${source_file})
@@ -308,6 +308,9 @@ endif ()
 # Library definition
 add_library(aio
         src/aio/net.cpp
+        src/aio/io_buffer.cpp
+        src/aio/writev_buffer.cpp
+        src/aio/tls/tls_context.cpp
 )
 # Include directories
 target_include_directories(aio PUBLIC
@@ -318,6 +321,8 @@ target_include_directories(aio PUBLIC
 target_link_libraries(aio PUBLIC
         PkgConfig::LibUring
         pthread
+        OpenSSL::SSL
+        OpenSSL::Crypto
 )
 
 #-----------------------------------------------
@@ -326,7 +331,7 @@ target_link_libraries(aio PUBLIC
 include_directories(${CMAKE_SOURCE_DIR})
 
 # TODO: remove for now
-# add_subdirectory(kio)
+add_subdirectory(kio)
 
 if (KIO_BUILD_BITCASK)
     add_subdirectory(bitcask)

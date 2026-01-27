@@ -1,8 +1,8 @@
 #pragma once
 
 #include <coroutine>
-#include <optional>
 #include <exception>
+#include <optional>
 #include <utility>
 
 namespace aio
@@ -12,7 +12,7 @@ namespace aio
 // -----------------------------------------------------------------------------
 
 template <typename T = void>
-class Task
+class [[nodiscard("You must co_await a Task or keep it alive")]] Task
 {
 public:
     struct promise_type
@@ -118,7 +118,7 @@ private:
 };
 
 template <>
-class Task<void>
+class [[nodiscard("You must co_await a Task or keep it alive")]] Task<void>
 {
 public:
     struct promise_type
