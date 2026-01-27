@@ -57,7 +57,7 @@ kio_add_demo(214_stats_demo aio/214_stats_demo.cpp TAGS core LIBS aio)
 kio_add_sanitizers(214_stats_demo)
 target_compile_definitions(214_stats_demo PRIVATE DAIO_STATS=1)
 
-kio_add_demo(215_tls_echo_server aio/215_tls_echo_server.cpp TAGS core LIBS aio)
+kio_add_demo(215_tls_echo_server aio/215_tls_echo_server.cpp TAGS core LIBS gflags::gflags aio)
 kio_add_sanitizers(215_tls_echo_server)
 
 
