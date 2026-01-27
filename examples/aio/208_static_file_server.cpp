@@ -6,6 +6,7 @@
 #include <string_view>
 
 #include <fcntl.h>
+
 #include <sys/stat.h>
 
 #include "aio/io.hpp"
@@ -43,13 +44,13 @@ aio::Task<> serve_file(aio::IoContext& ctx, int client_fd, const char* filepath)
     // Send HTTP header
     std::array<char, 256> header{};
     int header_len = std::snprintf(header.data(), header.size(),
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Length: %ld\r\n"
-        "Content-Type: application/octet-stream\r\n"
-        "\r\n", st.st_size);
+                                   "HTTP/1.1 200 OK\r\n"
+                                   "Content-Length: %ld\r\n"
+                                   "Content-Type: application/octet-stream\r\n"
+                                   "\r\n",
+                                   st.st_size);
 
-    co_await aio::AsyncSend(ctx, client_fd,
-        std::string_view{header.data(), static_cast<size_t>(header_len)});
+    co_await aio::AsyncSend(ctx, client_fd, std::string_view{header.data(), static_cast<size_t>(header_len)});
 
     // Zero-copy file transfer!
     auto result = co_await aio::AsyncSendfile(ctx, client_fd, *file_fd, 0, st.st_size);
@@ -116,13 +117,12 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    uint16_t port = static_cast<uint16_t>(std::atoi(argv[1]));
+    auto port = static_cast<uint16_t>(std::atoi(argv[1]));
     const char* filepath = argv[2];
 
     aio::IoContext ctx;
 
-    auto task = server(ctx, port, filepath);
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(server(ctx, port, filepath));
 
     return 0;
 }

@@ -118,7 +118,7 @@ int main(int argc, char** argv)
     auto socket_res = aio::net::TcpListener::Bind(port);
     if (!socket_res)
     {
-        aio::alog::fatal("failed to bind to {}", port);
+        ALOG_FATAL("failed to bind to {}", port);
         return 1;
     }
 

@@ -275,7 +275,7 @@ public:
     // -------------------------------------------------------------------------
 
     template <typename T>
-    void RunUntilDone(Task<T>& t)
+    void RunUntilDone(Task<T>&& t)
     {
         AssertOwnerThread();
 
@@ -856,8 +856,7 @@ struct WithTimeoutOp
 // Builder method to apply a timeout to an io operation
 template <typename Rep, typename Period>
 auto UringOp::WithTimeout(this auto&& self, std::chrono::duration<Rep, Period> dur)
-    requires std::is_rvalue_reference_v<decltype(self)> &&
-             (!std::is_const_v<std::remove_reference_t<decltype(self)>>)
+    requires std::is_rvalue_reference_v<decltype(self)> && (!std::is_const_v<std::remove_reference_t<decltype(self)>>)
 {
     using Op = std::remove_cvref_t<decltype(self)>;
     return WithTimeoutOp<Op>(std::forward<decltype(self)>(self), dur);

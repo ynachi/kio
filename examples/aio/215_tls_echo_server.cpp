@@ -1,7 +1,5 @@
 //
 // Created by Yao ACHI on 24/01/2026.
-// Updated for TLS by Junie on 26/01/2026.
-// Updated to use Worker by Gemini on 27/01/2026.
 //
 // examples/aio/215_tls_echo_server.cpp
 // Demonstrates: KTLS, AsyncTlsHandshake, TaskGroup, Worker, and high-performance echo server
@@ -25,8 +23,8 @@
  */
 
 // Flags (Note: client_cert/key are usually for the client, keeping them here as provided)
-DEFINE_string(client_cert, "/home/ynachi/test_certs/client.crt", "Path to client certificate (for mTLS)");
-DEFINE_string(client_key, "/home/ynachi/test_certs/client.key", "Path to client private key (for mTLS)");
+DEFINE_string(cert_path, "/home/ynachi/test_certs/server.crt", "certificate path");
+DEFINE_string(cert_key, "/home/ynachi/test_certs/server.key", "cert key path");
 DEFINE_string(host, "127.0.0.1", "Server host");
 DEFINE_uint32(port, 8443, "Server port");
 DEFINE_string(ca, "/home/ynachi/test_certs/ca.crt", "CA certificate path");

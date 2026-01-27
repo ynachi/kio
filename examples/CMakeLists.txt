@@ -60,6 +60,9 @@ target_compile_definitions(214_stats_demo PRIVATE DAIO_STATS=1)
 kio_add_demo(215_tls_echo_server aio/215_tls_echo_server.cpp TAGS core LIBS gflags::gflags aio)
 kio_add_sanitizers(215_tls_echo_server)
 
+kio_add_demo(216_tls_file_server aio/216_tls_file_server.cpp TAGS core LIBS gflags::gflags aio)
+kio_add_sanitizers(216_tls_file_server)
+
 
 # Create a custom target to build all examples
 add_custom_target(examples
@@ -80,6 +83,7 @@ add_custom_target(examples
         212_hello_http_worker
         213_hello_http_worker_single_acceptor
         215_tls_echo_server
+        216_tls_file_server
         06_worker_wackup
         10_integrated_file_server
 )

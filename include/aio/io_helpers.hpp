@@ -3,10 +3,10 @@
 #include <algorithm>
 #include <span>
 
-#include "aio/io_context.hpp"
-#include "aio/task.hpp"
 #include "aio/io.hpp"
+#include "aio/io_context.hpp"
 #include "aio/result.hpp"
+#include "aio/task.hpp"
 
 namespace aio
 {
@@ -32,10 +32,7 @@ struct SpliceOp : UringOp
     {
     }
 
-    void PrepareSqe(io_uring_sqe* sqe)
-    {
-        io_uring_prep_splice(sqe, fd_in, off_in, fd_out, off_out, len, flags);
-    }
+    void PrepareSqe(io_uring_sqe* sqe) { io_uring_prep_splice(sqe, fd_in, off_in, fd_out, off_out, len, flags); }
 };
 
 inline SpliceOp AsyncSplice(IoContext& ctx, int fd_in, int64_t off_in, int fd_out, int64_t off_out, unsigned int len,
@@ -268,42 +265,40 @@ Task<Result<void>> AsyncSendfile(IoContext& ctx, const Fout& out_fd, const Fin& 
     {
         const auto to_splice = static_cast<unsigned int>(std::min(remaining, kChunkSize));
 
-        // Splice from input file to pipe
-        auto splice_in = co_await detail::AsyncSplice(ctx, GetRawFd(in_fd), current_offset, pipe_write, -1, to_splice, 0);
-        if (!splice_in)
+        // Splice from File -> Pipe
+        // Loop until we get 'to_splice' bytes or EOF
+        size_t bytes_in_pipe = 0;
+        while (bytes_in_pipe < to_splice)
         {
-            co_return std::unexpected(splice_in.error());
+            auto res = co_await detail::AsyncSplice(ctx, GetRawFd(in_fd), current_offset, pipe_write, -1,
+                                                    to_splice - bytes_in_pipe, 0);
+            if (!res)
+                co_return std::unexpected(res.error());
+            if (*res == 0)
+                break;  // EOF
+            bytes_in_pipe += *res;
+            current_offset += *res;
         }
 
-        if (*splice_in == 0)
+        if (bytes_in_pipe == 0)
+            break;  // Real EOF
+
+        // Splice from Pipe -> Socket
+        // Must flush EXACTLY bytes_in_pipe
+        size_t bytes_flushed = 0;
+        while (bytes_flushed < bytes_in_pipe)
         {
-            // EOF on input file
-            co_return std::unexpected(std::make_error_code(std::errc::no_message_available));
-        }
-
-        auto pipe_remaining = *splice_in;
-
-        // Splice from pipe to output socket
-        while (pipe_remaining > 0)
-        {
-            auto splice_out =
-                co_await detail::AsyncSplice(ctx, pipe_read, -1, GetRawFd(out_fd), -1, static_cast<unsigned int>(pipe_remaining), 0);
-            if (!splice_out)
-            {
-                co_return std::unexpected(splice_out.error());
-            }
-
-            if (*splice_out == 0)
-            {
-                // Output closed
+            auto res = co_await detail::AsyncSplice(ctx, pipe_read, -1, GetRawFd(out_fd), -1,
+                                                    bytes_in_pipe - bytes_flushed, 0);
+            if (!res)
+                co_return std::unexpected(res.error());
+            if (*res == 0)
                 co_return std::unexpected(std::make_error_code(std::errc::broken_pipe));
-            }
 
-            pipe_remaining -= *splice_out;
+            bytes_flushed += *res;
         }
 
-        current_offset += static_cast<off_t>(*splice_in);
-        remaining -= *splice_in;
+        remaining -= bytes_in_pipe;
     }
 
     co_return Result<void>{};

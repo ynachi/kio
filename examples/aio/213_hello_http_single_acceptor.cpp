@@ -142,7 +142,7 @@ static aio::Task<> connection_handler_loop(aio::IoContext& ctx, ConnectionQueue&
 
     while (g_running.load(std::memory_order_relaxed))
     {
-        // Wait for signal from acceptor (blocks efficiently in io_uring)
+        // Wait for a signal from acceptor (blocks efficiently in io_uring)
         auto wait_result = co_await queue.Wait(ctx).WithTimeout(100ms);
 
         // Timeout is fine - just loop and check g_running
@@ -219,7 +219,7 @@ int main(int argc, char** argv)
     auto socket_res = aio::net::TcpListener::Bind(port);
     if (!socket_res)
     {
-        aio::alog::fatal("failed to bind to {}", port);
+        ALOG_FATAL("failed to bind to {}", port);
         return 1;
     }
 

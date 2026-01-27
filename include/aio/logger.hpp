@@ -1,3 +1,4 @@
+
 #pragma once
 
 #include <array>
@@ -206,7 +207,7 @@ inline void logger_loop(int out_fd)
     while (true)
     {
         const uint32_t captured_epoch = g_epoch.load(std::memory_order_acquire);
- if (!g_running.load(std::memory_order_acquire))
+        if (!g_running.load(std::memory_order_acquire))
         {
             // One last drain before exit
             drain_all(out_fd);
@@ -311,7 +312,7 @@ inline uint64_t dropped_count()
 // ---- API ----
 
 template <Level L, typename... Args>
-void log(std::source_location loc, std::format_string<Args...> fmt, Args&&... args)
+void log_impl(std::source_location loc, std::format_string<Args...> fmt, Args&&... args)
 {
     if constexpr (kBuildMinLevel <= L)
     {
@@ -350,30 +351,11 @@ void log(std::source_location loc, std::format_string<Args...> fmt, Args&&... ar
     }
 }
 
-template <typename... Args>
-void debug(std::format_string<Args...> f, Args&&... a)
-{
-    log<Level::Debug>(std::source_location::current(), f, std::forward<Args>(a)...);
-}
-template <typename... Args>
-void info(std::format_string<Args...> f, Args&&... a)
-{
-    log<Level::Info>(std::source_location::current(), f, std::forward<Args>(a)...);
-}
-template <typename... Args>
-void warn(std::format_string<Args...> f, Args&&... a)
-{
-    log<Level::Warn>(std::source_location::current(), f, std::forward<Args>(a)...);
-}
-template <typename... Args>
-void error(std::format_string<Args...> f, Args&&... a)
-{
-    log<Level::Error>(std::source_location::current(), f, std::forward<Args>(a)...);
-}
-template <typename... Args>
-void fatal(std::format_string<Args...> f, Args&&... a)
-{
-    log<Level::Fatal>(std::source_location::current(), f, std::forward<Args>(a)...);
-}
-
 }  // namespace aio::alog
+
+// ---- Macros for proper source location capture ----
+#define ALOG_DEBUG(...) ::aio::alog::log_impl<::aio::alog::Level::Debug>(std::source_location::current(), __VA_ARGS__)
+#define ALOG_INFO(...)  ::aio::alog::log_impl<::aio::alog::Level::Info>(std::source_location::current(), __VA_ARGS__)
+#define ALOG_WARN(...)  ::aio::alog::log_impl<::aio::alog::Level::Warn>(std::source_location::current(), __VA_ARGS__)
+#define ALOG_ERROR(...) ::aio::alog::log_impl<::aio::alog::Level::Error>(std::source_location::current(), __VA_ARGS__)
+#define ALOG_FATAL(...) ::aio::alog::log_impl<::aio::alog::Level::Fatal>(std::source_location::current(), __VA_ARGS__)

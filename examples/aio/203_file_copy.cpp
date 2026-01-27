@@ -89,7 +89,7 @@ int main(int argc, char** argv)
     aio::IoContext ctx;
 
     auto task = AsyncMain(ctx, FLAGS_src.c_str(), FLAGS_dst.c_str());
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 
     return 0;
 }
