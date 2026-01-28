@@ -16,8 +16,7 @@
 #include <sys/socket.h>
 
 #include "aio/blocking_pool.hpp"
-#include "aio/result.hpp"
-#include "io_context.hpp"
+#include "aio/core.hpp"
 #include "ip_address.hpp"
 #include <arpa/inet.h>
 #include <netinet/in.h>

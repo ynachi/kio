@@ -5,6 +5,7 @@
 // Demonstrates: KTLS, AsyncTlsHandshake, TaskGroup, Worker, and high-performance echo server
 
 #include <array>
+#include <csignal>
 #include <print>
 
 #include "aio/aio.hpp"
@@ -12,7 +13,6 @@
 #include "aio/tls/handshake.hpp"
 #include "aio/tls/socket.hpp"
 #include "aio/tls/tls_context.hpp"
-#include "aio/worker.hpp"
 #include <gflags/gflags.h>
 
 /**

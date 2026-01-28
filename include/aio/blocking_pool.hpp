@@ -8,9 +8,7 @@
 #include <thread>
 #include <vector>
 
-#include "aio/io_context.hpp"
-#include "aio/operation_base.hpp"
-#include "aio/waker.hpp"
+#include "aio/core.hpp"
 
 namespace aio
 {

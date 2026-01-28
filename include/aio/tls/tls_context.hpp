@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-#include "aio/result.hpp"
+#include "aio/core.hpp"
 #include <openssl/ssl.h>
 
 // OpenSSL 3.0+ KTLS only support
@@ -78,8 +78,7 @@ private:
                             unsigned int inlen, void* arg);
 
     // Constructor taking ownership of both Context and ALPN storage
-    explicit TlsContext(SSLCtxPtr&& ctx,
-                        std::unique_ptr<std::vector<unsigned char>>&& alpn_store = nullptr,
+    explicit TlsContext(SSLCtxPtr&& ctx, std::unique_ptr<std::vector<unsigned char>>&& alpn_store = nullptr,
                         bool verify_hostname = true)
         : ctx_(std::move(ctx)), alpn_store_(std::move(alpn_store)), verify_hostname_(verify_hostname)
     {

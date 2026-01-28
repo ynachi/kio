@@ -5,10 +5,7 @@
 #include <memory>
 #include <vector>
 
-#include "aio/io.hpp"
-#include "aio/io_context.hpp"
-#include "aio/notifier.hpp"
-#include "aio/task.hpp"
+#include "aio/core.hpp"
 
 namespace aio
 {

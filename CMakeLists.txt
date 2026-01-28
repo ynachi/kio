@@ -307,6 +307,7 @@ endif ()
 #----------------------------------------------
 # Library definition
 add_library(aio
+        src/aio/core.cpp
         src/aio/net.cpp
         src/aio/io_buffer.cpp
         src/aio/writev_buffer.cpp
