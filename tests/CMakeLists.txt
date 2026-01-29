@@ -43,6 +43,8 @@ kio_add_test(203_aio_net_tests aio/203_net_tests.cpp
         LIBS aio GTest::gtest GTest::gtest_main
 )
 
-add_executable(repro_logger repro_logger.cpp)
-target_link_libraries(repro_logger PRIVATE aio)
+kio_add_test(301_http_tests aio/301_http_test.cpp
+        TAGS aio http unit
+        LIBS aio GTest::gtest GTest::gtest_main
+)
 

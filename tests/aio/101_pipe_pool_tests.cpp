@@ -1,11 +1,10 @@
 // tests/aio/pipe_pool_tests.cpp
 // Tests for PipePool
 
-#include <gtest/gtest.h>
-
 #include <unistd.h>
 
-#include "aio/pipe_pool.hpp"
+#include "aio/aio.hpp"
+#include <gtest/gtest.h>
 
 using namespace aio;
 

@@ -6,13 +6,13 @@ using namespace aio;
 TEST(IoContextTest, Lifecycle) {
     IoContext ctx;
     Task<> t = []() -> Task<> { co_return; }();
-    ctx.RunUntilDone(t);
+    ctx.RunUntilDone(std::move(t));
 }
 
 TEST(IoContextTest, ReturnValue) {
     IoContext ctx;
     Task<int> t = []() -> Task<int> { co_return 42; }();
-    ctx.RunUntilDone(t);
+    ctx.RunUntilDone(std::move(t));
     ASSERT_EQ(t.Result(), 42);
 }
 
@@ -32,7 +32,7 @@ TEST(IoContextTest, Notify) {
         co_await AsyncSleep(c, std::chrono::milliseconds(50));
     }(ctx);
     
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
     t.join();
     
     ASSERT_TRUE(notified);

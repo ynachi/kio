@@ -6,8 +6,7 @@
 #include <array>
 #include <chrono>
 
-#include "aio/io_context.hpp"
-#include "aio/io.hpp"
+#include "aio/aio.hpp"
 #include "test_helpers.hpp"
 
 using namespace aio;
@@ -27,7 +26,7 @@ TEST_F(TimeoutTest, OperationTimesOut) {
     auto sockets = MakeSocketPair();
     ASSERT_TRUE(sockets.Valid());
 
-    auto test = [&]() -> Task<void> {
+    auto test = [&]() -> Task<> {
         std::array<std::byte, 32> buf{};
 
         // Recv with timeout - nothing sent, should timeout
@@ -40,7 +39,7 @@ TEST_F(TimeoutTest, OperationTimesOut) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 }
 
 TEST_F(TimeoutTest, OperationCompletesBeforeTimeout) {
@@ -62,26 +61,26 @@ TEST_F(TimeoutTest, OperationCompletesBeforeTimeout) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 }
 
 TEST_F(TimeoutTest, SleepWithTimeout) {
-    auto test = [&]() -> Task<void> {
+    auto test = [&]() -> Task<> {
         // Sleep that completes before timeout
-        auto result = co_await AsyncSleep(ctx, 10ms).WithTimeout(1s);
+        const auto result = co_await AsyncSleep(ctx, 10ms).WithTimeout(1s);
         EXPECT_TRUE(result.has_value());
         co_return;
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 }
 
 TEST_F(TimeoutTest, WriteWithTimeout) {
     auto file = MakeTempFile();
     ASSERT_TRUE(file.Valid());
 
-    auto test = [&]() -> Task<void> {
+    auto test = [&]() -> Task<> {
         auto data = AsBytes("test data");
 
         // Write should complete quickly
@@ -94,7 +93,7 @@ TEST_F(TimeoutTest, WriteWithTimeout) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 }
 
 TEST_F(TimeoutTest, ReadWithTimeoutSuccess) {
@@ -113,7 +112,7 @@ TEST_F(TimeoutTest, ReadWithTimeoutSuccess) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 }
 
 TEST_F(TimeoutTest, TimeoutAccuracyLowerBound) {
@@ -136,7 +135,7 @@ TEST_F(TimeoutTest, TimeoutAccuracyLowerBound) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 }
 
 TEST_F(TimeoutTest, TimeoutAccuracyUpperBound) {
@@ -159,7 +158,7 @@ TEST_F(TimeoutTest, TimeoutAccuracyUpperBound) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 }
 
 TEST_F(TimeoutTest, ZeroTimeout) {
@@ -178,7 +177,7 @@ TEST_F(TimeoutTest, ZeroTimeout) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 }
 
 // -----------------------------------------------------------------------------
@@ -189,7 +188,7 @@ TEST_F(TimeoutTest, StandaloneTimeoutHelper) {
     auto sockets = MakeSocketPair();
     ASSERT_TRUE(sockets.Valid());
 
-    auto test = [&]() -> Task<void> {
+    auto test = [&]() -> Task<> {
         std::array<std::byte, 32> buf{};
 
         // Using standalone Timeout() instead of .WithTimeout()
@@ -204,7 +203,7 @@ TEST_F(TimeoutTest, StandaloneTimeoutHelper) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 }
 
 int main(int argc, char** argv)

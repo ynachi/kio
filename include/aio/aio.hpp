@@ -47,7 +47,7 @@
 
 #include "core/blocking_pool.hpp"
 #include "core/core.hpp"
-#include "core/task_group.hpp"
 #include "io.hpp"
+#include "core/task_group.hpp"
 #include "logger.hpp"
 #include "net.hpp"

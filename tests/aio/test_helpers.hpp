@@ -17,8 +17,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 
-#include "aio/io_context.hpp"
-#include "aio/task.hpp"
+#include "aio/aio.hpp"
 
 namespace aio::test {
 
@@ -65,9 +64,9 @@ T RunSync(Task<T> task) {
     return task.result();
 }
 
-inline void RunSync(Task<void> task) {
+inline void RunSync(Task<> task) {
     IoContext ctx;
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
     task.Result();
 }
 

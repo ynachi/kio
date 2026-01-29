@@ -1,8 +1,6 @@
 // tests/aio/io_ops_tests.cpp
 // Integration tests for I/O operations
 
-#include <gtest/gtest.h>
-
 #include <array>
 #include <chrono>
 #include <cstring>
@@ -10,13 +8,13 @@
 
 #include <fcntl.h>
 #include <poll.h>
-#include <sys/uio.h>
 #include <unistd.h>
 
-#include "aio/io_context.hpp"
-#include "aio/io.hpp"
-#include "aio/io_helpers.hpp"
+#include <sys/uio.h>
+
+#include "aio/aio.hpp"
 #include "test_helpers.hpp"
+#include <gtest/gtest.h>
 
 using namespace aio;
 using namespace aio::test;
@@ -55,7 +53,7 @@ TEST_F(IoOpsTest, WriteAndReadFile) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 }
 
 TEST_F(IoOpsTest, ReadAtOffset) {
@@ -72,7 +70,7 @@ TEST_F(IoOpsTest, ReadAtOffset) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 }
 
 TEST_F(IoOpsTest, WriteAtOffset) {
@@ -94,7 +92,7 @@ TEST_F(IoOpsTest, WriteAtOffset) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 }
 
 TEST_F(IoOpsTest, ReadEOF) {
@@ -110,7 +108,7 @@ TEST_F(IoOpsTest, ReadEOF) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 }
 
 // -----------------------------------------------------------------------------
@@ -135,7 +133,7 @@ TEST_F(IoOpsTest, SendRecvSocketPair) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 }
 
 TEST_F(IoOpsTest, SendStringView) {
@@ -156,7 +154,7 @@ TEST_F(IoOpsTest, SendStringView) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 }
 
 TEST_F(IoOpsTest, RecvConnectionClosed) {
@@ -175,7 +173,7 @@ TEST_F(IoOpsTest, RecvConnectionClosed) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 }
 
 // -----------------------------------------------------------------------------
@@ -219,7 +217,7 @@ TEST_F(IoOpsTest, WritevReadv) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 }
 
 // -----------------------------------------------------------------------------
@@ -241,7 +239,7 @@ TEST_F(IoOpsTest, FsyncAfterWrite) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 }
 
 TEST_F(IoOpsTest, FdatasyncAfterWrite) {
@@ -259,7 +257,7 @@ TEST_F(IoOpsTest, FdatasyncAfterWrite) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 }
 
 // -----------------------------------------------------------------------------
@@ -277,7 +275,7 @@ TEST_F(IoOpsTest, FtruncateExtend) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 
     EXPECT_EQ(GetFileSize(file.Get()), 1024);
 }
@@ -294,7 +292,7 @@ TEST_F(IoOpsTest, FtruncateShrink) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 
     EXPECT_EQ(GetFileSize(file.Get()), 5);
 }
@@ -314,7 +312,7 @@ TEST_F(IoOpsTest, FallocatePreallocate) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 
     EXPECT_GE(GetFileSize(file.Get()), 4096);
 }
@@ -338,7 +336,7 @@ TEST_F(IoOpsTest, PollReadable) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 }
 
 // -----------------------------------------------------------------------------
@@ -358,7 +356,7 @@ TEST_F(IoOpsTest, SleepTiming) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 }
 
 TEST_F(IoOpsTest, SleepZeroDuration) {
@@ -373,7 +371,7 @@ TEST_F(IoOpsTest, SleepZeroDuration) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 }
 
 // -----------------------------------------------------------------------------
@@ -395,7 +393,7 @@ TEST_F(IoOpsTest, CloseFile) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 
     // Verify fd is closed (write should fail)
     EXPECT_EQ(::write(raw_fd, "x", 1), -1);
@@ -416,11 +414,11 @@ TEST_F(IoOpsTest, ReadInvalidFd) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 }
 
 TEST_F(IoOpsTest, WriteInvalidFd) {
-    auto test = [&]() -> Task<void> {
+    auto test = [&]() -> Task<> {
         auto data = AsBytes("test");
         auto wr = co_await AsyncWrite(ctx, -1, data, 0);
         EXPECT_FALSE(wr.has_value());
@@ -429,7 +427,7 @@ TEST_F(IoOpsTest, WriteInvalidFd) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 }
 
 int main(int argc, char** argv)

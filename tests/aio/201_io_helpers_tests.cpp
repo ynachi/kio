@@ -7,9 +7,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-#include "aio/io.hpp"
-#include "aio/io_context.hpp"
-#include "aio/io_helpers.hpp"
+#include "aio/aio.hpp"
+#include "aio/core/io_helpers.hpp"
 #include "test_helpers.hpp"
 #include <gtest/gtest.h>
 
@@ -39,7 +38,7 @@ TEST_F(IoHelpersTest, ReadExactSuccess) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 }
 
 TEST_F(IoHelpersTest, ReadExactMultipleChunks) {
@@ -61,7 +60,7 @@ TEST_F(IoHelpersTest, ReadExactMultipleChunks) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 }
 
 TEST_F(IoHelpersTest, ReadExactEOF) {
@@ -76,7 +75,7 @@ TEST_F(IoHelpersTest, ReadExactEOF) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 }
 
 // -----------------------------------------------------------------------------
@@ -87,7 +86,7 @@ TEST_F(IoHelpersTest, WriteExactSuccess) {
     auto file = MakeTempFile();
     ASSERT_TRUE(file.Valid());
 
-    auto test = [&]() -> Task<void> {
+    auto test = [&]() -> Task<> {
         auto data = GenerateTestData(1024);
         auto wr = co_await AsyncWriteExact(ctx, file.Get(), data, 0);
         EXPECT_TRUE(wr.has_value());
@@ -102,7 +101,7 @@ TEST_F(IoHelpersTest, WriteExactSuccess) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 }
 
 TEST_F(IoHelpersTest, WriteExactLargeBuffer) {
@@ -118,7 +117,7 @@ TEST_F(IoHelpersTest, WriteExactLargeBuffer) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 
     EXPECT_EQ(GetFileSize(file.Get()), 65536);
 }
@@ -144,7 +143,7 @@ TEST_F(IoHelpersTest, RecvExactSuccess) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 }
 
 TEST_F(IoHelpersTest, RecvExactConnectionClosed) {
@@ -163,7 +162,7 @@ TEST_F(IoHelpersTest, RecvExactConnectionClosed) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 }
 
 // -----------------------------------------------------------------------------
@@ -182,7 +181,7 @@ TEST_F(IoHelpersTest, SendExactSuccess) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 
     // Verify by reading
     std::array<std::byte, 256> buf{};
@@ -210,7 +209,7 @@ TEST_F(IoHelpersTest, SendfileSmallFile) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 
     // Read from receiver and verify
     std::array<std::byte, 1024> buf{};
@@ -244,7 +243,7 @@ TEST_F(IoHelpersTest, SendfileLargeFile) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 
     // Verify size by reading
     size_t total = 0;
@@ -278,7 +277,7 @@ TEST_F(IoHelpersTest, SendfileWithOffset) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 
     std::array<std::byte, 3> buf{};
     auto n = ::read(sockets.fd2.Get(), buf.data(), buf.size());
@@ -301,7 +300,7 @@ TEST_F(IoHelpersTest, SendfilePartialFile) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 
     std::array<std::byte, 512> buf{};
     auto n = ::read(sockets.fd2.Get(), buf.data(), buf.size());
@@ -339,7 +338,7 @@ TEST_F(IoHelpersTest, SendfileReusesPipes) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 }
 
 int main(int argc, char** argv)
