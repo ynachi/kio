@@ -5,7 +5,7 @@
 #include <memory>
 #include <vector>
 
-#include "aio/core.hpp"
+#include "core.hpp"
 
 namespace aio
 {

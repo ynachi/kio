@@ -15,14 +15,70 @@
 
 #include <sys/socket.h>
 
-#include "aio/blocking_pool.hpp"
-#include "aio/core.hpp"
-#include "ip_address.hpp"
-#include <arpa/inet.h>
+#include "core/blocking_pool.hpp"
+#include "core/core.hpp"
 #include <netinet/in.h>
 
 namespace aio::net
 {
+
+////////////////////////////////////////////////////////////////////////////////
+// SocketAddress - IPv4/IPv6 wrapper, data only
+////////////////////////////////////////////////////////////////////////////////
+
+/// @brief Wrapper for sockaddr_storage supporting both IPv4 and IPv6.
+///
+/// Provides convenient factory methods for creating addresses and async DNS
+/// resolution that doesn't block the event loop.
+///
+/// @code
+///   // Direct IPv4 address
+///   auto addr = SocketAddress::V4(8080, "0.0.0.0");
+///
+///   // Async DNS resolution (non-blocking)
+///   auto addr = co_await SocketAddress::ResolveAsync(ctx, pool, "example.com", 443);
+/// @endcode
+struct SocketAddress
+{
+    sockaddr_storage addr{};
+    socklen_t addrlen = sizeof(sockaddr_storage);
+
+    SocketAddress() = default;
+
+    /// @brief Creates an IPv4 address.
+    /// @param port Port number in host byte order (automatically converted to network order)
+    /// @param ip IPv4 address string (e.g., "127.0.0.1"). Pass nullptr for INADDR_ANY (0.0.0.0).
+    /// @return SocketAddress configured for IPv4
+    ///
+    /// @code
+    ///   auto any = SocketAddress::V4(8080);              // Bind to all interfaces
+    ///   auto local = SocketAddress::V4(8080, "127.0.0.1"); // Localhost only
+    /// @endcode
+    static SocketAddress V4(uint16_t port, const char* ip = nullptr);
+
+    /// @brief Creates an IPv6 address.
+    /// @param port Port number in host byte order (automatically converted to network order)
+    /// @param ip IPv6 address string (e.g., "::1"). Pass nullptr for in6addr_any (::).
+    /// @return SocketAddress configured for IPv6
+    ///
+    /// @code
+    ///   auto any = SocketAddress::V6(8080);         // Bind to all IPv6 interfaces
+    ///   auto local = SocketAddress::V6(8080, "::1"); // IPv6 localhost only
+    /// @endcode
+    static SocketAddress V6(uint16_t port, const char* ip = nullptr);
+
+    /// @brief Returns the raw sockaddr pointer.
+    [[nodiscard]] const sockaddr* Get() const { return reinterpret_cast<const sockaddr*>(&addr); }
+
+    /// @brief Returns the raw sockaddr pointer (mutable).
+    [[nodiscard]] sockaddr* GetMutable() { return reinterpret_cast<sockaddr*>(&addr); }
+
+    /// @brief Retrieves the IP address as a string.
+    [[nodiscard]] std::optional<std::string> GetIp() const;
+
+    /// @brief Retrieves the port number (host byte order).
+    [[nodiscard]] std::optional<uint16_t> GetPort() const;
+};
 
 ////////////////////////////////////////////////////////////////////////////////
 // Socket - RAII wrapper for file descriptors

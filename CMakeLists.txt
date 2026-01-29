@@ -274,43 +274,14 @@ else ()
 endif ()
 
 #-----------------------------------------------
-# Kio lib
-#----------------------------------------------
-# Library definition
-#add_library(kio
-#        src/kio/executor.cpp
-#        src/kio/runtime.cpp
-#        src/kio/net.cpp
-#        src/kio/io.cpp
-#)
-## Include directories
-#target_include_directories(kio PUBLIC
-#        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-#        $<INSTALL_INTERFACE:include>
-#)
-## Link dependencies
-#target_link_libraries(kio PUBLIC
-#        PkgConfig::LibUring
-#        pthread
-#)
-#kio_target_compile_options(kio)
-#
-#kio_add_demo(tcp_demo_v6 io_pool/demo/tcp_demo.cpp
-#        TAGS runtime
-#        LIBS kio
-#)
-#kio_add_sanitizers(tcp_demo_v6)
-
-
-#-----------------------------------------------
 # Aio lib, change later to kio
 #----------------------------------------------
 # Library definition
 add_library(aio
-        src/aio/core.cpp
+        src/aio/core/core.cpp
+        src/aio/io.cpp
         src/aio/net.cpp
-        src/aio/io_buffer.cpp
-        src/aio/writev_buffer.cpp
+        src/aio/resp/parser.cpp
         src/aio/tls/tls_context.cpp
 )
 # Include directories

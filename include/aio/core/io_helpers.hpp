@@ -4,9 +4,7 @@
 #include <span>
 
 #include "aio/io.hpp"
-#include "aio/io_context.hpp"
-#include "aio/result.hpp"
-#include "aio/task.hpp"
+#include "core.hpp"
 
 namespace aio
 {
