@@ -71,7 +71,7 @@ public:
             }
         }(std::move(t), this);
 
-        wrapped.Start();
+        wrapped.resume();
         tasks_.push_back(std::move(wrapped));
 
         ++spawn_count_;

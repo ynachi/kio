@@ -4,10 +4,10 @@
 #include <thread>
 #include <vector>
 
+#include "../../include/aio/core/stats.hpp"
+#include "../../include/aio/core/task_group.hpp"
 #include "aio/io.hpp"
 #include "aio/io_context.hpp"
-#include "aio/stats.hpp"
-#include "aio/task_group.hpp"
 
 // Ensure stats are enabled
 #if !AIO_STATS

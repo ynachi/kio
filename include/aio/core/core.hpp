@@ -22,6 +22,7 @@ namespace aio
 {
 // forward declaration
 class IoContext;
+template <typename T> class TaskGroup;
 
 ////////////////////////////////////////////////////////////////////////////////
 // Standardized Error Handling
@@ -146,18 +147,6 @@ public:
         return std::move(*handle_.promise().value);
     }
 
-    void resume()
-    {
-        if (handle_ != nullptr && !handle_.done())
-        {
-            handle_.resume();
-        }
-    }
-
-    // Alias resume for clarity: Starts the task concurrently.
-    // WARNING: You must still keep the 'task' object alive!
-    void Start() { resume(); }
-
     // Awaitable interface
     bool await_ready() const noexcept { return false; }
 
@@ -177,6 +166,17 @@ public:
     }
 
 private:
+    friend class IoContext;
+    template <typename U> friend class TaskGroup;
+
+    void resume()
+    {
+        if (handle_ != nullptr && !handle_.done())
+        {
+            handle_.resume();
+        }
+    }
+
     handle_type handle_;
 };
 
@@ -250,18 +250,6 @@ public:
         }
     }
 
-    void resume()
-    {
-        if (handle_ && !handle_.done())
-        {
-            handle_.resume();
-        }
-    }
-
-    // Alias resume for clarity: Starts the task concurrently.
-    // WARNING: You must still keep the 'task' object alive!
-    void Start() { resume(); }
-
     // Awaitable interface
     bool await_ready() const noexcept { return false; }
 
@@ -280,6 +268,17 @@ public:
     }
 
 private:
+
+    friend class IoContext;
+    template <typename U> friend class TaskGroup;
+
+    void resume()
+    {
+        if (handle_ != nullptr && !handle_.done())
+        {
+            handle_.resume();
+        }
+    }
     handle_type handle_;
 };
 

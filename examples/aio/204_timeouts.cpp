@@ -11,10 +11,8 @@
 #include <print>
 #include <string>
 
-#include "aio/io.hpp"
-#include "aio/io_context.hpp"
-#include "aio/net.hpp"
-#include "aio/task.hpp"
+#include "aio/aio.hpp"
+
 
 using namespace std::chrono_literals;
 
@@ -149,17 +147,17 @@ int main()
 
     // Try connecting to a non-responsive address to demonstrate timeout
     auto task = ConnectWithRetry(ctx, "10.255.255.1", 8080);
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 
     std::println();
     std::println("Send with timeout");
     auto task2 = SendWithTimeout(ctx);
-    ctx.RunUntilDone(task2);
+    ctx.RunUntilDone(std::move(task2));
 
     std::println();
     std::println("Recv with timeout, invalid fd, should error even before timout");
     auto task3 = ReceiveWithTimeout(ctx, 55);
-    ctx.RunUntilDone(task3);
+    ctx.RunUntilDone(std::move(task3));
 
     return 0;
 }

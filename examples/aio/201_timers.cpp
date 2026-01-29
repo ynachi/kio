@@ -2,7 +2,7 @@
 #include <iostream>
 
 #include "aio/io.hpp"
-#include "aio/io_context.hpp"
+#include "aio/aio.hpp"
 
 using namespace aio;
 using namespace std::chrono_literals;
@@ -28,12 +28,12 @@ Task<> run_demo(IoContext& ctx)
     auto t2 = Ticker(ctx, 2, 250ms, 4);   // 250ms x 4  = 1s total
     auto t3 = Ticker(ctx, 3, 500ms, 2);   // 500ms x 2  = 1s total
 
-    t1.Start();
-    t2.Start();
-    t3.Start();
-    // co_await t1;
-    // co_await t2;
-    // co_await t3;
+    // t1.Start();
+    // t2.Start();
+    // t3.Start();
+    co_await t1;
+    co_await t2;
+    co_await t3;
 
     // Wait for all to complete using simple polling
     // (In a real app, you'd use a proper join mechanism)

@@ -12,12 +12,7 @@
 
 #include <unistd.h>
 
-#include "aio/io.hpp"
-#include "aio/logger.hpp"
-#include "aio/net.hpp"
-#include "aio/task.hpp"
-#include "aio/task_group.hpp"
-#include "aio/worker.hpp"
+#include "aio/aio.hpp"
 
 using namespace std::chrono_literals;
 

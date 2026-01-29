@@ -3,7 +3,6 @@
 //
 
 #include <chrono>
-#include <print>
 
 #include "aio/aio.hpp"
 
@@ -13,15 +12,15 @@ namespace
 {
 aio::Task<> AsyncMain(aio::IoContext& ctx)
 {
-    aio::alog::info("Starting ...");
+    ALOG_INFO("Starting ...");
 
     for (int i = 3; i > 0; --i)
     {
-        aio::alog::info("{}...", i);
+        ALOG_INFO("{}...", i);
         co_await aio::AsyncSleep(ctx, 1s);
     }
 
-    aio::alog::info("Liftoff!");
+    ALOG_INFO("Liftoff!");
 }
 }  // namespace
 
@@ -30,7 +29,7 @@ int main()
     aio::IoContext ctx;
 
     auto task = AsyncMain(ctx);
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 
     return 0;
 }

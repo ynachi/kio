@@ -70,8 +70,7 @@ aio::Task<> AsyncMain(aio::IoContext& ctx, const char* src, const char* dst)
 {
     std::println("Copying {} -> {}", src, dst);
 
-    auto result = co_await CopyFile(ctx, src, dst);
-    if (result)
+    if (auto result = co_await CopyFile(ctx, src, dst))
     {
         std::println("Copied {} bytes", *result);
     }

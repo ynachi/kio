@@ -8,8 +8,6 @@ kio_add_sanitizers(00_logger)
 kio_add_demo(06_worker_wackup aio/06_worker_wackup.cpp TAGS core LIBS aio)
 kio_add_sanitizers(06_worker_wackup)
 
-kio_add_demo(10_integrated_file_server aio/10_integrated_file_server.cpp TAGS core LIBS aio)
-kio_add_sanitizers(10_integrated_file_server)
 
 kio_add_demo(200_hello_sleep aio/200_hello_sleep.cpp TAGS core LIBS aio)
 kio_add_sanitizers(200_hello_sleep)
@@ -26,8 +24,6 @@ kio_add_sanitizers(203_file_copy)
 kio_add_demo(204_timeout aio/204_timeouts.cpp TAGS core LIBS aio)
 kio_add_sanitizers(204_timeout)
 
-kio_add_demo(205_task_group aio/205_task_group.cpp TAGS core LIBS aio)
-kio_add_sanitizers(205_task_group)
 
 kio_add_demo(206_graceful_shutdown aio/206_graceful_shutdown.cpp TAGS core LIBS aio)
 kio_add_sanitizers(206_graceful_shutdown)
@@ -73,7 +69,6 @@ add_custom_target(examples
         202_aio_timers
         203_file_copy
         204_timeout
-        205_task_group
         206_graceful_shutdown
         207_blocking_offload
         208_static_file_server
@@ -85,7 +80,6 @@ add_custom_target(examples
         215_tls_echo_server
         216_tls_file_server
         06_worker_wackup
-        10_integrated_file_server
 )
 
 message(STATUS "  Examples will be installed to: ${CMAKE_INSTALL_PREFIX}/bin/examples")

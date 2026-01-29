@@ -7,25 +7,16 @@
 
 #include "aio/aio.hpp"
 
-// examples/msg_ring_wakeup.cpp
-// Demonstrates: Correctly waking a SINGLE_ISSUER ring from another thread.
-//
-// SAFETY NOTE:
-// When sharing a pointer to a stack-allocated IoContext (remote_ctx),
-// you must ensure the worker thread does not destroy the context while
-// the main thread is still trying to use it (call Notify).
-// We use a promise/future barrier to ensure safe destruction.
-
 int main()
 {
-    std::atomic<bool> stop{false};
+    std::atomic stop{false};
 
     std::promise<aio::IoContext*> ctx_promise;
     auto ctx_future = ctx_promise.get_future();
 
     // Barrier to prevent Use-After-Free
     std::promise<void> shutdown_barrier;
-    auto shutdown_complete = shutdown_barrier.get_future();
+    const auto shutdown_complete = shutdown_barrier.get_future();
 
     std::thread worker(
         [&]
@@ -48,7 +39,7 @@ int main()
                         worker_ctx.Stop();
                 });
 
-            // 4. WAIT for main thread to finish calling Notify()
+            // 4. WAIT for the main thread to finish calling Notify()
             // If we destroy worker_ctx now, the main thread's Notify() call
             // might race with the destructor (close(wake_fd)).
             shutdown_complete.wait();
@@ -57,7 +48,7 @@ int main()
         });
 
     // Main thread waits until worker has created the context
-    aio::IoContext* remote_ctx = ctx_future.get();
+    const aio::IoContext* remote_ctx = ctx_future.get();
 
     std::println(stderr, "Main thread sleeping...");
     std::this_thread::sleep_for(std::chrono::seconds(1));

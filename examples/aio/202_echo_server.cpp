@@ -21,8 +21,7 @@ aio::Task<> HandleClient(aio::IoContext& ctx, int fd)
         if (!recv_result || *recv_result == 0)
             break;
 
-        auto send_result = co_await aio::AsyncSend(ctx, fd, std::span{buffer.data(), *recv_result});
-        if (!send_result)
+        if (const auto send_result = co_await aio::AsyncSend(ctx, fd, std::span{buffer.data(), *recv_result}); !send_result)
             break;
     }
 
@@ -32,7 +31,7 @@ aio::Task<> HandleClient(aio::IoContext& ctx, int fd)
 
 aio::Task<> Server(aio::IoContext& ctx, uint16_t port)
 {
-    auto listener = aio::net::TcpListener::Bind(port);
+    const auto listener = aio::net::TcpListener::Bind(port);
     if (!listener)
     {
         std::println(stderr, "Failed to bind to port {}", port);
@@ -54,7 +53,7 @@ aio::Task<> Server(aio::IoContext& ctx, uint16_t port)
 
         // Start a client handler (fire and forget for simplicity)
         auto client_task = HandleClient(ctx, accept_result->fd);
-        // This won't work because task need to stay alive
+        // This won't work because task needs to stay alive
         // client_task.Start();
 
         // Spawn the task into the group.
@@ -68,7 +67,7 @@ int main()
     aio::IoContext ctx;
 
     auto task = Server(ctx, 8080);
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 
     return 0;
 }
