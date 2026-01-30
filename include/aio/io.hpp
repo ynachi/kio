@@ -194,6 +194,8 @@ public:
     }
 
     [[nodiscard]] size_t ConsumedBytes() const { return read_offset_; }
+
+    [[nodiscard]] size_t Mask() const noexcept { return mask_; }
 };
 
 ///////////////////////////////////////////////////////////////////////

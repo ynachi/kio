@@ -48,3 +48,8 @@ kio_add_test(301_http_tests aio/301_http_test.cpp
         LIBS aio GTest::gtest GTest::gtest_main
 )
 
+kio_add_test(401_io_buffer aio/401_io_buffer_tests.cpp
+        TAGS aio buffer unit
+        LIBS aio GTest::gtest GTest::gtest_main
+)
+
