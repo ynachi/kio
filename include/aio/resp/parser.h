@@ -121,7 +121,12 @@ public:
     // Warning: check if parser has error before in case of nulopt as response
     [[nodiscard]] std::expected<FrameHeader, ParseError> NextFrame()
     {
-        return ParseFrameInternal(buffer_.ReadableSpan(), 0);
+        auto bytes = buffer_.ReadableSpan();
+
+        // Construct a new span of chars pointing to the same memory
+        std::span char_view{reinterpret_cast<const char*>(bytes.data()), bytes.size()};
+
+        return ParseFrameInternal(char_view, 0);
     }
 
     // Consume bytes after processing a frame
