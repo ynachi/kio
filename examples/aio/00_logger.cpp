@@ -8,7 +8,7 @@ int main()
 {
     // 1. Configuration (Optional)
     // No explicit start() needed! The first log call will trigger it.
-    aio::alog::g_level = aio::alog::Level::Disabled;
+    aio::alog::g_level = aio::alog::Level::Info;
 
     // 2. Log from Main Thread
     // The background logger thread starts automatically here.

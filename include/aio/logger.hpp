@@ -12,7 +12,7 @@
 #include <thread>
 
 #include <unistd.h>
-
+#include <sys/uio.h>
 #include <sys/syscall.h>
 
 #ifndef LOG_BUILD_LEVEL
@@ -181,22 +181,28 @@ inline uint32_t get_thread_slot()
     return guard.slot_idx;
 }
 
-inline bool drain_all(int out_fd)
-{
+
+inline bool drain_all(int out_fd) {
     bool any_work = false;
-    Record r{};
-    for (auto& slot : g_slots)
-    {
-        if (!slot.active.load(std::memory_order_acquire) && slot.q.is_empty())
-        {
+    constexpr size_t kMaxBatch = 16;
+    Record batch[kMaxBatch];
+    iovec iovs[kMaxBatch];
+
+    for (auto& slot : g_slots) {
+        if (!slot.active.load(std::memory_order_acquire) && slot.q.is_empty()) {
             continue;
         }
 
-        // Drain this specific queue
-        while (slot.q.try_pop(r))
-        {
-            (void)::write(out_fd, r.msg, r.len);
+        size_t count = 0;
+        while (count < kMaxBatch && slot.q.try_pop(batch[count])) {
+            iovs[count].iov_base = batch[count].msg;
+            iovs[count].iov_len = batch[count].len;
+            ++count;
             any_work = true;
+        }
+
+        if (count > 0) {
+            ::writev(out_fd, iovs, count);
         }
     }
     return any_work;

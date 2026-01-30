@@ -28,6 +28,11 @@
  * intentional — the alternative is silent memory corruption when the kernel
  * writes to freed memory.
  *
+ * Running a task example
+ * ctx.RunUntilDone(HandleClient(ctx, fd));
+ *
+ * group.Spawn(HandleClient(ctx, fd));
+ *
  * To safely cancel work:
  * 1. Use timeouts (.with_timeout()) so operations eventually complete.
  * 2. Let io_context::cancel_all_pending() drain on destruction.
@@ -41,7 +46,7 @@
  * - Linux kernel >= 6.0
  * - liburing
  * - C++23
- */
+ **/
 
 #include <liburing.h>
 

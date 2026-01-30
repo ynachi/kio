@@ -89,98 +89,224 @@ net::SocketAddress net::SocketAddress::V6(uint16_t port, const char* ip)
 //=============================================
 // Io Buffer
 //===============================================
-
-void IoBuffer::Consume(size_t n)
+std::span<const std::byte> IoBuffer::ReadableSpan() const
 {
-    if (n > ReadableBytes())
+    if (IsEmpty())
     {
-        throw std::out_of_range("IoBuffer::Consume() beyond available data");
+        return {};
     }
-    read_offset_ += n;
+
+    const size_t read_idx = read_offset_ & mask_;
+    const size_t write_idx = write_offset_ & mask_;
+
+    if (read_idx < write_idx)
+    {
+        // Normal case: [read_idx, write_idx)
+        return {data_.data() + read_idx, write_idx - read_idx};
+    }
+
+    // Wrapped case: [read_idx, end)
+    return {data_.data() + read_idx, data_.size() - read_idx};
 }
 
-void IoBuffer::EnsureWritableBytes(size_t additional)
+std::pair<std::span<const std::byte>, std::span<const std::byte>> IoBuffer::ReadableSpans() const
 {
-    if (WritableBytes() >= additional)
+    if (IsEmpty())
+    {
+        return {{}, {}};
+    }
+
+    const size_t read_idx = read_offset_ & mask_;
+    const size_t write_idx = write_offset_ & mask_;
+
+    if (read_idx < write_idx)
+    {
+        // Normal case: single contiguous segment
+        return {
+            {data_.data() + read_idx, write_idx - read_idx},
+            {}
+        };
+    }
+    // Wrapped case: two segments
+    return {
+        {data_.data() + read_idx, data_.size() - read_idx}, // Tail
+        {data_.data(),            write_idx              }  // Head
+    };
+}
+
+[[nodiscard]] std::vector<iovec> IoBuffer::ReadableIovecs() const
+{
+    auto [s1, s2] = ReadableSpans();
+    std::vector<iovec> vecs;
+    vecs.reserve(s2.empty() ? 1 : 2);
+    if (!s1.empty())
+    {
+        vecs.push_back({(void*)s1.data(), s1.size()});
+    }
+    if (!s2.empty())
+    {
+        vecs.push_back({(void*)s2.data(), s2.size()});
+    }
+    return vecs;
+}
+
+size_t IoBuffer::Consume(const size_t n) noexcept
+{
+    const auto real_consume = std::min(n, ReadableBytes());
+    read_offset_ += real_consume;
+
+    // Optional: Reset positions when the buffer is empty to avoid overflow long-term
+    // (though uint64_t would take centuries to overflow)
+    if (read_offset_ == write_offset_)
+    {
+        read_offset_ = 0;
+        write_offset_ = 0;
+    }
+
+    return real_consume;
+}
+
+[[nodiscard]] std::span<std::byte> IoBuffer::WritableSpan() noexcept
+{
+    if (IsFull())
+    {
+        return {};
+    }
+
+    const size_t read_idx = read_offset_ & mask_;
+    const size_t write_idx = write_offset_ & mask_;
+
+    if (write_idx >= read_idx)
+    {
+        // Normal case: can write to end of buffer
+        const size_t available_to_end = data_.size() - write_idx;
+        const size_t total_writable = WritableBytes();
+
+        // We can write until end of buffer OR until we hit the read pointer (virtually)
+        // Since read_idx <= write_idx in this branch, we are bounded by buffer size or capacity.
+        return {(data_.data() + write_idx), std::min(available_to_end, total_writable)};
+    }
+    // Wrapped case: can write [write_idx, read_idx)
+    return {(data_.data() + write_idx), read_idx - write_idx};
+}
+
+[[nodiscard]] std::pair<std::span<std::byte>, std::span<std::byte>> IoBuffer::WritableSpans()
+{
+    if (IsFull())
+    {
+        return {{}, {}};
+    }
+
+    const size_t read_idx = read_offset_ & mask_;
+    const size_t write_idx = write_offset_ & mask_;
+
+    if (write_idx >= read_idx)
+    {
+        // Normal case: may have space at end and beginning
+        const size_t space_at_end = data_.size() - write_idx;
+        const size_t total_writable = WritableBytes();
+
+        // First chunk: up to end of buffer
+        size_t len1 = std::min(space_at_end, total_writable);
+        std::span<std::byte> s1{reinterpret_cast<std::byte*>(data_.data() + write_idx), len1};
+
+        // Second chunk: remainder at the beginning
+        std::span<std::byte> s2{};
+        if (len1 < total_writable)
+        {
+            size_t len2 = total_writable - len1;
+            s2 = {(data_.data()), len2};
+        }
+        return {s1, s2};
+    }
+
+    // Wrapped case: single segment [write_idx, read_idx)
+    return {
+        {(data_.data() + write_idx), read_idx - write_idx},
+        {}
+    };
+}
+
+[[nodiscard]] std::vector<iovec> IoBuffer::WritableIovecs() noexcept
+{
+    auto [s1, s2] = WritableSpans();
+    std::vector<iovec> vecs;
+    vecs.reserve(s2.empty() ? 1 : 2);
+    if (!s1.empty())
+    {
+        vecs.push_back({(void*)s1.data(), s1.size()});
+    }
+    if (!s2.empty())
+    {
+        vecs.push_back({(void*)s2.data(), s2.size()});
+    }
+    return vecs;
+}
+
+[[nodiscard]] size_t IoBuffer::Commit(size_t n) noexcept
+{
+    auto actual_commit = std::min(n, WritableBytes());
+    write_offset_ += actual_commit;
+    return actual_commit;
+}
+
+void IoBuffer::EnsureWritableBytes(size_t n)
+{
+    if (WritableBytes() >= n)
     {
         return;
     }
 
-    const size_t kDataLen = ReadableBytes();
-    const size_t kAvailableTotal = data_.capacity();
+    // Need to grow buffer
+    const size_t current_data_len = ReadableBytes();
+    const size_t new_capacity = std::bit_ceil(current_data_len + n);
 
-    // Strategy 1: Compact in place if it fits
-    if (kAvailableTotal >= kDataLen + additional)
+    // Linearize to new buffer
+    std::vector<std::byte> new_data(new_capacity);
+
+    auto [span1, span2] = ReadableSpans();
+    size_t copied = 0;
+
+    if (!span1.empty())
     {
-        // Threshold: only compact if significant waste
-        if (read_offset_ >= kAutoCompactionThresholdBytes || read_offset_ >= data_.size() / 4)
-        {
-            Compact();
-        }
-
-        if (data_.size() < write_offset_ + additional)
-        {
-            data_.resize(write_offset_ + additional);
-        }
-        return;
+        std::memcpy(new_data.data(), span1.data(), span1.size());
+        copied += span1.size();
     }
 
-    // Strategy 2: Reallocate, copy ONLY live data
-    const size_t kNewCapacity = std::max(kAvailableTotal * 2, kDataLen + additional);
-    std::vector<char> new_buffer;
-    new_buffer.reserve(kNewCapacity);
-    new_buffer.resize(kNewCapacity);
-
-    if (kDataLen > 0)
+    if (!span2.empty())
     {
-        std::memcpy(new_buffer.data(), data_.data() + read_offset_, kDataLen);
+        std::memcpy(new_data.data() + copied, span2.data(), span2.size());
+        copied += span2.size();
     }
 
-    data_ = std::move(new_buffer);
+    data_ = std::move(new_data);
+    mask_ = new_capacity - 1;
     read_offset_ = 0;
-    write_offset_ = kDataLen;
+    write_offset_ = current_data_len;
 }
 
-[[nodiscard]] std::span<const char> IoBuffer::Peek(size_t n) const
-{
-    if (n > ReadableBytes())
-    {
-        throw std::out_of_range("IoBuffer::Peek() beyond available data");
-    }
-    return {data_.data() + read_offset_, n};
-}
-
-void IoBuffer::Commit(size_t n)
-{
-    if (write_offset_ + n > data_.size())
-    {
-        throw std::out_of_range("IoBuffer::Commit() beyond buffer size");
-    }
-    write_offset_ += n;
-}
-
-void IoBuffer::Append(std::span<const char> data)
+void IoBuffer::Append(std::span<const std::byte> data)
 {
     EnsureWritableBytes(data.size());
-    std::memcpy(data_.data() + write_offset_, data.data(), data.size());
-    write_offset_ += data.size();
-}
 
-void IoBuffer::Compact()
-{
-    if (read_offset_ == 0)
+    // Write in up to two segments if wrapped
+    size_t written = 0;
+    auto [span1, span2] = WritableSpans();
+
+    if (!span1.empty())
     {
-        return;
+        const size_t to_write = std::min(span1.size(), data.size());
+        std::memcpy(span1.data(), data.data(), to_write);
+        written += to_write;
     }
 
-    const size_t live_bytes = ReadableBytes();
-
-    if (live_bytes > 0)
+    if (written < data.size() && !span2.empty())
     {
-        std::memmove(data_.data(), data_.data() + read_offset_, live_bytes);
+        const size_t to_write = data.size() - written;
+        std::memcpy(span2.data(), data.data() + written, to_write);
+        written += to_write;
     }
 
-    read_offset_ = 0;
-    write_offset_ = live_bytes;
+    (void)Commit(written);
 }
 }  // namespace aio

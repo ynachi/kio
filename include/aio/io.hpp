@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstring>
 #include <span>
+#include <string_view>
 
 #include "aio/net.hpp"
 #include "core/core.hpp"
@@ -15,179 +16,184 @@ namespace aio
 //==============================================================
 
 /**
- * @brief A growable buffer optimized for reading data in chunks and consuming it.
+ * @brief High-performance ring buffer for I/O operations.
  *
- * Features:
- * - Lazy Compaction: Only moves memory when strictly necessary.
- * - Smart Growth: Copies only live data when resizing.
+ * Key properties:
+ * - Zero-copy reads/writes via span API
+ * - Power-of-2 size for fast modulo via bit masking
+ * - Handles wraparound transparently
+ * - Copyable and movable
+ * - NOT thread-safe (use one per thread in thread-per-core model)
  *
- * Memory layout:
- * [consumed data | readable data | writable space]
- *                ^read_pos       ^write_pos      ^capacity
- *
- * Example usage:
- * ```cpp
- * BytesMut buf;
- * buf.reserve(4096);
- *
- * // Write data
- * auto writable = buf.writable_span();
- * ssize_t n = read(fd, writable.data(), writable.size());
- * buf.commit_write(n);
- *
- * // Read data
- * while (buf.remaining() >= header_size) {
- *     auto data = buf.readable_span();
- *     auto [entry, size] = parse_entry(data);
- *     buf.advance(size);  // consume
- * }
- *
- * // Reclaim space when read_pos gets large
- * if (buf.should_compact()) {
- *     buf.compact();
- * }
+ * Memory layout (ring buffer):
  * ```
+ *   Logical view:    [consumed...][readable data...][writable space...]
+ *   Physical view:   [...data...][wrap]--->[...more data...]
+ *                    ^write_idx          ^read_idx
+ * ```
+ *
+ * The read_pos_ and write_pos_ are monotonically increasing indices.
+ * Physical position = pos & mask_ (where mask_ = capacity - 1).
+ *
+ * Usage:
+ * @code
+ *   IoBuffer buf(4096);
+ *
+ *   // Zero-copy write
+ *   auto writable = buf.WritableSpan();
+ *   ssize_t n = recv(fd, writable.data(), writable.size(), 0);
+ *   buf.Commit(n);
+ *
+ *   // Zero-copy read
+ *   auto readable = buf.ReadableSpan();
+ *   process(readable);
+ *   buf.Consume(readable.size());
+ *
+ *   // For wrapped data, use spans pair
+ *   auto [s1, s2] = buf.ReadableSpans();
+ *   // s1 is tail, s2 is head (s2 may be empty)
+ * @endcode
  */
 class IoBuffer
 {
-    std::vector<char> data_;
+    std::vector<std::byte> data_;
     size_t read_offset_ = 0;
     size_t write_offset_ = 0;
+    size_t mask_ = 0;
     static constexpr size_t kAutoCompactionThresholdBytes = 1024;
+    static constexpr size_t kDefaultCapacity = 4096;
 
 public:
     IoBuffer() = default;
+    IoBuffer(const IoBuffer&) = delete;
+    IoBuffer& operator=(const IoBuffer&) = delete;
 
-    explicit IoBuffer(const size_t cap)
+    /// Construct buffer with power-of-2 capacity
+    /// @param capacity Desired minimum capacity (rounded up to power-of-2)
+    explicit IoBuffer(const size_t cap = kDefaultCapacity)
     {
-        data_.reserve(cap);
-        data_.resize(cap);
+        // Round up to next power of 2
+        size_t actual_capacity = std::bit_ceil(cap);
+
+        data_.resize(actual_capacity);
+        mask_ = actual_capacity - 1;
     }
 
-    /**
-     * @brief Ensures at least `additional` bytes of writable space.
-     * May trigger reallocation.
-     */
-    void EnsureWritableBytes(size_t additional);
-
-    [[nodiscard]] size_t Capacity() const { return data_.capacity(); }
-
-    /**
-     * @brief Returns a span of readable data (not yet consumed)
-     */
-    [[nodiscard]] std::span<const char> ReadableSpan() const
+    IoBuffer(IoBuffer&& other) noexcept
+        : data_(std::move(other.data_)),
+          read_offset_(other.read_offset_),
+          write_offset_(other.write_offset_),
+          mask_(other.mask_)
     {
-        return {data_.data() + read_offset_, write_offset_ - read_offset_};
+        other.read_offset_ = 0;
+        other.write_offset_ = 0;
+        other.mask_ = 0;
     }
 
-    /**
-     * @brief Number of bytes available to read
-     */
-    [[nodiscard]] size_t ReadableBytes() const { return write_offset_ - read_offset_; }
-
-    /**
-     * @brief Consumes `n` bytes from the read position
-     * @param n Number of bytes to consume
-     */
-    void Consume(size_t n);
-
-    [[nodiscard]] std::span<const char> Peek(size_t n) const;
-
-    [[nodiscard]] std::span<char> WritableSpan()
+    IoBuffer& operator=(IoBuffer&& other) noexcept
     {
-        return {data_.data() + write_offset_, data_.size() - write_offset_};
+        if (this != &other)
+        {
+            data_ = std::move(other.data_);
+            read_offset_ = other.read_offset_;
+            write_offset_ = other.write_offset_;
+            mask_ = other.mask_;
+            other.read_offset_ = 0;
+            other.write_offset_ = 0;
+            other.mask_ = 0;
+        }
+        return *this;
     }
 
-    [[nodiscard]] size_t WritableBytes() const { return data_.size() - write_offset_; }
-    // Call after writing to WritableSpan().
-    void Commit(size_t n);
-    void Append(std::span<const char> data);
+    // =========================================================================
+    // Capacity and State
+    // =========================================================================
 
-    void Compact();
+    /// Returns the number of bytes available to read
+    [[nodiscard]] size_t ReadableBytes() const noexcept { return write_offset_ - read_offset_; }
 
-    [[nodiscard]] bool ShouldCompact() const { return read_offset_ >= data_.size() / 2; }
+    /// Returns the number of bytes available to write without growing
+    [[nodiscard]] size_t WritableBytes() const noexcept { return Capacity() - ReadableBytes(); }
 
-    void Clear()
+    /// Returns total buffer capacity
+    [[nodiscard]] size_t Capacity() const noexcept { return data_.size(); }
+
+    /// Check if the buffer has no readable data
+    [[nodiscard]] bool IsEmpty() const noexcept { return read_offset_ == write_offset_; }
+
+    /// Check if the buffer is full (no writable space)
+    [[nodiscard]] bool IsFull() const noexcept { return ReadableBytes() == Capacity(); }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Zero-copy read API
+    // ═══════════════════════════════════════════════════════════════
+
+    /// Get readable data as a contiguous span
+    ///
+    /// IMPORTANT: If data wraps around, this returns only the first segment!
+    /// Use ReadableSpans() if you need both segments or call this again
+    /// after consuming the first segment.
+    [[nodiscard]] std::span<const std::byte> ReadableSpan() const;
+
+    /// Get readable data as two spans (for a wrapped case)
+    ///
+    /// Returns: {first_segment, second_segment}
+    /// If not wrapped, the second_segment is empty.
+    [[nodiscard]] std::pair<std::span<const std::byte>, std::span<const std::byte>> ReadableSpans() const;
+    /// Get readable data as iovec array (for writev/sendmsg)
+    [[nodiscard]] std::vector<iovec> ReadableIovecs() const;
+
+    /// Peek at the first N bytes without consuming
+    /// @note If `N` is bigger than the readable byte sizes, the maximum
+    /// readable is returned instead. This method does not throw.
+    [[nodiscard]] std::span<const std::byte> Peek(const size_t n) const noexcept
+    {
+        auto span = ReadableSpan();
+        // Return whatever is available up to N in the first chunk
+        return span.subspan(0, std::min(n, span.size()));
+    }
+
+    /// @brief Consumes `n` bytes from the read position.     *
+    /// @note If n is passed the readable size, the maximum read available
+    /// is return. This method does not throw on the wrong ` n ` size.
+    /// @param n Number of bytes to consume
+    size_t Consume(size_t n) noexcept;
+
+    // ═══════════════════════════════════════════════════════════════
+    // Zero-copy write API
+    // ═══════════════════════════════════════════════════════════════
+
+    [[nodiscard]] std::span<std::byte> WritableSpan() noexcept;
+    /// Get writable space as two spans (for wrapped case)
+    [[nodiscard]] std::pair<std::span<std::byte>, std::span<std::byte>> WritableSpans();
+    /// Get writable space as iovec array (for readv/recvmsg)
+    [[nodiscard]] std::vector<iovec> WritableIovecs() noexcept;
+    /// Commit N bytes after writing to WritableSpan().
+    /// @return The number of bytes actually committed.
+    /// @note if N > WritableBytes, only WritableBytes is committed.
+    [[nodiscard]] size_t Commit(size_t n) noexcept;
+    /// @note This method does copy
+    void Append(std::span<const std::byte> data);
+    void Append(std::span<const char> data) { Append(std::as_bytes(data)); }
+    void Append(std::string_view data) { Append(std::as_bytes(std::span{data.data(), data.size()})); }
+    void Append(const char* data) { Append(std::string_view(data)); }
+    void Append(const char c) { Append(std::span<const char>{&c, 1}); }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Buffer management
+    // ═══════════════════════════════════════════════════════════════
+    /// @brief Ensures at least `additional` bytes of writable space.
+    /// May trigger reallocation.
+    void EnsureWritableBytes(size_t n);
+
+    /// Reset buffer (clear all data)
+    void Reset()
     {
         read_offset_ = 0;
         write_offset_ = 0;
     }
 
-    [[nodiscard]] bool Empty() const { return read_offset_ == write_offset_; }
-
     [[nodiscard]] size_t ConsumedBytes() const { return read_offset_; }
-};
-
-// ==============================================
-// Writev buffer, optimized for vectorized writes
-// ==================================================
-class WritevBuffer
-{
-    static constexpr size_t kDefaultChunkSize = 8192;  // 8 KiB
-
-    struct Chunk
-    {
-        std::unique_ptr<char[]> data;
-        size_t capacity_;
-        size_t size = 0;
-
-        explicit Chunk(size_t capacity) : data(std::make_unique<char[]>(capacity)), capacity_(capacity) {}
-
-        [[nodiscard]] size_t WritableBytes() const { return capacity_ - size; }
-        [[nodiscard]] char* WritePtr() const { return data.get() + size; }  // matches original behavior
-        [[nodiscard]] const char* Data() const { return data.get(); }
-    };
-
-public:
-    explicit WritevBuffer(size_t chunk_size = kDefaultChunkSize) : chunk_size_(chunk_size) {}
-
-    // --------------------
-    // Producer side
-    // --------------------
-
-    // Append data to the buffer. The data remains uncommitted until Commit() is called.
-    void Append(std::span<const char> data);
-
-    void Append(std::string_view sv) { Append(std::span(sv.data(), sv.size())); }
-
-    // String literal / C-string helper (does NOT include null terminator).
-    void Append(const char* str) { Append(std::string_view(str)); }
-
-    // Makes uncommitted data visible to consumers (IoVecs).
-    void Commit()
-    {
-        committed_bytes_ += uncommitted_bytes_;
-        uncommitted_bytes_ = 0;
-    }
-
-    // Discards uncommitted data.
-    void RollbackPending();
-
-    // --------------------
-    // Consumer side
-    // --------------------
-
-    // Returns a vector of iovec representing all committed data.
-    [[nodiscard]] std::vector<iovec> IoVecs() const;
-
-    [[nodiscard]] size_t CommittedBytes() const { return committed_bytes_; }
-    [[nodiscard]] bool HasData() const { return committed_bytes_ > 0; }
-
-    void Consume(size_t bytes_consumed);
-
-private:
-    void EnsureSpace()
-    {
-        if (chunks_.empty() || chunks_.back()->WritableBytes() == 0)
-        {
-            chunks_.push_back(std::make_unique<Chunk>(chunk_size_));
-        }
-    }
-
-    size_t chunk_size_;
-    std::vector<std::unique_ptr<Chunk>> chunks_;
-    size_t committed_bytes_ = 0;
-    size_t uncommitted_bytes_ = 0;
 };
 
 ///////////////////////////////////////////////////////////////////////
