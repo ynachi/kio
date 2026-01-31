@@ -602,6 +602,7 @@ public:
 
     void WaitReady() const { ready_latch_.wait(); }
     void WaitStop() const { stopped_latch_.wait(); }
+    bool Running() const { return running_.load(std::memory_order_relaxed); }
 #if AIO_STATS
     IoContextStats& Stats() { return stats_; }
     const IoContextStats& Stats() const { return stats_; }

@@ -66,7 +66,7 @@ int main()
 {
     constexpr int num_workers = 3;
 
-    std::atomic<bool> running{true};
+    std::atomic running{true};
     WorkQueue queue;
 
     // Start workers

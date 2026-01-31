@@ -2,8 +2,8 @@
 # Examples
 # ============================================================================
 
-kio_add_demo(00_logger aio/00_logger.cpp TAGS core LIBS aio)
-kio_add_sanitizers(00_logger)
+kio_add_demo(01_core_concepts aio/01_core_concepts.cpp TAGS core LIBS aio)
+kio_add_sanitizers(01_core_concepts)
 
 kio_add_demo(06_worker_wackup aio/06_worker_wackup.cpp TAGS core LIBS aio)
 kio_add_sanitizers(06_worker_wackup)
@@ -63,7 +63,8 @@ kio_add_sanitizers(216_tls_file_server)
 # Create a custom target to build all examples
 add_custom_target(examples
         DEPENDS
-        00_logger
+        01_core_concepts
+        
         200_hello_sleep
         201_aio_timers
         202_aio_timers
