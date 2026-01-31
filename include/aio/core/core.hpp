@@ -22,7 +22,8 @@ namespace aio
 {
 // forward declaration
 class IoContext;
-template <typename T> class TaskGroup;
+template <typename T>
+class TaskGroup;
 
 ////////////////////////////////////////////////////////////////////////////////
 // Standardized Error Handling
@@ -68,6 +69,61 @@ inline const std::error_category& openssl_category() noexcept
     return cat;
 }
 }  // namespace detail
+
+/**
+ * Generic high-level parse errors.
+ * These are protocol-agnostic, allowing different parsers to map
+ * specific failures to these general categories.
+ */
+enum class ParseError
+{
+    Success = 0,
+    Incomplete,       // Not enough data to finish frame
+    InvalidProtocol,  // Violation of protocol rules (bad characters, etc)
+    Overflow,         // Data size exceeds limits
+    InternalError,    // Logical failure in parser
+};
+
+/**
+ * Custom error category for Parsing
+ */
+class ParseErrorCategory : public std::error_category
+{
+public:
+    const char* name() const noexcept override { return "aio::ParseError"; }
+
+    std::string message(int ev) const override
+    {
+        switch (static_cast<ParseError>(ev))
+        {
+            case ParseError::Success:
+                return "Success";
+            case ParseError::Incomplete:
+                return "Incomplete data (need more)";
+            case ParseError::InvalidProtocol:
+                return "Protocol violation / Invalid format";
+            case ParseError::Overflow:
+                return "Data exceeds buffer or protocol limits";
+            case ParseError::InternalError:
+                return "Internal parsing logic error";
+            default:
+                return "Unknown parse error";
+        }
+    }
+};
+
+// Singleton instance of the category
+inline const std::error_category& GetParseErrorCategory()
+{
+    static ParseErrorCategory instance;
+    return instance;
+}
+
+// Overload make_error_code for ADL
+inline std::error_code make_error_code(ParseError e)
+{
+    return {static_cast<int>(e), GetParseErrorCategory()};
+}
 
 std::unexpected<std::error_code> ErrorFromOpenSSL() noexcept;
 
@@ -167,7 +223,8 @@ public:
 
 private:
     friend class IoContext;
-    template <typename U> friend class TaskGroup;
+    template <typename U>
+    friend class TaskGroup;
 
     void resume()
     {
@@ -268,9 +325,9 @@ public:
     }
 
 private:
-
     friend class IoContext;
-    template <typename U> friend class TaskGroup;
+    template <typename U>
+    friend class TaskGroup;
 
     void resume()
     {
@@ -940,10 +997,9 @@ public:
                 };
 
                 std::stop_callback cb_internal(st, stop_action);
-
+                std::optional<std::stop_callback<decltype(stop_action)>> cb_external;  // NOLINT
                 if (ext_st.stop_possible())
                 {
-                    std::optional<std::stop_callback<decltype(stop_action)>> cb_external;
                     cb_external.emplace(ext_st, stop_action);
                 }
 
@@ -1071,3 +1127,8 @@ private:
 };
 
 }  // namespace aio
+
+template <>
+struct std::is_error_code_enum<aio::ParseError> : true_type
+{
+};  // namespace std

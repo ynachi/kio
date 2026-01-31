@@ -54,7 +54,7 @@ IoContext::IoContext(const unsigned entries)
     ext_done_.reserve(entries);
 
     // Initialize internal wake eventfd
-    wake_fd_ = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+    wake_fd_ = eventfd(0, EFD_CLOEXEC);
     if (wake_fd_ < 0)
     {
         io_uring_queue_exit(&ring_);
@@ -190,11 +190,6 @@ void IoContext::EnsureSqes(const unsigned n)
 
 void IoContext::DrainExternal(std::vector<std::coroutine_handle<>>& out)
 {
-    if (!ext_hint_.load(std::memory_order_relaxed))
-    {
-        return;
-    }
-
 #if AIO_STATS
     uint64_t external_count = 0;
 #endif
@@ -306,6 +301,8 @@ void IoContext::DrainWithoutResume()
         {
             // A cross-thread wake. Drain any externally completed ops.
             DrainExternalWithoutResume();
+            SubmitWakeRead();
+            (void)io_uring_submit(&ring_);
         }
         else if (ud)
         {

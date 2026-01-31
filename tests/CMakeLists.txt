@@ -53,3 +53,13 @@ kio_add_test(401_io_buffer aio/401_io_buffer_tests.cpp
         LIBS aio GTest::gtest GTest::gtest_main
 )
 
+
+kio_add_test(501_resp_parser aio/resp/501_resp_parser.cpp
+        TAGS aio resp unit
+        LIBS aio GTest::gtest GTest::gtest_main
+)
+kio_add_test(502_resp_writer aio/resp/502_resp_writer.cpp
+        TAGS aio resp unit
+        LIBS aio GTest::gtest GTest::gtest_main
+)
+

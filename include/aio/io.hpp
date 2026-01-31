@@ -56,146 +56,231 @@ namespace aio
  */
 class IoBuffer
 {
-    std::vector<std::byte> data_;
-    size_t read_offset_ = 0;
-    size_t write_offset_ = 0;
-    size_t mask_ = 0;
-    static constexpr size_t kAutoCompactionThresholdBytes = 1024;
-    static constexpr size_t kDefaultCapacity = 4096;
-
 public:
-    IoBuffer() = default;
-    IoBuffer(const IoBuffer&) = delete;
-    IoBuffer& operator=(const IoBuffer&) = delete;
+    explicit IoBuffer(const std::size_t initial_capacity = 0) { Reserve(initial_capacity); }
 
-    /// Construct buffer with power-of-2 capacity
-    /// @param capacity Desired minimum capacity (rounded up to power-of-2)
-    explicit IoBuffer(const size_t cap = kDefaultCapacity)
+    // ---------------------------
+    // Core state
+    // ---------------------------
+    [[nodiscard]] std::size_t Capacity() const noexcept { return capacity_; }
+
+    // Published (readable) bytes: [read_, commit_)
+    [[nodiscard]] std::size_t ReadableBytes() const noexcept { return commit_ - read_; }
+
+    // Staged bytes (built but not yet published): [commit_, write_)
+    [[nodiscard]] std::size_t StagedBytes() const noexcept { return write_ - commit_; }
+
+    // Free writable bytes: [write_, capacity_)
+    [[nodiscard]] std::size_t WritableBytes() const noexcept { return capacity_ - write_; }
+
+    [[nodiscard]] bool Empty() const noexcept { return ReadableBytes() == 0; }
+
+    // ---------------------------
+    // Readable view (CONTIGUOUS)
+    // ---------------------------
+    [[nodiscard]] std::span<const std::byte> ReadableBytesSpan() const noexcept
     {
-        // Round up to next power of 2
-        size_t actual_capacity = std::bit_ceil(cap);
-
-        data_.resize(actual_capacity);
-        mask_ = actual_capacity - 1;
+        if (!data_ || ReadableBytes() == 0)
+            return {};
+        return {data_.get() + read_, ReadableBytes()};
     }
 
-    IoBuffer(IoBuffer&& other) noexcept
-        : data_(std::move(other.data_)),
-          read_offset_(other.read_offset_),
-          write_offset_(other.write_offset_),
-          mask_(other.mask_)
+    // For RESP parser (it uses span<const char>).
+    [[nodiscard]] std::span<const char> ReadableSpan() const noexcept
     {
-        other.read_offset_ = 0;
-        other.write_offset_ = 0;
-        other.mask_ = 0;
+        const auto b = ReadableBytesSpan();
+        return {reinterpret_cast<const char*>(b.data()), b.size()};
     }
 
-    IoBuffer& operator=(IoBuffer&& other) noexcept
+    // No allocations: single iovec.
+    [[nodiscard]] iovec ReadableIovec() const noexcept
     {
-        if (this != &other)
+        auto b = ReadableBytesSpan();
+        return iovec{const_cast<std::byte*>(b.data()), b.size()};
+    }
+
+    // ---------------------------
+    // Writable view
+    // ---------------------------
+    void EnsureWritableBytes(const std::size_t additional)
+    {
+        if (WritableBytes() >= additional)
+            return;
+
+        // Try compaction first if it will help.
+        const std::size_t live = write_ - read_;
+        const std::size_t free_if_compact = capacity_ - live;
+
+        if (free_if_compact >= additional && read_ >= kCompactThreshold)
         {
-            data_ = std::move(other.data_);
-            read_offset_ = other.read_offset_;
-            write_offset_ = other.write_offset_;
-            mask_ = other.mask_;
-            other.read_offset_ = 0;
-            other.write_offset_ = 0;
-            other.mask_ = 0;
+            Compact();
+            if (WritableBytes() >= additional)
+                return;
         }
-        return *this;
+
+        // Grow if still not enough.
+        Grow(live + additional);
     }
 
-    // =========================================================================
-    // Capacity and State
-    // =========================================================================
-
-    /// Returns the number of bytes available to read
-    [[nodiscard]] size_t ReadableBytes() const noexcept { return write_offset_ - read_offset_; }
-
-    /// Returns the number of bytes available to write without growing
-    [[nodiscard]] size_t WritableBytes() const noexcept { return Capacity() - ReadableBytes(); }
-
-    /// Returns total buffer capacity
-    [[nodiscard]] size_t Capacity() const noexcept { return data_.size(); }
-
-    /// Check if the buffer has no readable data
-    [[nodiscard]] bool IsEmpty() const noexcept { return read_offset_ == write_offset_; }
-
-    /// Check if the buffer is full (no writable space)
-    [[nodiscard]] bool IsFull() const noexcept { return ReadableBytes() == Capacity(); }
-
-    // ═══════════════════════════════════════════════════════════════
-    // Zero-copy read API
-    // ═══════════════════════════════════════════════════════════════
-
-    /// Get readable data as a contiguous span
-    ///
-    /// IMPORTANT: If data wraps around, this returns only the first segment!
-    /// Use ReadableSpans() if you need both segments or call this again
-    /// after consuming the first segment.
-    [[nodiscard]] std::span<const std::byte> ReadableSpan() const;
-
-    /// Get readable data as two spans (for a wrapped case)
-    ///
-    /// Returns: {first_segment, second_segment}
-    /// If not wrapped, the second_segment is empty.
-    [[nodiscard]] std::pair<std::span<const std::byte>, std::span<const std::byte>> ReadableSpans() const;
-    /// Get readable data as iovec array (for writev/sendmsg)
-    [[nodiscard]] std::vector<iovec> ReadableIovecs() const;
-
-    /// Peek at the first N bytes without consuming
-    /// @note If `N` is bigger than the readable byte sizes, the maximum
-    /// readable is returned instead. This method does not throw.
-    [[nodiscard]] std::span<const std::byte> Peek(const size_t n) const noexcept
+    [[nodiscard]] std::span<std::byte> WritableBytesSpan() const noexcept
     {
-        auto span = ReadableSpan();
-        // Return whatever is available up to N in the first chunk
-        return span.subspan(0, std::min(n, span.size()));
+        if (!data_)
+            return {};
+        return {data_.get() + write_, WritableBytes()};
     }
 
-    /// @brief Consumes `n` bytes from the read position.     *
-    /// @note If n is passed the readable size, the maximum read available
-    /// is return. This method does not throw on the wrong ` n ` size.
-    /// @param n Number of bytes to consume
-    size_t Consume(size_t n) noexcept;
-
-    // ═══════════════════════════════════════════════════════════════
-    // Zero-copy write API
-    // ═══════════════════════════════════════════════════════════════
-
-    [[nodiscard]] std::span<std::byte> WritableSpan() noexcept;
-    /// Get writable space as two spans (for wrapped case)
-    [[nodiscard]] std::pair<std::span<std::byte>, std::span<std::byte>> WritableSpans();
-    /// Get writable space as iovec array (for readv/recvmsg)
-    [[nodiscard]] std::vector<iovec> WritableIovecs() noexcept;
-    /// Commit N bytes after writing to WritableSpan().
-    /// @return The number of bytes actually committed.
-    /// @note if N > WritableBytes, only WritableBytes is committed.
-    [[nodiscard]] size_t Commit(size_t n) noexcept;
-    /// @note This method does copy
-    void Append(std::span<const std::byte> data);
-    void Append(std::span<const char> data) { Append(std::as_bytes(data)); }
-    void Append(std::string_view data) { Append(std::as_bytes(std::span{data.data(), data.size()})); }
-    void Append(const char* data) { Append(std::string_view(data)); }
-    void Append(const char c) { Append(std::span<const char>{&c, 1}); }
-
-    // ═══════════════════════════════════════════════════════════════
-    // Buffer management
-    // ═══════════════════════════════════════════════════════════════
-    /// @brief Ensures at least `additional` bytes of writable space.
-    /// May trigger reallocation.
-    void EnsureWritableBytes(size_t n);
-
-    /// Reset buffer (clear all data)
-    void Reset()
+    // Convenience (if you like writing into char*).
+    [[nodiscard]] std::span<char> WritableSpan() const noexcept
     {
-        read_offset_ = 0;
-        write_offset_ = 0;
+        auto b = WritableBytesSpan();
+        return {reinterpret_cast<char*>(b.data()), b.size()};
     }
 
-    [[nodiscard]] size_t ConsumedBytes() const { return read_offset_; }
+    [[nodiscard]] iovec WritableIovec() const noexcept
+    {
+        auto b = WritableBytesSpan();
+        return iovec{b.data(), b.size()};
+    }
 
-    [[nodiscard]] size_t Mask() const noexcept { return mask_; }
+    // ---------------------------
+    // Commit / rollback / consume
+    // ---------------------------
+
+    // Commit bytes written into WritableBytesSpan(): advances write_ and commit_.
+    std::size_t Commit(std::size_t n) noexcept
+    {
+        const std::size_t actual = std::min(n, WritableBytes());
+        write_ += actual;
+        commit_ += actual;
+        return actual;
+    }
+
+    // Publish staged bytes (for output building).
+    void Commit() noexcept { commit_ = write_; }
+
+    // Drop staged bytes.
+    void RollbackPending() noexcept { write_ = commit_; }
+
+    // Consume published bytes after processing/sending.
+    std::size_t Consume(std::size_t n) noexcept
+    {
+        const std::size_t actual = std::min(n, ReadableBytes());
+        read_ += actual;
+
+        // Reset indices if fully empty (keeps counters from growing forever).
+        if (read_ == commit_ && commit_ == write_)
+        {
+            read_ = commit_ = write_ = 0;
+        }
+        return actual;
+    }
+
+    void Clear() noexcept { read_ = commit_ = write_ = 0; }
+
+    // ---------------------------
+    // Append helpers (staged)
+    // ---------------------------
+    void Append(std::span<const std::byte> data)
+    {
+        EnsureWritableBytes(data.size());
+        std::memcpy(data_.get() + write_, data.data(), data.size());
+        write_ += data.size();
+    }
+
+    void Append(std::string_view sv) { Append(std::span{reinterpret_cast<const std::byte*>(sv.data()), sv.size()}); }
+
+    template <std::size_t N>
+    void Append(const char (&lit)[N])
+    {
+        static_assert(N > 0);
+        Append(std::string_view(lit, N - 1));
+    }
+
+    // Optional helper used by text protocols.
+    [[nodiscard]] std::optional<std::size_t> FindCrlf() const noexcept
+    {
+        auto s = ReadableSpan();
+        std::string_view sv(s.data(), s.size());
+        auto pos = sv.find("\r\n");
+        if (pos == std::string_view::npos)
+            return std::nullopt;
+        return pos;
+    }
+
+    void Reserve(std::size_t min_capacity)
+    {
+        if (min_capacity <= capacity_)
+            return;
+
+        const std::size_t live = write_ - read_;
+        const std::size_t new_cap = std::max(kMinCapacity, RoundUpPow2(min_capacity));
+
+        auto new_data = Alloc(new_cap);
+        if (data_ && live != 0)
+        {
+            std::memcpy(new_data.get(), data_.get() + read_, live);
+        }
+
+        // Rebase indices
+        write_ = live;
+        commit_ = (commit_ - read_);
+        read_ = 0;
+
+        data_ = std::move(new_data);
+        capacity_ = new_cap;
+    }
+
+private:
+    static constexpr std::size_t kMinCapacity = 4096;
+    static constexpr std::size_t kCompactThreshold = 1024;
+
+    static std::size_t RoundUpPow2(std::size_t n)
+    {
+        if (n <= 1)
+            return 1;
+        return std::bit_ceil(n);
+    }
+
+    static std::unique_ptr<std::byte[]> Alloc(std::size_t n)
+    {
+#if defined(__cpp_lib_make_unique_for_overwrite) && (__cpp_lib_make_unique_for_overwrite >= 202002L)
+        return std::make_unique_for_overwrite<std::byte[]>(n);
+#else
+        return std::unique_ptr<std::byte[]>(new std::byte[n]);
+#endif
+    }
+
+    void Compact()
+    {
+        if (!data_ || read_ == 0)
+            return;
+
+        const std::size_t live = write_ - read_;
+        const std::size_t published = commit_ - read_;
+
+        if (live > 0)
+        {
+            std::memmove(data_.get(), data_.get() + read_, live);
+        }
+
+        read_ = 0;
+        commit_ = published;
+        write_ = live;
+    }
+
+    void Grow(const std::size_t min_needed)
+    {
+        // amortized growth
+        const std::size_t target = std::max(min_needed, capacity_ ? (capacity_ + 1) : kMinCapacity);
+        Reserve(target);
+    }
+
+    std::unique_ptr<std::byte[]> data_{};
+    std::size_t capacity_ = 0;
+
+    std::size_t read_ = 0;
+    std::size_t commit_ = 0;
+    std::size_t write_ = 0;
 };
 
 ///////////////////////////////////////////////////////////////////////
@@ -626,7 +711,7 @@ inline WriteFixedOp AsyncWriteFixed(IoContext& ctx, int idx, std::span<const std
 
 /// @brief Closes a file descriptor asynchronously.
 /// @param ctx The IoContext to run on
-/// @param f File descriptor to close
+/// @param s File descriptor to close
 /// @return Awaitable yielding Result<void>
 ///
 /// @note After co_await returns, the fd is closed and must not be used.
@@ -635,10 +720,15 @@ inline WriteFixedOp AsyncWriteFixed(IoContext& ctx, int idx, std::span<const std
 ///   co_await AsyncClose(ctx, client_socket);
 ///   // client_socket is now invalid
 /// @endcode
-template <FileDescriptor F>
-CloseOp AsyncClose(IoContext& ctx, const F& f)
+inline CloseOp AsyncClose(IoContext& ctx, net::Socket& s)
 {
-    return CloseOp(ctx, f);
+    const auto fd = s.Release();
+    return CloseOp(ctx, fd);
+}
+
+inline CloseOp AsyncClose(IoContext& ctx, int fd)
+{
+    return CloseOp(ctx, fd);
 }
 
 struct ConnectOp : UringOp

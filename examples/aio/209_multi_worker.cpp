@@ -6,10 +6,7 @@
 #include <print>
 #include <vector>
 
-#include "aio/io.hpp"
-#include "aio/notifier.hpp"
-#include "aio/task.hpp"
-#include "aio/worker.hpp"
+#include "aio/aio.hpp"
 
 using namespace std::chrono_literals;
 
@@ -45,8 +42,7 @@ private:
     aio::Notifier notifier_;
 };
 
-aio::Task<> worker_loop(aio::IoContext& ctx, int worker_id,
-                        WorkQueue& queue, std::atomic<bool>& running)
+aio::Task<> worker_loop(aio::IoContext& ctx, int worker_id, WorkQueue& queue, std::atomic<bool>& running)
 {
     std::println("[Worker {}] Started", worker_id);
 
@@ -59,8 +55,7 @@ aio::Task<> worker_loop(aio::IoContext& ctx, int worker_id,
         {
             // Simulate processing
             co_await aio::AsyncSleep(ctx, 50ms);
-            std::println("[Worker {}] Processed item {} (value={})",
-                         worker_id, item.id, item.value);
+            std::println("[Worker {}] Processed item {} (value={})", worker_id, item.id, item.value);
         }
     }
 
@@ -81,10 +76,8 @@ int main()
     for (int i = 0; i < num_workers; ++i)
     {
         workers.emplace_back(i);
-        workers.back().RunTask(
-            [i, &queue, &running](aio::IoContext& ctx) {
-                return worker_loop(ctx, i, queue, running);
-            });
+        workers.back().RunTask([i, &queue, &running](aio::IoContext& ctx)
+                               { return worker_loop(ctx, i, queue, running); });
     }
 
     // Producer: submit work items

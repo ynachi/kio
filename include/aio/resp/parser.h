@@ -1,14 +1,15 @@
 #pragma once
 
 #include <expected>
+#include <span>
 #include <string_view>
 
-#include <unistd.h>
-
+#include "aio/core/core.hpp"
 #include "aio/io.hpp"
 
 namespace aio::resp
 {
+
 struct ParserConfig
 {
     size_t max_size = 512 * 1024 * 1024;  // 512 MB
@@ -18,49 +19,37 @@ struct ParserConfig
 
 /**
  * @brief RESP Data Types mapped to their protocol byte indicators.
- * @see https://github.com/redis/redis-specifications/blob/master/protocol/RESP3.md
  */
 enum class FrameType : uint8_t
 {
     // Simple types (CRLF-terminated)
-    kSimpleString = '+',  // +OK\r\n
-    kSimpleError = '-',   // -ERR message\r\n
-    kInteger = ':',       // :1000\r\n
-    kNull = '_',          // _\r\n
-    kBoolean = '#',       // #t\r\n or #f\r\n
-    kDouble = ',',        // ,3.14\r\n
-    kBigNumber = '(',     // (123456789...\r\n
+    kSimpleString = '+',
+    kSimpleError = '-',
+    kInteger = ':',
+    kNull = '_',
+    kBoolean = '#',
+    kDouble = ',',
+    kBigNumber = '(',
 
     // Bulk types (length-prefixed)
-    kBulkString = '$',      // $5\r\nhello\r\n
-    kBulkError = '!',       // !21\r\nSYNTAX error\r\n
-    kVerbatimString = '=',  // =15\r\ntxt:Some text\r\n
+    kBulkString = '$',
+    kBulkError = '!',
+    kVerbatimString = '=',
 
     // Aggregates (count + children)
-    kArray = '*',      // *2\r\n...
-    kMap = '%',        // %2\r\n...
-    kSet = '~',        // ~3\r\n...
-    kPush = '>',       // >3\r\n...
-    kAttribute = '|',  // |1\r\n...
+    kArray = '*',
+    kMap = '%',
+    kSet = '~',
+    kPush = '>',
+    kAttribute = '|',
 };
 
 struct FrameHeader
 {
     FrameType type;
-    const char* data;      // Points into BytesMut
+    const char* data;      // Points directly into IoBuffer
     size_t size;           // Total frame size including header & children
     size_t element_count;  // For aggregates: number of semantic elements
-};
-
-enum class ParseError : uint8_t
-{
-    kNeedMoreData,
-    kMalformedFrame,
-    kAtoi,
-    kMaxDepthReached,
-    kSizeOverflow,
-    kEoIter,
-    kUnknown
 };
 
 class Parser;
@@ -82,56 +71,72 @@ private:
     const char* current_;
     const char* end_;  // Safety bound
     size_t remaining_;
-    // Logic depth for validation context
     size_t depth_;
 };
 
-// TODO: for now, skip that check
-// Validate no embedded CRLF in payload for strict compliance?
-// RESP3 allows loose compliance usually, but strict check is:
-// std::string_view payload{data.data() + 1, *pos - 1};
-// if (payload.find_first_of("\r\n") != std::string_view::npos) {
-//    last_error_ = "ERR malformed simple frame"; return std::nullopt;
-// }
 class Parser
 {
     friend class FrameIterator;
 
     IoBuffer buffer_;
     ParserConfig config_;
-    std::string last_error_;
 
     // Internal: parse frame starting at a given position
     std::expected<FrameHeader, ParseError> ParseFrameInternal(std::span<const char> data, size_t depth);
-    // helpers
-    [[nodiscard]] std::expected<FrameHeader, ParseError> ExtractBulkHeader(std::span<const char> data,
-                                                                           FrameType type) const;
 
 public:
     explicit Parser(const ParserConfig& config) : buffer_(config.initial_buffer), config_(config) {}
 
-    // Get buffer for network reads
-    // WARNING: Modifying buffer invalidates all FrameView pointers!
     IoBuffer& Buffer() { return buffer_; }
     [[nodiscard]] const IoBuffer& Buffer() const { return buffer_; }
 
-    // Try to parse the next complete frame from buffer
-    // Returns nullptr if incomplete (need more data)
-    // On success, frame points into buffer - valid until buffer modified
-    // Warning: check if parser has error before in case of nulopt as response
     [[nodiscard]] std::expected<FrameHeader, ParseError> NextFrame()
     {
+        // Use the conversion helper from IoBuffer to get char span
         auto bytes = buffer_.ReadableSpan();
-
-        // Construct a new span of chars pointing to the same memory
-        std::span char_view{reinterpret_cast<const char*>(bytes.data()), bytes.size()};
-
-        return ParseFrameInternal(char_view, 0);
+        return ParseFrameInternal(bytes, 0);
     }
 
     // Consume bytes after processing a frame
     void Consume(const size_t n) { buffer_.Consume(n); }
     void Consume(const FrameHeader& frame) { Consume(frame.size); }
+};
+
+/**
+ * BufferReader: A non-owning utility to walk through the IoBuffer
+ */
+class BufferReader
+{
+public:
+    explicit BufferReader(std::span<const char> data) : data_(data) {}
+
+    [[nodiscard]] size_t Available() const { return data_.size() - offset_; }
+
+    std::optional<std::string_view> ReadLine()
+    {
+        std::string_view sv(data_.data() + offset_, Available());
+        auto pos = sv.find("\r\n");
+        if (pos == std::string_view::npos)
+            return std::nullopt;
+        std::string_view line = sv.substr(0, pos);
+        offset_ += (pos + 2);
+        return line;
+    }
+
+    std::optional<std::span<const char>> ReadBytes(size_t n)
+    {
+        if (Available() < n)
+            return std::nullopt;
+        auto res = data_.subspan(offset_, n);
+        offset_ += n;
+        return res;
+    }
+
+    [[nodiscard]] size_t Offset() const { return offset_; }
+
+private:
+    std::span<const char> data_;
+    size_t offset_ = 0;
 };
 
 // --- Helpers ---

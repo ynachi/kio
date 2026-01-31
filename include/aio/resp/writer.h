@@ -1,9 +1,10 @@
 #pragma once
 
+#include "aio/resp/parser.h"
+
+#include <array>
 #include <charconv>
 #include <string_view>
-
-#include "aio/io.hpp"
 
 namespace aio::resp
 {
@@ -11,7 +12,7 @@ namespace aio::resp
 class RespWriter
 {
 public:
-    explicit RespWriter(WritevBuffer& buffer) : buffer_(buffer) {}
+    explicit RespWriter(IoBuffer& buffer) : buffer_(buffer) {}
 
     // -----------------------------------------------------------------------
     // Primitive: Simple String (+OK\r\n)
@@ -38,10 +39,12 @@ public:
     // -----------------------------------------------------------------------
     void WriteInteger(const int64_t val) const
     {
-        char buf[32];
-        auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), val);
+        // Use a small local buffer for integer conversion
+        std::array<char, 32> buf;
+        auto [ptr, ec] = std::to_chars(buf.data(), buf.data() + buf.size(), val);
+
         buffer_.Append(":");
-        buffer_.Append(std::string_view(buf, ptr - buf));
+        buffer_.Append(std::string_view(buf.data(), ptr - buf.data()));
         buffer_.Append("\r\n");
     }
 
@@ -67,25 +70,21 @@ public:
     // -----------------------------------------------------------------------
     // Transaction Control
     // -----------------------------------------------------------------------
-
-    // Makes all appended data visible for sending.
-    // Call this after building a complete logical response.
     void Commit() const { buffer_.Commit(); }
-
-    // Discards uncommitted data (e.g. if an error occurs during serialization)
     void Rollback() const { buffer_.RollbackPending(); }
 
 private:
     void WriteLenPrefix(const char type, const int64_t len) const
     {
-        char buf[32];
+        std::array<char, 32> buf;
         buf[0] = type;
-        auto [ptr, ec] = std::to_chars(buf + 1, buf + sizeof(buf), len);
-        buffer_.Append(std::string_view(buf, ptr - buf));
+        auto [ptr, ec] = std::to_chars(buf.data() + 1, buf.data() + buf.size(), len);
+
+        buffer_.Append(std::string_view(buf.data(), ptr - buf.data()));
         buffer_.Append("\r\n");
     }
 
-    WritevBuffer& buffer_;
+    IoBuffer& buffer_;
 };
 
 }  // namespace aio::resp

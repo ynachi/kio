@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cassert>
 #include <span>
 
 #include "aio/io.hpp"
@@ -8,6 +9,8 @@
 
 namespace aio
 {
+
+constexpr uint64_t kUseFilePos = std::numeric_limits<uint64_t>::max();
 
 // -----------------------------------------------------------------------------
 // Internal: Splice operation (not exposed publicly)
@@ -49,7 +52,7 @@ inline SpliceOp AsyncSplice(IoContext& ctx, int fd_in, int64_t off_in, int fd_ou
 /// @param ctx The IoContext to run on
 /// @param f File descriptor to read from
 /// @param buffer Buffer to read into. MUST remain valid until operation completes.
-/// @param offset Offset to read from (default: 0)
+/// @param offset Offset to read from (default: 0). kUseFilePos is not supported.
 /// @return Task yielding Result<void> - success means all bytes read
 ///
 /// @warning The buffer must remain valid until co_await returns!
@@ -65,6 +68,8 @@ inline SpliceOp AsyncSplice(IoContext& ctx, int fd_in, int64_t off_in, int fd_ou
 template <FileDescriptor F>
 Task<Result<void>> AsyncReadExact(IoContext& ctx, const F& f, std::span<std::byte> buffer, uint64_t offset = 0)
 {
+    assert(offset != kUseFilePos && "AsyncReadExact does not support kUseFilePos");
+
     size_t total = 0;
     const size_t target = buffer.size();
 
@@ -91,7 +96,7 @@ Task<Result<void>> AsyncReadExact(IoContext& ctx, const F& f, std::span<std::byt
 /// @param ctx The IoContext to run on
 /// @param f File descriptor to write to
 /// @param buffer Buffer to write from. MUST remain valid until operation completes.
-/// @param offset Offset to write at (default: 0)
+/// @param offset Offset to write at (default: 0). kUseFilePos is not supported.
 /// @return Task yielding Result<void> - success means all bytes written
 ///
 /// @warning The buffer must remain valid until co_await returns!
@@ -103,6 +108,8 @@ Task<Result<void>> AsyncReadExact(IoContext& ctx, const F& f, std::span<std::byt
 template <FileDescriptor F>
 Task<Result<void>> AsyncWriteExact(IoContext& ctx, const F& f, std::span<const std::byte> buffer, uint64_t offset = 0)
 {
+    assert(offset != kUseFilePos && "AsyncWriteExact does not support kUseFilePos");
+
     size_t total = 0;
     const size_t target = buffer.size();
 

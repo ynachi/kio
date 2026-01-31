@@ -65,8 +65,15 @@ public:
     bool TrySubmit(job_t&& job)
     {
         std::scoped_lock lk(m_);
-        if (count_ == cap_)
+        if (stopping_.load(std::memory_order_relaxed))
+        {
             return false;
+        }
+
+        if (count_ == cap_)
+        {
+            return false;
+        }
 
         q_[tail_] = std::move(job);
         tail_ = (tail_ + 1) % cap_;

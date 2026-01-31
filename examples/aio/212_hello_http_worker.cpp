@@ -110,14 +110,6 @@ int main(int argc, char** argv)
     const uint16_t port = (argc >= 2) ? static_cast<uint16_t>(std::atoi(argv[1])) : 8080;
     const int num_threads = (argc >= 3) ? std::max(1, std::atoi(argv[2])) : 4;
 
-    auto socket_res = aio::net::TcpListener::Bind(port);
-    if (!socket_res)
-    {
-        ALOG_FATAL("failed to bind to {}", port);
-        return 1;
-    }
-
-    int listen_fd = socket_res->Get();
     std::fprintf(stderr, "http_hello_v2: port=%u threads=%d\n", port, num_threads);
 
     // Create workers
@@ -128,12 +120,19 @@ int main(int argc, char** argv)
     {
         workers.emplace_back(i);  // Worker with id = i
         workers.back().Start(
-            [listen_fd](aio::IoContext& ctx)
+            [port](aio::IoContext& ctx)
             {
+                auto socket_res = aio::net::TcpListener::Bind(port);
+                if (!socket_res)
+                {
+                    ALOG_ERROR("failed to bind to {}", port);
+                    return;
+                }
+
+                auto listener = std::move(*socket_res);
+                int listen_fd = listener.Get();
                 auto acc = accept_loop(ctx, listen_fd);
-                acc.Start();
-                ctx.Run();
-                ctx.CancelAllPending();
+                ctx.RunUntilDone(std::move(acc));
             },
             i);  // Pin to CPU i
     }
@@ -152,7 +151,6 @@ int main(int argc, char** argv)
     }
 
     std::fprintf(stderr, "shutdown...\n");
-    ::close(listen_fd);
 
     // Clean shutdown - just call RequestStop() on each worker
     for (auto& w : workers)

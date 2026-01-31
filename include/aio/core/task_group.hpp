@@ -53,6 +53,9 @@ public:
 
     void Spawn(Task<T>&& t)
     {
+        ++spawn_count_;
+        ++active_count_;
+
         auto wrapped = [](Task<T> original, TaskGroup* group) -> Task<T>
         {
             struct CompletionGuard
@@ -73,9 +76,6 @@ public:
 
         wrapped.resume();
         tasks_.push_back(std::move(wrapped));
-
-        ++spawn_count_;
-        ++active_count_;
 
         if ((spawn_count_ & (sweep_interval_ - 1)) == 0)
         {
