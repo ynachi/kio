@@ -20,20 +20,9 @@ using aio::Task;
 namespace
 {
 
-// Helper: Block signals in the main thread so they are handled
-// asynchronously by SignalSet (via signalfd) rather than the OS default handler.
-void BlockSignals()
-{
-    sigset_t mask;
-    sigemptyset(&mask);
-    sigaddset(&mask, SIGINT);
-    sigaddset(&mask, SIGTERM);
-    pthread_sigmask(SIG_BLOCK, &mask, nullptr);
-}
-
 // We pass a stop flag reference to control the lifecycle of the agents.
 // This is "Cooperative Cancellation": the task decides when it is safe to stop.
-Task<> Agent(IoContext& ctx, int id, std::chrono::microseconds interval, const bool& stop_token)
+Task<> Agent(IoContext& ctx, int id, const std::chrono::microseconds interval, const bool& stop_token)
 {
     ALOG_INFO("[Agent {}] Started (interval: {}us)", id, interval.count());
     int tick = 0;
@@ -71,13 +60,13 @@ Task<> MainTask(IoContext& ctx)
     ALOG_INFO("System running. Press Ctrl+C to stop.");
 
     // This suspends MainTask until a signal arrives
-    auto sig = co_await aio::AsyncWaitSignal(ctx, signals.fd());
+    auto sig = co_await aio::AsyncWaitSignal(ctx, signals);
     ALOG_WARN("\nReceived Signal {}. Shutting down...", *sig);
 
-    // 1. Signal agents to stop looping (Cooperative Request)
+    // Signal agents to stop looping
     stop_agents = true;
 
-    // 2. Wait for all agents to finish their last iteration (Graceful Wait)
+    // Wait for all agents to finish their last iteration
     co_await agents.JoinAll(ctx);
 
     ALOG_INFO("All agents successfully stopped");
@@ -87,16 +76,10 @@ Task<> MainTask(IoContext& ctx)
 
 int main()
 {
-    // 0. Logging setup
     aio::alog::g_level = aio::alog::Level::Info;
 
-    // 1. Block signals (Boilerplate hidden in helper)
-    BlockSignals();
-
-    // 2. Create the Context. This owns the io_uring instance.
     IoContext ctx;
 
-    // 3. Run the main task until it completes.
     ctx.RunUntilDone(MainTask(ctx));
 
     return 0;

@@ -1,5 +1,6 @@
 #pragma once
 #include <coroutine>
+#include <csignal>
 #include <expected>
 #include <functional>
 #include <latch>
@@ -7,11 +8,11 @@
 #include <mutex>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 #include <liburing.h>
 
 #include <sys/eventfd.h>
-#include <sys/signalfd.h>
 
 #include "aio/logger.hpp"
 #include "pipe_pool.hpp"
@@ -657,40 +658,58 @@ private:
 // -----------------------------------------------------------------------------
 
 /**
- * RAII wrapper for signalfd.
+ * RAII signal handler using eventfd.
  *
- * Creates a BLOCKING signalfd suitable for io_uring. Do not use SFD_NONBLOCK
- * with io_uring — it causes spurious EAGAIN completions when no signal is
- * pending. io_uring handles the blocking internally.
+ * Installs signal handlers that write to an eventfd, allowing io_uring to
+ * wait for signals without requiring signals to be blocked beforehand.
+ *
+ * Note: Only one SignalSet instance should be active at a time.
  */
 class SignalSet
 {
 public:
-    SignalSet(std::initializer_list<int> sigs)
+    SignalSet(const std::initializer_list<int> sigs) : fd_(eventfd(0, EFD_CLOEXEC))
     {
-        sigset_t mask;
-        sigemptyset(&mask);
-        for (const int s : sigs)
-        {
-            sigaddset(&mask, s);
-        }
-
-        if (sigprocmask(SIG_BLOCK, &mask, nullptr) < 0)
-        {
-            throw std::system_error(errno, std::system_category(), "sigprocmask");
-        }
-
-        // SFD_CLOEXEC but NOT SFD_NONBLOCK — io_uring handles blocking
-        fd_ = signalfd(-1, &mask, SFD_CLOEXEC);
+        // Create eventfd for notification (blocking for io_uring)
         if (fd_ < 0)
         {
-            throw std::system_error(errno, std::system_category(), "signalfd");
+            throw std::system_error(errno, std::system_category(), "eventfd");
+        }
+
+        // Store this instance for signal handler access
+        instance_.store(this, std::memory_order_release);
+
+        // Install signal handlers
+        struct sigaction sa{};
+        sa.sa_handler = SignalHandler;
+        sa.sa_flags = 0;  // No SA_RESTART - allow interrupting syscalls
+        sigemptyset(&sa.sa_mask);
+
+        for (const int sig : sigs)
+        {
+            struct sigaction old_action{};
+            if (sigaction(sig, &sa, &old_action) < 0)
+            {
+                // Cleanup on failure
+                instance_.store(nullptr, std::memory_order_release);
+                ::close(fd_);
+                throw std::system_error(errno, std::system_category(), "sigaction");
+            }
+            old_actions_.emplace_back(sig, old_action);
         }
     }
 
     ~SignalSet()
     {
-        if (fd_ > 0)
+        // Restore old signal handlers
+        for (const auto& [sig, old_action] : old_actions_)
+        {
+            sigaction(sig, &old_action, nullptr);
+        }
+
+        instance_.store(nullptr, std::memory_order_release);
+
+        if (fd_ >= 0)
         {
             ::close(fd_);
             fd_ = -1;
@@ -703,17 +722,30 @@ public:
     int fd() const { return fd_; }
 
 private:
-    int fd_;
+    static void SignalHandler(int sig)
+    {
+        if (const SignalSet* self = instance_.load(std::memory_order_acquire))
+        {
+            // Write signal number to eventfd - write() is async-signal-safe
+            const auto val = static_cast<uint64_t>(sig);
+            (void)::write(self->fd_, &val, sizeof(val));
+        }
+    }
+
+    int fd_ = -1;
+    std::vector<std::pair<int, struct sigaction>> old_actions_;
+
+    static inline std::atomic<SignalSet*> instance_{nullptr};
 };
 
 struct WaitSignalOp : UringOp
 {
     int fd;
-    signalfd_siginfo info{};
+    uint64_t signo{};  // eventfd value contains signal number
 
-    WaitSignalOp(IoContext& ctx, int signal_fd) : UringOp(&ctx), fd(signal_fd) {}
+    WaitSignalOp(IoContext& ctx, const int signal_fd) : UringOp(&ctx), fd(signal_fd) {}
 
-    void PrepareSqe(io_uring_sqe* sqe) { io_uring_prep_read(sqe, fd, &info, sizeof(info), 0); }
+    void PrepareSqe(io_uring_sqe* sqe) { io_uring_prep_read(sqe, fd, &signo, sizeof(signo), 0); }
 
     Result<int> await_resume()
     {
@@ -721,13 +753,18 @@ struct WaitSignalOp : UringOp
         {
             return std::unexpected(MakeErrorCode(res));
         }
-        return static_cast<int>(info.ssi_signo);
+        return static_cast<int>(signo);
     }
 };
 
 inline WaitSignalOp AsyncWaitSignal(IoContext& ctx, int signal_fd)
 {
     return WaitSignalOp(ctx, signal_fd);
+}
+
+inline WaitSignalOp AsyncWaitSignal(IoContext& ctx, const SignalSet& set)
+{
+    return WaitSignalOp(ctx, set.fd());
 }
 
 // -----------------------------------------------------------------------------
