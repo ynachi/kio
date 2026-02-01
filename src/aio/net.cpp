@@ -139,9 +139,9 @@ Result<Socket> TcpListener::Bind(const SocketAddress& addr, int backlog)
     return sock;
 }
 
-Result<Socket> TcpListener::Bind(uint16_t port)
+Result<Socket> TcpListener::BindV4(uint16_t port, std::string ipv4)
 {
-    return Bind(SocketAddress::V4(port));
+    return Bind(SocketAddress::V4(port, ipv4.c_str()));
 }
 
 }  // namespace aio::net

@@ -262,6 +262,7 @@ struct TcpListener
 
     /// @brief Convenience overload that binds to all interfaces on the given port.
     /// @param port Port number in host byte order
+    /// @param ipv4
     /// @return Result<Socket> with the listening socket or error
     ///
     /// @note Equivalent to Bind(SocketAddress::V4(port), 4096).
@@ -269,7 +270,7 @@ struct TcpListener
     /// @code
     ///   auto server = TcpListener::Bind(8080);  // Bind to 0.0.0.0:8080
     /// @endcode
-    static Result<Socket> Bind(uint16_t port);
+    static Result<Socket> BindV4(uint16_t port, std::string ipv4 = "0.0.0.0");
 };
 
 }  // namespace aio::net

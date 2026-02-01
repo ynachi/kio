@@ -7,7 +7,6 @@
 // 4. Graceful shutdown via SignalSet.
 
 #include <chrono>
-#include <csignal>  // Required for signal blocking
 #include <print>
 
 #include "aio/aio.hpp"
@@ -32,8 +31,11 @@ Task<> Agent(IoContext& ctx, int id, const std::chrono::microseconds interval, c
         co_await aio::AsyncSleep(ctx, interval);
 
         // Check again after waking up; we might need to stop immediately.
-        if (stop_token)
+        if (stop_token)  // NOLINT the linter have hard time about this condition. It claims it is always true
+                         // which almost makes sens.
+        {
             break;
+        }
         ++tick;
         ALOG_INFO("[Agent {}] Tick {}", id, tick);
     }

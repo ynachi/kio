@@ -5,8 +5,8 @@
 kio_add_demo(01_core_concepts aio/01_core_concepts.cpp TAGS core LIBS aio)
 kio_add_sanitizers(01_core_concepts)
 
-kio_add_demo(06_worker_wackup aio/06_worker_wackup.cpp TAGS core LIBS aio)
-kio_add_sanitizers(06_worker_wackup)
+kio_add_demo(02_echo_server aio/02_echo_server.cpp TAGS core LIBS gflags::gflags aio)
+kio_add_sanitizers(02_echo_server)
 
 
 kio_add_demo(200_hello_sleep aio/200_hello_sleep.cpp TAGS core LIBS aio)
@@ -64,7 +64,8 @@ kio_add_sanitizers(216_tls_file_server)
 add_custom_target(examples
         DEPENDS
         01_core_concepts
-        
+        02_echo_server
+
         200_hello_sleep
         201_aio_timers
         202_aio_timers
