@@ -122,7 +122,7 @@ int main(int argc, char** argv)
         workers.back().Start(
             [port](aio::IoContext& ctx)
             {
-                auto socket_res = aio::net::TcpListener::Bind(port);
+                auto socket_res = aio::net::TcpListener::BindV4(port);
                 if (!socket_res)
                 {
                     ALOG_ERROR("failed to bind to {}", port);

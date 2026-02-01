@@ -8,6 +8,9 @@ kio_add_sanitizers(01_core_concepts)
 kio_add_demo(02_echo_server aio/02_echo_server.cpp TAGS core LIBS gflags::gflags aio)
 kio_add_sanitizers(02_echo_server)
 
+kio_add_demo(03_http_services aio/03_http_services.cpp TAGS core LIBS gflags::gflags aio)
+kio_add_sanitizers(03_http_services)
+
 
 kio_add_demo(200_hello_sleep aio/200_hello_sleep.cpp TAGS core LIBS aio)
 kio_add_sanitizers(200_hello_sleep)

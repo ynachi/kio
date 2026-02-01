@@ -24,6 +24,10 @@ aio::Task<> HandleClient(aio::IoContext& ctx, aio::net::Socket sock, const std::
     {
         // Read with a 10-second timeout.
         // If the client is idle for too long, we disconnect them.
+        // Note: timeout in the hote path is expensive. It cost 2X system call per operation
+        // which is huge when we have a great number of them! This is to demo the timeout capability.
+        // I would not use it on this kind of operations in production. It is only fine for
+        // non-frequent operations.
         auto recv_res = co_await aio::AsyncRecv(ctx, sock, buf).WithTimeout(10s);
 
         if (!recv_res.has_value())

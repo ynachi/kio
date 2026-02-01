@@ -473,7 +473,7 @@ struct SendOp : UringOp
 ///   }
 /// @endcode
 template <FileDescriptor F>
-inline SendOp AsyncSend(IoContext& ctx, const F& f, std::span<const std::byte> buffer, int flags = 0)
+[[nodiscard]] SendOp AsyncSend(IoContext& ctx, const F& f, std::span<const std::byte> buffer, int flags = 0)
 {
     return SendOp{ctx, f, buffer, flags};
 }
@@ -481,7 +481,7 @@ inline SendOp AsyncSend(IoContext& ctx, const F& f, std::span<const std::byte> b
 /// @brief Sends a string_view to a socket (convenience overload).
 /// @note Perfect for sending HTTP responses or text protocols.
 template <FileDescriptor F>
-SendOp AsyncSend(IoContext& ctx, const F& f, std::string_view str, int flags = 0)
+[[nodiscard]] SendOp AsyncSend(IoContext& ctx, const F& f, std::string_view str, int flags = 0)
 {
     return SendOp{
         ctx, f, std::span{reinterpret_cast<const std::byte*>(str.data()), str.size()},
@@ -492,7 +492,7 @@ SendOp AsyncSend(IoContext& ctx, const F& f, std::string_view str, int flags = 0
 /// @brief Sends a char array to a socket (convenience overload).
 /// @note Automatically excludes the null terminator.
 template <FileDescriptor F, size_t N>
-SendOp AsyncSend(IoContext& ctx, const F& f, const char (&buf)[N], int flags = 0)
+[[nodiscard]] SendOp AsyncSend(IoContext& ctx, const F& f, const char (&buf)[N], int flags = 0)
 {
     return SendOp{
         ctx, f, std::span{reinterpret_cast<const std::byte*>(buf), N - 1}, // Skip null terminator
@@ -534,7 +534,7 @@ struct OpenOp : UringOp
 ///       // Use fd...
 ///   }
 /// @endcode
-inline OpenOp AsyncOpen(IoContext& ctx, const char* path, int flags, mode_t mode = 0644)
+[[nodiscard]] inline OpenOp AsyncOpen(IoContext& ctx, const char* path, int flags, mode_t mode = 0644)
 {
     return OpenOp(ctx, path, flags, mode);
 }
@@ -571,7 +571,7 @@ struct ReadOp : UringOp
 ///   }
 /// @endcode
 template <FileDescriptor F>
-ReadOp AsyncRead(IoContext& ctx, const F& f, std::span<std::byte> buffer, uint64_t offset = 0)
+[[nodiscard]] ReadOp AsyncRead(IoContext& ctx, const F& f, std::span<std::byte> buffer, uint64_t offset = 0)
 {
     return ReadOp{ctx, f, buffer, offset};
 }
@@ -606,7 +606,7 @@ struct WriteOp : UringOp
 ///   co_await AsyncWrite(ctx, fd, data, file_offset);
 /// @endcode
 template <FileDescriptor F>
-WriteOp AsyncWrite(IoContext& ctx, const F& f, std::span<const std::byte> buffer, uint64_t offset = 0)
+[[nodiscard]] WriteOp AsyncWrite(IoContext& ctx, const F& f, std::span<const std::byte> buffer, uint64_t offset = 0)
 {
     return WriteOp{ctx, f, buffer, offset};
 }
@@ -670,7 +670,7 @@ struct ReadFixedOp : UringOp
 ///   // Use index instead of fd
 ///   co_await AsyncReadFixed(ctx, 0, buffer, offset);  // Reads from fd1
 /// @endcode
-inline ReadFixedOp AsyncReadFixed(IoContext& ctx, int idx, std::span<std::byte> buf, off_t off)
+[[nodiscard]] inline ReadFixedOp AsyncReadFixed(IoContext& ctx, int idx, std::span<std::byte> buf, off_t off)
 {
     return ReadFixedOp(ctx, idx, buf, off);
 }
@@ -704,7 +704,7 @@ struct WriteFixedOp : UringOp
 /// @warning The buffer must remain valid until co_await returns!
 /// @note Requires files to be registered with IoContext::RegisterFiles() first.
 ///       Uses fixed file optimization for reduced kernel overhead.
-inline WriteFixedOp AsyncWriteFixed(IoContext& ctx, int idx, std::span<const std::byte> buf, off_t off)
+[[nodiscard]] inline WriteFixedOp AsyncWriteFixed(IoContext& ctx, int idx, std::span<const std::byte> buf, off_t off)
 {
     return WriteFixedOp(ctx, idx, buf, off);
 }
@@ -720,7 +720,7 @@ inline WriteFixedOp AsyncWriteFixed(IoContext& ctx, int idx, std::span<const std
 ///   co_await AsyncClose(ctx, client_socket);
 ///   // client_socket is now invalid
 /// @endcode
-inline CloseOp AsyncClose(IoContext& ctx, net::Socket& s)
+[[nodiscard]] inline CloseOp AsyncClose(IoContext& ctx, net::Socket& s)
 {
     const auto fd = s.Release();
     return CloseOp(ctx, fd);

@@ -11,7 +11,7 @@ set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 # Cmake find modules
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 
-option(ENABLE_AIO_STATS "Enable AIO observability metrics" ON)
+option(ENABLE_AIO_STATS "Enable AIO observability metrics" OFF)
 if (ENABLE_AIO_STATS)
     add_compile_definitions(AIO_STATS=1)
 endif ()
