@@ -76,7 +76,7 @@ inline const std::error_category& openssl_category() noexcept
  * These are protocol-agnostic, allowing different parsers to map
  * specific failures to these general categories.
  */
-enum class ParseError
+enum class ParseError: uint8_t
 {
     Success = 0,
     Incomplete,       // Not enough data to finish frame
@@ -343,6 +343,14 @@ private:
 ////////////////////////////////////////////////////////////////////////////////
 // Operation State (Intrusive Tracking)
 ////////////////////////////////////////////////////////////////////////////////
+enum class OpCancelReason: uint8_t
+{
+    None,
+    Timeout,
+    ExplicitCancel,
+    ContextShutdown,
+};
+
 
 /**
  * Base state for all pending I/O operations.
@@ -367,6 +375,7 @@ struct OperationState
     OperationState* next = nullptr;
     OperationState* prev = nullptr;
     bool tracked = false;
+    OpCancelReason cancel_reason = OpCancelReason::None;
 
     OperationState() = default;
 
@@ -409,7 +418,7 @@ struct UringOp : OperationState
 protected:
     explicit UringOp(IoContext* c) { ctx = c; }
 
-    UringOp(UringOp&&) = default;
+    UringOp(UringOp&& other) noexcept : OperationState(std::move(other)) {}
 
 public:
     bool await_ready() const noexcept { return false; }
@@ -455,6 +464,34 @@ constexpr uint64_t WAKE_TAG = 1;
 
 class IoContext
 {
+    //
+    // IoContext clss members
+    //
+    io_uring ring_{};
+    std::vector<std::coroutine_handle<>> ready_;
+    OperationState* pending_head_ = nullptr;
+    std::atomic<bool> running_ = false;
+    std::once_flag pipe_pool_flag_;
+    std::latch ready_latch_{1};
+    std::latch stopped_latch_{1};
+
+    // Internal Wake Mechanism (eventfd)
+    int wake_fd_ = -1;
+    uint64_t wake_buffer_ = 0;
+
+    // External completions (from blocking pool, etc.).
+    std::mutex ext_mtx_;
+    std::vector<OperationState*> ext_done_;
+    bool ext_wake_pending_ = false;       // protected by ext_mtx_
+    std::atomic<bool> ext_hint_ = false;  // fast-path hint (may be stale)
+    std::atomic_bool shutdown_requested_{false};
+
+    // Lazy pipe pool for sendfile operations
+    std::optional<PipePool> pipe_pool_;
+
+    #if AIO_STATS
+    IoContextStats stats_{};
+    #endif
 #ifndef NDEBUG
     std::thread::id owner_thread_ = std::this_thread::get_id();
 #endif
@@ -474,7 +511,7 @@ class IoContext
 public:
     // user can pass their own io uring flag.
     // Note: using single issuer must ensure single issuer constraints are met.
-    explicit IoContext(unsigned entries = 256);
+    explicit IoContext(unsigned entries = 16800);
 
     ~IoContext() noexcept
     {
@@ -515,9 +552,24 @@ public:
      *
      * IMPORTANT: This does NOT resume coroutines. Handles are dropped.
      */
-    void CancelAllPending();
+    void CancelAllPending(OpCancelReason reason = OpCancelReason::None);
 
     Result<> RegisterFiles(std::span<const int> fds);
+
+    /// @brief Returns true if shutdown has been requested
+    /// @note Coroutines can check this to perform graceful cleanup.
+    [[nodiscard]] bool IsShuttingDown() const
+    {
+        return shutdown_requested_.load(std::memory_order_acquire);
+    }
+
+    /// @brief  Request graceful shutdown, coroutines could check IsShuttingDown and exit cleanly
+    void RequestShutdown() noexcept
+    {
+        shutdown_requested_.store(true, std::memory_order_release);
+        Stop(); // unset running_ flag
+        (void)Notify();
+    }
 
     template <typename T>
     void RunUntilDone(Task<T>&& t)
@@ -526,7 +578,7 @@ public:
 
         running_ = true;
         t.resume();
-        while (running_ && !t.Done())
+        while (!IsShuttingDown() && !t.Done())
         {
             Step();
         }
@@ -540,7 +592,7 @@ public:
         AssertOwnerThread();
 
         running_ = true;
-        while (running_)
+        while (!IsShuttingDown())
         {
             Step();
         }
@@ -552,7 +604,7 @@ public:
         AssertOwnerThread();
 
         running_ = true;
-        while (running_)
+        while (IsShuttingDown())
         {
             Step();
             tick();
@@ -624,33 +676,7 @@ private:
     // and if wake signal was seen for the caller to decide what to do about it
     std::pair<unsigned, bool> ProcessReadyCompletions();
 
-    //
-    // IoContext clss members
-    //
-    io_uring ring_{};
-    std::vector<std::coroutine_handle<>> ready_;
-    OperationState* pending_head_ = nullptr;
-    std::atomic<bool> running_ = false;
-    std::once_flag pipe_pool_flag_;
-    std::latch ready_latch_{1};
-    std::latch stopped_latch_{1};
-
-    // Internal Wake Mechanism (eventfd)
-    int wake_fd_ = -1;
-    uint64_t wake_buffer_ = 0;
-
-    // External completions (from blocking pool, etc.).
-    std::mutex ext_mtx_;
-    std::vector<OperationState*> ext_done_;
-    bool ext_wake_pending_ = false;       // protected by ext_mtx_
-    std::atomic<bool> ext_hint_ = false;  // fast-path hint (may be stale)
-
-    // Lazy pipe pool for sendfile operations
-    std::optional<PipePool> pipe_pool_;
-
-#if AIO_STATS
-    IoContextStats stats_{};
-#endif
+    int SubmitSqesWait(uint32_t wait_us);
 };
 
 // -----------------------------------------------------------------------------
@@ -801,6 +827,7 @@ struct WithTimeoutOp
 
         // Linked timeout (user_data = nullptr so we skip its CQE)
         auto* sqe_timer = op.ctx->GetSqe();
+        sqe_timer->flags |= IOSQE_CQE_SKIP_SUCCESS;
         io_uring_prep_link_timeout(sqe_timer, &ts, 0);
         io_uring_sqe_set_data(sqe_timer, nullptr);
     }
@@ -808,14 +835,24 @@ struct WithTimeoutOp
     auto await_resume()
     {
         auto r = op.await_resume();
+
         // Translate ECANCELED to timed_out for clarity
         if (!r && r.error().value() == ECANCELED)
         {
-#if AIO_STATS
-            AIO_STATS_INC(op.ctx->Stats(), timeouts);
-#endif
-            return decltype(r)(std::unexpected(std::make_error_code(std::errc::timed_out)));
+            // If the reason is None, it implies io_uring cancelled it via the
+            // linked timeout mechanism, because CancelAllPending() would have
+            // set it to something else (e.g., ContextShutdown).
+            if (op.cancel_reason == OpCancelReason::None ||
+                op.cancel_reason == OpCancelReason::Timeout)
+            {
+                #if AIO_STATS
+                AIO_STATS_INC(op.ctx->Stats(), timeouts);
+                #endif
+                return decltype(r)(std::unexpected(std::make_error_code(std::errc::timed_out)));
+            }
+            return r;
         }
+
         return r;
     }
 };
@@ -1026,12 +1063,12 @@ public:
                 }
 
                 const auto tid = static_cast<uint32_t>(::syscall(SYS_gettid));
-                IoContext ctx(1024);
+                // TODO: use param
+                IoContext ctx(16800);
 
                 auto stop_action = [&ctx]
                 {
-                    ctx.Stop();
-                    (void)ctx.Notify();
+                    ctx.RequestShutdown();
                 };
 
                 std::stop_callback cb_internal(st, stop_action);
@@ -1114,7 +1151,10 @@ public:
     /// @brief Requests the worker thread to stop.
     ///
     /// This signals the IoContext to stop processing events and exit its run loop.
-    void RequestStop() { thread_.request_stop(); }
+    void RequestStop()
+    {
+        thread_.request_stop();
+    }
 
     /// @brief Blocks until the worker thread finishes execution.
     void Join()

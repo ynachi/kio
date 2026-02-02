@@ -92,8 +92,7 @@ aio::Task<> HandleHttp(aio::IoContext& ctx, aio::net::Socket sock, const std::st
         {
             // 3. Zero-Copy File Send
             const std::string filepath = std::format("{}/10g.bin", FLAGS_sering_folder);
-            auto file_res = co_await aio::AsyncOpen(ctx, filepath.c_str(), O_RDONLY);
-            if (file_res)
+            if (auto file_res = co_await aio::AsyncOpen(ctx, filepath.c_str(), O_RDONLY))
             {
                 int file_fd = *file_res;
                 struct stat stt{};
@@ -132,7 +131,7 @@ aio::Task<> Server(aio::IoContext& ctx, const std::string& host, uint16_t port, 
     {
         // We MUST use a timeout here. If we don't, AsyncAccept will block forever,
         // preventing the loop from checking st.stop_requested().
-        auto accept_res = co_await aio::AsyncAccept(ctx, listener).WithTimeout(1s);
+        auto accept_res = co_await aio::AsyncAccept(ctx, listener);
 
         if (!accept_res.has_value())
         {
@@ -198,8 +197,11 @@ int main()
 
     // Main thread waits for signal
     aio::IoContext main_ctx;
-    // Pass ss by value or ref is fine, here by value to keep it alive
+    // Passers-by value or ref is fine, here by value to keep it alive
     main_ctx.RunUntilDone(Stop(main_ctx, ss));
+
+    for (auto& w : workers)
+        w.RequestStop();
 
     ALOG_INFO("Shutting down workers...");
     for (auto& w : workers)

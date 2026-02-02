@@ -44,8 +44,7 @@ public:
 
     void Stop()
     {
-        bool expected = false;
-        if (!stopping_.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+        if (bool expected = false; !stopping_.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
         {
             return;
         }
@@ -56,7 +55,9 @@ public:
         for (auto& t : workers_)
         {
             if (t.joinable())
+            {
                 t.join();
+            }
         }
     }
 
@@ -92,21 +93,30 @@ public:
 private:
     void WorkerLoop()
     {
-        while (true)
+        while (!stopping_.load(std::memory_order_acquire))
         {
             job_t job;
             {
-                std::unique_lock<std::mutex> lk(m_);
+                std::unique_lock lk(m_);
                 cv_.wait(lk, [&] { return stopping_.load(std::memory_order_relaxed) || count_ > 0; });
                 if (stopping_.load(std::memory_order_relaxed) && count_ == 0)
                 {
                     return;
+                }
+                if (count_ == 0)
+                {
+                    continue;
                 }
                 job = std::move(q_[head_]);
                 head_ = (head_ + 1) % cap_;
                 --count_;
             }
 
+            // check before running
+            if (stopping_.load(std::memory_order_acquire))
+            {
+                break;
+            }
             // Execute outside lock
             job();
         }

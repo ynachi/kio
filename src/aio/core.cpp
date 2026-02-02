@@ -1,13 +1,13 @@
 //
 // Created by Yao ACHI on 28/01/2026.
 //
-#include "../../../include/aio/core/core.hpp"
+#include "../../include/aio/core/core.hpp"
 
 #include <liburing/io_uring.h>
 
 #include <sys/eventfd.h>
 
-#include "../../../include/aio/core/stats.hpp"
+#include "../../include/aio/core/stats.hpp"
 
 namespace aio
 {
@@ -125,10 +125,18 @@ void IoContext::Untrack(OperationState* op)
 #endif
 }
 
-void IoContext::CancelAllPending()
+void IoContext::CancelAllPending(const OpCancelReason reason)
 {
+    // collect all operations to cancel first
+    // TODO: is it necessary to collect first for safety ?
+    std::vector<OperationState*> ops_to_cancel;
+    for (auto* op = pending_head_; op != nullptr; op = op->next)
+    {
+        ops_to_cancel.push_back(op);
+    }
+
     // Submit cancel requests for all tracked operations
-    for (const auto* op = pending_head_; op; op = op->next)
+    for (auto* op : ops_to_cancel)
     {
         io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
         if (sqe == nullptr)
@@ -140,6 +148,7 @@ void IoContext::CancelAllPending()
                 break;
             }
         }
+        op->cancel_reason = reason;
         io_uring_prep_cancel(sqe, op, 0);
         io_uring_sqe_set_data(sqe, nullptr);
     }
@@ -331,24 +340,52 @@ void IoContext::SubmitWakeRead()
         // Force flush if full? This is rare in typical loop usage.
         io_uring_submit(&ring_);
         sqe = io_uring_get_sqe(&ring_);
-        if (!sqe)
-            return;  // Should fatal error really // TODO
+        if (sqe == nullptr)
+        {
+            // Should fatal error really // TODO fix this kater, not good right now
+            ALOG_ERROR("failed to get io completion, probably resource unavailable");
+            return;
+        }
     }
 
     io_uring_prep_read(sqe, wake_fd_, &wake_buffer_, sizeof(wake_buffer_), 0);
     io_uring_sqe_set_data64(sqe, detail::WAKE_TAG);
 }
 
-void IoContext::Step()
+int IoContext::SubmitSqesWait(const uint32_t wait_us)
 {
-    // Retry on EINTR
+    // Define the heartbeat interval (max sleep time)
+    __kernel_timespec ts{};
+    ts.tv_sec = 0;
+    ts.tv_nsec = wait_us * 1000;
+
+    // DYNAMIC BUSY WAIT:
+    // Only engage the kernel-side busy loop if we are actually submitting new work.
+    // If we are just checking for completions (idle/heartbeat), sleep immediately.
+    // TODO: make as config
+    unsigned min_wait = 20;
+
+    if (io_uring_sq_ready(&ring_) == 0)
+    {
+        min_wait = 0;
+    }
+
+    io_uring_cqe* cqe_ptr = nullptr;
+
     int ret = 0;
     do
     {
-        ret = io_uring_submit_and_wait(&ring_, 1);
+        ret = io_uring_submit_and_wait_min_timeout(&ring_, &cqe_ptr, 1, &ts, min_wait, nullptr);
     } while (ret == -EINTR);
 
-    if (ret < 0)
+    return ret;
+}
+
+void IoContext::Step()
+{
+    // Retry on EINTR
+    // TODO as config
+    if (const int ret = SubmitSqesWait(100); ret < 0)
     {
         // If we failed to wait (and it wasn't EINTR), we can't really proceed.
         // Returning here might spin the loop if the error persists,
@@ -377,7 +414,7 @@ void IoContext::Step()
     {
         AIO_STATS_INC(stats_, loop_wakeups);
     }
-    const uint64_t batch = static_cast<uint64_t>(ready_.size());
+    const auto batch = ready_.size();
     if (batch == 0)
     {
         AIO_STATS_INC(stats_, loop_idle_iterations);

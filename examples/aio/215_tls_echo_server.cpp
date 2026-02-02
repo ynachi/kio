@@ -103,7 +103,7 @@ aio::Task<> HandleClient(aio::IoContext& ctx, int fd, aio::tls::TlsContext& tls_
     co_await tls_sock.AsyncShutdown(ctx);
 
     // Explicitly close the socket asynchronously.
-    co_await aio::AsyncClose(ctx, tls_sock);
+    co_await aio::AsyncClose(ctx, tls_sock.Get());
 
     std::println("Client disconnected (FD {})", ktls_fd);
 }
@@ -132,7 +132,7 @@ aio::Task<> Server(aio::IoContext& ctx, uint16_t port)
     auto& tls_ctx = *tls_ctx_res;
 
     // 3. Bind TCP Listener
-    const auto listener = aio::net::TcpListener::Bind(port);
+    const auto listener = aio::net::TcpListener::BindV4(port);
     if (!listener)
     {
         std::println(stderr, "Failed to bind to port {}", port);
