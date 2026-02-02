@@ -302,9 +302,6 @@ target_link_libraries(aio PUBLIC
 #----------------------------------------------
 include_directories(${CMAKE_SOURCE_DIR})
 
-# TODO: remove for now
-add_subdirectory(kio)
-
 if (KIO_BUILD_BITCASK)
     add_subdirectory(bitcask)
 endif ()
@@ -342,6 +339,3 @@ if (KIO_BUILD_TESTS)
     message(STATUS "Added targets: check, check-quick")
 endif ()
 
-add_executable(testbed main.cpp)
-target_link_libraries(testbed PRIVATE kio_bitcask kio_lib)
-kio_add_sanitizers(testbed)

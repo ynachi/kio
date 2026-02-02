@@ -162,7 +162,7 @@ int main() {
 
         // Run async benchmark
         auto t2 = bench_async(ctx, pool);
-        ctx.RunUntilDone(t2);
+        ctx.RunUntilDone(std::move(t2));
 
         aio::alog::stop();
     } catch (const std::exception& e) {
