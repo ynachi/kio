@@ -10,57 +10,14 @@ kio_add_sanitizers(02_echo_server)
 
 kio_add_demo(03_http_services aio/03_http_services.cpp TAGS core LIBS gflags::gflags aio)
 kio_add_sanitizers(03_http_services)
-
-
-kio_add_demo(200_hello_sleep aio/200_hello_sleep.cpp TAGS core LIBS aio)
-kio_add_sanitizers(200_hello_sleep)
-
-kio_add_demo(201_aio_timers aio/201_timers.cpp TAGS core LIBS aio)
-kio_add_sanitizers(201_aio_timers)
-
-kio_add_demo(202_aio_timers aio/202_echo_server.cpp TAGS core LIBS aio)
-kio_add_sanitizers(202_aio_timers)
-
-kio_add_demo(203_file_copy aio/203_file_copy.cpp TAGS core LIBS gflags::gflags aio)
-kio_add_sanitizers(203_file_copy)
-
-kio_add_demo(204_timeout aio/204_timeouts.cpp TAGS core LIBS aio)
-kio_add_sanitizers(204_timeout)
-
-
-kio_add_demo(206_graceful_shutdown aio/206_graceful_shutdown.cpp TAGS core LIBS aio)
-kio_add_sanitizers(206_graceful_shutdown)
-
-kio_add_demo(207_blocking_offload aio/207_blocking_offload.cpp TAGS core LIBS aio)
-kio_add_sanitizers(207_blocking_offload)
-
-kio_add_demo(208_static_file_server aio/208_static_file_server.cpp TAGS core LIBS aio)
-kio_add_sanitizers(208_static_file_server)
-
-kio_add_demo(209_multi_worker aio/209_multi_worker.cpp TAGS core LIBS aio)
-kio_add_sanitizers(209_multi_worker)
-
-kio_add_demo(210_chat_server aio/210_chat_server.cpp TAGS core LIBS aio)
-kio_add_sanitizers(210_chat_server)
+target_compile_definitions(03_http_services PRIVATE DAIO_STATS=1)
 
 kio_add_demo(211_dns_resolver aio/211_dns_resolve.cpp TAGS core LIBS aio)
 kio_add_sanitizers(211_dns_resolver)
 
-kio_add_demo(212_hello_http_worker aio/212_hello_http_worker.cpp TAGS core LIBS aio)
-kio_add_sanitizers(212_hello_http_worker)
-
-kio_add_demo(213_hello_http_worker_single_acceptor aio/213_hello_http_single_acceptor.cpp TAGS core LIBS aio)
-kio_add_sanitizers(213_hello_http_worker_single_acceptor)
-
-kio_add_demo(214_stats_demo aio/214_stats_demo.cpp TAGS core LIBS aio)
-kio_add_sanitizers(214_stats_demo)
-target_compile_definitions(214_stats_demo PRIVATE DAIO_STATS=1)
 
 kio_add_demo(215_tls_echo_server aio/215_tls_echo_server.cpp TAGS core LIBS gflags::gflags aio)
 kio_add_sanitizers(215_tls_echo_server)
-
-kio_add_demo(216_tls_file_server aio/216_tls_file_server.cpp TAGS core LIBS gflags::gflags aio)
-kio_add_sanitizers(216_tls_file_server)
 
 
 # Create a custom target to build all examples
@@ -68,23 +25,9 @@ add_custom_target(examples
         DEPENDS
         01_core_concepts
         02_echo_server
-
-        200_hello_sleep
-        201_aio_timers
-        202_aio_timers
-        203_file_copy
-        204_timeout
-        206_graceful_shutdown
-        207_blocking_offload
-        208_static_file_server
-        209_multi_worker
-        210_chat_server
+        03_http_services
         211_dns_resolver
-        212_hello_http_worker
-        213_hello_http_worker_single_acceptor
         215_tls_echo_server
-        216_tls_file_server
-        06_worker_wackup
 )
 
 message(STATUS "  Examples will be installed to: ${CMAKE_INSTALL_PREFIX}/bin/examples")

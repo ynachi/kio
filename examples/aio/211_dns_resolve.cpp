@@ -10,9 +10,8 @@
 
 #include <netdb.h>
 
-#include "../../include/aio/core/blocking_pool.hpp"
-#include "aio/io.hpp"
-#include "aio/io_context.hpp"
+#include "aio/core/blocking_pool.hpp"
+#include "aio/aio.hpp"
 #include "aio/logger.hpp"
 #include <arpa/inet.h>
 
@@ -65,8 +64,8 @@ static std::string resolve_blocking(const std::string& host) {
 // -----------------------------------------------------------------------------
 // Blocking Benchmark - Sequential, blocks the IO thread
 // -----------------------------------------------------------------------------
-aio::Task<void> bench_blocking(aio::IoContext& ctx) {
-    aio::alog::info("--- Starting BLOCKING Benchmark (Sequential) ---");
+aio::Task<> bench_blocking(aio::IoContext& ctx) {
+    ALOG_INFO("--- Starting BLOCKING Benchmark (Sequential) ---");
 
     std::vector<std::pair<std::string, std::string>> results;
     results.reserve(domains.size());
@@ -82,10 +81,10 @@ aio::Task<void> bench_blocking(aio::IoContext& ctx) {
     auto end = std::chrono::high_resolution_clock::now();
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
 
-    aio::alog::info("Blocking Total Time: {} ms", ms);
-    aio::alog::info("--- Results (Blocking) ---");
+    ALOG_INFO("Blocking Total Time: {} ms", ms);
+    ALOG_INFO("--- Results (Blocking) ---");
     for (const auto& [dom, ip] : results) {
-        aio::alog::info("{}: {}", dom, ip);
+        ALOG_INFO("{}: {}", dom, ip);
     }
 
     co_return;
@@ -111,7 +110,7 @@ aio::Task<void> resolve_one(aio::IoContext& ctx, aio::BlockingPool& pool,
 }
 
 aio::Task<> bench_async(aio::IoContext& ctx, aio::BlockingPool& pool) {
-    aio::alog::info("--- Starting ASYNC Benchmark (Parallel) ---");
+    ALOG_INFO("--- Starting ASYNC Benchmark (Parallel) ---");
 
     std::vector<std::pair<std::string, std::string>> results;
     results.reserve(domains.size());

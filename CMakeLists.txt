@@ -216,10 +216,10 @@ endif ()
 # ============================================================================
 
 # Find clang-format
-find_program(CLANG_FORMAT_EXE NAMES clang-format)
+find_program(CLANG_FORMAT_EXE NAMES clang-format-22)
 
 # Find clang-tidy
-find_program(CLANG_TIDY_EXE NAMES clang-tidy)
+find_program(CLANG_TIDY_EXE NAMES clang-tidy-22)
 
 # Collect all source files for formatting/linting
 file(GLOB_RECURSE ALL_SOURCE_FILES
