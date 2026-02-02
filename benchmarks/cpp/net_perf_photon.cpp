@@ -17,7 +17,7 @@ static constexpr std::string_view HTTP_RESPONSE =
     "Content-Length: 13\r\n"
     "Connection: keep-alive\r\n"
     "\r\n"
-    "Hello, World!";
+    "Hello from AIO!";
 
 void handle_connection(photon::net::ISocketStream* stream)
 {

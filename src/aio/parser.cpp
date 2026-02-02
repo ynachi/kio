@@ -55,12 +55,12 @@ std::string_view GetBulkPayload(const FrameHeader& frame)
     // frame.data points to '$'.
 
     // We need to find the first CRLF to know where the header ends.
-    std::string_view whole_frame(frame.data, frame.size);
-    auto first_crlf = whole_frame.find("\r\n");
+    const std::string_view whole_frame(frame.data, frame.size);
+    const auto first_crlf = whole_frame.find("\r\n");
     if (first_crlf == std::string_view::npos)
         return {};
 
-    size_t header_len = first_crlf + 2;
+    const size_t header_len = first_crlf + 2;
     if (frame.size < header_len + 2)
         return {};  // Should handle empty bulk string case "$0\r\n\r\n"
 

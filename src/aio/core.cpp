@@ -352,40 +352,17 @@ void IoContext::SubmitWakeRead()
     io_uring_sqe_set_data64(sqe, detail::WAKE_TAG);
 }
 
-int IoContext::SubmitSqesWait(const uint32_t wait_us)
-{
-    // Define the heartbeat interval (max sleep time)
-    __kernel_timespec ts{};
-    ts.tv_sec = 0;
-    ts.tv_nsec = wait_us * 1000;
-
-    // DYNAMIC BUSY WAIT:
-    // Only engage the kernel-side busy loop if we are actually submitting new work.
-    // If we are just checking for completions (idle/heartbeat), sleep immediately.
-    // TODO: make as config
-    unsigned min_wait = 20;
-
-    if (io_uring_sq_ready(&ring_) == 0)
-    {
-        min_wait = 0;
-    }
-
-    io_uring_cqe* cqe_ptr = nullptr;
-
-    int ret = 0;
-    do
-    {
-        ret = io_uring_submit_and_wait_min_timeout(&ring_, &cqe_ptr, 1, &ts, min_wait, nullptr);
-    } while (ret == -EINTR);
-
-    return ret;
-}
 
 void IoContext::Step()
 {
     // Retry on EINTR
-    // TODO as config
-    if (const int ret = SubmitSqesWait(100); ret < 0)
+    int ret = 0;
+    do
+    {
+        ret = io_uring_submit_and_wait(&ring_, 1);
+    } while (ret == -EINTR);
+
+    if (ret < 0)
     {
         // If we failed to wait (and it wasn't EINTR), we can't really proceed.
         // Returning here might spin the loop if the error persists,
@@ -393,7 +370,6 @@ void IoContext::Step()
         // aggressive. For now, we assume transient errors or fatal ones we can't fix.
         return;
     }
-
 #if AIO_STATS
     AIO_STATS_INC(stats_, loop_iterations);
 #endif
