@@ -11,7 +11,7 @@ set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 # Cmake find modules
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 
-option(ENABLE_AIO_STATS "Enable AIO observability metrics" OFF)
+option(ENABLE_AIO_STATS "Enable AIO observability metrics" ON)
 if (ENABLE_AIO_STATS)
     add_compile_definitions(AIO_STATS=1)
 endif ()
@@ -278,11 +278,11 @@ endif ()
 #----------------------------------------------
 # Library definition
 add_library(aio
-        src/aio/core/core.cpp
+        src/aio/core.cpp
         src/aio/io.cpp
         src/aio/net.cpp
-        src/aio/resp/parser.cpp
-        src/aio/tls/tls_context.cpp
+        src/aio/parser.cpp
+        src/aio/tls_context.cpp
 )
 # Include directories
 target_include_directories(aio PUBLIC

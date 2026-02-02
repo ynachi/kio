@@ -33,27 +33,23 @@ namespace
 aio::Task<> HandleHttp(aio::IoContext& ctx, aio::net::Socket sock, const std::stop_token st)
 {
     std::array<std::byte, 1024> buf{};
+    // auto deadline = std::chrono::steady_clock::now() + 10s;
 
     while (!st.stop_requested())
     {
+        // if (std::chrono::steady_clock::now() >= deadline)
+        // {
+        //     ALOG_INFO("[Client {}] Timed out", sock.Get());
+        //     break;
+        // }
         // Read Request
-        auto recv_res = co_await aio::AsyncRecv(ctx, sock, buf).WithTimeout(10s);
+        auto recv_res = co_await aio::AsyncRecv(ctx, sock, buf);
 
         if (!recv_res.has_value())
         {
-            if (recv_res.error() == std::errc::timed_out)
-            {
-                // If we timed out, check if it's because of shutdown
                 if (st.stop_requested())
                     break;
-
-                ALOG_INFO("[Client {}] Timed out", sock.Get());
-                // Optional: Send close frame
-            }
-            else
-            {
                 ALOG_INFO("[Client {}] Read error: {}", sock.Get(), recv_res.error().message());
-            }
             break;
         }
 
@@ -61,6 +57,8 @@ aio::Task<> HandleHttp(aio::IoContext& ctx, aio::net::Socket sock, const std::st
         {
             break;
         }
+
+        // deadline = std::chrono::steady_clock::now() + 10s;
 
         std::string_view request(reinterpret_cast<const char*>(buf.data()), *recv_res);
 
@@ -131,7 +129,7 @@ aio::Task<> Server(aio::IoContext& ctx, const std::string& host, uint16_t port, 
     {
         // We MUST use a timeout here. If we don't, AsyncAccept will block forever,
         // preventing the loop from checking st.stop_requested().
-        auto accept_res = co_await aio::AsyncAccept(ctx, listener);
+        auto accept_res = co_await aio::AsyncAccept(ctx, listener).WithTimeout(1s);
 
         if (!accept_res.has_value())
         {
@@ -199,9 +197,6 @@ int main()
     aio::IoContext main_ctx;
     // Passers-by value or ref is fine, here by value to keep it alive
     main_ctx.RunUntilDone(Stop(main_ctx, ss));
-
-    for (auto& w : workers)
-        w.RequestStop();
 
     ALOG_INFO("Shutting down workers...");
     for (auto& w : workers)

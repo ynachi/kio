@@ -675,8 +675,6 @@ private:
     // process ready completions, return the number of completions processed
     // and if wake signal was seen for the caller to decide what to do about it
     std::pair<unsigned, bool> ProcessReadyCompletions();
-
-    int SubmitSqesWait(uint32_t wait_us);
 };
 
 // -----------------------------------------------------------------------------
