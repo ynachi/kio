@@ -1,6 +1,10 @@
 // DNS Resolution Benchmark
 // Demonstrates: blocking vs async (offload) DNS, task fan-out, blocking_pool
 
+#include "kio/aio.hpp"
+#include "kio/core/blocking_pool.hpp"
+#include "kio/logger.hpp"
+
 #include <atomic>
 #include <chrono>
 #include <iostream>
@@ -10,9 +14,6 @@
 
 #include <netdb.h>
 
-#include "aio/core/blocking_pool.hpp"
-#include "aio/aio.hpp"
-#include "aio/logger.hpp"
 #include <arpa/inet.h>
 
 using namespace std::chrono_literals;
@@ -64,7 +65,7 @@ static std::string resolve_blocking(const std::string& host) {
 // -----------------------------------------------------------------------------
 // Blocking Benchmark - Sequential, blocks the IO thread
 // -----------------------------------------------------------------------------
-aio::Task<> bench_blocking(aio::IoContext& ctx) {
+kio::Task<> bench_blocking(kio::IoContext& ctx) {
     ALOG_INFO("--- Starting BLOCKING Benchmark (Sequential) ---");
 
     std::vector<std::pair<std::string, std::string>> results;
@@ -94,13 +95,13 @@ aio::Task<> bench_blocking(aio::IoContext& ctx) {
 // Async Benchmark - Parallel via blocking_pool
 // -----------------------------------------------------------------------------
 
-aio::Task<void> resolve_one(aio::IoContext& ctx, aio::BlockingPool& pool,
+kio::Task<void> resolve_one(kio::IoContext& ctx, kio::BlockingPool& pool,
                             std::string domain,
                             std::vector<std::pair<std::string, std::string>>& results,
                             std::atomic<int>& pending) {
     // Offload blocking DNS to thread pool
     // IMPORTANT: capture domain by value - the coroutine frame may be destroyed
-    auto ip = co_await aio::Offload(ctx, pool, [domain] {
+    auto ip = co_await kio::Offload(ctx, pool, [domain] {
         return resolve_blocking(domain);
     });
 
@@ -109,7 +110,7 @@ aio::Task<void> resolve_one(aio::IoContext& ctx, aio::BlockingPool& pool,
     pending.fetch_sub(1, std::memory_order_release);
 }
 
-aio::Task<> bench_async(aio::IoContext& ctx, aio::BlockingPool& pool) {
+kio::Task<> bench_async(kio::IoContext& ctx, kio::BlockingPool& pool) {
     ALOG_INFO("--- Starting ASYNC Benchmark (Parallel) ---");
 
     std::vector<std::pair<std::string, std::string>> results;
@@ -120,7 +121,7 @@ aio::Task<> bench_async(aio::IoContext& ctx, aio::BlockingPool& pool) {
     std::atomic<int> pending{static_cast<int>(domains.size())};
 
     // Keep tasks alive
-    std::vector<aio::Task<>> tasks;
+    std::vector<kio::Task<>> tasks;
     tasks.reserve(domains.size());
 
     // Fan-out: spawn all tasks
@@ -132,16 +133,16 @@ aio::Task<> bench_async(aio::IoContext& ctx, aio::BlockingPool& pool) {
 
     // Wait for completion
     while (pending.load(std::memory_order_acquire) > 0) {
-        co_await aio::AsyncSleep(ctx, 1ms);
+        co_await kio::AsyncSleep(ctx, 1ms);
     }
 
     auto end = std::chrono::high_resolution_clock::now();
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
 
-    aio::alog::info("Async Total Time: {} ms", ms);
-    aio::alog::info("--- Results (Async) ---");
+    kio::alog::info("Async Total Time: {} ms", ms);
+    kio::alog::info("--- Results (Async) ---");
     for (const auto& [dom, ip] : results) {
-        aio::alog::info("{}: {}", dom, ip);
+        kio::alog::info("{}: {}", dom, ip);
     }
 
     co_return;
@@ -149,10 +150,10 @@ aio::Task<> bench_async(aio::IoContext& ctx, aio::BlockingPool& pool) {
 
 int main() {
     try {
-        aio::alog::start();
+        kio::alog::start();
 
-        aio::IoContext ctx;
-        aio::BlockingPool pool{20};  // 20 threads for parallel DNS
+        kio::IoContext ctx;
+        kio::BlockingPool pool{20};  // 20 threads for parallel DNS
 
         // Run blocking benchmark
         auto t1 = bench_blocking(ctx);
@@ -164,7 +165,7 @@ int main() {
         auto t2 = bench_async(ctx, pool);
         ctx.RunUntilDone(std::move(t2));
 
-        aio::alog::stop();
+        kio::alog::stop();
     } catch (const std::exception& e) {
         std::cerr << "Exception: " << e.what() << std::endl;
         return 1;

@@ -1,13 +1,13 @@
 // test tasks without any io involved
 
-#include <gtest/gtest.h>
+#include "kio/aio.hpp"
 
 #include <stdexcept>
 #include <string>
 
-#include "aio/aio.hpp"
+#include <gtest/gtest.h>
 
-using namespace aio;
+using namespace kio;
 
 // -----------------------------------------------------------------------------
 // Task<T> (non-void) Tests

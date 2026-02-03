@@ -1,7 +1,8 @@
-#include <gtest/gtest.h>
-#include "aio/aio.hpp"
+#include "kio/aio.hpp"
 
-using namespace aio;
+#include <gtest/gtest.h>
+
+using namespace kio;
 
 TEST(IoContextTest, Lifecycle) {
     IoContext ctx;

@@ -1,12 +1,13 @@
-// tests/aio/pipe_pool_tests.cpp
+// tests/kio/pipe_pool_tests.cpp
 // Tests for PipePool
+
+#include "kio/aio.hpp"
 
 #include <unistd.h>
 
-#include "aio/aio.hpp"
 #include <gtest/gtest.h>
 
-using namespace aio;
+using namespace kio;
 
 // -----------------------------------------------------------------------------
 // PipePool Basic Tests

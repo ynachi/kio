@@ -5,12 +5,12 @@
 // 2. Offloading DNS resolution.
 // 3. Offloading complex calculation.
 
+#include "kio/aio.hpp"
+#include "kio/core/blocking_pool.hpp"
+
 #include <print>
 #include <string>
 #include <thread>
-
-#include "aio/aio.hpp"
-#include "aio/core/blocking_pool.hpp"
 
 using namespace std::chrono_literals;
 
@@ -29,7 +29,7 @@ aio::Task<> AsyncMain(aio::IoContext& ctx)
 
     std::println("1. Async DNS Resolution...");
 
-    // aio::net::ResolveAsync internally uses Offload to call getaddrinfo
+    // kio::net::ResolveAsync internally uses Offload to call getaddrinfo
     auto addr = co_await aio::net::ResolveAsync(ctx, pool, "google.com", 80);
 
     if (addr)

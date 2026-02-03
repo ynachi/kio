@@ -10,7 +10,7 @@
 
 #include "core.hpp"
 
-namespace aio
+namespace kio
 {
 
 namespace detail
@@ -218,4 +218,4 @@ auto Offload(IoContext& ctx, BlockingPool& pool, Fn&& fn)
     return OffloadOp<std::decay_t<Fn>>{&ctx, &pool, std::forward<Fn>(fn)};
 }
 
-}  // namespace aio
+}  // namespace kio

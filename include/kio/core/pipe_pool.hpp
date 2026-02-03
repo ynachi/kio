@@ -6,7 +6,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-namespace aio
+namespace kio
 {
 
 /// A reusable pipe (read_fd, write_fd)
@@ -144,4 +144,4 @@ private:
     size_t max_size_;
 };
 
-}  // namespace aio
+}  // namespace kio

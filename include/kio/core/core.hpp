@@ -1,4 +1,6 @@
 #pragma once
+#include "kio/logger.hpp"
+
 #include <coroutine>
 #include <csignal>
 #include <expected>
@@ -14,12 +16,11 @@
 
 #include <sys/eventfd.h>
 
-#include "aio/logger.hpp"
 #include "pipe_pool.hpp"
 #include "stats.hpp"
 #include <openssl/err.h>
 
-namespace aio
+namespace kio
 {
 // forward declaration
 class IoContext;
@@ -91,7 +92,7 @@ enum class ParseError: uint8_t
 class ParseErrorCategory : public std::error_category
 {
 public:
-    const char* name() const noexcept override { return "aio::ParseError"; }
+    const char* name() const noexcept override { return "kio::ParseError"; }
 
     std::string message(int ev) const override
     {
@@ -386,8 +387,8 @@ struct OperationState
         if (other.tracked)
         {
             ALOG_ERROR(
-                "[aio] FATAL: Attempted to move an OperationState that is currently tracked by "
-                "IoContext.\n[aio]        This usually means a Task was moved while suspended on I/O.");
+                "[kio] FATAL: Attempted to move an OperationState that is currently tracked by "
+                "IoContext.\n[kio]        This usually means a Task was moved while suspended on I/O.");
             std::terminate();
         }
         other.ctx = nullptr;
@@ -405,8 +406,8 @@ struct OperationState
             // Coroutine destroyed while I/O pending → memory corruption risk
             // Terminate loudly rather than corrupt silently
             ALOG_ERROR(
-                "[aio] FATAL: OperationState destroyed while still tracked by IoContext (I/O pending).\n[aio] "
-                "       CAUSE: A Task was destroyed while suspended on an async operation.\n[aio]        FIX: "
+                "[kio] FATAL: OperationState destroyed while still tracked by IoContext (I/O pending).\n[kio] "
+                "       CAUSE: A Task was destroyed while suspended on an async operation.\n[kio]        FIX: "
                 "  Ensure the Task is kept alive (e.g., in a TaskGroup) until it completes.");
             std::terminate();
         }
@@ -1202,9 +1203,9 @@ private:
     std::stop_token stop_token_;
 };
 
-}  // namespace aio
+}  // namespace kio
 
 template <>
-struct std::is_error_code_enum<aio::ParseError> : true_type
+struct std::is_error_code_enum<kio::ParseError> : true_type
 {
 };  // namespace std

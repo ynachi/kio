@@ -8,7 +8,7 @@
 #define AIO_STATS 0
 #endif
 
-namespace aio
+namespace kio
 {
 
 struct IoContextStats
@@ -94,7 +94,7 @@ inline void StatsSetMax(std::atomic<uint64_t>& target, uint64_t value)
 #define AIO_STATS_INC(stats, field) ((stats).field.fetch_add(1, std::memory_order_relaxed))
 #define AIO_STATS_DEC(stats, field) ((stats).field.fetch_sub(1, std::memory_order_relaxed))
 #define AIO_STATS_ADD(stats, field, value) ((stats).field.fetch_add((value), std::memory_order_relaxed))
-#define AIO_STATS_SET_MAX(stats, field, value) ::aio::detail::StatsSetMax((stats).field, (value))
+#define AIO_STATS_SET_MAX(stats, field, value) ::kio::detail::StatsSetMax((stats).field, (value))
 #else
 #define AIO_STATS_INC(stats, field) ((void)0)
 #define AIO_STATS_DEC(stats, field) ((void)0)
@@ -102,4 +102,4 @@ inline void StatsSetMax(std::atomic<uint64_t>& target, uint64_t value)
 #define AIO_STATS_SET_MAX(stats, field, value) ((void)0)
 #endif
 
-}  // namespace aio
+}  // namespace kio

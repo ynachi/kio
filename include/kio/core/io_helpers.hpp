@@ -1,13 +1,14 @@
 #pragma once
 
+#include "kio/io.hpp"
+
 #include <algorithm>
 #include <cassert>
 #include <span>
 
-#include "aio/io.hpp"
 #include "core.hpp"
 
-namespace aio
+namespace kio
 {
 
 constexpr uint64_t kUseFilePos = std::numeric_limits<uint64_t>::max();
@@ -309,4 +310,4 @@ Task<Result<void>> AsyncSendfile(IoContext& ctx, const Fout& out_fd, const Fin& 
     co_return Result<void>{};
 }
 
-}  // namespace aio
+}  // namespace kio

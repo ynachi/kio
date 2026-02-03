@@ -111,7 +111,7 @@ Checks:
   "
 
 WarningsAsErrors: '*'
-#HeaderFilterRegex: '/include/(aio|core)/,bitcask'
+#HeaderFilterRegex: '/include/(kio|core)/,bitcask'
 CheckOptions:
   - key: misc-non-private-member-variables-in-classes.IgnoreClassesWithAllMemberVariablesBeingPublic
     value: '1'

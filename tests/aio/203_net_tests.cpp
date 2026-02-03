@@ -1,5 +1,9 @@
-// tests/aio/net_tests.cpp
+// tests/kio/net_tests.cpp
 // Tests for networking utilities (Socket, SocketAddress, TcpListener)
+
+#include "kio/io.hpp"
+#include "kio/io_context.hpp"
+#include "kio/net.hpp"
 
 #include <chrono>
 #include <thread>
@@ -8,17 +12,14 @@
 
 #include <sys/socket.h>
 
-#include "aio/io.hpp"
-#include "aio/io_context.hpp"
-#include "aio/net.hpp"
 #include "test_helpers.hpp"
 #include <arpa/inet.h>
 #include <gtest/gtest.h>
 #include <netinet/in.h>
 
-using namespace aio;
-using namespace aio::net;
-using namespace aio::test;
+using namespace kio;
+using namespace kio::net;
+using namespace kio::test;
 using namespace std::chrono_literals;
 
 // -----------------------------------------------------------------------------

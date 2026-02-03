@@ -1,16 +1,16 @@
-// tests/aio/timeout_tests.cpp
+// tests/kio/timeout_tests.cpp
 // Tests for timeout functionality
 
-#include <gtest/gtest.h>
+#include "kio/aio.hpp"
 
 #include <array>
 #include <chrono>
 
-#include "aio/aio.hpp"
 #include "test_helpers.hpp"
+#include <gtest/gtest.h>
 
-using namespace aio;
-using namespace aio::test;
+using namespace kio;
+using namespace kio::test;
 using namespace std::chrono_literals;
 
 class TimeoutTest : public ::testing::Test {

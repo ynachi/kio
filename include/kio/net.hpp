@@ -19,7 +19,7 @@
 #include "core/core.hpp"
 #include <netinet/in.h>
 
-namespace aio::net
+namespace kio::net
 {
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -273,4 +273,4 @@ struct TcpListener
     static Result<Socket> BindV4(uint16_t port, std::string ipv4 = "0.0.0.0");
 };
 
-}  // namespace aio::net
+}  // namespace kio::net

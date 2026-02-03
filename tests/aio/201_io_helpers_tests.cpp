@@ -1,5 +1,8 @@
 // Tests for exact read/write helpers and sendfile
 
+#include "kio/aio.hpp"
+#include "kio/core/io_helpers.hpp"
+
 #include <array>
 #include <chrono>
 #include <vector>
@@ -7,13 +10,11 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-#include "aio/aio.hpp"
-#include "aio/core/io_helpers.hpp"
 #include "test_helpers.hpp"
 #include <gtest/gtest.h>
 
-using namespace aio;
-using namespace aio::test;
+using namespace kio;
+using namespace kio::test;
 using namespace std::chrono_literals;
 
 class IoHelpersTest : public ::testing::Test {

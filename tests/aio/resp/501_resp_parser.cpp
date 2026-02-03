@@ -1,18 +1,19 @@
 //
-// Updated for aio::resp::Parser and aio::IoBuffer
+// Updated for kio::resp::Parser and kio::IoBuffer
 //
 
-#include "aio/resp/parser.h"
+#include "kio/resp/parser.h"
+
+#include "kio/aio.hpp"
 
 #include <random>
 #include <string>
 #include <vector>
 
-#include "aio/aio.hpp"
 #include <gtest/gtest.h>
 
-using namespace aio;
-using namespace aio::resp;
+using namespace kio;
+using namespace kio::resp;
 
 class ParserTest : public ::testing::Test
 {

@@ -7,7 +7,7 @@
 
 #include "core.hpp"
 
-namespace aio
+namespace kio
 {
 
 /**
@@ -174,4 +174,4 @@ private:
 
 using void_task_group = TaskGroup<>;
 
-}  // namespace aio
+}  // namespace kio

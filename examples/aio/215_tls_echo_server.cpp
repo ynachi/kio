@@ -1,18 +1,19 @@
 //
 // Created by Yao ACHI on 24/01/2026.
 //
-// examples/aio/215_tls_echo_server.cpp
+// examples/kio/215_tls_echo_server.cpp
 // Demonstrates: KTLS, AsyncTlsHandshake, TaskGroup, Worker, and high-performance echo server
+
+#include "kio/aio.hpp"
+#include "kio/logger.hpp"
+#include "kio/tls/handshake.hpp"
+#include "kio/tls/socket.hpp"
+#include "kio/tls/tls_context.hpp"
 
 #include <array>
 #include <csignal>
 #include <print>
 
-#include "aio/aio.hpp"
-#include "aio/logger.hpp"
-#include "aio/tls/handshake.hpp"
-#include "aio/tls/socket.hpp"
-#include "aio/tls/tls_context.hpp"
 #include <gflags/gflags.h>
 
 /**
@@ -60,16 +61,16 @@ void PrintKtlsDiagnostics()
     ALOG_ERROR("BIO_get_ktls_send: NOT AVAILABLE (need OpenSSL 3.0+)");
 #endif
 
-    ALOG_INFO("Kernel TLS module: {}", aio::tls::detail::HaveKtls() ? "loaded" : "NOT LOADED");
+    ALOG_INFO("Kernel TLS module: {}", kio::tls::detail::HaveKtls() ? "loaded" : "NOT LOADED");
 }
 
-aio::Task<> HandleClient(aio::IoContext& ctx, int fd, aio::tls::TlsContext& tls_ctx)
+kio::Task<> HandleClient(kio::IoContext& ctx, int fd, kio::tls::TlsContext& tls_ctx)
 {
     // Wrap the raw FD from AsyncAccept into a RAII Socket.
-    aio::net::Socket client_sock(fd);
+    kio::net::Socket client_sock(fd);
 
     // Perform the asynchronous TLS handshake.
-    auto handshake_res = co_await aio::tls::AsyncTlsHandshake(ctx, std::move(client_sock), tls_ctx, true);
+    auto handshake_res = co_await kio::tls::AsyncTlsHandshake(ctx, std::move(client_sock), tls_ctx, true);
     if (!handshake_res)
     {
         std::println(stderr, "TLS Handshake failed: {}", handshake_res.error().message());
@@ -90,11 +91,11 @@ aio::Task<> HandleClient(aio::IoContext& ctx, int fd, aio::tls::TlsContext& tls_
 
     while (true)
     {
-        auto recv_result = co_await aio::AsyncRecv(ctx, tls_sock, buffer);
+        auto recv_result = co_await kio::AsyncRecv(ctx, tls_sock, buffer);
         if (!recv_result || *recv_result == 0)
             break;
 
-        auto send_result = co_await aio::AsyncSend(ctx, tls_sock, std::span{buffer.data(), (*recv_result)});
+        auto send_result = co_await kio::AsyncSend(ctx, tls_sock, std::span{buffer.data(), (*recv_result)});
         if (!send_result)
             break;
     }
@@ -103,15 +104,15 @@ aio::Task<> HandleClient(aio::IoContext& ctx, int fd, aio::tls::TlsContext& tls_
     co_await tls_sock.AsyncShutdown(ctx);
 
     // Explicitly close the socket asynchronously.
-    co_await aio::AsyncClose(ctx, tls_sock.Get());
+    co_await kio::AsyncClose(ctx, tls_sock.Get());
 
     std::println("Client disconnected (FD {})", ktls_fd);
 }
 
-aio::Task<> Server(aio::IoContext& ctx, uint16_t port)
+kio::Task<> Server(kio::IoContext& ctx, uint16_t port)
 {
     // 1. Initialize TLS Configuration
-    aio::tls::TlsConfig tls_cfg;
+    kio::tls::TlsConfig tls_cfg;
     // Hardcoded server identity (as per requirements)
     tls_cfg.cert_path = "/home/ynachi/test_certs/server.crt";
     tls_cfg.key_path = "/home/ynachi/test_certs/server.key";
@@ -122,7 +123,7 @@ aio::Task<> Server(aio::IoContext& ctx, uint16_t port)
     tls_cfg.verify_mode = SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
 
     // 2. Create TLS Context
-    auto tls_ctx_res = aio::tls::TlsContext::Create(tls_cfg, true);
+    auto tls_ctx_res = kio::tls::TlsContext::Create(tls_cfg, true);
     if (!tls_ctx_res)
     {
         std::println(stderr, "Failed to create TLS context: {}", tls_ctx_res.error().message());
@@ -132,7 +133,7 @@ aio::Task<> Server(aio::IoContext& ctx, uint16_t port)
     auto& tls_ctx = *tls_ctx_res;
 
     // 3. Bind TCP Listener
-    const auto listener = aio::net::TcpListener::BindV4(port);
+    const auto listener = kio::net::TcpListener::BindV4(port);
     if (!listener)
     {
         std::println(stderr, "Failed to bind to port {}", port);
@@ -144,11 +145,11 @@ aio::Task<> Server(aio::IoContext& ctx, uint16_t port)
     std::println("ALPN Enabled: h2, http/1.1");
 
     // Use TaskGroup to manage the lifetime of client tasks
-    aio::TaskGroup tasks(256);
+    kio::TaskGroup tasks(256);
 
     while (true)
     {
-        auto accept_result = co_await aio::AsyncAccept(ctx, listener->Get());
+        auto accept_result = co_await kio::AsyncAccept(ctx, listener->Get());
         if (!accept_result)
             continue;
 
@@ -172,10 +173,10 @@ int main(int argc, char* argv[])
     // External stop source to control the worker
     const std::stop_source stop_source;
     // Create a worker with the stop token
-    aio::Worker worker(0, stop_source.get_token());
+    kio::Worker worker(0, stop_source.get_token());
 
     // Run the server task
-    worker.RunTask([&](aio::IoContext& ctx) { return Server(ctx, static_cast<uint16_t>(FLAGS_port)); }, /*cpu_id=*/0);
+    worker.RunTask([&](kio::IoContext& ctx) { return Server(ctx, static_cast<uint16_t>(FLAGS_port)); }, /*cpu_id=*/0);
 
     // Main thread loop: Wait for signal
     ALOG_INFO("Server running. Press Ctrl+C to stop.");

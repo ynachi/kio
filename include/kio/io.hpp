@@ -1,15 +1,16 @@
 #pragma once
 
+#include "kio/net.hpp"
+
 #include <concepts>
 #include <cstddef>
 #include <cstring>
 #include <span>
 #include <string_view>
 
-#include "aio/net.hpp"
 #include "core/core.hpp"
 
-namespace aio
+namespace kio
 {
 //================================================================
 // IO Buffer
@@ -792,7 +793,7 @@ ConnectOp AsyncConnect(IoContext& ctx, const F& f, const sockaddr* addr, socklen
 /// @return Awaitable yielding Result<void>
 ///
 /// @code
-///   auto addr = aio::net::SocketAddress::V4(8080, "127.0.0.1");
+///   auto addr = kio::net::SocketAddress::V4(8080, "127.0.0.1");
 ///   auto result = co_await AsyncConnect(ctx, socket, addr);
 /// @endcode
 template <FileDescriptor F>
@@ -1139,4 +1140,4 @@ SleepOp AsyncSleep(IoContext& ctx, std::chrono::duration<Rep, Period> dur)
     return SleepOp(ctx, dur);
 }
 
-}  // namespace aio
+}  // namespace kio

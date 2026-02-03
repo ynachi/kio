@@ -1,15 +1,15 @@
 //
 // Created by Yao ACHI on 28/01/2026.
 //
-#include "../../include/aio/core/core.hpp"
+#include "kio/core/core.hpp"
 
 #include <liburing/io_uring.h>
 
 #include <sys/eventfd.h>
 
-#include "../../include/aio/core/stats.hpp"
+#include "../../include/kio/core/stats.hpp"
 
-namespace aio
+namespace kio
 {
 std::unexpected<std::error_code> ErrorFromOpenSSL() noexcept
 {
@@ -456,4 +456,4 @@ std::pair<unsigned, bool> IoContext::ProcessReadyCompletions()
     return {count, saw_wake};
 }
 
-}  // namespace aio
+}  // namespace kio

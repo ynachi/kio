@@ -1,5 +1,7 @@
-// tests/aio/io_ops_tests.cpp
+// tests/kio/io_ops_tests.cpp
 // Integration tests for I/O operations
+
+#include "kio/aio.hpp"
 
 #include <array>
 #include <chrono>
@@ -12,12 +14,11 @@
 
 #include <sys/uio.h>
 
-#include "aio/aio.hpp"
 #include "test_helpers.hpp"
 #include <gtest/gtest.h>
 
-using namespace aio;
-using namespace aio::test;
+using namespace kio;
+using namespace kio::test;
 using namespace std::chrono_literals;
 
 class IoOpsTest : public ::testing::Test {

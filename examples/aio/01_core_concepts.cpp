@@ -6,15 +6,15 @@
 // 3. Handling time (AsyncSleep).
 // 4. Graceful shutdown via SignalSet.
 
+#include "kio/aio.hpp"
+#include "kio/logger.hpp"
+
 #include <chrono>
 #include <print>
 
-#include "aio/aio.hpp"
-#include "aio/logger.hpp"
-
 using namespace std::chrono_literals;
-using aio::IoContext;
-using aio::Task;
+using kio::IoContext;
+using kio::Task;
 
 namespace
 {
@@ -28,7 +28,7 @@ Task<> Agent(IoContext& ctx, int id, const std::chrono::microseconds interval, c
 
     while (!stop_token)
     {
-        co_await aio::AsyncSleep(ctx, interval);
+        co_await kio::AsyncSleep(ctx, interval);
 
         // Check again after waking up; we might need to stop immediately.
         if (stop_token)  // NOLINT the linter have hard time about this condition. It claims it is always true
@@ -48,7 +48,7 @@ Task<> MainTask(IoContext& ctx)
     bool stop_agents = false;
 
     // TaskGroup allows running multiple tasks concurrently on the single-threaded context
-    auto agents = aio::TaskGroup();
+    auto agents = kio::TaskGroup();
 
     // Pass the stop flag to all agents
     auto a1 = Agent(ctx, 1, 500ms, stop_agents);
@@ -58,11 +58,11 @@ Task<> MainTask(IoContext& ctx)
     agents.SpawnAll(std::move(a1), std::move(a2), std::move(a3));
 
     // Wait for a termination signal (Ctrl+C).
-    const aio::SignalSet signals{SIGINT, SIGTERM};
+    const kio::SignalSet signals{SIGINT, SIGTERM};
     ALOG_INFO("System running. Press Ctrl+C to stop.");
 
     // This suspends MainTask until a signal arrives
-    auto sig = co_await aio::AsyncWaitSignal(ctx, signals);
+    auto sig = co_await kio::AsyncWaitSignal(ctx, signals);
     ALOG_WARN("\nReceived Signal {}. Shutting down...", *sig);
 
     // Signal agents to stop looping
@@ -78,7 +78,7 @@ Task<> MainTask(IoContext& ctx)
 
 int main()
 {
-    aio::alog::g_level = aio::alog::Level::Info;
+    kio::alog::g_level = kio::alog::Level::Info;
 
     IoContext ctx;
 

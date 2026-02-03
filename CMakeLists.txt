@@ -227,7 +227,7 @@ file(GLOB_RECURSE ALL_SOURCE_FILES
         ${CMAKE_SOURCE_DIR}/kio/*.h
         ${CMAKE_SOURCE_DIR}/bitcask/src/*.cpp
         ${CMAKE_SOURCE_DIR}/bitcask/include/*.h
-        ${CMAKE_SOURCE_DIR}/demo/*.cpp
+        ${CMAKE_SOURCE_DIR}/examples/*.cpp
         ${CMAKE_SOURCE_DIR}/tests/*.cpp
         ${CMAKE_SOURCE_DIR}/benchmarks/cpp/*.cpp
 )
@@ -277,20 +277,20 @@ endif ()
 # Aio lib, change later to kio
 #----------------------------------------------
 # Library definition
-add_library(aio
-        src/aio/core.cpp
-        src/aio/io.cpp
-        src/aio/net.cpp
-        src/aio/parser.cpp
-        src/aio/tls_context.cpp
+add_library(kio
+        src/kio/core.cpp
+        src/kio/io.cpp
+        src/kio/net.cpp
+        src/kio/parser.cpp
+        src/kio/tls_context.cpp
 )
 # Include directories
-target_include_directories(aio PUBLIC
+target_include_directories(kio PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
 )
 # Link dependencies
-target_link_libraries(aio PUBLIC
+target_link_libraries(kio PUBLIC
         PkgConfig::LibUring
         pthread
         OpenSSL::SSL
@@ -319,7 +319,6 @@ endif ()
 if (KIO_BUILD_TESTS)
     include(CTest)
     enable_testing()
-    add_subdirectory(kio/tests)
     add_subdirectory(tests)
 
     # Check target - runs all tests

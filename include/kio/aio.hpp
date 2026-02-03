@@ -59,3 +59,6 @@
 #include "io.hpp"
 #include "logger.hpp"
 #include "net.hpp"
+#include "tls/handshake.hpp"
+#include "tls/socket.hpp"
+#include "tls/tls_context.hpp"

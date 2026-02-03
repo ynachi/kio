@@ -1,25 +1,26 @@
 #pragma once
-// tests/aio/test_helpers.hpp
-// Common test utilities for aio tests
+// tests/kio/test_helpers.hpp
+// Common test utilities for kio tests
+
+#include "kio/aio.hpp"
 
 #include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstring>
-#include <fcntl.h>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <unistd.h>
 #include <utility>
+
+#include <fcntl.h>
+#include <unistd.h>
 
 #include <sys/socket.h>
 #include <sys/stat.h>
 
-#include "aio/aio.hpp"
-
-namespace aio::test {
+namespace kio::test {
 
 // -----------------------------------------------------------------------------
 // Run helpers
@@ -36,7 +37,7 @@ T RunWithTimeout(IoContext& ctx, Task<T>& t, std::chrono::milliseconds timeout) 
         }
     });
     if (!t.done()) {
-        throw std::runtime_error("aio task timed out");
+        throw std::runtime_error("kio task timed out");
     }
     return t.result();
 }
@@ -51,7 +52,7 @@ inline void RunWithTimeout(IoContext& ctx, Task<void>& t, std::chrono::milliseco
         }
     });
     if (!t.Done()) {
-        throw std::runtime_error("aio task timed out");
+        throw std::runtime_error("kio task timed out");
     }
     t.Result();
 }
@@ -239,4 +240,4 @@ inline bool VerifyTestData(std::span<const std::byte> data, uint8_t seed = 0) {
     return true;
 }
 
-}  // namespace aio::test
+}  // namespace kio::test

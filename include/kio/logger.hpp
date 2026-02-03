@@ -19,7 +19,7 @@
     #define LOG_BUILD_LEVEL 0
 #endif
 
-namespace aio::alog
+namespace kio::alog
 {
 
 enum class Level : uint8_t
@@ -357,11 +357,11 @@ void log_impl(std::source_location loc, std::format_string<Args...> fmt, Args&&.
     }
 }
 
-}  // namespace aio::alog
+}  // namespace kio::alog
 
 // ---- Macros for proper source location capture ----
-#define ALOG_DEBUG(...) ::aio::alog::log_impl<::aio::alog::Level::Debug>(std::source_location::current(), __VA_ARGS__)
-#define ALOG_INFO(...)  ::aio::alog::log_impl<::aio::alog::Level::Info>(std::source_location::current(), __VA_ARGS__)
-#define ALOG_WARN(...)  ::aio::alog::log_impl<::aio::alog::Level::Warn>(std::source_location::current(), __VA_ARGS__)
-#define ALOG_ERROR(...) ::aio::alog::log_impl<::aio::alog::Level::Error>(std::source_location::current(), __VA_ARGS__)
-#define ALOG_FATAL(...) ::aio::alog::log_impl<::aio::alog::Level::Fatal>(std::source_location::current(), __VA_ARGS__)
+#define ALOG_DEBUG(...) ::kio::alog::log_impl<::kio::alog::Level::Debug>(std::source_location::current(), __VA_ARGS__)
+#define ALOG_INFO(...)  ::kio::alog::log_impl<::kio::alog::Level::Info>(std::source_location::current(), __VA_ARGS__)
+#define ALOG_WARN(...)  ::kio::alog::log_impl<::kio::alog::Level::Warn>(std::source_location::current(), __VA_ARGS__)
+#define ALOG_ERROR(...) ::kio::alog::log_impl<::kio::alog::Level::Error>(std::source_location::current(), __VA_ARGS__)
+#define ALOG_FATAL(...) ::kio::alog::log_impl<::kio::alog::Level::Fatal>(std::source_location::current(), __VA_ARGS__)

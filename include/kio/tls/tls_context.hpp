@@ -15,7 +15,7 @@
     #define KIO_HAVE_OPENSSL3 0
 #endif
 
-namespace aio::tls
+namespace kio::tls
 {
 
 namespace detail
@@ -93,4 +93,4 @@ public:
     [[nodiscard]] bool VerifyHostname() const { return verify_hostname_; }
 };
 
-}  // namespace aio::tls
+}  // namespace kio::tls
