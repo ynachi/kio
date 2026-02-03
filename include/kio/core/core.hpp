@@ -1190,7 +1190,7 @@ private:
 
         if (const int rc = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset); rc != 0)
         {
-            ALOG_INFO("Warning: Failed to pin to CPU {}: {}", cpu_id, std::strerror(rc));
+            ALOG_INFO("Warning: Failed to pin to CPU {}: {}", cpu_id, std::generic_category().message(rc));
         }
     }
 

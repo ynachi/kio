@@ -16,11 +16,13 @@ Checks:
   ,readability-*\
   # it will work from clang-16
   ,-bugprone-unchecked-optional-access\
+  ,-bugprone-derived-method-shadowing-base-method\
   ,-bugprone-easily-swappable-parameters\
   ,-bugprone-exception-escape\
   ,-bugprone-implicit-widening-of-multiplication-result\
   ,-bugprone-lambda-function-name\
   ,-bugprone-narrowing-conversions\
+  ,-bugprone-throwing-static-initialization\
   ,-bugprone-use-after-move\
   ,-cert-dcl21-cpp\
   ,-cert-err09-cpp\
@@ -38,9 +40,14 @@ Checks:
   ,-cppcoreguidelines-avoid-magic-numbers\
   ,-cppcoreguidelines-avoid-non-const-global-variables\
   ,-cppcoreguidelines-c-copy-assignment-signature\
+  ,-cppcoreguidelines-macro-usage\
+  ,-cppcoreguidelines-missing-std-forward\
   ,-cppcoreguidelines-narrowing-conversions\
   ,-cppcoreguidelines-non-private-member-variables-in-classes\
   ,-cppcoreguidelines-owning-memory\
+  ,-cppcoreguidelines-pro-bounds-avoid-unchecked-container-access\
+  ,-cppcoreguidelines-pro-type-const-cast\
+  ,-cppcoreguidelines-rvalue-reference-param-not-moved\
   ,-cppcoreguidelines-pro-bounds-array-to-pointer-decay\
   ,-cppcoreguidelines-pro-bounds-constant-array-index\
   ,-cppcoreguidelines-pro-bounds-pointer-arithmetic\
@@ -87,6 +94,7 @@ Checks:
   ,-performance-no-int-to-ptr\
   ,-performance-trivially-destructible\
   ,-performance-unnecessary-value-param\
+  ,-portability-avoid-pragma-once\
   ,-portability-simd-intrinsics\
   ,-readability-braces-around-statements\
   ,-readability-container-contains\
@@ -111,7 +119,7 @@ Checks:
   "
 
 WarningsAsErrors: '*'
-#HeaderFilterRegex: '/include/(kio|core)/,bitcask'
+HeaderFilterRegex: '(include/kio/|src/kio/|bitcask/|examples/|tests/|demo/)'
 CheckOptions:
   - key: misc-non-private-member-variables-in-classes.IgnoreClassesWithAllMemberVariablesBeingPublic
     value: '1'
