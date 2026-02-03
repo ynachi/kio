@@ -34,6 +34,7 @@ function(kio_target_compile_options target_name)
             #"-DLOG_BUILD_LEVEL=${LOG_BUILD_LEVEL}"
 
             $<$<CONFIG:Release>:-O3>
+            $<$<CONFIG:Release>:-march=native>
     )
 
     if (target_type STREQUAL "INTERFACE_LIBRARY")
@@ -307,7 +308,6 @@ if (KIO_BUILD_BITCASK)
 endif ()
 
 if (KIO_BUILD_DEMOS)
-    add_subdirectory(demo)
     add_subdirectory(examples)
 endif ()
 

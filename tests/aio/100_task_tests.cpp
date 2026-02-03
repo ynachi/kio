@@ -21,7 +21,7 @@ TEST(TaskTest, ReturnsIntValue) {
     auto task = coro();
     EXPECT_FALSE(task.Done());
 
-    task.resume();
+    auto ans = co_await task;
 
     EXPECT_TRUE(task.Done());
     EXPECT_EQ(task.Result(), 42);

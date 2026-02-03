@@ -2,7 +2,7 @@
 // Tests for networking utilities (Socket, SocketAddress, TcpListener)
 
 #include "kio/io.hpp"
-#include "kio/io_context.hpp"
+#include "kio/kio.hpp"
 #include "kio/net.hpp"
 
 #include <chrono>
