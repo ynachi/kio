@@ -1,8 +1,6 @@
 #pragma once
-// tests/kio/test_helpers.hpp
-// Common test utilities for kio tests
 
-#include "kio/aio.hpp"
+#include "kio/kio.hpp"
 
 #include <array>
 #include <chrono>
@@ -40,21 +38,6 @@ T RunWithTimeout(IoContext& ctx, Task<T>& t, std::chrono::milliseconds timeout) 
         throw std::runtime_error("kio task timed out");
     }
     return t.result();
-}
-
-/// Specialization for void tasks
-inline void RunWithTimeout(IoContext& ctx, Task<void>& t, std::chrono::milliseconds timeout) {
-    t.Start();
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    ctx.Run([&] {
-        if (t.Done() || std::chrono::steady_clock::now() >= deadline) {
-            ctx.Stop();
-        }
-    });
-    if (!t.Done()) {
-        throw std::runtime_error("kio task timed out");
-    }
-    t.Result();
 }
 
 /// Run a task synchronously (no timeout, use for fast tests)

@@ -1,7 +1,4 @@
-// tests/kio/pipe_pool_tests.cpp
-// Tests for PipePool
-
-#include "kio/aio.hpp"
+#include "kio/kio.hpp"
 
 #include <unistd.h>
 

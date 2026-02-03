@@ -5,13 +5,11 @@
 // 2. Zero-Copy file serving (AsyncSendfile).
 // 3. Introspection via internal stats.
 
-#include "kio/aio.hpp"
-#include "kio/core/io_helpers.hpp"
+#include "kio/kio.hpp"
 
 #include <chrono>
 #include <filesystem>
 #include <format>
-#include <thread>
 #include <vector>
 
 #include <fcntl.h>
@@ -20,7 +18,7 @@
 
 #include <gflags/gflags.h>
 
-DEFINE_string(host, "127.0.0.1", "Server host");
+DEFINE_string(host, "0.0.0.0", "Server host");
 DEFINE_uint32(port, 8080, "Server port");
 DEFINE_string(sering_folder, "/home/ynachi/benchmarks", "The folder from which static files are served");
 DEFINE_uint32(cores, 4, "number of cores");
@@ -33,16 +31,9 @@ namespace
 kio::Task<> HandleHttp(kio::IoContext& ctx, kio::net::Socket sock, const std::stop_token st)
 {
     std::array<std::byte, 1024> buf{};
-    // auto deadline = std::chrono::steady_clock::now() + 10s;
 
     while (!st.stop_requested())
     {
-        // if (std::chrono::steady_clock::now() >= deadline)
-        // {
-        //     ALOG_INFO("[Client {}] Timed out", sock.Get());
-        //     break;
-        // }
-        // Read Request
         auto recv_res = co_await kio::AsyncRecv(ctx, sock, buf);
 
         if (!recv_res.has_value())
@@ -89,7 +80,7 @@ kio::Task<> HandleHttp(kio::IoContext& ctx, kio::net::Socket sock, const std::st
         else if (request.starts_with("GET /file "))
         {
             // 3. Zero-Copy File Send
-            const std::string filepath = std::format("{}/10g.bin", FLAGS_sering_folder);
+            const std::string filepath = std::format("{}/10g.img", FLAGS_sering_folder);
             if (auto file_res = co_await kio::AsyncOpen(ctx, filepath.c_str(), O_RDONLY))
             {
                 int file_fd = *file_res;

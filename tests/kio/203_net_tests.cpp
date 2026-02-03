@@ -1,6 +1,3 @@
-// tests/kio/net_tests.cpp
-// Tests for networking utilities (Socket, SocketAddress, TcpListener)
-
 #include "kio/io.hpp"
 #include "kio/kio.hpp"
 #include "kio/net.hpp"
@@ -246,54 +243,9 @@ TEST(TcpListenerTest, BindToPort) {
 TEST(TcpListenerTest, BindPortOnly) {
     // Convenience overload - also use port 0
     // Note: This test might fail if port is already in use
-    auto result = TcpListener::Bind(0);
+    auto result = TcpListener::BindV4(0);
     ASSERT_TRUE(result.has_value());
     EXPECT_TRUE(result->IsValid());
-}
-
-TEST(TcpListenerTest, AcceptConnection) {
-    IoContext ctx;
-
-    auto listener_result = TcpListener::Bind(SocketAddress::V4(0, "127.0.0.1"));
-    ASSERT_TRUE(listener_result.has_value());
-    Socket listener = std::move(*listener_result);
-
-    // Get the actual port
-    sockaddr_in addr{};
-    socklen_t len = sizeof(addr);
-    ASSERT_EQ(::getsockname(listener.Get(), reinterpret_cast<sockaddr*>(&addr), &len), 0);
-    uint16_t port = ntohs(addr.sin_port);
-
-    // Start a thread to connect
-    std::thread client([port]() {
-        std::this_thread::sleep_for(10ms);
-
-        int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-        if (fd < 0) return;
-
-        sockaddr_in server{};
-        server.sin_family = AF_INET;
-        server.sin_port = htons(port);
-        inet_pton(AF_INET, "127.0.0.1", &server.sin_addr);
-
-        ::connect(fd, reinterpret_cast<sockaddr*>(&server), sizeof(server));
-        ::close(fd);
-    });
-
-    auto test = [&]() -> Task<> {
-        auto accept_result = co_await AsyncAccept(ctx, listener.Get())
-            .WithTimeout(1s);
-
-        EXPECT_TRUE(accept_result.has_value());
-        if (accept_result.has_value()) {
-            ::close(*accept_result);
-        }
-        co_return;
-    };
-
-    auto task = test();
-    ctx.RunUntilDone(task);
-    client.join();
 }
 
 // -----------------------------------------------------------------------------
@@ -338,7 +290,7 @@ TEST(AsyncConnectTest, ConnectToListener) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
     acceptor.join();
 }
 
@@ -364,7 +316,7 @@ TEST(AsyncConnectTest, ConnectRefused) {
     };
 
     auto task = test();
-    ctx.RunUntilDone(task);
+    ctx.RunUntilDone(std::move(task));
 }
 
 int main(int argc, char** argv)

@@ -1,7 +1,6 @@
 // Tests for exact read/write helpers and sendfile
 
-#include "kio/aio.hpp"
-#include "kio/core/io_helpers.hpp"
+#include "kio/kio.hpp"
 
 #include <array>
 #include <chrono>

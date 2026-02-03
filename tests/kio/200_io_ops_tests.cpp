@@ -1,7 +1,7 @@
 // tests/kio/io_ops_tests.cpp
 // Integration tests for I/O operations
 
-#include "kio/aio.hpp"
+#include "kio/kio.hpp"
 
 #include <array>
 #include <chrono>

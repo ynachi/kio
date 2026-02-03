@@ -7,7 +7,7 @@
 
 #include <sys/eventfd.h>
 
-#include "../../include/kio/core/stats.hpp"
+#include "kio/core/stats.hpp"
 
 namespace kio
 {
