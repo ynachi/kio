@@ -2,6 +2,7 @@
 *.d
 .venv
 build
+build2/
 build-*/
 # Compiled Object files
 *.slo

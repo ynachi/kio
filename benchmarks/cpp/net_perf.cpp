@@ -46,12 +46,12 @@ static constexpr std::string_view HTTP_RESPONSE =
 DetachedTask handle_client(Worker& worker, const int client_fd)
 {
     std::vector<char> buf(8192);
-    const auto st = worker.get_stop_token();
+    const auto st = worker.GetStopToken();
 
     while (!st.stop_requested())
     {
         // Read data (maybe partial)
-        auto n = co_await worker.async_read(client_fd, buf);
+        auto n = co_await worker.AsyncRead(client_fd, buf);
         if (!n.has_value() || n.value() == 0)
         {
             break;  // Error or disconnect
@@ -66,7 +66,9 @@ DetachedTask handle_client(Worker& worker, const int client_fd)
             // We have a complete request, send response
             // Use async_write_exact to ensure all bytes are sent (matching Photon behavior)
 
-            if (auto sent = co_await worker.async_write_exact(client_fd, std::span(HTTP_RESPONSE.data(), HTTP_RESPONSE.size())); !sent.has_value())
+            if (auto sent = co_await worker.AsyncWriteExact(client_fd,
+                                                            std::span(HTTP_RESPONSE.data(), HTTP_RESPONSE.size()));
+                !sent.has_value())
             {
                 break;
             }
@@ -86,14 +88,14 @@ DetachedTask handle_client(Worker& worker, const int client_fd)
 // Accept loop
 DetachedTask accept_loop(Worker& worker, const int listen_fd)
 {
-    const auto st = worker.get_stop_token();
+    const auto st = worker.GetStopToken();
 
     while (!st.stop_requested())
     {
         sockaddr_storage client_addr{};
         socklen_t addr_len = sizeof(client_addr);
 
-        auto client_fd = co_await worker.async_accept(listen_fd, reinterpret_cast<sockaddr*>(&client_addr), &addr_len);
+        auto client_fd = co_await worker.AsyncAccept(listen_fd, reinterpret_cast<sockaddr*>(&client_addr), &addr_len);
 
         if (!client_fd.has_value())
         {
@@ -104,7 +106,7 @@ DetachedTask accept_loop(Worker& worker, const int listen_fd)
             continue;
         }
 
-        handle_client(worker, client_fd.value()).detach();
+        handle_client(worker, client_fd.value());
     }
 }
 
@@ -113,7 +115,7 @@ int main(int argc, char** argv)
     gflags::ParseCommandLineFlags(&argc, &argv, true);
 
     signal(SIGPIPE, SIG_IGN);
-    alog::configure(4096, LogLevel::Info);
+    alog::Configure(8192, LogLevel::kDisabled);
 
     // Create a listening socket
     auto server_fd_exp = net::create_tcp_server_socket(FLAGS_ip, FLAGS_port, static_cast<int>(FLAGS_backlog));
@@ -129,16 +131,15 @@ int main(int argc, char** argv)
     // Configure workers
     WorkerConfig config{};
     config.uring_queue_depth = FLAGS_uring_queue_depth;
-    config.default_op_slots = FLAGS_op_slots;
 
     // Create a worker pool
-    IOPool pool(FLAGS_workers, config, [server_fd](Worker& worker) { accept_loop(worker, server_fd).detach(); });
+    IOPool pool(FLAGS_workers, config, [server_fd](Worker& worker) { accept_loop(worker, server_fd); });
 
     ALOG_INFO("Server running with {} workers", FLAGS_workers);
     std::cout << "\nPress Enter to stop...\n";
     std::cin.get();
 
-    pool.stop();
+    pool.Stop();
     close(server_fd);
     ALOG_INFO("Server stopped");
 

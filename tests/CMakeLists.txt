@@ -1,151 +1,60 @@
-# Test executables
-add_executable(sync_wait_test sync_wait_test.cpp)
-add_executable(lock_free_free_queue ds/mpsc_queue_test.cpp)
+# kio tests
 
-target_link_libraries(sync_wait_test
-        PRIVATE
-        kio_lib
-        GTest::gtest
-        GTest::gtest_main
+# -----------------------------------------------------------------------------
+# Unit Tests (fast, no I/O)
+# -----------------------------------------------------------------------------
+
+kio_add_test(101_kio_pipe_pool_tests kio/101_pipe_pool_tests.cpp
+        TAGS kio unit
+        LIBS kio GTest::gtest GTest::gtest_main
 )
 
-target_link_libraries(lock_free_free_queue
-        PRIVATE
-        kio_lib
-        GTest::gtest
-        GTest::gtest_main
+kio_add_test(102_io_context kio/102_io_context.cpp
+        TAGS kio unit
+        LIBS kio GTest::gtest GTest::gtest_main
 )
 
-target_include_directories(sync_wait_test
-        PRIVATE
-        ${CMAKE_SOURCE_DIR}/src
+# -----------------------------------------------------------------------------
+# Integration Tests (real I/O)
+# -----------------------------------------------------------------------------
+
+kio_add_test(200_kio_io_ops_tests kio/200_io_ops_tests.cpp
+        TAGS kio integration
+        LIBS kio GTest::gtest GTest::gtest_main
 )
 
-target_include_directories(lock_free_free_queue
-        PRIVATE
-        ${CMAKE_SOURCE_DIR}/src
+kio_add_test(201_kio_io_helpers_tests kio/201_io_helpers_tests.cpp
+        TAGS kio integration
+        LIBS kio GTest::gtest GTest::gtest_main
 )
 
-# worker tests
-add_executable(kio_worker_test worker_test.cpp)
-
-target_link_libraries(kio_worker_test
-        PRIVATE
-        kio_lib
-        GTest::gtest
-        GTest::gtest_main
+kio_add_test(202_kio_timeout_tests kio/202_timeout_tests.cpp
+        TAGS kio integration
+        LIBS kio GTest::gtest GTest::gtest_main
 )
 
-target_include_directories(kio_worker_test
-        PRIVATE
-        ${CMAKE_SOURCE_DIR}/src
+kio_add_test(203_kio_net_tests kio/203_net_tests.cpp
+        TAGS kio integration
+        LIBS kio GTest::gtest GTest::gtest_main
 )
 
-target_include_directories(kio_worker_test
-        PRIVATE
-        ${CMAKE_SOURCE_DIR}/src
+kio_add_test(301_http_tests kio/301_http_test.cpp
+        TAGS kio http unit
+        LIBS kio GTest::gtest GTest::gtest_main
 )
 
-# file manager tests
-add_executable(filemanager_test filemanager_test.cpp)
-
-target_link_libraries(filemanager_test
-        PRIVATE
-        kio_lib
-        GTest::gtest
-        GTest::gtest_main
-)
-
-target_include_directories(filemanager_test
-        PRIVATE
-        ${CMAKE_SOURCE_DIR}/src
-)
-
-target_include_directories(filemanager_test
-        PRIVATE
-        ${CMAKE_SOURCE_DIR}/src
+kio_add_test(401_io_buffer kio/401_io_buffer_tests.cpp
+        TAGS kio buffer unit
+        LIBS kio GTest::gtest GTest::gtest_main
 )
 
 
-# kio logger tests
-add_executable(kio_logger_test kio_logger_test.cpp)
-
-target_link_libraries(kio_logger_test
-        PRIVATE
-        kio_lib
-        GTest::gtest
-        GTest::gtest_main
+kio_add_test(501_resp_parser kio/resp/501_resp_parser.cpp
+        TAGS kio resp unit
+        LIBS kio GTest::gtest GTest::gtest_main
 )
-
-target_include_directories(kio_logger_test
-        PRIVATE
-        ${CMAKE_SOURCE_DIR}/src
+kio_add_test(502_resp_writer kio/resp/502_resp_writer.cpp
+        TAGS kio resp unit
+        LIBS kio GTest::gtest GTest::gtest_main
 )
-
-target_include_directories(kio_logger_test
-        PRIVATE
-        ${CMAKE_SOURCE_DIR}/src
-)
-
-# buffer pool tests
-add_executable(buffer_pool_test ds/buffer_pool_test.cpp)
-
-target_link_libraries(buffer_pool_test
-        PRIVATE
-        kio_lib
-        GTest::gtest
-        GTest::gtest_main
-)
-
-target_include_directories(buffer_pool_test
-        PRIVATE
-        ${CMAKE_SOURCE_DIR}/src
-)
-
-# sync tests
-add_executable(sync_tests
-        sync/baton_test.cpp
-        sync/event_test.cpp
-        sync/when_any_test.cpp
-)
-
-target_link_libraries(sync_tests
-        PRIVATE
-        kio_lib
-        GTest::gtest
-        GTest::gtest_main
-)
-
-target_include_directories(sync_tests
-        PRIVATE
-        ${CMAKE_SOURCE_DIR}/src
-)
-
-# bytes_mut tests
-add_executable(bytes_mut_tests
-        ds/bytes_mut_test.cpp
-)
-
-target_link_libraries(bytes_mut_tests
-        PRIVATE
-        kio_lib
-        GTest::gtest
-        GTest::gtest_main
-)
-
-target_include_directories(bytes_mut_tests
-        PRIVATE
-        ${CMAKE_SOURCE_DIR}/src
-)
-
-
-gtest_discover_tests(sync_wait_test)
-gtest_discover_tests(lock_free_free_queue)
-gtest_discover_tests(kio_worker_test)
-gtest_discover_tests(filemanager_test)
-gtest_discover_tests(kio_logger_test)
-gtest_discover_tests(buffer_pool_test)
-gtest_discover_tests(sync_tests)
-gtest_discover_tests(bytes_mut_tests)
-
 

@@ -3,10 +3,10 @@
 ## Requirements
 
 - Compiler: A C++23 compatible compiler (e.g., Clang 16+ or GCC 14+).
-- CMake: Version 3.28 or higher.
+- CMake: Version 3.25 or higher.
 - liburing (install the latest version, tested with 2.9).
 ```bash
-# On Debian/Ubuntu
+# On Debian/Ubuntu/RHEL based
 git clone https://github.com/axboe/liburing.git
 cd liburing
 ./configure --prefix=/usr/local
@@ -21,43 +21,129 @@ sudo make install
 
 1. Building as a Standalone Project
 
-Optional Build Flags
+**Quick Start**
 
-You can disable parts of the build by passing options to CMake:
-
-- `-DKIO_BUILD_TESTS=OFF`: Disables building the test suite.
-- `-DKIO_BUILD_DEMOS=OFF`: Disables building the demo executables.
-- `-DKIO_BUILD_BENCHMARKS=OFF`: Disables building the benchmarks.
-
-This method is best to test `kio` features by running the tests and demos. 
 ```bash
 git clone https://github.com/ynachi/kio.git
+cd kio
 
-# Optional, set the compiler, here we use clang/clang++, build type, debug
-CC=clang CXX=clang++ cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+# Configure for development (Debug build with all features)
+cmake --preset dev
 
-# or just build in release mode
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+# you can set the compiler if needed
+CC=clang CXX=clang++ cmake --preset dev
 
-# Or set some flags if you want
-CC=clang CXX=clang++  cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
-    -DKIO_BUILD_TESTS=ON \
-    -DKIO_BUILD_DEMOS=ON \
-    -DKIO_BUILD_BENCHMARKS=OFF
-    
 # Build
-cmake --build build -j 
+cd build && make -j$(nproc)
 
 # Run tests
-cmake --build build --target test
+make check
+```
 
-# Run one demo demos
-cd build/demo && ./timer_demo
+**Available Presets**
+
+List all available presets:
+
+```bash
+cmake --list-presets
+```
+
+- `dev`      :  Development build (Debug, all features enabled, thread sanitizer)
+- `dev-tidy` : Development with clang-tidy enabled during compilation
+- `release`  : Optimized release build (-O3)
+- `ci`       : CI environment (Debug + clang-tidy, minimal features)
+
+**Configure Examples:**
+
+```bash
+# Development
+cmake --preset dev
+
+# Development with clang-tidy checking during build (slower)
+cmake --preset dev-tidy
+
+# Release build
+cmake --preset release
+```
+
+**Build Commands**
+
+From project root:
+
+```bash
+# Using cmake --build (works from anywhere)
+cmake --build build -j$(nproc)
+
+# Or change to build directory and use make
+cd build
+make -j$(nproc)
+```
+
+**Code Formatting:**
+
+```bash
+cd build
+make format              # Apply clang-format to all sources
+make format-check        # Check formatting without modifying (CI-friendly)
+```
+
+**Static Analysis:**
+
+```bash
+cd build
+make tidy                # Run clang-tidy on all sources
+make tidy-fix            # Run clang-tidy with automatic fixes
+```
+
+**Testing:**
+
+```bash
+cd build
+make check               # Run all tests
+make check-quick         # Run only fast unit tests
+ctest --output-on-failure  # Alternative test runner
+```
+
+**Using Presets for Build Targets:**
+
+```bash
+# From project root
+cmake --build --preset dev           # Build all
+cmake --build build --target format  # Run format
+cmake --build build --target tidy    # Run tidy
+ctest --preset dev                   # Run tests
+ctest --preset dev-verbose           # Verbose test output
+```
+
+**Typical dev workflow:**
+
+```bash
+# Quick iteration
+cmake --preset dev
+cd build && make -j$(nproc) && make check
+
+# Before committing
+cd build
+make format && make tidy && make check
+
+# Build with tidy checking (thorough but slower):
+cmake --preset dev-tidy
+cmake --build build -j$(nproc)
+
+# Clean rebuild:
+rm -rf build
+cmake --preset dev
+cd build && make -j$(nproc)
+
+# Run specific demos:
+cd build/demo
+./timer_demo
+./tcp_demo
 ```
 
 2. Integrate using CMake
 ```cmake
-cmake_minimum_required(VERSION 3.28)
+cmake_minimum_required(VERSION 3.25)
 project(my_awesome_app LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
@@ -69,7 +155,7 @@ include(FetchContent)
 #    This ensures we don't build kio's tests in our project.
 set(KIO_BUILD_TESTS OFF)
 set(KIO_BUILD_DEMOS OFF)
-set(KIO_BUILD_BENCHMARKS OFF)
+set(KIO_BUILD_BENCHMARK OFF)
 
 # 3. Declare the kio dependency
 FetchContent_Declare(
@@ -85,6 +171,6 @@ FetchContent_MakeAvailable(kio)
 add_executable(my_awesome_app main.cpp)
 
 # 6. Link against kio's core library
-#    kio's dependencies (spdlog, liburing) are handled automatically.
+#    kio's dependencies (liburing, openssl, etc.) are handled automatically.
 target_link_libraries(my_awesome_app PRIVATE kio_lib)
 ```

@@ -12,3 +12,4 @@ num_cpus = "1.17.0"
 opt-level = 3
 lto = true
 codegen-units = 1
+
