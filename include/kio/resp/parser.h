@@ -61,7 +61,7 @@ public:
     explicit FrameIterator(const FrameHeader& parent, Parser& parser, size_t depth = 0);
 
     // Get the next child frame
-    std::expected<FrameHeader, ParseError> Next();
+    Result<FrameHeader> Next();
 
     [[nodiscard]] bool HasNext() const { return remaining_ > 0; }
     [[nodiscard]] size_t Remaining() const { return remaining_; }
@@ -82,7 +82,7 @@ class Parser
     ParserConfig config_;
 
     // Internal: parse frame starting at a given position
-    std::expected<FrameHeader, ParseError> ParseFrameInternal(std::span<const char> data, size_t depth);
+    Result<FrameHeader> ParseFrameInternal(std::span<const char> data, size_t depth);
 
 public:
     explicit Parser(const ParserConfig& config) : buffer_(config.initial_buffer), config_(config) {}
@@ -90,7 +90,7 @@ public:
     IoBuffer& Buffer() { return buffer_; }
     [[nodiscard]] const IoBuffer& Buffer() const { return buffer_; }
 
-    [[nodiscard]] std::expected<FrameHeader, ParseError> NextFrame()
+    [[nodiscard]] Result<FrameHeader> NextFrame()
     {
         // Use the conversion helper from IoBuffer to get char span
         auto bytes = buffer_.ReadableSpan();

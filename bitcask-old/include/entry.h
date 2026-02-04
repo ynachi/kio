@@ -1,13 +1,9 @@
+#pragma once
 
-//
-// Created by Yao ACHI on 08/11/2025.
-//
+#include "kio/kio.hpp"
 
-#ifndef KIO_ENTRY_H
-#define KIO_ENTRY_H
 #include "absl/container/flat_hash_map.h"
 #include "common.h"
-#include "kio/core/errors.h"
 
 #include <chrono>
 #include <expected>
@@ -159,5 +155,3 @@ struct ValueLocation
 using KeyDir = absl::flat_hash_map<std::string, ValueLocation>;
 
 }  // namespace bitcask
-
-#endif  // KIO_ENTRY_H

@@ -69,7 +69,7 @@ std::string_view GetBulkPayload(const FrameHeader& frame)
 }
 
 // --- Parser Implementation ---
-std::expected<FrameHeader, ParseError> Parser::ParseFrameInternal(std::span<const char> data, size_t depth)
+Result<FrameHeader> Parser::ParseFrameInternal(std::span<const char> data, size_t depth)
 {
     if (depth >= config_.max_aggregate_depth)
         return std::unexpected(ParseError::Overflow);
@@ -215,7 +215,7 @@ FrameIterator::FrameIterator(const FrameHeader& parent, Parser& parser, size_t d
     }
 }
 
-std::expected<FrameHeader, ParseError> FrameIterator::Next()
+Result<FrameHeader> FrameIterator::Next()
 {
     if (remaining_ == 0)
         return std::unexpected(ParseError::InternalError);
