@@ -1,9 +1,7 @@
+
 #pragma once
 
-#include "kio/kio.hpp"
-
 #include "absl/container/flat_hash_map.h"
-#include "common.h"
 
 #include <chrono>
 #include <expected>
@@ -11,6 +9,8 @@
 #include <span>
 #include <string>
 #include <vector>
+
+#include "common.hpp"
 
 namespace bitcask
 {
@@ -55,10 +55,13 @@ namespace bitcask
 class DataEntry
 {
     // This holds: [crc(4)][Timestamp(8)][Flag(1)][KeyLen(4)][KeyBytes...][ValueLen(4)][ValueBytes...]
-    std::vector<char> payload_;
+    std::vector<std::byte> payload_;
 
     std::string_view key_view_;
-    std::span<const char> value_view_;
+    std::span<const std::byte> value_view_;
+
+    /// Warning, using this constructor requires checking the blob upfront!
+    explicit DataEntry(std::vector<std::byte>&& raw_blob);
 
 public:
     /**
@@ -67,8 +70,9 @@ public:
      * @param buffer
      * @return
      */
-    static kio::Result<DataEntry> Deserialize(std::span<const char> buffer);
-    DataEntry(std::string_view key, std::span<const char> value, uint8_t flag = kFlagNone, uint64_t timestamp = GetCurrentTimestamp());
+    static kio::Result<DataEntry> Deserialize(std::span<const std::byte> buffer);
+    DataEntry(std::string_view key, std::span<const std::byte> value, uint8_t flag = kFlagNone,
+              uint64_t timestamp = GetCurrentTimestamp());
 
     [[nodiscard]] uint32_t GetCrc() const { return ReadLe<uint32_t>(payload_.data()); }
 
@@ -77,23 +81,22 @@ public:
     [[nodiscard]] uint8_t GetFlag() const { return ReadLe<uint8_t>(payload_.data() + 12); }
 
     [[nodiscard]] std::string_view GetKeyView() const { return key_view_; }
-    [[nodiscard]] std::span<const char> GetValueView() const { return value_view_; }
-    [[nodiscard]] std::vector<char> GetValueOwned() const { return {value_view_.begin(), value_view_.end()}; }
+    [[nodiscard]] std::span<const std::byte> GetValueView() const { return value_view_; }
+    [[nodiscard]] std::vector<std::byte> GetValueOwned() const { return {value_view_.begin(), value_view_.end()}; }
 
     // Tombstone marker (for deletions)
     [[nodiscard]] bool IsTombstone() const { return (GetFlag() & kFlagTombstone) != 0; }
 
     void SetKeyView(std::string_view key) { key_view_ = key; }
-    void SetValueView(std::span<const char> value) { value_view_ = value; }
-
-    [[nodiscard]] std::span<const char> GetPayload() const { return payload_; }
+    void SetValueView(std::span<const std::byte> value) { value_view_ = value; }
+    [[nodiscard]] std::span<const std::byte> GetPayloadSpan() const noexcept
+    {
+        return payload_;
+    }
     [[nodiscard]] uint32_t Size() const { return payload_.size(); }
 
     // mostly for testing
-    bool operator==(const DataEntry& other) const
-    {
-        return payload_ == other.payload_;
-    }
+    bool operator==(const DataEntry& other) const { return payload_ == other.payload_; }
 };
 
 struct HintEntry
@@ -121,11 +124,11 @@ struct HintEntry
 
     // Serialize to buffer
     [[nodiscard]]
-    std::vector<char> Serialize() const;
+    size_t SerializeTo(std::span<std::byte> out_buffer) const;
 
     /// Deserialize from buffer, returns the entry and its serialized size
     /// Deserializing give access to that size returning it makes sense to not have to recompute it
-    static kio::Result<std::pair<HintEntry, size_t>> Deserialize(std::span<const char> buffer);
+    static kio::Result<std::pair<HintEntry, size_t>> Deserialize(std::span<const std::byte> buffer);
     bool operator==(const HintEntry& other) const = default;
 };
 

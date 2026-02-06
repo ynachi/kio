@@ -74,7 +74,7 @@ TEST(PipePoolTest, PoolRespectsSizeLimit) {
     ASSERT_TRUE(reacquired2.has_value());
 
     // One of them should be a new pipe (not fd3)
-    bool found_fd3 = (reacquired1->read_fd == fd3 || reacquired2->read_fd == fd3);
+    const bool found_fd3 = (reacquired1->read_fd == fd3 || reacquired2->read_fd == fd3);
     // fd3 was closed, so it shouldn't be found as-is
     // (Though the OS might reuse the fd number for a new pipe)
 
@@ -98,13 +98,13 @@ TEST(PipePoolTest, PipeWriteAndRead) {
     ASSERT_TRUE(pipe.has_value());
 
     // Write to pipe
-    const char* msg = "hello";
-    ssize_t written = ::write(pipe->write_fd, msg, 5);
+    const auto msg = "hello";
+    const ssize_t written = ::write(pipe->write_fd, msg, 5);
     EXPECT_EQ(written, 5);
 
-    // Read from pipe
+    // Read from a pipe
     char buf[16] = {};
-    ssize_t read_bytes = ::read(pipe->read_fd, buf, sizeof(buf));
+    const ssize_t read_bytes = ::read(pipe->read_fd, buf, sizeof(buf));
     EXPECT_EQ(read_bytes, 5);
     EXPECT_STREQ(buf, "hello");
 

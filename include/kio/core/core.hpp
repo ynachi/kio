@@ -1,9 +1,12 @@
 #pragma once
 #include "kio/logger.hpp"
 
+#include <bit>
+#include <concepts>
 #include <coroutine>
 #include <csignal>
 #include <expected>
+#include <format>
 #include <functional>
 #include <latch>
 #include <memory>
@@ -19,6 +22,25 @@
 #include "pipe_pool.hpp"
 #include "stats.hpp"
 #include <openssl/err.h>
+
+// =============================================================================
+// Forward Declarations & Standard Type Registry
+// =============================================================================
+
+namespace kio
+{
+enum class ParseError : uint8_t;
+}
+
+// Register ParseError as an error_code enum (Must be in std namespace)
+template <>
+struct std::is_error_code_enum<kio::ParseError> : std::true_type
+{
+};
+
+// =============================================================================
+// Core KIO Definitions
+// =============================================================================
 
 namespace kio
 {
@@ -42,7 +64,7 @@ inline std::unexpected<std::error_code> ErrorFromErrno(const int err) noexcept
     return std::unexpected(std::error_code(err, std::system_category()));
 }
 
-inline std::error_code MakeErrorCode(const int err) noexcept
+inline std::error_code make_error_code(const int err) noexcept
 {
     return std::error_code{err > 0 ? err : -err, std::system_category()};
 }
@@ -56,11 +78,8 @@ struct openssl_category_t final : std::error_category
 
     std::string message(const int ev) const override
     {
-        static_assert(sizeof(int) == 4, "This helper assumes 32-bit int");
-        const auto bits = std::bit_cast<uint32_t>(ev);
-
         char buf[256];
-        ERR_error_string_n(bits, buf, sizeof(buf));
+        ERR_error_string_n(static_cast<unsigned long>(ev), buf, sizeof(buf));
         return buf;
     }
 };
@@ -84,6 +103,7 @@ enum class ParseError: uint8_t
     InvalidProtocol,  // Violation of protocol rules (bad characters, etc)
     Overflow,         // Data size exceeds limits
     InternalError,    // Logical failure in parser
+    Corrupted,        // invalid checksum
 };
 
 /**
@@ -108,6 +128,8 @@ public:
                 return "Data exceeds buffer or protocol limits";
             case ParseError::InternalError:
                 return "Internal parsing logic error";
+            case ParseError::Corrupted:
+                return "Data altered, invalid checksum, corrupted";
             default:
                 return "Unknown parse error";
         }
@@ -121,13 +143,65 @@ inline const std::error_category& GetParseErrorCategory()
     return instance;
 }
 
-// Overload make_error_code for ADL
+// Overload make_error_code for ADL (must be snake_case)
 inline std::error_code make_error_code(ParseError e)
 {
     return {static_cast<int>(e), GetParseErrorCategory()};
 }
 
-std::unexpected<std::error_code> ErrorFromOpenSSL() noexcept;
+inline std::unexpected<std::error_code> ErrorFromOpenSSL(unsigned long err) noexcept
+{
+    return std::unexpected(std::error_code(static_cast<int>(err), detail::openssl_category()));
+}
+
+inline std::unexpected<std::error_code> ErrorFromOpenSSL() noexcept;
+
+////////////////////////////////////////////////////////////////////////////////
+// Error Propagation Macros (Rust-style ? operator)
+////////////////////////////////////////////////////////////////////////////////
+
+namespace kio_try_internal
+{
+template <typename Exp>
+auto unwrap_impl(Exp&& exp)
+{
+    using ValueT = std::decay_t<Exp>::value_type;
+    if constexpr (!std::is_void_v<ValueT>)
+    {
+        return std::move(*std::forward<Exp>(exp));
+    }
+}
+}  // namespace kio_try_internal
+
+/**
+ * @brief Sync Error Propagation.
+ * Use inside normal functions. Returns `std::unexpected` on failure.
+ * Usage: auto val = KIO_TRY(MyFunc());
+ */
+#define KIO_TRY(expr)                                    \
+    ({                                                   \
+        auto __res = (expr);                             \
+        if (!__res)                                      \
+        {                                                \
+            return std::unexpected(__res.error());       \
+        }                                                \
+        ::kio::kio_try_internal::unwrap_impl(__res);     \
+    })
+
+/**
+ * @brief Async Error Propagation.
+ * Use inside Coroutines. Co_returns `std::unexpected` on failure.
+ * Usage: auto val = KIO_CO_TRY(co_await MyAsyncFunc());
+ */
+#define KIO_CO_TRY(expr)                                 \
+    ({                                                   \
+        auto __res = (expr);                             \
+        if (!__res)                                      \
+        {                                                \
+            co_return std::unexpected(__res.error());    \
+        }                                                \
+        ::kio::kio_try_internal::unwrap_impl(__res);     \
+    })
 
 ////////////////////////////////////////////////////////////////////////////////
 // Task<T>/Task<void> - Minimal Coroutine Return Type
@@ -440,7 +514,7 @@ public:
     {
         if (res < 0)
         {
-            return std::unexpected(MakeErrorCode(res));
+            return std::unexpected(make_error_code(res));
         }
         return static_cast<size_t>(res);
     }
@@ -776,7 +850,7 @@ struct WaitSignalOp : UringOp
     {
         if (res < 0)
         {
-            return std::unexpected(MakeErrorCode(res));
+            return std::unexpected(make_error_code(res));
         }
         return static_cast<int>(signo);
     }
@@ -944,7 +1018,7 @@ public:
         {
             if (res < 0)
             {
-                return std::unexpected(MakeErrorCode(res));
+                return std::unexpected(make_error_code(res));
             }
             return value;
         }
@@ -1203,9 +1277,42 @@ private:
     std::stop_token stop_token_;
 };
 
+////////////////////////////////////////////////////////////////////////////////
+// Formatting Support
+////////////////////////////////////////////////////////////////////////////////
+
+// Helper wrapper to format std::error_code nicely
+struct FmtErr
+{
+    const std::error_code& code;
+};
+
 }  // namespace kio
 
+// =============================================================================
+// std::formatter Specializations
+// =============================================================================
+
 template <>
-struct std::is_error_code_enum<kio::ParseError> : true_type
+struct std::formatter<kio::ParseError>
 {
-};  // namespace std
+    constexpr auto parse(std::format_parse_context& ctx) { return ctx.begin(); }
+
+    auto format(kio::ParseError e, std::format_context& ctx) const
+    {
+        return std::format_to(ctx.out(), "ParseError: {} ({})", kio::make_error_code(e).message(),
+                              static_cast<int>(e));
+    }
+};
+
+template <>
+struct std::formatter<kio::FmtErr>
+{
+    constexpr auto parse(std::format_parse_context& ctx) { return ctx.begin(); }
+
+    auto format(kio::FmtErr w, std::format_context& ctx) const
+    {
+        // Output: "Category: Message (Value)"
+        return std::format_to(ctx.out(), "{}: {} ({})", w.code.category().name(), w.code.message(), w.code.value());
+    }
+};

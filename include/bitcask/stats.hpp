@@ -1,9 +1,5 @@
-//
-// Created by Yao ACHI on 14/11/2025.
-//
+#pragma once
 
-#ifndef KIO_STATS_H
-#define KIO_STATS_H
 #include <cstdint>
 #include <ranges>
 #include <unordered_map>
@@ -71,5 +67,3 @@ struct PartitionStats
     }
 };
 }  // namespace bitcask
-
-#endif  // KIO_STATS_H

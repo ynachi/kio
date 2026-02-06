@@ -1,7 +1,5 @@
-# kio tests
-
 # -----------------------------------------------------------------------------
-# Unit Tests (fast, no I/O)
+# Kio Unit Tests (fast, no I/O)
 # -----------------------------------------------------------------------------
 
 kio_add_test(101_kio_pipe_pool_tests kio/101_pipe_pool_tests.cpp
@@ -15,7 +13,7 @@ kio_add_test(102_io_context kio/102_io_context.cpp
 )
 
 # -----------------------------------------------------------------------------
-# Integration Tests (real I/O)
+# Kio Integration Tests (real I/O)
 # -----------------------------------------------------------------------------
 
 kio_add_test(200_kio_io_ops_tests kio/200_io_ops_tests.cpp
@@ -57,4 +55,46 @@ kio_add_test(502_resp_writer kio/resp/502_resp_writer.cpp
         TAGS kio resp unit
         LIBS kio GTest::gtest GTest::gtest_main
 )
+
+# -----------------------------------------------------------------------------
+# Bitcask
+# -----------------------------------------------------------------------------
+
+kio_add_test(101_entry_test bitcask/101_entry_test.cpp
+        TAGS bitcask unit
+        LIBS bitcask GTest::gtest GTest::gtest_main
+)
+
+kio_add_test(102_files_test bitcask/102_files_test.cpp
+        TAGS bitcask unit
+        LIBS bitcask GTest::gtest GTest::gtest_main
+)
+
+kio_add_test(103_compactor_test bitcask/103_compactor_test.cpp
+        TAGS bitcask integration
+        LIBS bitcask GTest::gtest GTest::gtest_main
+)
+# -----------------------------------------------------------------------------
+# Fuzz Tests (requires clang with -fsanitize=fuzzer)
+# -----------------------------------------------------------------------------
+
+if (KIO_ENABLE_FUZZING)
+    message(STATUS "Fuzzing enabled")
+
+    add_executable(fuzz_entry bitcask/fuzz_entry.cpp)
+    target_link_libraries(fuzz_entry PRIVATE bitcask)
+    target_compile_options(fuzz_entry PRIVATE
+            -fsanitize=fuzzer,address,undefined
+            -g
+    )
+    target_link_options(fuzz_entry PRIVATE
+            -fsanitize=fuzzer,address,undefined
+    )
+
+    # Install to a separate fuzz directory
+    install(TARGETS fuzz_entry
+            RUNTIME DESTINATION bin/fuzz
+    )
+endif ()
+
 

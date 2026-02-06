@@ -104,7 +104,7 @@ TEST_F(IoBufferTest, CompactionTrigger)
     buf.Commit();
     buf.Consume(1200);  // read_ is now 1200, which is > 1024
 
-    size_t prev_write = buf.ReadableBytesSpan().data() != nullptr ? 0 : 0;  // Dummy
+    size_t prev_write = buf.ReadableSpan().data() != nullptr ? 0 : 0;  // Dummy
 
     // This should trigger compaction because we need more space than currently at the end
     buf.EnsureWritableBytes(buf.Capacity() - 100);

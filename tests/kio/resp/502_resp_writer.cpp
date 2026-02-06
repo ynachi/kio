@@ -40,7 +40,7 @@ protected:
 
         auto task = [&]() -> Task<void>
         {
-            auto span = buffer_.ReadableBytesSpan();
+            auto span = buffer_.ReadableSpan();
             if (span.empty())
                 co_return;
 
