@@ -6,9 +6,10 @@
 using namespace bitcask;
 namespace fs = std::filesystem;
 
-TEST(FileIDTest, EncodeDecode) {
+TEST(FileIDTest, EncodeDecode)
+{
     FileID original{.partition = 1, .timestamp_sec = 1700000000, .sequence = 123};
-    
+
     uint64_t encoded = original.Encode();
     FileID decoded = FileID::Decode(encoded);
 
@@ -17,22 +18,24 @@ TEST(FileIDTest, EncodeDecode) {
     EXPECT_EQ(decoded.sequence, original.sequence);
 }
 
-TEST(FileIDTest, SortOrder) {
+TEST(FileIDTest, SortOrder)
+{
     // ID A: Time 100, Seq 1
-    FileID id_a{.partition=1, .timestamp_sec=100, .sequence=1};
+    FileID id_a{.partition = 1, .timestamp_sec = 100, .sequence = 1};
     // ID B: Time 100, Seq 2
-    FileID id_b{.partition=1, .timestamp_sec=100, .sequence=2};
+    FileID id_b{.partition = 1, .timestamp_sec = 100, .sequence = 2};
     // ID C: Time 101, Seq 0
-    FileID id_c{.partition=1, .timestamp_sec=101, .sequence=0};
+    FileID id_c{.partition = 1, .timestamp_sec = 101, .sequence = 0};
 
     EXPECT_TRUE(FileIdCompareByTime(id_a.Encode(), id_b.Encode()));
     EXPECT_TRUE(FileIdCompareByTime(id_b.Encode(), id_c.Encode()));
     EXPECT_FALSE(FileIdCompareByTime(id_b.Encode(), id_a.Encode()));
 }
 
-TEST(FileIDTest, Generator_Monotonicity) {
+TEST(FileIDTest, Generator_Monotonicity)
+{
     FileIdGenerator gen(1);
-    
+
     uint64_t id1 = gen.Next();
     uint64_t id2 = gen.Next();
 
@@ -40,53 +43,61 @@ TEST(FileIDTest, Generator_Monotonicity) {
     FileID decoded2 = FileID::Decode(id2);
 
     // If generated in same second
-    if (decoded1.timestamp_sec == decoded2.timestamp_sec) {
+    if (decoded1.timestamp_sec == decoded2.timestamp_sec)
+    {
         EXPECT_EQ(decoded2.sequence, decoded1.sequence + 1);
-    } else {
+    }
+    else
+    {
         EXPECT_GT(decoded2.timestamp_sec, decoded1.timestamp_sec);
         EXPECT_EQ(decoded2.sequence, 0);
     }
 }
 
-TEST(FileIDTest, Generator_StateRecovery) {
+TEST(FileIDTest, Generator_StateRecovery)
+{
     FileIdGenerator gen(1);
-    
+
     // Simulate finding a file with high timestamp/sequence
     gen.UpdateState(2000000000, 50);
 
     // Next ID should respect the restored state
-    // We can't easily force the system clock to be 2000000000, 
+    // We can't easily force the system clock to be 2000000000,
     // but we can verify Next() doesn't produce an ID < restored state if clock is 'behind'
-    // Note: The Generator implementation uses system_clock. 
+    // Note: The Generator implementation uses system_clock.
     // If system_clock is < 2000000000, it treats it as clock skew and uses last_timestamp_.
-    
+
     uint64_t next_id = gen.Next();
     FileID decoded = FileID::Decode(next_id);
-    
+
     EXPECT_EQ(decoded.timestamp_sec, 2000000000);
     EXPECT_EQ(decoded.sequence, 51);
 }
 
 
 // For this code to compile, I will assume a class 'TestRuntime' exists
-class FileTest : public ::testing::Test {
+class FileTest : public ::testing::Test
+{
 protected:
     fs::path temp_dir;
     kio::IoContext ctx;
     BitcaskConfig config;
 
-    void SetUp() override {
+    void SetUp() override
+    {
         temp_dir = fs::temp_directory_path() / "bitcask_test_env";
         fs::create_directories(temp_dir);
     }
 
-    void TearDown() override {
+    void TearDown() override
+    {
         fs::remove_all(temp_dir);
     }
 };
 
 // FDc cache tests
-TEST_F(FileTest, FDCache_OpenAndEvict) {
+TEST_F(FileTest, FDCache_OpenAndEvict)
+{
     // Create dummy files
     auto p1 = temp_dir / "1.db";
     auto p2 = temp_dir / "2.db";
@@ -97,7 +108,8 @@ TEST_F(FileTest, FDCache_OpenAndEvict) {
         std::ofstream(p3) << "data";
     }
 
-    auto task = [&](kio::IoContext& io) -> kio::Task<void> {
+    auto task = [&](kio::IoContext& io) -> kio::Task<void>
+    {
         // Cache size 2
         FDCache cache(2);
 
@@ -157,7 +169,6 @@ TEST_F(FileTest, BasicWrite)
         EXPECT_TRUE(result2.has_value());
         EXPECT_EQ(result2.value(), expected_offset);
         EXPECT_EQ(df.Size(), 2* entry.Size()) << "File size should match entry size X2";
-
     }(ctx);
 
     ctx.RunUntilDone(std::move(test));
@@ -206,7 +217,7 @@ TEST_F(FileTest, SequentialAsyncWrites)
         }
 
         // Verify NO overlapping regions
-        std::vector<std::pair<uint64_t, uint64_t>> ranges;  // (start, end)
+        std::vector<std::pair<uint64_t, uint64_t>> ranges; // (start, end)
         for (size_t i = 0; i < offsets.size(); ++i)
         {
             ranges.emplace_back(offsets[i], offsets[i] + sizes[i]);
@@ -305,7 +316,7 @@ TEST_F(FileTest, ShouldRotate_TriggersWhenSizeExceeded)
     ASSERT_GE(fd, 0) << "Failed to create test file";
 
     DataFile df = DataFile(fd, 1, config);
-    const size_t max_size = 200;  // Small limit for quick test
+    const size_t max_size = 200; // Small limit for quick test
 
     auto test = [&](kio::IoContext& io) -> kio::Task<>
     {
@@ -364,7 +375,7 @@ TEST_F(FileTest, DataSurvivesClose)
         }(ctx);
 
         ctx.RunUntilDone(std::move(write_task));
-        ::close(fd);  // File closed - data should persist
+        ::close(fd); // File closed - data should persist
     }
 
     // Phase 2: Reopen and verify data
@@ -402,4 +413,10 @@ TEST_F(FileTest, DataSurvivesClose)
 
         ctx.RunUntilDone(std::move(read_task));
     }
+}
+
+int main(int argc, char** argv)
+{
+    ::testing::InitGoogleTest(&argc, argv);
+    return RUN_ALL_TESTS();
 }

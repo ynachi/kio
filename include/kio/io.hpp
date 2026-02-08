@@ -518,6 +518,28 @@ namespace kio
         };
     }
 
+    struct UnlinkAtOp : UringOp
+    {
+        int dirfd;
+        const char* path;
+        int flags;
+
+        UnlinkAtOp(IoContext* ctx, int d, const char* p, int f)
+            : UringOp(ctx), dirfd(d), path(p), flags(f)
+        {
+        }
+
+        void PrepareSqe(io_uring_sqe* sqe)
+        {
+            io_uring_prep_unlinkat(sqe, dirfd, path, flags);
+        }
+    };
+
+    inline Task<Result<int>> AsyncUnlink(IoContext& ctx, int dirfd, const std::filesystem::path path, int flags)
+    {
+        co_return co_await UnlinkAtOp(&ctx, dirfd, path.c_str(), flags);
+    }
+
     struct OpenOp : UringOp
     {
         using UringOp::await_resume;
@@ -556,7 +578,7 @@ namespace kio
     ///       // Use fd...
     ///   }
     /// @endcode
-    [[nodiscard]] inline OpenOp AsyncOpen(IoContext& ctx, const std::filesystem::path& path, int flags,
+    [[nodiscard]] inline OpenOp AsyncOpen(IoContext& ctx, const std::filesystem::path path, int flags,
                                           mode_t mode = 0644)
     {
         return OpenOp(ctx, path.c_str(), flags, mode);

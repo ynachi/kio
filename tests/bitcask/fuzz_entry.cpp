@@ -21,7 +21,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     }
 
     // Convert to std::span<const std::byte>
-    auto byte_span = std::span<const std::byte>(
+    auto byte_span = std::span(
         reinterpret_cast<const std::byte*>(data),
         size
     );

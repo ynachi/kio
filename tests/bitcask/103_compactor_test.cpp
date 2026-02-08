@@ -13,6 +13,7 @@
 using namespace bitcask;
 namespace fs = std::filesystem;
 
+// TODO: compaction code moved to Partition, move the tests there
 class CompactorTest : public ::testing::Test
 {
 protected:
@@ -23,16 +24,11 @@ protected:
 
     void SetUp() override
     {
-        // Create unique temp directory for this test run
         temp_dir = fs::temp_directory_path() / ("bitcask_compact_test_" + std::to_string(getpid()));
         fs::create_directories(temp_dir);
-
-        // Setup default config pointing to this dir
         config.directory = temp_dir;
-        config.write_flags = O_CREAT | O_RDWR;
-
         // We need to create the partition directory structure expected by CompactFiles
-        // CompactFiles constructs path: cfg.directory / "partition_{id}" / "data_{id}.db"
+        //  constructs a path: cfg.directory / "partition_{id}" / "data_{id}.db"
         fs::create_directories(temp_dir / "partition_1");
     }
 
@@ -43,7 +39,7 @@ protected:
         fs::remove_all(temp_dir);
     }
 
-    // Helper to generate a random string of specific size
+    // Helper to generate a random string of a specific size
     std::string RandomString(size_t length)
     {
         static const char charset[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
@@ -77,7 +73,7 @@ protected:
             auto res = co_await df.AsyncWrite(ctx, entry);
             if (!res) throw std::runtime_error("Failed to write entry");
 
-            uint64_t offset = res.value();
+            const uint64_t offset = res.value();
 
             locations.push_back({
                 key, ValueLocation{
@@ -89,7 +85,7 @@ protected:
             });
         }
 
-        // CRITICAL FIX: Sync data to disk BEFORE closing
+        // Sync data to disk BEFORE closing
         // Without this, the data may still be in kernel buffers when we reopen the file
         auto sync_result = co_await kio::AsyncFdatasync(ctx, fd);
         if (!sync_result)
@@ -109,7 +105,6 @@ protected:
     {
         auto path = config.directory / "partition_1" / std::format("data_{}.db", file_id);
 
-        // Handle case where file might not exist (e.g. 0 byte file deleted? actually 0 byte file exists usually)
         if (!fs::exists(path) || fs::file_size(path) == 0)
         {
             co_return {};
@@ -139,7 +134,7 @@ protected:
 
         while (offset < file_size)
         {
-            // Need at least header
+            // Need at least a header
             if (view.size() < kEntryFixedHeaderSize) break;
 
             // Deserialize peeks sizes first
@@ -235,7 +230,7 @@ TEST_F(CompactorTest, AllLiveNoReclaim)
             co_return;
         }
 
-        // CRITICAL: Close the file before reading it back
+        // Close the file before reading it back
         // fs::file_size() may not reflect writes until the FD is closed
         close(dst_fd);
 
@@ -327,10 +322,10 @@ TEST_F(CompactorTest, MixedLiveAndStaleReclaimsSpace)
             co_return;
         }
 
-        // CRITICAL: Close the file before reading it back
+        // Close the file before reading it back
         close(dst_fd);
 
-        // Verify file only has 1 entry
+        // Verify a file only has 1 entry
         auto new_entries = co_await ReadAllEntries(200);
         if (new_entries.size() != 1)
         {
@@ -397,7 +392,7 @@ TEST_F(CompactorTest, MultipleSourceFilesMerge)
             co_return;
         }
 
-        // The order depends on iteration order of src_ids and data in files
+        // The order depends on the iteration order of src_ids and data in files
         // We expect KeyB (from 100) then KeyA (from 101)
         if (result.new_hints[0].key != "KeyB")
         {
@@ -421,7 +416,6 @@ TEST_F(CompactorTest, MultipleSourceFilesMerge)
             co_return;
         }
 
-        // CRITICAL: Close the file before reading it back
         close(dst_fd);
 
         auto entries = co_await ReadAllEntries(200);
@@ -455,7 +449,7 @@ TEST_F(CompactorTest, MultipleSourceFilesMerge)
     EXPECT_TRUE(test_passed) << failure_message;
 }
 
-TEST_F(CompactorTest, TruncatedEntry_Ignored)
+TEST_F(CompactorTest, TruncatedEntryIgnored)
 {
     bool test_passed = false;
     std::string failure_message;
@@ -463,15 +457,15 @@ TEST_F(CompactorTest, TruncatedEntry_Ignored)
     auto task = [&]() -> kio::Task<>
     {
         // Write a valid file
-        auto locs = co_await CreateDataFile(100, {
-                                                {"key1", "val1"},
-                                                {"key2", "val2"}
-                                            });
+        const auto locs = co_await CreateDataFile(100, {
+                                                      {"key1", "val1"},
+                                                      {"key2", "val2"}
+                                                  });
 
         // Manually truncate the file to cut off half of key2
         auto path = config.directory / "partition_1" / "data_100.db";
         uint64_t valid_size = locs[0].second.total_size;
-        uint64_t partial_size = valid_size + 10; // 10 bytes of next header
+        uint64_t partial_size = valid_size + 10; // 10 bytes of the next header
         fs::resize_file(path, partial_size);
 
         KeyDir key_dir;
@@ -516,7 +510,7 @@ TEST_F(CompactorTest, TruncatedEntry_Ignored)
             co_return;
         }
 
-        // CRITICAL: Close the file before trying to read it
+        // Close the file before trying to read it
         close(dst_fd);
 
         test_passed = true;
@@ -526,7 +520,7 @@ TEST_F(CompactorTest, TruncatedEntry_Ignored)
     EXPECT_TRUE(test_passed) << failure_message;
 }
 
-TEST_F(CompactorTest, AllEntriesStale_FileDeleted)
+TEST_F(CompactorTest, AllEntriesStaleFileDeleted)
 {
     // Scenario: File 100 has keys, but KeyDir says they are all in File 101 or deleted.
     // Result: File 200 (compaction output) should be empty/0 bytes.
@@ -535,7 +529,7 @@ TEST_F(CompactorTest, AllEntriesStale_FileDeleted)
 
     auto task = [&]() -> kio::Task<>
     {
-        auto locs = co_await CreateDataFile(100, {{"k1", "v1"}, {"k2", "v2"}});
+        const auto locs = co_await CreateDataFile(100, {{"k1", "v1"}, {"k2", "v2"}});
 
         KeyDir key_dir; // Empty keydir implies keys are deleted or exist elsewhere
 
@@ -581,7 +575,7 @@ TEST_F(CompactorTest, AllEntriesStale_FileDeleted)
     EXPECT_TRUE(passed) << failure_message;
 }
 
-TEST_F(CompactorTest, LargeEntry_ExceedsBuffers)
+TEST_F(CompactorTest, LargeEntryExceedsBuffers)
 {
     // Scenario: Write a value larger than default I/O buffers (assuming ~16KB-64KB defaults).
     // This forces the compactor to resize buffers or handle partial chunks correctly.
@@ -597,8 +591,8 @@ TEST_F(CompactorTest, LargeEntry_ExceedsBuffers)
         KeyDir key_dir;
         key_dir["large_key"] = locs[0].second;
 
-        auto dst_path = config.directory / "partition_1" / "data_200.db";
-        int dst_fd = open(dst_path.c_str(), config.write_flags, config.file_mode);
+        const auto dst_path = config.directory / "partition_1" / "data_200.db";
+        const int dst_fd = open(dst_path.c_str(), config.write_flags, config.file_mode);
         DataFile dst_file(dst_fd, 200, config);
 
         auto result_opt = co_await CompactFiles(config, ctx, {100}, dst_file, fd_cache, key_dir, 1);
@@ -650,7 +644,7 @@ TEST_F(CompactorTest, LargeEntry_ExceedsBuffers)
     EXPECT_TRUE(passed) << failure_message;
 }
 
-TEST_F(CompactorTest, ManySmallEntries_BufferFlushing)
+TEST_F(CompactorTest, ManySmallEntriesBufferFlushing)
 {
     // Scenario: Write many small entries to force the output buffer to flush multiple times.
     bool passed = false;

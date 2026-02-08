@@ -161,6 +161,7 @@ endfunction()
 set(KIO_DEMO_FILTER "all" CACHE STRING "List of tags to build (or 'all')")
 option(KIO_BUILD_TESTS "Build the kio test suite" ON)
 set(KIO_TEST_FILTER "all" CACHE STRING "List of tags to build (or 'all')")
+option(KIO_ENABLE_FUZZING "Enable fuzzing targets (requires clang)" OFF)
 option(KIO_BUILD_BITCASK "Build bitcask storage engine" ON)
 option(KIO_BUILD_DEMOS "Build the kio demo executables" ON)
 # pass -DKIO_DEMO_FILTER="core;http" to build specific subsets of demo.
@@ -224,10 +225,10 @@ find_program(CLANG_TIDY_EXE NAMES clang-tidy-22)
 
 # Collect all source files for formatting/linting
 file(GLOB_RECURSE ALL_SOURCE_FILES
-        ${CMAKE_SOURCE_DIR}/kio/*.cpp
-        ${CMAKE_SOURCE_DIR}/kio/*.h
-        ${CMAKE_SOURCE_DIR}/bitcask/src/*.cpp
-        ${CMAKE_SOURCE_DIR}/bitcask/include/*.h
+        ${CMAKE_SOURCE_DIR}/include/kio/*.cpp
+        ${CMAKE_SOURCE_DIR}/include/kio/*.hpp
+        ${CMAKE_SOURCE_DIR}/include/bitcask/*.cpp
+        ${CMAKE_SOURCE_DIR}/include/bitcask/*.hpp
         ${CMAKE_SOURCE_DIR}/examples/*.cpp
         ${CMAKE_SOURCE_DIR}/tests/*.cpp
         ${CMAKE_SOURCE_DIR}/benchmarks/cpp/*.cpp
@@ -274,15 +275,18 @@ else ()
     message(WARNING "clang-tidy not found - tidy targets not available")
 endif ()
 
+include_directories(${CMAKE_SOURCE_DIR})
+add_subdirectory(library/cpp)
+
 #-----------------------------------------------
-# Aio lib, change later to kio
+# kio lib
 #----------------------------------------------
 # Library definition
 add_library(kio
         src/kio/core.cpp
         src/kio/io.cpp
         src/kio/net.cpp
-        src/kio/parser.cpp
+        #        src/kio/parser.cpp
         src/kio/tls_context.cpp
 )
 # Include directories
@@ -299,14 +303,36 @@ target_link_libraries(kio PUBLIC
 )
 
 #-----------------------------------------------
+# bitcask lib
+#----------------------------------------------
+# Library definition
+if (KIO_BUILD_BITCASK)
+    add_library(bitcask
+            src/bitcask/entry.cpp
+            src/bitcask/files.cpp
+            src/bitcask/compactor.cpp
+    )
+
+    # Include directories
+    target_include_directories(bitcask PUBLIC
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+            $<INSTALL_INTERFACE:include>
+    )
+    # Link dependencies
+    target_link_libraries(bitcask
+            PUBLIC
+            kio
+            absl::flat_hash_map
+            absl::flat_hash_set
+            absl::inlined_vector
+            PRIVATE
+            cpp_library
+            crc32c
+    )
+endif ()
+#-----------------------------------------------
 # Includes
 #----------------------------------------------
-include_directories(${CMAKE_SOURCE_DIR})
-
-if (KIO_BUILD_BITCASK)
-    add_subdirectory(bitcask)
-endif ()
-
 if (KIO_BUILD_DEMOS)
     add_subdirectory(examples)
 endif ()
