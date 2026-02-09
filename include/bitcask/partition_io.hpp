@@ -12,7 +12,10 @@ namespace bitcask
     class PartitionIO
     {
     public:
-        PartitionIO(const BitcaskConfig& config, size_t partition_id, PartitionStats& stats);
+        PartitionIO(const BitcaskConfig& config, size_t partition_id, PartitionStats& stats) : stats_(stats),
+            file_id_gen_(partition_id), config_(config), partition_id_(partition_id)
+        {
+        }
 
         // Core operations
         kio::Task<kio::Result<void>> Put(kio::IoContext& ctx, std::string key, std::span<const std::byte> value);
@@ -41,17 +44,10 @@ namespace bitcask
             return active_file_->FileId();
         }
 
-    private:
-        KeyDir keydir_;
-        PartitionStats& stats_;
-        std::unique_ptr<DataFile> active_file_;
-        FDCache fd_cache_;
-        FileIdGenerator file_id_gen_;
-        BitcaskConfig config_;
-        size_t partition_id_;
-
-
-        kio::Task<kio::Result<void>> CreateAndSetActiveFile(kio::IoContext& ctx);
+        void RequestStop()
+        {
+            shutting_down_.store(true, std::memory_order_release);
+        }
 
         std::filesystem::path GetDataFilePath(uint64_t file_id) const
         {
@@ -62,6 +58,19 @@ namespace bitcask
         {
             return config_.directory / std::format("partition_{}/hint_{}.ht", partition_id_, file_id);
         }
+
+        kio::Task<kio::Result<void>> CreateAndSetActiveFile(kio::IoContext& ctx);
+        kio::Task<> BackgroundSync(kio::IoContext& ctx);
+
+    private:
+        KeyDir keydir_;
+        PartitionStats& stats_;
+        std::unique_ptr<DataFile> active_file_;
+        FDCache fd_cache_;
+        FileIdGenerator file_id_gen_;
+        BitcaskConfig config_;
+        size_t partition_id_;
+        std::atomic<bool> shutting_down_{false};
 
         [[nodiscard]] uint64_t ActiveFileId() const { return active_file_ ? active_file_->FileId() : 0; }
     };

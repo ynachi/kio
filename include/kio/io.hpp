@@ -124,23 +124,16 @@ namespace kio
             Grow(live + additional);
         }
 
-        [[nodiscard]] std::span<std::byte> WritableBytesSpan() const noexcept
+        [[nodiscard]] std::span<std::byte> WritableSpan() const noexcept
         {
             if (!data_)
                 return {};
             return {data_.get() + write_, WritableBytes()};
         }
 
-        // Convenience (if you like writing into char*).
-        [[nodiscard]] std::span<char> WritableSpan() const noexcept
-        {
-            auto b = WritableBytesSpan();
-            return {reinterpret_cast<char*>(b.data()), b.size()};
-        }
-
         [[nodiscard]] iovec WritableIovec() const noexcept
         {
-            auto b = WritableBytesSpan();
+            auto b = WritableSpan();
             return iovec{b.data(), b.size()};
         }
 

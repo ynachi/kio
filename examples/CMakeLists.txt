@@ -19,6 +19,8 @@ kio_add_sanitizers(211_dns_resolver)
 kio_add_demo(215_tls_echo_server aio/215_tls_echo_server.cpp TAGS core LIBS gflags::gflags kio)
 kio_add_sanitizers(215_tls_echo_server)
 
+kio_add_demo(08_partition aio/08_partition.cpp TAGS bitcask LIBS kio bitcask)
+kio_add_sanitizers(08_partition)
 
 # Create a custom target to build all examples
 add_custom_target(examples

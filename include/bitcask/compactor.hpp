@@ -1,5 +1,4 @@
 #pragma once
-#include <cstdint>
 #include <vector>
 
 #include "partition_io.hpp"
@@ -21,7 +20,7 @@ namespace bitcask
     };
 
     // ===================================================================
-    // 3. PartitionCompactor - Compaction Logic
+    // Compactor - Compaction Logic
     // ===================================================================
     class Compactor
     {
@@ -29,6 +28,11 @@ namespace bitcask
         Compactor(PartitionIO& io, BitcaskConfig& config, PartitionStats& stats) :
             io_(io), config_(config), stats_(stats)
         {
+        }
+
+        void RequestStop()
+        {
+            shutting_down_.store(true, std::memory_order_release);
         }
 
         // Compaction operations
@@ -40,12 +44,8 @@ namespace bitcask
             DataFile& dst_file
         );
 
-        // Background tasks
-        void StartBackgroundTasks(kio::IoContext& ctx);
         kio::Task<> CompactionLoop(kio::IoContext& ctx);
 
-        // Signaling
-        void SignalCompaction(uint64_t file_id);
         // Analysis
         std::vector<uint64_t> FindFragmentedFiles() const;
         bool ShouldCompactFile(uint64_t file_id) const;
@@ -55,9 +55,39 @@ namespace bitcask
         BitcaskConfig& config_;
         PartitionStats& stats_;
 
-        kio::Notifier compaction_signal_;
         absl::flat_hash_set<uint64_t> compaction_candidates_;
         std::atomic<bool> shutting_down_{false};
         std::atomic<bool> compaction_running_{false};
+
+        // --- Helper Structures & Methods ---
+
+        struct CompactionContext
+        {
+            CompactionResult result;
+            uint64_t current_src_id = 0;
+            uint64_t current_src_offset = 0; // Logical offset in a current source file
+            uint64_t dst_write_offset = 0; // Physical offset in destination
+            uint64_t dst_logical_offset = 0; // Logical offset for the next entry
+        };
+
+        // Processes entries currently in the buffer.
+        // Returns success or error if writing fails.
+        kio::Task<kio::Result<void>> ProcessBufferEntries(
+            kio::IoContext& ctx,
+            kio::IoBuffer& in_buf,
+            kio::IoBuffer& out_buf,
+            DataFile& dst_file,
+            CompactionContext& c_ctx,
+            bool is_eof
+        );
+
+        // Updates the in-memory KeyDir with the new locations after compaction
+        void UpdateKeyDir(const std::vector<HintEntry>& new_hints, uint64_t dst_file_id);
+
+        // Deletes the old source files after successful compaction
+        kio::Task<kio::Result<uint64_t>> DeleteSourceFiles(
+            kio::IoContext& ctx,
+            const std::vector<uint64_t>& fragmented_files
+        );
     };
 } // namespace bitcask

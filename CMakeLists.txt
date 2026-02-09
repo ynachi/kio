@@ -311,6 +311,9 @@ if (KIO_BUILD_BITCASK)
             src/bitcask/entry.cpp
             src/bitcask/files.cpp
             src/bitcask/compactor.cpp
+            src/bitcask/partition.cpp
+            src/bitcask/partition_io.cpp
+            src/bitcask/partition_recovery.cpp
     )
 
     # Include directories
@@ -363,4 +366,3 @@ if (KIO_BUILD_TESTS)
 
     message(STATUS "Added targets: check, check-quick")
 endif ()
-

@@ -1,5 +1,6 @@
 #include "bitcask/partition_io.hpp"
 
+#include <ranges>
 
 namespace bitcask
 {
@@ -7,25 +8,15 @@ namespace bitcask
 
     namespace
     {
-        kio::Task<kio::Result<DataEntry>> AsyncReadEntry(kio::IoContext& ctx, const int fd,
-                                                         const uint64_t offset, const uint32_t size) const
+        kio::Task<kio::Result<DataEntry>> AsyncReadEntry(kio::IoContext& ctx, const int fd, const uint64_t offset,
+                                                         const uint32_t size)
         {
             std::vector<std::byte> buffer(size);
             KIO_CO_TRY(co_await kio::AsyncReadExact(ctx, fd, buffer, offset));
             auto entry = KIO_CO_TRY(DataEntry::Deserialize(buffer));
             co_return entry;
         }
-    }
-
-    PartitionIO::PartitionIO(const BitcaskConfig& config, const size_t partition_id, PartitionStats& stats)
-        : stats_(stats),
-          fd_cache_(config.max_open_sealed_files),
-          file_id_gen_(partition_id),
-          config_(config),
-          partition_id_(partition_id)
-
-    {
-    }
+    } // namespace
 
     kio::Task<kio::Result<void>> PartitionIO::Put(kio::IoContext& ctx, std::string key,
                                                   std::span<const std::byte> value)
@@ -64,8 +55,8 @@ namespace bitcask
         co_return {};
     }
 
-    kio::Task<kio::Result<std::optional<std::vector<std::byte>>>> PartitionIO::Get(
-        kio::IoContext& ctx, std::string_view key)
+    kio::Task<kio::Result<std::optional<std::vector<std::byte>>>> PartitionIO::Get(kio::IoContext& ctx,
+        std::string_view key)
     {
         stats_.gets_total++;
 
@@ -162,12 +153,11 @@ namespace bitcask
 
     kio::Task<kio::Result<void>> PartitionIO::CreateAndSetActiveFile(kio::IoContext& ctx)
     {
-        uint64_t const new_id = file_id_gen_.Next();
-        int const new_fd =
-            KIO_CO_TRY(co_await kio::AsyncOpen(ctx, GetDataFilePath(new_id), config_.write_flags, config_.file_mode)).
-            Get();
+        uint64_t const new_fid = file_id_gen_.Next();
+        auto new_fd =
+            KIO_CO_TRY(co_await kio::AsyncOpen(ctx, GetDataFilePath(new_fid), config_.write_flags, config_.file_mode));
 
-        active_file_ = std::make_unique<DataFile>(new_fd, new_id, config_);
+        active_file_ = std::make_unique<DataFile>(new_fd.Release(), new_fid, config_);
 
         // Pre-allocate file space
         auto fallocate_result = co_await kio::AsyncFallocate(ctx, new_fd, 0, 0,
@@ -175,11 +165,11 @@ namespace bitcask
         if (!fallocate_result.has_value())
         {
             // Fallocate failure is non-fatal on some filesystems, just log
-            ALOG_ERROR("Fallocate failed for file {}: {}", new_id, fallocate_result.error().message());
+            ALOG_ERROR("Fallocate failed for file {}: {}", new_fid, fallocate_result.error().message());
         }
 
         // Initialize stats for a new file
-        stats_.data_files[new_id] = PartitionStats::FileStats{};
+        stats_.data_files[new_fid] = PartitionStats::FileStats{};
 
         co_return {};
     }
@@ -233,7 +223,8 @@ namespace bitcask
     {
         std::vector<uint64_t> ids;
         const fs::path p_dir = config_.directory / std::format("partition_{}", partition_id_);
-        if (!fs::exists(p_dir)) return ids;
+        if (!fs::exists(p_dir))
+            return ids;
         for (const auto& entry : fs::directory_iterator(p_dir))
         {
             if (entry.path().extension() == ".db" && entry.path().stem().string().starts_with("data_"))
@@ -265,7 +256,8 @@ namespace bitcask
 
         // Write all hints using once; hint entries are not that large
         size_t total = 0;
-        for (const auto& h : hints) total += h.Size();
+        for (const auto& h : hints)
+            total += h.Size();
         std::vector<std::byte> buf(total);
 
         size_t off = 0;
@@ -286,4 +278,33 @@ namespace bitcask
         ALOG_DEBUG("Wrote hint file for file_id {} with {} entries", file_id, hints.size());
         co_return {};
     }
-}
+
+    kio::Task<> PartitionIO::BackgroundSync(kio::IoContext& ctx)
+    {
+        while (!shutting_down_.load(std::memory_order_acquire))
+        {
+            if (auto res = co_await kio::AsyncSleep(ctx, std::chrono::milliseconds(config_.sync_interval));
+                !res.has_value())
+            {
+                ALOG_ERROR("Background sync job failed to sleep: {}", res.error().message());
+            }
+            // check again after wakeup
+            if (shutting_down_.load())
+            {
+                break;
+            }
+
+            if (active_file_ != nullptr)
+            {
+                if (auto res = co_await kio::AsyncFsync(ctx, active_file_->Fd()); !res.has_value())
+                {
+                    ALOG_ERROR("Background sync job failed to sync file {}: {}", active_file_->FileId(),
+                               res.error().message());
+                }
+            }
+        }
+        ALOG_INFO("Partition {} background sync loop exiting", partition_id_);
+
+        co_return;
+    }
+} // namespace bitcask
