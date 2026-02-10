@@ -2,7 +2,6 @@
 #include <vector>
 
 #include "partition_io.hpp"
-#include "absl/container/flat_hash_set.h"
 #include "kio/core/core.hpp"
 
 namespace bitcask
@@ -55,7 +54,6 @@ namespace bitcask
         BitcaskConfig& config_;
         PartitionStats& stats_;
 
-        absl::flat_hash_set<uint64_t> compaction_candidates_;
         std::atomic<bool> shutting_down_{false};
         std::atomic<bool> compaction_running_{false};
 

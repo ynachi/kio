@@ -74,6 +74,16 @@ kio_add_test(103_compactor_test bitcask/103_compactor_test.cpp
         TAGS bitcask integration
         LIBS bitcask GTest::gtest GTest::gtest_main
 )
+
+kio_add_test(104_partition_test bitcask/104_partition_test.cpp
+        TAGS bitcask integration
+        LIBS bitcask GTest::gtest GTest::gtest_main
+)
+
+kio_add_test(105_compaction_test bitcask/105_compaction_test.cpp
+        TAGS bitcask integration
+        LIBS bitcask GTest::gtest GTest::gtest_main
+)
 # -----------------------------------------------------------------------------
 # Fuzz Tests (requires clang with -fsanitize=fuzzer)
 # -----------------------------------------------------------------------------
@@ -96,5 +106,4 @@ if (KIO_ENABLE_FUZZING)
             RUNTIME DESTINATION bin/fuzz
     )
 endif ()
-
 

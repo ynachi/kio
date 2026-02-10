@@ -12,11 +12,15 @@
 
 namespace bitcask
 {
+    using SharedFD = std::shared_ptr<kio::FDGuard>;
+
     //========================================
     // FD Cache
     //========================================
     /**
-     * @brief LRU cache for file descriptors
+     * @brief LRU cache for file descriptors. This is the sole utility that MUST open RO
+     * FDs in this project to guarantee safe FD lifetime management. The only exception
+     * is the Active Write file.
      *
      * Prevents FD exhaustion by:
      * 1. Limiting max open files (e.g., 100)
@@ -33,11 +37,12 @@ namespace bitcask
         /**
          * @brief Get FD for file_id, opening if not cached
          */
-        kio::Task<kio::Result<int>> GetOrOpen(kio::IoContext& ctx, uint64_t file_id, const std::filesystem::path& path);
+        kio::Task<kio::Result<SharedFD>> GetOrOpen(kio::IoContext& ctx, uint64_t file_id,
+                                                   const std::filesystem::path& path);
         /**
-         * @brief Remove file from cache (e.g., after compaction)
+         * @brief Remove a file from the cache (e.g., after compaction)
          */
-        kio::Task<kio::Result<>> Remove(kio::IoContext& ctx, uint64_t file_id);
+        void Remove(uint64_t file_id);
         /**
          * @brief Clear all cached FDs
          */
@@ -66,7 +71,7 @@ namespace bitcask
     private:
         struct CacheEntry
         {
-            kio::FDGuard handle;
+            SharedFD handle;
             std::filesystem::path path;
             std::list<uint64_t>::iterator lru_iter;
         };
@@ -78,7 +83,7 @@ namespace bitcask
 
         /// refresh file id in the cache
         void Touch(uint64_t file_id);
-        kio::Task<> EvictOldest(kio::IoContext& ctx);
+        void EvictOldest();
     };
 
     //========================================
@@ -259,8 +264,8 @@ namespace bitcask
          *
          * @throws std::invalid_argument if fd < 0 or if O_APPEND is set
          */
-        DataFile(const int fd, const uint64_t file_id, BitcaskConfig& config) : file_id_(file_id), fd_(fd),
-            config_(config)
+        DataFile(SharedFD fd, const uint64_t file_id, BitcaskConfig& config) : file_id_(file_id), fd_(fd),
+                                                                               config_(config)
         {
         }
 
@@ -306,16 +311,16 @@ namespace bitcask
 
         // Getters
         [[nodiscard]] uint64_t FileId() const { return file_id_; }
-        [[nodiscard]] int Fd() { return fd_; }
+        [[nodiscard]] int RawFd() const { return fd_->Get(); }
+        [[nodiscard]] SharedFD Fd() { return fd_; }
         [[nodiscard]] uint64_t Size() const { return size_; }
-        [[nodiscard]] bool ShouldRotate(size_t max_file_size) const { return size_ >= max_file_size; }
+        [[nodiscard]] bool ShouldRotate(const size_t max_file_size) const { return size_ >= max_file_size; }
 
     private:
         // timestamp_s based id
         // data_1741971205.db
         uint64_t file_id_{0};
-        // FD is owned by the cache via a guard, this is a non-owned raw fd, it should not be closed by this class
-        int fd_;
+        SharedFD fd_;
         uint64_t size_{0};
         // useful to perform compaction of files older than X
         // on seal, file metadata is also written to disk
@@ -352,14 +357,5 @@ namespace bitcask
         [[nodiscard]] uint64_t FileId() const { return file_id_; }
         // Add this getter so tests can access the fd
         [[nodiscard]] int Fd() const { return fd_; }
-
-        // TODO: this method might create too much allocation. Do not use it.
-        // [[nodiscard]] kio::Task<kio::Result<void>> AsyncWrite(kio::IoContext& ctx, const HintEntry&& entry) const
-        // {
-        //     std::vector<std::byte> buf(entry.Size());
-        //     (void)entry.SerializeTo(buf);
-        //     // this writes at the end because entry files are created with O_APEND
-        //     return kio::AsyncWriteExact(ctx, fd_, buf);
-        // }
     };
 } // namespace bitcask

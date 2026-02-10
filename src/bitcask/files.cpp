@@ -37,15 +37,15 @@ namespace bitcask
         }
     } // namespace
 
-    kio::Task<kio::Result<int>> FDCache::GetOrOpen(kio::IoContext& ctx, uint64_t file_id,
-                                                   const std::filesystem::path& path)
+    kio::Task<kio::Result<SharedFD>> FDCache::GetOrOpen(kio::IoContext& ctx, uint64_t file_id,
+                                                        const std::filesystem::path& path)
     {
         // Cache hit
         if (const auto it = cache_.find(file_id); it != cache_.end())
         {
             stats_.hits++;
             Touch(file_id);
-            co_return it->second.handle.Get();
+            co_return it->second.handle;
         }
 
         // Cache miss
@@ -54,34 +54,31 @@ namespace bitcask
         // Evict if at capacity
         if (cache_.size() >= max_open_files_)
         {
-            co_await EvictOldest(ctx);
+            EvictOldest();
         }
 
         // Open file
         auto fd = KIO_CO_TRY(co_await kio::AsyncOpen(ctx, path, O_RDONLY, 0));
 
-        auto raw_fd = fd.Get();
+        auto shared_fd = std::make_shared<kio::FDGuard>(std::move(fd));
 
         // Add to cache
         lru_list_.push_front(file_id);
-        cache_.emplace(file_id, CacheEntry{.handle = std::move(fd), .path = path, .lru_iter = lru_list_.begin()});
+        cache_.emplace(file_id, CacheEntry{.handle = shared_fd, .path = path, .lru_iter = lru_list_.begin()});
 
         ALOG_DEBUG("FdCache: Opened file {} (cache size: {})", file_id, cache_.size());
 
-        co_return raw_fd;
+        co_return shared_fd;
     }
 
-    kio::Task<kio::Result<>> FDCache::Remove(kio::IoContext& ctx, uint64_t file_id)
+    void FDCache::Remove(uint64_t file_id)
     {
         if (const auto it = cache_.find(file_id); it != cache_.end())
         {
             lru_list_.erase(it->second.lru_iter);
-            // release the fd so that the destructor does not close it synchronously
-            const int fd_to_close = it->second.handle.Release();
+
             cache_.erase(it);
-            KIO_CO_TRY(co_await kio::AsyncClose(ctx, fd_to_close));
         }
-        co_return {};
     }
 
     void FDCache::Touch(const uint64_t file_id)
@@ -98,26 +95,18 @@ namespace bitcask
         entry.lru_iter = lru_list_.begin();
     }
 
-    kio::Task<> FDCache::EvictOldest(kio::IoContext& ctx)
+    void FDCache::EvictOldest()
     {
-        if (lru_list_.empty())
-            co_return;
+        if (lru_list_.empty()) return;
 
         const uint64_t old_id = lru_list_.back();
         auto it = cache_.find(old_id);
 
         if (it != cache_.end())
         {
-            // seal the FD so the destructor doesn't close it in blocking mode
-            const int fd_to_close = it->second.handle.Release();
-
-            // Erase from map (Destructor runs, but fd is -1, so it's a no-op)
             cache_.erase(it);
             lru_list_.pop_back();
             stats_.evictions++;
-
-            // Close it Asynchronously
-            co_await kio::AsyncClose(ctx, fd_to_close);
         }
     }
 
@@ -132,11 +121,11 @@ namespace bitcask
         size_ += entry_size;
 
         // Now perform the writing - other coroutines will see updated size_
-        KIO_CO_TRY(co_await kio::AsyncWriteExact(ctx, fd_, entry.GetPayloadSpan(), entry_offset));
+        KIO_CO_TRY(co_await kio::AsyncWriteExact(ctx, fd_->Get(), entry.GetPayloadSpan(), entry_offset));
 
         if (config_.sync_on_write)
         {
-            KIO_CO_TRY(co_await kio::AsyncFdatasync(ctx, fd_));
+            KIO_CO_TRY(co_await kio::AsyncFdatasync(ctx, fd_->Get()));
         }
 
         co_return entry_offset;
@@ -152,7 +141,6 @@ namespace bitcask
         const size_t entry_size = kEntryFixedHeaderSize + key_len + val_len;
 
         const uint64_t entry_offset = size_;
-        size_ += entry_size;
 
         // Prepare Header (21 bytes)
         // Layout: [CRC(4)][Timestamp(8)][Flag(1)][KeyLen(4)][ValueLen(4)]
@@ -177,7 +165,7 @@ namespace bitcask
         iov[2].iov_base = const_cast<void*>(static_cast<const void*>(value.data()));
         iov[2].iov_len = value.size();
 
-        auto bytes_written = KIO_CO_TRY(co_await kio::AsyncWritev(ctx, fd_, iov, entry_offset));
+        auto bytes_written = KIO_CO_TRY(co_await kio::AsyncWritev(ctx, fd_->Get(), iov, entry_offset));
 
         if (std::cmp_not_equal(bytes_written, entry_size))
         {
@@ -190,9 +178,10 @@ namespace bitcask
 
         if (config_.sync_on_write)
         {
-            KIO_CO_TRY(co_await kio::AsyncFdatasync(ctx, fd_));
+            KIO_CO_TRY(co_await kio::AsyncFdatasync(ctx, fd_->Get()));
         }
 
+        size_ += entry_size;
         co_return entry_offset;
     }
 } // namespace bitcask

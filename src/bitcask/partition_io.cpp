@@ -71,7 +71,7 @@ namespace bitcask
         const auto& loc = it->second;
 
         // get the fd
-        int fd{};
+        SharedFD fd{};
         if (active_file_ && loc.file_id == active_file_->FileId())
         {
             fd = active_file_->Fd();
@@ -82,7 +82,7 @@ namespace bitcask
             fd = KIO_CO_TRY(co_await fd_cache_.GetOrOpen(ctx, loc.file_id, path));
         }
 
-        const DataEntry entry = KIO_CO_TRY(co_await AsyncReadEntry(ctx, fd, loc.offset, loc.total_size));
+        const DataEntry entry = KIO_CO_TRY(co_await AsyncReadEntry(ctx, fd->Get(), loc.offset, loc.total_size));
 
         if (entry.GetKeyView() != key)
         {
@@ -133,7 +133,7 @@ namespace bitcask
     {
         const uint64_t sealed_file_id = active_file_->FileId();
         const uint64_t actual_size = active_file_->Size();
-        const int active_fd = active_file_->Fd();
+        const int active_fd = active_file_->RawFd();
 
         // Sync before sealing
         KIO_CO_TRY(co_await kio::AsyncFsync(ctx, active_fd));
@@ -154,13 +154,14 @@ namespace bitcask
     kio::Task<kio::Result<void>> PartitionIO::CreateAndSetActiveFile(kio::IoContext& ctx)
     {
         uint64_t const new_fid = file_id_gen_.Next();
-        auto new_fd =
+        auto fd_guard =
             KIO_CO_TRY(co_await kio::AsyncOpen(ctx, GetDataFilePath(new_fid), config_.write_flags, config_.file_mode));
 
-        active_file_ = std::make_unique<DataFile>(new_fd.Release(), new_fid, config_);
+        auto shared_fd = std::make_shared<kio::FDGuard>(std::move(fd_guard));
+        active_file_ = std::make_unique<DataFile>(shared_fd, new_fid, config_);
 
         // Pre-allocate file space
-        auto fallocate_result = co_await kio::AsyncFallocate(ctx, new_fd, 0, 0,
+        auto fallocate_result = co_await kio::AsyncFallocate(ctx, shared_fd->Get(), 0, 0,
                                                              static_cast<off_t>(config_.max_file_size));
         if (!fallocate_result.has_value())
         {
@@ -183,7 +184,7 @@ namespace bitcask
         }
 
         const uint64_t actual_size = active_file_->Size();
-        const int active_fd = active_file_->Fd();
+        const int active_fd = active_file_->RawFd();
         const uint64_t sealed_file_id = ActiveFileId();
 
         if (active_fd >= 0 && actual_size > 0)
@@ -296,7 +297,7 @@ namespace bitcask
 
             if (active_file_ != nullptr)
             {
-                if (auto res = co_await kio::AsyncFsync(ctx, active_file_->Fd()); !res.has_value())
+                if (auto res = co_await kio::AsyncFsync(ctx, active_file_->RawFd()); !res.has_value())
                 {
                     ALOG_ERROR("Background sync job failed to sync file {}: {}", active_file_->FileId(),
                                res.error().message());

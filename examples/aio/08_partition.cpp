@@ -10,9 +10,11 @@ namespace
 {
     kio::Task<> MainTask(kio::IoContext& ctx)
     {
+        using namespace std::chrono_literals;
         bitcask::BitcaskConfig cfg;
         cfg.directory = "/tmp/bitcask_demo";
         cfg.Validate();
+        cfg.compaction_interval_s = 50ms;
 
         // Partition expects: <directory>/partition_<id> to exist.
         std::filesystem::create_directories(cfg.directory / "partition_0");
@@ -30,6 +32,7 @@ namespace
         if (!put_res)
         {
             // handle put_res.error()
+            co_await part->AsyncClose(ctx);
             co_return;
         }
 
