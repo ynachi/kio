@@ -3,6 +3,7 @@
 #include <chrono>
 #include <filesystem>
 #include <format>
+#include <fstream>
 #include <span>
 #include <string>
 #include <vector>
@@ -12,6 +13,7 @@
 #include "kio/kio.hpp"
 
 namespace fs = std::filesystem;
+using namespace bitcask;
 
 namespace
 {
@@ -302,6 +304,90 @@ TEST_F(PartitionTest, RecoveryIgnoresTruncatedTail)
             auto close_res = co_await partition->AsyncClose(ctx_);
             EXPECT_TRUE(close_res.has_value());
         }
+    };
+
+    ctx_.RunUntilDone(task());
+}
+
+TEST_F(PartitionTest, HintFileIsSourceOfTruth)
+{
+    auto task = [&]() -> kio::Task<>
+    {
+        const std::string old_val = "old_value";
+        const std::string new_val = "new_value";
+        const uint64_t file_id = 1;
+
+        const auto data_path = test_dir_ / "partition_0" / "data_1.db";
+        const auto hint_path = test_dir_ / "partition_0" / "hint_1.ht";
+
+        // Build a data file with two versions of the same key
+        uint64_t old_offset = 0;
+        uint32_t old_size = 0;
+        uint64_t old_ts = 0;
+        {
+            const int fd = open(data_path.c_str(), config_.write_flags, config_.file_mode);
+            EXPECT_GE(fd, 0);
+            if (fd < 0)
+            {
+                co_return;
+            }
+
+            auto shared_fd = std::make_shared<kio::FDGuard>(fd);
+            DataFile df(shared_fd, file_id, config_);
+
+            DataEntry e1("key", std::as_bytes(std::span(old_val)));
+            auto res1 = co_await df.AsyncWrite(ctx_, e1);
+            EXPECT_TRUE(res1.has_value());
+            if (!res1)
+            {
+                co_return;
+            }
+            old_offset = res1.value();
+            old_size = static_cast<uint32_t>(e1.Size());
+            old_ts = e1.GetTimestamp();
+
+            DataEntry e2("key", std::as_bytes(std::span(new_val)));
+            auto res2 = co_await df.AsyncWrite(ctx_, e2);
+            EXPECT_TRUE(res2.has_value());
+            if (!res2)
+            {
+                co_return;
+            }
+
+            auto sync_res = co_await kio::AsyncFdatasync(ctx_, shared_fd->Get());
+            EXPECT_TRUE(sync_res.has_value());
+        }
+
+        // Write a hint file that points to the OLD value
+        {
+            HintEntry hint(old_ts, old_offset, old_size, std::string("key"));
+            std::vector<std::byte> buf(hint.Size());
+            hint.SerializeTo(buf);
+
+            std::ofstream out(hint_path, std::ios::binary | std::ios::trunc);
+            out.write(reinterpret_cast<const char*>(buf.data()), static_cast<std::streamsize>(buf.size()));
+        }
+
+        // Recover via Partition: hint should override the newer data in the log
+        auto open_res = co_await bitcask::Partition::AsyncOpen(ctx_, config_, 0);
+        EXPECT_TRUE(open_res.has_value());
+        if (!open_res)
+        {
+            co_return;
+        }
+
+        auto partition = std::move(open_res.value());
+
+        auto get_res = co_await partition->Get(ctx_, "key");
+        EXPECT_TRUE(get_res.has_value());
+        EXPECT_TRUE(get_res.value().has_value());
+        if (get_res.value())
+        {
+            EXPECT_EQ(BytesToString(get_res.value().value()), old_val);
+        }
+
+        auto close_res = co_await partition->AsyncClose(ctx_);
+        EXPECT_TRUE(close_res.has_value());
     };
 
     ctx_.RunUntilDone(task());
