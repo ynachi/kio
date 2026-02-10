@@ -59,6 +59,7 @@
 #include "core/io_helpers.hpp"
 #include "io.hpp"
 #include "logger.hpp"
+#include "try_log.hpp"
 #include "net.hpp"
 #include "tls/handshake.hpp"
 #include "tls/socket.hpp"

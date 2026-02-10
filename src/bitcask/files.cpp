@@ -141,6 +141,7 @@ namespace bitcask
         const size_t entry_size = kEntryFixedHeaderSize + key_len + val_len;
 
         const uint64_t entry_offset = size_;
+        size_ += entry_size;
 
         // Prepare Header (21 bytes)
         // Layout: [CRC(4)][Timestamp(8)][Flag(1)][KeyLen(4)][ValueLen(4)]
@@ -181,7 +182,6 @@ namespace bitcask
             KIO_CO_TRY(co_await kio::AsyncFdatasync(ctx, fd_->Get()));
         }
 
-        size_ += entry_size;
         co_return entry_offset;
     }
 } // namespace bitcask

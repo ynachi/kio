@@ -45,7 +45,6 @@ namespace bitcask
             old_stats.live_entries--;
             it->second = new_loc;
         }
-
         dst_stats.live_bytes += new_loc.total_size;
         dst_stats.live_entries++;
         dst_stats.total_bytes += new_loc.total_size;
@@ -133,7 +132,8 @@ namespace bitcask
     {
         const uint64_t sealed_file_id = active_file_->FileId();
         const uint64_t actual_size = active_file_->Size();
-        const int active_fd = active_file_->RawFd();
+        auto active_fd_handle = active_file_->Fd();
+        const int active_fd = active_fd_handle->Get();
 
         // Sync before sealing
         KIO_CO_TRY(co_await kio::AsyncFsync(ctx, active_fd));
@@ -142,8 +142,8 @@ namespace bitcask
         KIO_CO_TRY(co_await kio::AsyncFtruncate(ctx, active_fd, static_cast<off_t>(actual_size)));
 
         KIO_CO_TRY(co_await WriteHintFile(ctx, sealed_file_id));
-
-        KIO_CO_TRY(co_await kio::AsyncClose(ctx, active_fd));
+        const int fd_to_close = active_fd_handle->Release();
+        KIO_CO_TRY(co_await kio::AsyncClose(ctx, fd_to_close));
 
         KIO_CO_TRY(co_await CreateAndSetActiveFile(ctx));
 
@@ -184,7 +184,8 @@ namespace bitcask
         }
 
         const uint64_t actual_size = active_file_->Size();
-        const int active_fd = active_file_->RawFd();
+        auto active_fd_handle = active_file_->Fd();
+        const int active_fd = active_fd_handle->Get();
         const uint64_t sealed_file_id = ActiveFileId();
 
         if (active_fd >= 0 && actual_size > 0)
@@ -195,13 +196,15 @@ namespace bitcask
             // Write a hint file for the sealed file
             KIO_CO_TRY(co_await WriteHintFile(ctx, sealed_file_id));
 
-            KIO_CO_TRY(co_await kio::AsyncClose(ctx, active_fd));
+            const int fd_to_close = active_fd_handle->Release();
+            KIO_CO_TRY(co_await kio::AsyncClose(ctx, fd_to_close));
         }
         else if (active_fd >= 0)
         {
             // Empty file - close and remove
             ALOG_DEBUG("The active file is empty, removing file_id {}", sealed_file_id);
-            KIO_CO_TRY(co_await kio::AsyncClose(ctx, active_fd));
+            const int fd_to_close = active_fd_handle->Release();
+            KIO_CO_TRY(co_await kio::AsyncClose(ctx, fd_to_close));
 
             const auto path = GetDataFilePath(sealed_file_id);
             auto unlink_result = co_await kio::AsyncUnlink(ctx, AT_FDCWD, path, 0);

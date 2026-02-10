@@ -80,7 +80,7 @@ namespace bitcask
         );
 
         // Updates the in-memory KeyDir with the new locations after compaction
-        void UpdateKeyDir(const std::vector<HintEntry>& new_hints, uint64_t dst_file_id);
+        void UpdateKeyDir(const std::vector<HintEntry>& new_hints, uint64_t dst_file_id) const;
 
         // Deletes the old source files after successful compaction
         kio::Task<kio::Result<uint64_t>> DeleteSourceFiles(

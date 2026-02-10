@@ -69,7 +69,7 @@ namespace bitcask
             if (out_buf.ReadableBytes() >= kDefaultOutBufWriteSize)
             {
                 auto out_span = out_buf.ReadableSpan();
-                KIO_CO_TRY(co_await kio::AsyncWriteExact(ctx, dst_file.RawFd(), out_span, c_ctx.dst_write_offset));
+                KIO_CO_TRY_LOG(co_await kio::AsyncWriteExact(ctx, dst_file.RawFd(), out_span, c_ctx.dst_write_offset));
 
                 c_ctx.dst_write_offset += out_span.size();
                 out_buf.Clear();
@@ -96,7 +96,7 @@ namespace bitcask
             c_ctx.current_src_offset = 0; // Logical offset in source file
 
             const auto src_path = config_.directory / std::format("partition_{}/data_{}.db", io_.PartitionID(), src_id);
-            auto src_fd = KIO_CO_TRY(co_await io_.GetFDCache().GetOrOpen(ctx, src_id, src_path));
+            auto src_fd = KIO_CO_TRY_LOG(co_await io_.GetFDCache().GetOrOpen(ctx, src_id, src_path));
 
             uint64_t src_read_ptr = 0; // Physical syscall offset
             in_buf.Clear();
@@ -143,7 +143,7 @@ namespace bitcask
         co_return c_ctx.result;
     }
 
-    void Compactor::UpdateKeyDir(const std::vector<HintEntry>& new_hints, uint64_t dst_file_id)
+    void Compactor::UpdateKeyDir(const std::vector<HintEntry>& new_hints, uint64_t dst_file_id) const
     {
         auto& keydir = io_.GetKeyDir();
         for (const auto& hint : new_hints)
@@ -176,12 +176,12 @@ namespace bitcask
             }
 
             const auto data_path = config_.directory / std::format("partition_{}/data_{}.db", partition_id, src_id);
-            KIO_CO_TRY(co_await kio::AsyncUnlink(ctx, AT_FDCWD, data_path, 0));
+            KIO_CO_TRY_LOG(co_await kio::AsyncUnlink(ctx, AT_FDCWD, data_path, 0));
 
             const auto hint_path = config_.directory / std::format("partition_{}/hint_{}.ht", partition_id, src_id);
             if (std::filesystem::exists(hint_path))
             {
-                KIO_CO_TRY(co_await kio::AsyncUnlink(ctx, AT_FDCWD, hint_path, 0));
+                KIO_CO_TRY_LOG(co_await kio::AsyncUnlink(ctx, AT_FDCWD, hint_path, 0));
             }
 
             stats_.files_compacted_total++;
@@ -213,20 +213,20 @@ namespace bitcask
         auto run_compaction = [&]() -> kio::Task<kio::Result<void>>
         {
             auto dst_fd =
-                KIO_CO_TRY(co_await kio::AsyncOpen(ctx, dst_path, config_.write_flags, config_.file_mode));
+                KIO_CO_TRY_LOG(co_await kio::AsyncOpen(ctx, dst_path, config_.write_flags, config_.file_mode));
 
             auto shared_fd = std::make_shared<kio::FDGuard>(std::move(dst_fd));
 
             DataFile dst_file(shared_fd, dst_file_id, config_);
 
             // 2. Perform Compaction (Heavy I/O)
-            const auto result = KIO_CO_TRY(co_await CompactFiles(ctx, fragmented_files, dst_file));
+            const auto result = KIO_CO_TRY_LOG(co_await CompactFiles(ctx, fragmented_files, dst_file));
 
             // 3. Update Memory Index
             UpdateKeyDir(result.new_hints, dst_file_id);
 
             // 4. Delete Old Files
-            uint64_t reclaimed = KIO_CO_TRY(co_await DeleteSourceFiles(ctx, fragmented_files));
+            uint64_t reclaimed = KIO_CO_TRY_LOG(co_await DeleteSourceFiles(ctx, fragmented_files));
 
             stats_.bytes_reclaimed_total += reclaimed;
             stats_.compactions_total++;
