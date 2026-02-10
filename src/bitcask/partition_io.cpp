@@ -12,8 +12,8 @@ namespace bitcask
                                                          const uint32_t size)
         {
             std::vector<std::byte> buffer(size);
-            KIO_CO_TRY(co_await kio::AsyncReadExact(ctx, fd, buffer, offset));
-            auto entry = KIO_CO_TRY(DataEntry::Deserialize(buffer));
+            KIO_CO_TRY_LOG(co_await kio::AsyncReadExact(ctx, fd, buffer, offset));
+            auto entry = KIO_CO_TRY_LOG(DataEntry::Deserialize(buffer));
             co_return entry;
         }
     } // namespace
@@ -23,13 +23,13 @@ namespace bitcask
     {
         if (active_file_->ShouldRotate(config_.max_file_size))
         {
-            KIO_CO_TRY(co_await RotateActiveFile(ctx));
+            KIO_CO_TRY_LOG(co_await RotateActiveFile(ctx));
         }
 
         uint64_t const ts = GetCurrentTimestamp();
         uint32_t const total_size = kEntryFixedHeaderSize + key.size() + value.size();
 
-        const auto offset = KIO_CO_TRY(co_await active_file_->AsyncWrite(ctx, key, value, ts, kFlagNone));
+        const auto offset = KIO_CO_TRY_LOG(co_await active_file_->AsyncWrite(ctx, key, value, ts, kFlagNone));
 
         const ValueLocation new_loc{
             .file_id = active_file_->FileId(), .offset = offset, .total_size = total_size, .timestamp_ns = ts
@@ -78,10 +78,10 @@ namespace bitcask
         else
         {
             const auto path = GetDataFilePath(loc.file_id);
-            fd = KIO_CO_TRY(co_await fd_cache_.GetOrOpen(ctx, loc.file_id, path));
+            fd = KIO_CO_TRY_LOG(co_await fd_cache_.GetOrOpen(ctx, loc.file_id, path));
         }
 
-        const DataEntry entry = KIO_CO_TRY(co_await AsyncReadEntry(ctx, fd->Get(), loc.offset, loc.total_size));
+        const DataEntry entry = KIO_CO_TRY_LOG(co_await AsyncReadEntry(ctx, fd->Get(), loc.offset, loc.total_size));
 
         if (entry.GetKeyView() != key)
         {
@@ -120,7 +120,7 @@ namespace bitcask
 
         const DataEntry tombstone(std::string(key), {}, kFlagTombstone, GetCurrentTimestamp());
 
-        KIO_CO_TRY(co_await active_file_->AsyncWrite(ctx, tombstone));
+        KIO_CO_TRY_LOG(co_await active_file_->AsyncWrite(ctx, tombstone));
 
         auto& active_stats = stats_.data_files[active_file_->FileId()];
         active_stats.total_bytes += tombstone.Size();
@@ -136,16 +136,16 @@ namespace bitcask
         const int active_fd = active_fd_handle->Get();
 
         // Sync before sealing
-        KIO_CO_TRY(co_await kio::AsyncFsync(ctx, active_fd));
+        KIO_CO_TRY_LOG(co_await kio::AsyncFsync(ctx, active_fd));
 
         // Truncate to actual size (remove fallocate padding)
-        KIO_CO_TRY(co_await kio::AsyncFtruncate(ctx, active_fd, static_cast<off_t>(actual_size)));
+        KIO_CO_TRY_LOG(co_await kio::AsyncFtruncate(ctx, active_fd, static_cast<off_t>(actual_size)));
 
-        KIO_CO_TRY(co_await WriteHintFile(ctx, sealed_file_id));
+        KIO_CO_TRY_LOG(co_await WriteHintFile(ctx, sealed_file_id));
         const int fd_to_close = active_fd_handle->Release();
-        KIO_CO_TRY(co_await kio::AsyncClose(ctx, fd_to_close));
+        KIO_CO_TRY_LOG(co_await kio::AsyncClose(ctx, fd_to_close));
 
-        KIO_CO_TRY(co_await CreateAndSetActiveFile(ctx));
+        KIO_CO_TRY_LOG(co_await CreateAndSetActiveFile(ctx));
 
         stats_.file_rotations_total++;
         co_return {};
@@ -155,7 +155,8 @@ namespace bitcask
     {
         uint64_t const new_fid = file_id_gen_.Next();
         auto fd_guard =
-            KIO_CO_TRY(co_await kio::AsyncOpen(ctx, GetDataFilePath(new_fid), config_.write_flags, config_.file_mode));
+            KIO_CO_TRY_LOG(
+                co_await kio::AsyncOpen(ctx, GetDataFilePath(new_fid), config_.write_flags, config_.file_mode));
 
         auto shared_fd = std::make_shared<kio::FDGuard>(std::move(fd_guard));
         active_file_ = std::make_unique<DataFile>(shared_fd, new_fid, config_);
@@ -190,21 +191,21 @@ namespace bitcask
 
         if (active_fd >= 0 && actual_size > 0)
         {
-            KIO_CO_TRY(co_await kio::AsyncFsync(ctx, active_fd));
-            KIO_CO_TRY(co_await kio::AsyncFtruncate(ctx, active_fd, static_cast<off_t>(actual_size)));
+            KIO_CO_TRY_LOG(co_await kio::AsyncFsync(ctx, active_fd));
+            KIO_CO_TRY_LOG(co_await kio::AsyncFtruncate(ctx, active_fd, static_cast<off_t>(actual_size)));
 
             // Write a hint file for the sealed file
-            KIO_CO_TRY(co_await WriteHintFile(ctx, sealed_file_id));
+            KIO_CO_TRY_LOG(co_await WriteHintFile(ctx, sealed_file_id));
 
             const int fd_to_close = active_fd_handle->Release();
-            KIO_CO_TRY(co_await kio::AsyncClose(ctx, fd_to_close));
+            KIO_CO_TRY_LOG(co_await kio::AsyncClose(ctx, fd_to_close));
         }
         else if (active_fd >= 0)
         {
             // Empty file - close and remove
             ALOG_DEBUG("The active file is empty, removing file_id {}", sealed_file_id);
             const int fd_to_close = active_fd_handle->Release();
-            KIO_CO_TRY(co_await kio::AsyncClose(ctx, fd_to_close));
+            KIO_CO_TRY_LOG(co_await kio::AsyncClose(ctx, fd_to_close));
 
             const auto path = GetDataFilePath(sealed_file_id);
             auto unlink_result = co_await kio::AsyncUnlink(ctx, AT_FDCWD, path, 0);
@@ -246,7 +247,7 @@ namespace bitcask
 
         // Open a hint file for writing
         const auto hint_handle =
-            KIO_CO_TRY(co_await kio::AsyncOpen(ctx, hint_path, O_CREAT | O_WRONLY | O_TRUNC, config_.file_mode));
+            KIO_CO_TRY_LOG(co_await kio::AsyncOpen(ctx, hint_path, O_CREAT | O_WRONLY | O_TRUNC, config_.file_mode));
 
         // Collect all entries for this file from the keydir
         std::vector<HintEntry> hints;
@@ -274,10 +275,10 @@ namespace bitcask
 
         if (!buf.empty())
         {
-            KIO_CO_TRY(co_await kio::AsyncWriteExact(ctx, hint_handle, buf));
+            KIO_CO_TRY_LOG(co_await kio::AsyncWriteExact(ctx, hint_handle, buf));
         }
 
-        KIO_CO_TRY(co_await kio::AsyncFsync(ctx, hint_handle));
+        KIO_CO_TRY_LOG(co_await kio::AsyncFsync(ctx, hint_handle));
 
         ALOG_DEBUG("Wrote hint file for file_id {} with {} entries", file_id, hints.size());
         co_return {};

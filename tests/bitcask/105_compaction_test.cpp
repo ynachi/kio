@@ -54,7 +54,7 @@ protected:
 
     void SetUp() override
     {
-        kio::alog::g_level = kio::alog::Level::Debug;
+        kio::alog::g_level = kio::alog::Level::Disabled;
         test_dir_ = MakeTempDir("bitcask_compaction_test");
         fs::create_directories(test_dir_ / "partition_0");
 
@@ -177,4 +177,10 @@ TEST_F(CompactionTest, CompactionDoesNotLoseLiveData)
     };
 
     ctx_.RunUntilDone(task());
+}
+
+int main(int argc, char** argv)
+{
+    ::testing::InitGoogleTest(&argc, argv);
+    return RUN_ALL_TESTS();
 }

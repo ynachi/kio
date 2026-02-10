@@ -124,7 +124,7 @@ namespace bitcask
                 }
 
                 // Process buffer content
-                KIO_CO_TRY(co_await ProcessBufferEntries(ctx, in_buf, out_buf, dst_file, c_ctx, file_done));
+                KIO_CO_TRY_LOG(co_await ProcessBufferEntries(ctx, in_buf, out_buf, dst_file, c_ctx, file_done));
             }
         }
 
@@ -132,13 +132,13 @@ namespace bitcask
         if (out_buf.ReadableBytes() > 0)
         {
             auto out_span = out_buf.ReadableSpan();
-            KIO_CO_TRY(co_await kio::AsyncWriteExact(ctx, dst_file.RawFd(), out_span, c_ctx.dst_write_offset));
+            KIO_CO_TRY_LOG(co_await kio::AsyncWriteExact(ctx, dst_file.RawFd(), out_span, c_ctx.dst_write_offset));
             c_ctx.dst_write_offset += out_span.size();
             out_buf.Clear();
         }
 
         ALOG_DEBUG("Compaction: Syncing dst file (fd={})", dst_file.RawFd());
-        KIO_CO_TRY(co_await kio::AsyncFdatasync(ctx, dst_file.RawFd()));
+        KIO_CO_TRY_LOG(co_await kio::AsyncFdatasync(ctx, dst_file.RawFd()));
 
         co_return c_ctx.result;
     }
@@ -243,7 +243,7 @@ namespace bitcask
             ALOG_ERROR("Partition {}: compaction failed: {}", partition_id, final_res.error().message());
             stats_.compactions_failed++;
             // Try to clean up a partial file
-            co_await kio::AsyncUnlink(ctx, AT_FDCWD, dst_path, 0);
+            KIO_CO_TRY_LOG(co_await kio::AsyncUnlink(ctx, AT_FDCWD, dst_path, 0));
         }
 
         compaction_running_.store(false, std::memory_order_release);

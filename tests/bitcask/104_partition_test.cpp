@@ -14,24 +14,24 @@ namespace fs = std::filesystem;
 
 namespace
 {
-std::vector<std::byte> BytesFromString(std::string_view value)
-{
-    const auto* begin = reinterpret_cast<const std::byte*>(value.data());
-    return std::vector<std::byte>(begin, begin + value.size());
-}
+    std::vector<std::byte> BytesFromString(std::string_view value)
+    {
+        const auto* begin = reinterpret_cast<const std::byte*>(value.data());
+        return std::vector(begin, begin + value.size());
+    }
 
-std::string BytesToString(const std::vector<std::byte>& bytes)
-{
-    return {reinterpret_cast<const char*>(bytes.data()), bytes.size()};
-}
+    std::string BytesToString(const std::vector<std::byte>& bytes)
+    {
+        return {reinterpret_cast<const char*>(bytes.data()), bytes.size()};
+    }
 
-fs::path MakeTempDir(std::string_view prefix)
-{
-    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
-    fs::path dir = fs::temp_directory_path() / std::format("{}_{}", prefix, now);
-    fs::create_directories(dir);
-    return dir;
-}
+    fs::path MakeTempDir(std::string_view prefix)
+    {
+        const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+        fs::path dir = fs::temp_directory_path() / std::format("{}_{}", prefix, now);
+        fs::create_directories(dir);
+        return dir;
+    }
 } // namespace
 
 class PartitionTest : public ::testing::Test
@@ -203,4 +203,10 @@ TEST_F(PartitionTest, FileRotationCreatesMultipleFiles)
     };
 
     ctx_.RunUntilDone(task());
+}
+
+int main(int argc, char** argv)
+{
+    ::testing::InitGoogleTest(&argc, argv);
+    return RUN_ALL_TESTS();
 }

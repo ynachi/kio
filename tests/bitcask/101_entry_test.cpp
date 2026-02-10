@@ -9,12 +9,14 @@ using namespace bitcask;
 
 
 // Helper to inspect raw bytes of a DataEntry
-std::vector<std::byte> ToVector(const DataEntry& entry) {
+std::vector<std::byte> ToVector(const DataEntry& entry)
+{
     auto span = entry.GetPayloadSpan();
     return {span.begin(), span.end()};
 }
 
-TEST(EntryTest, RoundTrip_ValidData) {
+TEST(EntryTest, RoundTripValidData)
+{
     std::string key = "user:123";
     std::string val = R"({"name": "alice"})";
     const auto ts = GetCurrentTimestamp();
@@ -31,20 +33,23 @@ TEST(EntryTest, RoundTrip_ValidData) {
     // Verify
     EXPECT_EQ(decoded.GetKeyView(), key);
     // Convert bytes back to string for comparison
-    const std::string decoded_val(reinterpret_cast<const char*>(decoded.GetValueView().data()), decoded.GetValueView().size());
+    const std::string decoded_val(reinterpret_cast<const char*>(decoded.GetValueView().data()),
+                                  decoded.GetValueView().size());
     EXPECT_EQ(decoded_val, val);
     EXPECT_EQ(decoded.GetTimestamp(), ts);
     EXPECT_EQ(decoded.GetFlag(), kFlagNone);
     EXPECT_FALSE(decoded.IsTombstone());
 }
 
-TEST(EntryTest, Tombstone_Flag) {
+TEST(EntryTest, TombstoneFlag)
+{
     const DataEntry entry("del_key", {}, kFlagTombstone);
     EXPECT_TRUE(entry.IsTombstone());
     EXPECT_EQ(entry.GetFlag(), kFlagTombstone);
 }
 
-TEST(EntryTest, Deserialize_CorruptedCrc) {
+TEST(EntryTest, DeserializeCorruptedCrc)
+{
     std::string val = "val";
     DataEntry original("key", std::as_bytes(std::span(val)));
     auto raw = ToVector(original);
@@ -57,7 +62,8 @@ TEST(EntryTest, Deserialize_CorruptedCrc) {
     EXPECT_EQ(result.error(), kio::ParseError::Corrupted);
 }
 
-TEST(EntryTest, Deserialize_CorruptedHeader) {
+TEST(EntryTest, DeserializeCorruptedHeader)
+{
     std::string val = "val";
     DataEntry original("key", std::as_bytes(std::span(val)));
     auto raw = ToVector(original);
@@ -72,7 +78,8 @@ TEST(EntryTest, Deserialize_CorruptedHeader) {
     EXPECT_EQ(result.error(), kio::ParseError::Corrupted);
 }
 
-TEST(EntryTest, Deserialize_IncompleteBuffer) {
+TEST(EntryTest, DeserializeIncompleteBuffer)
+{
     std::string val = "long_value";
     DataEntry original("long_key", std::as_bytes(std::span(val)));
     auto raw = ToVector(original);
@@ -86,14 +93,16 @@ TEST(EntryTest, Deserialize_IncompleteBuffer) {
     EXPECT_EQ(DataEntry::Deserialize(header_only).error(), kio::ParseError::Incomplete);
 }
 
-TEST(EntryTest, Deserialize_ZeroLength) {
+TEST(EntryTest, DeserializeZeroLength)
+{
     DataEntry empty_val("key", {});
     auto result = DataEntry::Deserialize(empty_val.GetPayloadSpan());
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(result->GetValueView().size(), 0);
 }
 
-TEST(EntryTest, HintEntry_RoundTrip) {
+TEST(EntryTest, HintEntryRoundTrip)
+{
     HintEntry original;
     original.timestamp_ns = 123456789;
     original.offset = 4096;
@@ -117,11 +126,12 @@ TEST(EntryTest, HintEntry_RoundTrip) {
     EXPECT_EQ(decoded.key, original.key);
 }
 
-TEST(EntryTest, HintEntry_BufferTooSmall) {
-    HintEntry entry(1, 100, 50, "key");
-    std::vector<std::byte> buffer(entry.Size() - 1); // Too small
+TEST(EntryTest, HintEntryBufferTooSmall)
+{
+    const HintEntry entry(1, 100, 50, "key");
+    std::vector<std::byte> buffer(entry.Size() - 1);
 
-    // SerializeTo returns 0 on small buffer
+    // SerializeTo returns 0 on a small buffer
     EXPECT_EQ(entry.SerializeTo(buffer), 0);
 }
 

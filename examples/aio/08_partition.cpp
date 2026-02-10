@@ -36,6 +36,15 @@ namespace
             co_return;
         }
 
+        std::string value2 = "hello";
+        auto put_res2 = co_await part->Put(ctx, "k2", std::as_bytes(std::span(value)));
+        if (!put_res2)
+        {
+            // handle put_res.error()
+            co_await part->AsyncClose(ctx);
+            co_return;
+        }
+
         auto get_res = co_await part->Get(ctx, "k1");
         if (get_res && get_res.value())
         {

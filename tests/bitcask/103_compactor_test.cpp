@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <vector>
 #include <string>
 #include <random>
@@ -20,7 +21,9 @@ protected:
     fs::path temp_dir;
     kio::IoContext ctx;
     BitcaskConfig config;
-    FDCache fd_cache;
+    PartitionStats stats;
+    std::unique_ptr<PartitionIO> io;
+    std::unique_ptr<Compactor> compactor;
 
     void SetUp() override
     {
@@ -30,12 +33,20 @@ protected:
         // We need to create the partition directory structure expected by CompactFiles
         //  constructs a path: cfg.directory / "partition_{id}" / "data_{id}.db"
         fs::create_directories(temp_dir / "partition_1");
+
+        io = std::make_unique<PartitionIO>(config, 1, stats);
+        compactor = std::make_unique<Compactor>(*io, config, stats);
     }
 
     void TearDown() override
     {
         // Clean up FDs before deleting files
-        fd_cache.Clear();
+        if (io)
+        {
+            io->GetFDCache().Clear();
+        }
+        compactor.reset();
+        io.reset();
         fs::remove_all(temp_dir);
     }
 
@@ -57,12 +68,13 @@ protected:
     kio::Task<std::vector<std::pair<std::string, ValueLocation>>>
     CreateDataFile(uint64_t file_id, const std::vector<std::pair<std::string, std::string>>& entries)
     {
-        auto path = config.directory / "partition_1" / std::format("data_{}.db", file_id);
+        auto path = io->GetDataFilePath(file_id);
 
         int fd = open(path.c_str(), config.write_flags, config.file_mode);
         if (fd < 0) throw std::runtime_error("Failed to open file");
 
-        DataFile df(fd, file_id, config);
+        auto shared_fd = std::make_shared<kio::FDGuard>(fd);
+        DataFile df(shared_fd, file_id, config);
         std::vector<std::pair<std::string, ValueLocation>> locations;
 
         for (const auto& [key, val] : entries)
@@ -87,15 +99,11 @@ protected:
 
         // Sync data to disk BEFORE closing
         // Without this, the data may still be in kernel buffers when we reopen the file
-        auto sync_result = co_await kio::AsyncFdatasync(ctx, fd);
+        auto sync_result = co_await kio::AsyncFdatasync(ctx, shared_fd->Get());
         if (!sync_result)
         {
-            close(fd);
             throw std::runtime_error("Failed to sync file");
         }
-
-        // Now it's safe to close - data is guaranteed to be on disk
-        close(fd);
 
         co_return locations;
     }
@@ -103,7 +111,7 @@ protected:
     // Helper to read all contents of a file to verify
     kio::Task<std::vector<DataEntry>> ReadAllEntries(uint64_t file_id)
     {
-        auto path = config.directory / "partition_1" / std::format("data_{}.db", file_id);
+        auto path = io->GetDataFilePath(file_id);
 
         if (!fs::exists(path) || fs::file_size(path) == 0)
         {
@@ -167,21 +175,29 @@ TEST_F(CompactorTest, AllLiveNoReclaim)
 
         auto locs = co_await CreateDataFile(100, data);
 
-        KeyDir key_dir;
+        auto& key_dir = io->GetKeyDir();
         for (const auto& [k, loc] : locs)
         {
             key_dir[k] = loc;
         }
 
-        auto dst_path = config.directory / "partition_1" / "data_200.db";
-        int dst_fd = open(dst_path.c_str(), config.write_flags, config.file_mode);
-        DataFile dst_file(dst_fd, 200, config);
+        auto dst_path = io->GetDataFilePath(200);
+        kio::Result<CompactionResult> result_ex;
+        {
+            int dst_fd = open(dst_path.c_str(), config.write_flags, config.file_mode);
+            if (dst_fd < 0)
+            {
+                failure_message = "Failed to open destination file";
+                co_return;
+            }
+            auto shared_fd = std::make_shared<kio::FDGuard>(dst_fd);
+            DataFile dst_file(shared_fd, 200, config);
 
-        auto result_ex = co_await CompactFiles(config, ctx, {100}, dst_file, fd_cache, key_dir, 1);
+            result_ex = co_await compactor->CompactFiles(ctx, {100}, dst_file);
+        }
         if (!result_ex.has_value())
         {
             failure_message = "CompactFiles failed: " + result_ex.error().message();
-            close(dst_fd);
             co_return;
         }
 
@@ -190,35 +206,30 @@ TEST_F(CompactorTest, AllLiveNoReclaim)
         if (result.bytes_reclaimed != 0)
         {
             failure_message = std::format("Expected bytes_reclaimed=0, got {}", result.bytes_reclaimed);
-            close(dst_fd);
             co_return;
         }
 
         if (result.new_hints.size() != 3)
         {
             failure_message = std::format("Expected 3 hints, got {}", result.new_hints.size());
-            close(dst_fd);
             co_return;
         }
 
         if (result.new_hints[0].key != "key1")
         {
             failure_message = std::format("Expected first hint key='key1', got '{}'", result.new_hints[0].key);
-            close(dst_fd);
             co_return;
         }
 
         if (result.new_hints[0].offset != 0)
         {
             failure_message = std::format("Expected first hint offset=0, got {}", result.new_hints[0].offset);
-            close(dst_fd);
             co_return;
         }
 
         if (result.new_hints[1].key != "key2")
         {
             failure_message = std::format("Expected second hint key='key2', got '{}'", result.new_hints[1].key);
-            close(dst_fd);
             co_return;
         }
 
@@ -226,13 +237,8 @@ TEST_F(CompactorTest, AllLiveNoReclaim)
         {
             failure_message = std::format("Expected second hint offset={}, got {}",
                                           result.new_hints[0].size, result.new_hints[1].offset);
-            close(dst_fd);
             co_return;
         }
-
-        // Close the file before reading it back
-        // fs::file_size() may not reflect writes until the FD is closed
-        close(dst_fd);
 
         auto new_entries = co_await ReadAllEntries(200);
 
@@ -271,7 +277,7 @@ TEST_F(CompactorTest, MixedLiveAndStaleReclaimsSpace)
         };
         auto locs = co_await CreateDataFile(100, data);
 
-        KeyDir key_dir;
+        auto& key_dir = io->GetKeyDir();
         key_dir["key1"] = locs[0].second;
 
         // Key2 is stale (points to file 999)
@@ -282,16 +288,24 @@ TEST_F(CompactorTest, MixedLiveAndStaleReclaimsSpace)
         // Key3 is missing (deleted) -> implicit
 
         // Prepare Dest
-        auto dst_path = config.directory / "partition_1" / "data_200.db";
-        int dst_fd = open(dst_path.c_str(), config.write_flags, config.file_mode);
-        DataFile dst_file(dst_fd, 200, config);
+        auto dst_path = io->GetDataFilePath(200);
+        kio::Result<CompactionResult> result_opt;
+        {
+            int dst_fd = open(dst_path.c_str(), config.write_flags, config.file_mode);
+            if (dst_fd < 0)
+            {
+                failure_message = "Failed to open destination file";
+                co_return;
+            }
+            auto shared_fd = std::make_shared<kio::FDGuard>(dst_fd);
+            DataFile dst_file(shared_fd, 200, config);
 
-        // Compact
-        auto result_opt = co_await CompactFiles(config, ctx, {100}, dst_file, fd_cache, key_dir, 1);
+            // Compact
+            result_opt = co_await compactor->CompactFiles(ctx, {100}, dst_file);
+        }
         if (!result_opt.has_value())
         {
             failure_message = "CompactFiles failed: " + result_opt.error().message();
-            close(dst_fd);
             co_return;
         }
 
@@ -301,14 +315,12 @@ TEST_F(CompactorTest, MixedLiveAndStaleReclaimsSpace)
         if (result.new_hints.size() != 1)
         {
             failure_message = std::format("Expected 1 hint, got {}", result.new_hints.size());
-            close(dst_fd);
             co_return;
         }
 
         if (result.new_hints[0].key != "key1")
         {
             failure_message = std::format("Expected hint key='key1', got '{}'", result.new_hints[0].key);
-            close(dst_fd);
             co_return;
         }
 
@@ -318,12 +330,8 @@ TEST_F(CompactorTest, MixedLiveAndStaleReclaimsSpace)
         {
             failure_message = std::format("Expected bytes_reclaimed={}, got {}",
                                           expected_reclaim, result.bytes_reclaimed);
-            close(dst_fd);
             co_return;
         }
-
-        // Close the file before reading it back
-        close(dst_fd);
 
         // Verify a file only has 1 entry
         auto new_entries = co_await ReadAllEntries(200);
@@ -365,21 +373,29 @@ TEST_F(CompactorTest, MultipleSourceFilesMerge)
                                                  {"KeyA", "v2"}
                                              });
 
-        KeyDir key_dir;
+        auto& key_dir = io->GetKeyDir();
         key_dir["KeyB"] = locs1[1].second; // KeyB from file 100 is live
         key_dir["KeyA"] = locs2[0].second; // KeyA from file 101 is live (v1 is stale)
 
         // Dest
-        auto dst_path = config.directory / "partition_1" / "data_200.db";
-        int dst_fd = open(dst_path.c_str(), config.write_flags, config.file_mode);
-        DataFile dst_file(dst_fd, 200, config);
+        auto dst_path = io->GetDataFilePath(200);
+        kio::Result<CompactionResult> result_opt;
+        {
+            int dst_fd = open(dst_path.c_str(), config.write_flags, config.file_mode);
+            if (dst_fd < 0)
+            {
+                failure_message = "Failed to open destination file";
+                co_return;
+            }
+            auto shared_fd = std::make_shared<kio::FDGuard>(dst_fd);
+            DataFile dst_file(shared_fd, 200, config);
 
-        // Compact {100, 101}
-        auto result_opt = co_await CompactFiles(config, ctx, {100, 101}, dst_file, fd_cache, key_dir, 1);
+            // Compact {100, 101}
+            result_opt = co_await compactor->CompactFiles(ctx, {100, 101}, dst_file);
+        }
         if (!result_opt.has_value())
         {
             failure_message = "CompactFiles failed: " + result_opt.error().message();
-            close(dst_fd);
             co_return;
         }
 
@@ -388,7 +404,6 @@ TEST_F(CompactorTest, MultipleSourceFilesMerge)
         if (result.new_hints.size() != 2)
         {
             failure_message = std::format("Expected 2 hints, got {}", result.new_hints.size());
-            close(dst_fd);
             co_return;
         }
 
@@ -397,14 +412,12 @@ TEST_F(CompactorTest, MultipleSourceFilesMerge)
         if (result.new_hints[0].key != "KeyB")
         {
             failure_message = std::format("Expected first hint key='KeyB', got '{}'", result.new_hints[0].key);
-            close(dst_fd);
             co_return;
         }
 
         if (result.new_hints[1].key != "KeyA")
         {
             failure_message = std::format("Expected second hint key='KeyA', got '{}'", result.new_hints[1].key);
-            close(dst_fd);
             co_return;
         }
 
@@ -412,11 +425,8 @@ TEST_F(CompactorTest, MultipleSourceFilesMerge)
         {
             failure_message = std::format("Expected bytes_reclaimed={}, got {}",
                                           locs1[0].second.total_size, result.bytes_reclaimed);
-            close(dst_fd);
             co_return;
         }
-
-        close(dst_fd);
 
         auto entries = co_await ReadAllEntries(200);
         if (entries.size() != 2)
@@ -463,27 +473,35 @@ TEST_F(CompactorTest, TruncatedEntryIgnored)
                                                   });
 
         // Manually truncate the file to cut off half of key2
-        auto path = config.directory / "partition_1" / "data_100.db";
+        auto path = io->GetDataFilePath(100);
         uint64_t valid_size = locs[0].second.total_size;
         uint64_t partial_size = valid_size + 10; // 10 bytes of the next header
         fs::resize_file(path, partial_size);
 
-        KeyDir key_dir;
+        auto& key_dir = io->GetKeyDir();
         key_dir["key1"] = locs[0].second;
         // Key2 might be in KeyDir pointing to this file, but since file is physically truncated,
         // it effectively doesn't exist.
         key_dir["key2"] = locs[1].second;
 
-        auto dst_path = config.directory / "partition_1" / "data_200.db";
-        int dst_fd = open(dst_path.c_str(), config.write_flags, config.file_mode);
-        DataFile dst_file(dst_fd, 200, config);
+        auto dst_path = io->GetDataFilePath(200);
+        kio::Result<CompactionResult> result_opt;
+        {
+            int dst_fd = open(dst_path.c_str(), config.write_flags, config.file_mode);
+            if (dst_fd < 0)
+            {
+                failure_message = "Failed to open destination file";
+                co_return;
+            }
+            auto shared_fd = std::make_shared<kio::FDGuard>(dst_fd);
+            DataFile dst_file(shared_fd, 200, config);
 
-        // Run Compactor
-        auto result_opt = co_await CompactFiles(config, ctx, {100}, dst_file, fd_cache, key_dir, 1);
+            // Run Compactor
+            result_opt = co_await compactor->CompactFiles(ctx, {100}, dst_file);
+        }
         if (!result_opt.has_value())
         {
             failure_message = "CompactFiles failed: " + result_opt.error().message();
-            close(dst_fd);
             co_return;
         }
 
@@ -492,26 +510,20 @@ TEST_F(CompactorTest, TruncatedEntryIgnored)
         if (result.new_hints.size() < 1)
         {
             failure_message = std::format("Expected at least 1 hint, got {}", result.new_hints.size());
-            close(dst_fd);
             co_return;
         }
 
         if (result.new_hints[0].key != "key1")
         {
             failure_message = std::format("Expected first hint key='key1', got '{}'", result.new_hints[0].key);
-            close(dst_fd);
             co_return;
         }
 
         if (result.new_hints.size() > 1)
         {
             failure_message = "Should not have recovered key2 from truncated data";
-            close(dst_fd);
             co_return;
         }
-
-        // Close the file before trying to read it
-        close(dst_fd);
 
         test_passed = true;
     };
@@ -531,23 +543,30 @@ TEST_F(CompactorTest, AllEntriesStaleFileDeleted)
     {
         const auto locs = co_await CreateDataFile(100, {{"k1", "v1"}, {"k2", "v2"}});
 
-        KeyDir key_dir; // Empty keydir implies keys are deleted or exist elsewhere
+        io->GetKeyDir().clear(); // Empty keydir implies keys are deleted or exist elsewhere
 
-        auto dst_path = config.directory / "partition_1" / "data_200.db";
-        int dst_fd = open(dst_path.c_str(), config.write_flags, config.file_mode);
-        DataFile dst_file(dst_fd, 200, config);
+        auto dst_path = io->GetDataFilePath(200);
+        kio::Result<CompactionResult> result_opt;
+        {
+            int dst_fd = open(dst_path.c_str(), config.write_flags, config.file_mode);
+            if (dst_fd < 0)
+            {
+                failure_message = "Failed to open destination file";
+                co_return;
+            }
+            auto shared_fd = std::make_shared<kio::FDGuard>(dst_fd);
+            DataFile dst_file(shared_fd, 200, config);
 
-        auto result_opt = co_await CompactFiles(config, ctx, {100}, dst_file, fd_cache, key_dir, 1);
+            result_opt = co_await compactor->CompactFiles(ctx, {100}, dst_file);
+        }
 
         if (!result_opt.has_value())
         {
             failure_message = "Compaction failed: " + result_opt.error().message();
-            close(dst_fd);
             co_return;
         }
 
         auto result = result_opt.value();
-        close(dst_fd);
 
         if (result.new_hints.size() != 0)
         {
@@ -588,22 +607,29 @@ TEST_F(CompactorTest, LargeEntryExceedsBuffers)
         std::string large_val = RandomString(1024 * 1024);
         auto locs = co_await CreateDataFile(100, {{"large_key", large_val}});
 
-        KeyDir key_dir;
+        auto& key_dir = io->GetKeyDir();
         key_dir["large_key"] = locs[0].second;
 
-        const auto dst_path = config.directory / "partition_1" / "data_200.db";
-        const int dst_fd = open(dst_path.c_str(), config.write_flags, config.file_mode);
-        DataFile dst_file(dst_fd, 200, config);
+        const auto dst_path = io->GetDataFilePath(200);
+        kio::Result<CompactionResult> result_opt;
+        {
+            const int dst_fd = open(dst_path.c_str(), config.write_flags, config.file_mode);
+            if (dst_fd < 0)
+            {
+                failure_message = "Failed to open destination file";
+                co_return;
+            }
+            auto shared_fd = std::make_shared<kio::FDGuard>(dst_fd);
+            DataFile dst_file(shared_fd, 200, config);
 
-        auto result_opt = co_await CompactFiles(config, ctx, {100}, dst_file, fd_cache, key_dir, 1);
+            result_opt = co_await compactor->CompactFiles(ctx, {100}, dst_file);
+        }
         if (!result_opt.has_value())
         {
             failure_message = "Compact failed: " + result_opt.error().message();
-            close(dst_fd);
             co_return;
         }
         auto result = result_opt.value();
-        close(dst_fd);
 
         if (result.new_hints.size() != 1)
         {
@@ -662,22 +688,29 @@ TEST_F(CompactorTest, ManySmallEntriesBufferFlushing)
 
         auto locs = co_await CreateDataFile(100, data);
 
-        KeyDir key_dir;
+        auto& key_dir = io->GetKeyDir();
         for (const auto& [k, loc] : locs) key_dir[k] = loc;
 
-        auto dst_path = config.directory / "partition_1" / "data_200.db";
-        int dst_fd = open(dst_path.c_str(), config.write_flags, config.file_mode);
-        DataFile dst_file(dst_fd, 200, config);
+        auto dst_path = io->GetDataFilePath(200);
+        kio::Result<CompactionResult> result_opt;
+        {
+            int dst_fd = open(dst_path.c_str(), config.write_flags, config.file_mode);
+            if (dst_fd < 0)
+            {
+                failure_message = "Failed to open destination file";
+                co_return;
+            }
+            auto shared_fd = std::make_shared<kio::FDGuard>(dst_fd);
+            DataFile dst_file(shared_fd, 200, config);
 
-        auto result_opt = co_await CompactFiles(config, ctx, {100}, dst_file, fd_cache, key_dir, 1);
+            result_opt = co_await compactor->CompactFiles(ctx, {100}, dst_file);
+        }
         if (!result_opt.has_value())
         {
             failure_message = "Compact failed";
-            close(dst_fd);
             co_return;
         }
         auto result = result_opt.value();
-        close(dst_fd);
 
         if (result.new_hints.size() != 1000)
         {
@@ -703,4 +736,10 @@ TEST_F(CompactorTest, ManySmallEntriesBufferFlushing)
 
     ctx.RunUntilDone(task());
     EXPECT_TRUE(passed) << failure_message;
+}
+
+int main(int argc, char** argv)
+{
+    ::testing::InitGoogleTest(&argc, argv);
+    return RUN_ALL_TESTS();
 }

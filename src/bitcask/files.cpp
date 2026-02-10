@@ -58,7 +58,7 @@ namespace bitcask
         }
 
         // Open file
-        auto fd = KIO_CO_TRY(co_await kio::AsyncOpen(ctx, path, O_RDONLY, 0));
+        auto fd = KIO_CO_TRY_LOG(co_await kio::AsyncOpen(ctx, path, O_RDONLY, 0));
 
         auto shared_fd = std::make_shared<kio::FDGuard>(std::move(fd));
 
@@ -121,11 +121,11 @@ namespace bitcask
         size_ += entry_size;
 
         // Now perform the writing - other coroutines will see updated size_
-        KIO_CO_TRY(co_await kio::AsyncWriteExact(ctx, fd_->Get(), entry.GetPayloadSpan(), entry_offset));
+        KIO_CO_TRY_LOG(co_await kio::AsyncWriteExact(ctx, fd_->Get(), entry.GetPayloadSpan(), entry_offset));
 
         if (config_.sync_on_write)
         {
-            KIO_CO_TRY(co_await kio::AsyncFdatasync(ctx, fd_->Get()));
+            KIO_CO_TRY_LOG(co_await kio::AsyncFdatasync(ctx, fd_->Get()));
         }
 
         co_return entry_offset;
@@ -166,7 +166,7 @@ namespace bitcask
         iov[2].iov_base = const_cast<void*>(static_cast<const void*>(value.data()));
         iov[2].iov_len = value.size();
 
-        auto bytes_written = KIO_CO_TRY(co_await kio::AsyncWritev(ctx, fd_->Get(), iov, entry_offset));
+        auto bytes_written = KIO_CO_TRY_LOG(co_await kio::AsyncWritev(ctx, fd_->Get(), iov, entry_offset));
 
         if (std::cmp_not_equal(bytes_written, entry_size))
         {
@@ -179,7 +179,7 @@ namespace bitcask
 
         if (config_.sync_on_write)
         {
-            KIO_CO_TRY(co_await kio::AsyncFdatasync(ctx, fd_->Get()));
+            KIO_CO_TRY_LOG(co_await kio::AsyncFdatasync(ctx, fd_->Get()));
         }
 
         co_return entry_offset;

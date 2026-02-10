@@ -13,7 +13,7 @@ namespace bitcask
     {
         auto partition = std::unique_ptr<Partition>(new Partition(config, partition_id));
 
-        KIO_CO_TRY(co_await RecoverPartition(ctx, partition->io_, partition->stats_, config));
+        KIO_CO_TRY_LOG(co_await RecoverPartition(ctx, partition->io_, partition->stats_, config));
 
         if (config.auto_compact)
         {
@@ -37,7 +37,7 @@ namespace bitcask
         // waits until the tasks exit naturally.
         co_await BgJobs().JoinAll(ctx);
 
-        KIO_CO_TRY(co_await io_.SealActiveFile(ctx));
+        KIO_CO_TRY_LOG(co_await io_.SealActiveFile(ctx));
 
         co_return {};
     }

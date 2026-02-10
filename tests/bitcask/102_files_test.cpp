@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include "bitcask/files.hpp"
 
 using namespace bitcask;
@@ -115,22 +116,26 @@ TEST_F(FileTest, FDCache_OpenAndEvict)
 
         // Open 1 (Miss -> Open)
         auto fd1 = co_await cache.GetOrOpen(io, 1, p1);
-        EXPECT_GT(fd1.value(), 0);
+        EXPECT_TRUE(fd1.has_value());
+        EXPECT_GT(fd1.value()->Get(), 0);
         EXPECT_EQ(cache.Size(), 1);
 
         // Open 2 (Miss -> Open)
         auto fd2 = co_await cache.GetOrOpen(io, 2, p2);
-        EXPECT_GT(fd2.value(), 0);
+        EXPECT_TRUE(fd2.has_value());
+        EXPECT_GT(fd2.value()->Get(), 0);
         EXPECT_EQ(cache.Size(), 2);
 
         // Open 3 (Miss -> Evict 1 -> Open 3)
         auto fd3 = co_await cache.GetOrOpen(io, 3, p3);
-        EXPECT_GT(fd3.value(), 0);
+        EXPECT_TRUE(fd3.has_value());
+        EXPECT_GT(fd3.value()->Get(), 0);
         EXPECT_EQ(cache.Size(), 2);
 
         // Open 1 again (Miss -> Evict 2 (LRU) -> Open 1)
         auto fd1_new = co_await cache.GetOrOpen(io, 1, p1);
-        EXPECT_GT(fd1_new.value(), 0);
+        EXPECT_TRUE(fd1_new.has_value());
+        EXPECT_GT(fd1_new.value()->Get(), 0);
 
         // If the cache works, fd1 and fd1_new might be different or same
         // depending on OS fd recycling, but the cache size must remain 2.
@@ -149,7 +154,8 @@ TEST_F(FileTest, BasicWrite)
     const int fd = open(path.c_str(), config.write_flags, config.file_mode);
     ASSERT_GE(fd, 0) << "Failed to create test file";
 
-    DataFile df = DataFile(fd, 1, config);
+    auto shared_fd = std::make_shared<kio::FDGuard>(fd);
+    DataFile df = DataFile(shared_fd, 1, config);
 
     auto test = [&](kio::IoContext& io) -> kio::Task<>
     {
@@ -172,7 +178,6 @@ TEST_F(FileTest, BasicWrite)
     }(ctx);
 
     ctx.RunUntilDone(std::move(test));
-    ::close(fd);
 }
 
 TEST_F(FileTest, SequentialAsyncWrites)
@@ -184,7 +189,8 @@ TEST_F(FileTest, SequentialAsyncWrites)
     const int fd = open(path.c_str(), config.write_flags, config.file_mode);
     ASSERT_GE(fd, 0) << "Failed to create test file";
 
-    DataFile df = DataFile(fd, 1, config);
+    auto shared_fd = std::make_shared<kio::FDGuard>(fd);
+    DataFile df = DataFile(shared_fd, 1, config);
 
     auto test = [&](kio::IoContext& io) -> kio::Task<>
     {
@@ -244,7 +250,6 @@ TEST_F(FileTest, SequentialAsyncWrites)
     }(ctx);
 
     ctx.RunUntilDone(std::move(test));
-    ::close(fd);
 }
 
 TEST_F(FileTest, MultipleDataFileInstances_CausesCorruption)
@@ -259,8 +264,10 @@ TEST_F(FileTest, MultipleDataFileInstances_CausesCorruption)
     const int fd2 = open(path.c_str(), config.write_flags, config.file_mode);
     ASSERT_GE(fd2, 0) << "Failed to open same file again";
 
-    DataFile df1 = DataFile(fd1, 1, config);
-    DataFile df2 = DataFile(fd2, 1, config);
+    auto shared_fd1 = std::make_shared<kio::FDGuard>(fd1);
+    auto shared_fd2 = std::make_shared<kio::FDGuard>(fd2);
+    DataFile df1 = DataFile(shared_fd1, 1, config);
+    DataFile df2 = DataFile(shared_fd2, 1, config);
 
     auto test = [&](kio::IoContext& io) -> kio::Task<>
     {
@@ -305,8 +312,6 @@ TEST_F(FileTest, MultipleDataFileInstances_CausesCorruption)
     }(ctx);
 
     ctx.RunUntilDone(std::move(test));
-    ::close(fd1);
-    ::close(fd2);
 }
 
 TEST_F(FileTest, ShouldRotate_TriggersWhenSizeExceeded)
@@ -315,7 +320,8 @@ TEST_F(FileTest, ShouldRotate_TriggersWhenSizeExceeded)
     const int fd = open(path.c_str(), config.write_flags, config.file_mode);
     ASSERT_GE(fd, 0) << "Failed to create test file";
 
-    DataFile df = DataFile(fd, 1, config);
+    auto shared_fd = std::make_shared<kio::FDGuard>(fd);
+    DataFile df = DataFile(shared_fd, 1, config);
     const size_t max_size = 200; // Small limit for quick test
 
     auto test = [&](kio::IoContext& io) -> kio::Task<>
@@ -344,7 +350,6 @@ TEST_F(FileTest, ShouldRotate_TriggersWhenSizeExceeded)
     }(ctx);
 
     ctx.RunUntilDone(std::move(test));
-    ::close(fd);
 }
 
 TEST_F(FileTest, DataSurvivesClose)
@@ -360,7 +365,8 @@ TEST_F(FileTest, DataSurvivesClose)
         const int fd = open(path.c_str(), config.write_flags, config.file_mode);
         ASSERT_GE(fd, 0) << "Failed to create test file";
 
-        DataFile df = DataFile(fd, 1, config);
+        auto shared_fd = std::make_shared<kio::FDGuard>(fd);
+        DataFile df = DataFile(shared_fd, 1, config);
 
         auto write_task = [&](kio::IoContext& io) -> kio::Task<>
         {
@@ -375,7 +381,6 @@ TEST_F(FileTest, DataSurvivesClose)
         }(ctx);
 
         ctx.RunUntilDone(std::move(write_task));
-        ::close(fd); // File closed - data should persist
     }
 
     // Phase 2: Reopen and verify data
@@ -407,7 +412,6 @@ TEST_F(FileTest, DataSurvivesClose)
             );
             EXPECT_EQ(recovered_str, test_val) << "Value mismatch after reopen";
 
-            co_await kio::AsyncClose(io, fd);
             co_return;
         }(ctx);
 

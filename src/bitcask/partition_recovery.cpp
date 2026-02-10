@@ -64,7 +64,7 @@ namespace bitcask
                                                          const kio::FDGuard& fh, const uint64_t file_id)
     {
         const int fd = fh.Get();
-        const uint64_t file_size = KIO_CO_TRY(GetFileSize(fd));
+        const uint64_t file_size = KIO_CO_TRY_LOG(GetFileSize(fd));
 
         if (file_size == 0)
         {
@@ -73,14 +73,14 @@ namespace bitcask
 
         // Hint files are small, read entirely
         std::vector<std::byte> buffer(file_size);
-        KIO_CO_TRY(co_await kio::AsyncReadExact(ctx, fd, buffer, 0));
+        KIO_CO_TRY_LOG(co_await kio::AsyncReadExact(ctx, fd, buffer, 0));
 
         std::span<const std::byte> remaining(buffer);
         uint64_t entries_recovered = 0;
 
         while (remaining.size() >= kHintHeaderSize)
         {
-            auto result = KIO_CO_TRY(HintEntry::Deserialize(remaining));
+            auto result = KIO_CO_TRY_LOG(HintEntry::Deserialize(remaining));
 
             auto [hint, consumed] = result;
             remaining = remaining.subspan(consumed);
@@ -112,9 +112,9 @@ namespace bitcask
             co_return std::unexpected(std::make_error_code(std::errc::no_such_file_or_directory));
         }
 
-        const auto fd = KIO_CO_TRY(co_await AsyncOpen(ctx, hint_path, config.read_flags, config.file_mode));
+        const auto fd = KIO_CO_TRY_LOG(co_await AsyncOpen(ctx, hint_path, config.read_flags, config.file_mode));
 
-        auto result = KIO_CO_TRY(co_await RecoverFromHintFile(ctx, io, fd, file_id));
+        auto result = KIO_CO_TRY_LOG(co_await RecoverFromHintFile(ctx, io, fd, file_id));
 
         co_return result;
     }
@@ -128,7 +128,7 @@ namespace bitcask
     )
     {
         const int fd = fh.Get();
-        const uint64_t file_size = KIO_CO_TRY(GetFileSize(fd));
+        const uint64_t file_size = KIO_CO_TRY_LOG(GetFileSize(fd));
 
         if (file_size == 0)
         {
@@ -148,7 +148,7 @@ namespace bitcask
             auto writable = buffer.WritableSpan();
 
             const uint64_t bytes_to_read = std::min(writable.size(), file_size - file_read_position);
-            const auto read_result = KIO_CO_TRY(
+            const auto read_result = KIO_CO_TRY_LOG(
                 co_await AsyncRead(ctx, fd, writable.subspan(0, bytes_to_read), file_read_position));
 
             if (read_result == 0)
@@ -160,7 +160,7 @@ namespace bitcask
             file_read_position += read_result;
 
             // Process entries in buffer
-            auto [recovered, skipped] = KIO_CO_TRY(RecoverDataFromBuffer(io, buffer, file_id, file_read_position));
+            auto [recovered, skipped] = KIO_CO_TRY_LOG(RecoverDataFromBuffer(io, buffer, file_id, file_read_position));
 
             total_recovered += recovered;
             total_skipped += skipped;
@@ -226,7 +226,7 @@ namespace bitcask
             io.FdGen().UpdateState(decoded.timestamp_sec, decoded.sequence);
         }
 
-        KIO_CO_TRY(co_await io.CreateAndSetActiveFile(ctx));
+        KIO_CO_TRY_LOG(co_await io.CreateAndSetActiveFile(ctx));
         co_return {};
     }
 }
