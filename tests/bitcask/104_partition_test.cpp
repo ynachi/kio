@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "bitcask/entry.hpp"
 #include "bitcask/partition.hpp"
 #include "kio/kio.hpp"
 
@@ -200,6 +201,107 @@ TEST_F(PartitionTest, FileRotationCreatesMultipleFiles)
             }
         }
         EXPECT_GT(data_files, 1u);
+    };
+
+    ctx_.RunUntilDone(task());
+}
+
+TEST_F(PartitionTest, RecoveryIgnoresTruncatedTail)
+{
+    auto task = [&]() -> kio::Task<>
+    {
+        const std::string v1 = "value_1";
+        const std::string v2 = "value_2";
+        const std::string v3 = "value_3";
+
+        // Phase 1: write a few entries and close cleanly
+        {
+            auto open_res = co_await bitcask::Partition::AsyncOpen(ctx_, config_, 0);
+            EXPECT_TRUE(open_res.has_value());
+            if (!open_res)
+            {
+                co_return;
+            }
+
+            auto partition = std::move(open_res.value());
+
+            EXPECT_TRUE((co_await partition->Put(ctx_, "k1", std::as_bytes(std::span(v1)))).has_value());
+            EXPECT_TRUE((co_await partition->Put(ctx_, "k2", std::as_bytes(std::span(v2)))).has_value());
+            EXPECT_TRUE((co_await partition->Put(ctx_, "k3", std::as_bytes(std::span(v3)))).has_value());
+
+            auto close_res = co_await partition->AsyncClose(ctx_);
+            EXPECT_TRUE(close_res.has_value());
+        }
+
+        // Find the single data file
+        fs::path data_path;
+        for (const auto& entry : fs::directory_iterator(test_dir_ / "partition_0"))
+        {
+            if (entry.path().extension() == ".db" && entry.path().stem().string().starts_with("data_"))
+            {
+                data_path = entry.path();
+                break;
+            }
+        }
+
+        EXPECT_FALSE(data_path.empty()) << "Expected a data file to exist";
+        if (data_path.empty())
+        {
+            co_return;
+        }
+
+        // Remove hint file so recovery must scan the data file
+        const auto stem = data_path.stem().string(); // data_{id}
+        const auto file_id_str = stem.substr(std::string("data_").size());
+        const auto hint_path = test_dir_ / "partition_0" / std::format("hint_{}.ht", file_id_str);
+        if (fs::exists(hint_path))
+        {
+            fs::remove(hint_path);
+        }
+
+        // Truncate into the last entry to simulate a crash
+        bitcask::DataEntry e1("k1", std::as_bytes(std::span(v1)));
+        bitcask::DataEntry e2("k2", std::as_bytes(std::span(v2)));
+        bitcask::DataEntry e3("k3", std::as_bytes(std::span(v3)));
+
+        const uint64_t valid_size = e1.Size() + e2.Size();
+        const uint64_t partial_size = valid_size + 10; // partial header/body of entry 3
+        fs::resize_file(data_path, partial_size);
+
+        // Phase 2: reopen and verify only the first two entries are recovered
+        {
+            auto open_res = co_await bitcask::Partition::AsyncOpen(ctx_, config_, 0);
+            EXPECT_TRUE(open_res.has_value());
+            if (!open_res)
+            {
+                co_return;
+            }
+
+            auto partition = std::move(open_res.value());
+
+            auto get1 = co_await partition->Get(ctx_, "k1");
+            EXPECT_TRUE(get1.has_value());
+            EXPECT_TRUE(get1.value().has_value());
+            if (get1.value())
+            {
+                EXPECT_EQ(BytesToString(get1.value().value()), v1);
+            }
+
+            auto get2 = co_await partition->Get(ctx_, "k2");
+            EXPECT_TRUE(get2.has_value());
+            EXPECT_TRUE(get2.value().has_value());
+            if (get2.value())
+            {
+                EXPECT_EQ(BytesToString(get2.value().value()), v2);
+            }
+
+            auto get3 = co_await partition->Get(ctx_, "k3");
+            EXPECT_TRUE(get3.has_value());
+            EXPECT_FALSE(get3.value().has_value());
+
+            auto close_res = co_await partition->AsyncClose(ctx_);
+            EXPECT_TRUE(close_res.has_value());
+        }
     };
 
     ctx_.RunUntilDone(task());
