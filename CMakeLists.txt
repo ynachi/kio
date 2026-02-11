@@ -300,6 +300,8 @@ target_link_libraries(kio PUBLIC
         pthread
         OpenSSL::SSL
         OpenSSL::Crypto
+        PRIVATE
+        cpp_library
 )
 
 #-----------------------------------------------

@@ -97,6 +97,8 @@ constexpr std::size_t kHintHeaderSize = 24;
 constexpr std::size_t kFSReadChunkSize = 32 * 1024;
 constexpr std::size_t kKeydirDefaultShardCount = 2;
 
+constexpr uint32_t CLUSTER_PARTITION_COUNT = 256;
+
 // file formats
 constexpr std::string_view kDataFilePrefix = "data_";
 constexpr std::string_view kHintFilePrefix = "hint_";

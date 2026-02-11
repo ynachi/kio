@@ -43,6 +43,26 @@ namespace
         std::ranges::sort(files);
         return files;
     }
+
+    std::vector<std::string> ListHintFiles(const fs::path& partition_dir)
+    {
+        std::vector<std::string> files;
+        if (!fs::exists(partition_dir))
+        {
+            return files;
+        }
+
+        for (const auto& entry : fs::directory_iterator(partition_dir))
+        {
+            if (entry.path().extension() == ".ht" && entry.path().stem().string().starts_with("hint_"))
+            {
+                files.push_back(entry.path().filename().string());
+            }
+        }
+
+        std::ranges::sort(files);
+        return files;
+    }
 } // namespace
 
 class CompactionTest : public ::testing::Test
@@ -171,6 +191,65 @@ TEST_F(CompactionTest, CompactionDoesNotLoseLiveData)
                 EXPECT_TRUE(get_res.value().has_value());
             }
         }
+
+        auto close_res = co_await partition->AsyncClose(ctx_);
+        EXPECT_TRUE(close_res.has_value());
+    };
+
+    ctx_.RunUntilDone(task());
+}
+
+TEST_F(CompactionTest, CompactionDeletesStaleFilesAndHints)
+{
+    auto task = [&]() -> kio::Task<>
+    {
+        auto open_res = co_await bitcask::Partition::AsyncOpen(ctx_, config_, 0);
+        EXPECT_TRUE(open_res.has_value());
+        if (!open_res)
+        {
+            co_return;
+        }
+
+        auto partition = std::move(open_res.value());
+
+        // Force multiple files + make the oldest file fully stale.
+        std::string payload(600, 'X');
+        for (int i = 0; i < 20; ++i)
+        {
+            auto put_res = co_await partition->Put(ctx_, std::format("key_{}", i),
+                                                   std::as_bytes(std::span(payload)));
+            EXPECT_TRUE(put_res.has_value());
+        }
+
+        for (int i = 0; i < 20; ++i)
+        {
+            auto put_res = co_await partition->Put(ctx_, std::format("key_{}", i),
+                                                   std::as_bytes(std::span(payload)));
+            EXPECT_TRUE(put_res.has_value());
+        }
+
+        const auto before_data = ListDataFiles(test_dir_ / "partition_0");
+        const auto before_hints = ListHintFiles(test_dir_ / "partition_0");
+
+        EXPECT_GT(before_data.size(), 1u);
+        EXPECT_GT(before_hints.size(), 0u);
+
+        // Oldest sealed file should be fully stale after overwrites
+        const std::string oldest_data = before_data.front();
+        const std::string oldest_hint = "hint_" + oldest_data.substr(std::string("data_").size(),
+                                                                     oldest_data.size() - std::string("data_").size() - 3)
+            + ".ht";
+
+        auto compact_res = co_await partition->Compact(ctx_);
+        EXPECT_TRUE(compact_res.has_value());
+
+        const auto after_data = ListDataFiles(test_dir_ / "partition_0");
+        const auto after_hints = ListHintFiles(test_dir_ / "partition_0");
+
+        EXPECT_FALSE(std::ranges::find(after_data, oldest_data) != after_data.end())
+            << "Expected stale data file to be deleted";
+        EXPECT_FALSE(std::ranges::find(after_hints, oldest_hint) != after_hints.end())
+            << "Expected stale hint file to be deleted";
 
         auto close_res = co_await partition->AsyncClose(ctx_);
         EXPECT_TRUE(close_res.has_value());

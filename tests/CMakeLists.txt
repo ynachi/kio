@@ -12,6 +12,11 @@ kio_add_test(102_io_context kio/102_io_context.cpp
         LIBS kio GTest::gtest GTest::gtest_main
 )
 
+kio_add_test(103_ketama_ring_test kio/103_ketama_ring_test.cpp
+        TAGS kio unit
+        LIBS kio GTest::gtest GTest::gtest_main
+)
+
 # -----------------------------------------------------------------------------
 # Kio Integration Tests (real I/O)
 # -----------------------------------------------------------------------------
@@ -84,6 +89,16 @@ kio_add_test(105_compaction_test bitcask/105_compaction_test.cpp
         TAGS bitcask integration
         LIBS bitcask GTest::gtest GTest::gtest_main
 )
+
+kio_add_test(106_perf_stress_test bitcask/106_perf_stress_test.cpp
+        TAGS bitcask perf
+        LIBS bitcask GTest::gtest GTest::gtest_main
+)
+
+kio_add_test(107_database_test bitcask/107_database_test.cpp
+        TAGS bitcask unit
+        LIBS bitcask GTest::gtest GTest::gtest_main
+)
 # -----------------------------------------------------------------------------
 # Fuzz Tests (requires clang with -fsanitize=fuzzer)
 # -----------------------------------------------------------------------------
@@ -106,4 +121,3 @@ if (KIO_ENABLE_FUZZING)
             RUNTIME DESTINATION bin/fuzz
     )
 endif ()
-
