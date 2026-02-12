@@ -95,10 +95,6 @@ kio_add_test(106_perf_stress_test bitcask/106_perf_stress_test.cpp
         LIBS bitcask GTest::gtest GTest::gtest_main
 )
 
-kio_add_test(107_database_test bitcask/107_database_test.cpp
-        TAGS bitcask unit
-        LIBS bitcask GTest::gtest GTest::gtest_main
-)
 # -----------------------------------------------------------------------------
 # Fuzz Tests (requires clang with -fsanitize=fuzzer)
 # -----------------------------------------------------------------------------

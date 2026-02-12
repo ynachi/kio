@@ -12,6 +12,10 @@ kio_add_demo(03_http_services aio/03_http_services.cpp TAGS core LIBS gflags::gf
 kio_add_sanitizers(03_http_services)
 target_compile_definitions(03_http_services PRIVATE DAIO_STATS=1)
 
+kio_add_demo(04_ctx_switch_benchmark aio/04_ctx_switch_benchmark.cpp TAGS core LIBS gflags::gflags kio)
+kio_add_sanitizers(04_ctx_switch_benchmark)
+target_compile_definitions(04_ctx_switch_benchmark PRIVATE DAIO_STATS=1)
+
 kio_add_demo(211_dns_resolver aio/211_dns_resolve.cpp TAGS core LIBS kio)
 kio_add_sanitizers(211_dns_resolver)
 

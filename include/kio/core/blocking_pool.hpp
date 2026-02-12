@@ -12,210 +12,196 @@
 
 namespace kio
 {
-
-namespace detail
-{
-
-// Thread-local waker for blocking pool threads
-inline thread_local RingWaker tls_waker;
-
-}  // namespace detail
-
-class BlockingPool
-{
-public:
-    using job_t = std::move_only_function<void() noexcept>;
-
-    explicit BlockingPool(std::size_t threads, std::size_t capacity = 4096) : cap_(capacity), q_(capacity)
+    class BlockingPool
     {
-        if (threads == 0)
-            threads = 1;
-        workers_.reserve(threads);
-        for (std::size_t i = 0; i < threads; ++i)
+    public:
+        using job_t = std::move_only_function<void() noexcept>;
+
+        explicit BlockingPool(std::size_t threads, std::size_t capacity = 4096) : cap_(capacity), q_(capacity)
         {
-            workers_.emplace_back([this] { WorkerLoop(); });
+            if (threads == 0)
+                threads = 1;
+            workers_.reserve(threads);
+            for (std::size_t i = 0; i < threads; ++i)
+            {
+                workers_.emplace_back([this] { WorkerLoop(); });
+            }
         }
-    }
 
-    ~BlockingPool() { Stop(); }
+        ~BlockingPool() { Stop(); }
 
-    BlockingPool(const BlockingPool&) = delete;
-    BlockingPool& operator=(const BlockingPool&) = delete;
+        BlockingPool(const BlockingPool&) = delete;
+        BlockingPool& operator=(const BlockingPool&) = delete;
 
-    void Stop()
-    {
-        if (bool expected = false; !stopping_.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+        void Stop()
         {
-            return;
+            if (bool expected = false; !stopping_.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+            {
+                return;
+            }
+            {
+                std::scoped_lock lk(m_);
+                cv_.notify_all();
+            }
+            for (auto& t : workers_)
+            {
+                if (t.joinable())
+                {
+                    t.join();
+                }
+            }
         }
+
+        // Submit a callable (lambda, function, etc)
+        // Returns false if queue is full
+        bool TrySubmit(job_t&& job)
         {
             std::scoped_lock lk(m_);
-            cv_.notify_all();
-        }
-        for (auto& t : workers_)
-        {
-            if (t.joinable())
+            if (stopping_.load(std::memory_order_relaxed))
             {
-                t.join();
+                return false;
             }
-        }
-    }
 
-    // Submit a callable (lambda, function, etc)
-    // Returns false if queue is full
-    bool TrySubmit(job_t&& job)
-    {
-        std::scoped_lock lk(m_);
-        if (stopping_.load(std::memory_order_relaxed))
-        {
-            return false;
-        }
-
-        if (count_ == cap_)
-        {
-            return false;
-        }
-
-        q_[tail_] = std::move(job);
-        tail_ = (tail_ + 1) % cap_;
-        ++count_;
-        cv_.notify_one();
-        return true;
-    }
-
-    // Convenience: submit with automatic move
-    template <typename F>
-    bool Submit(F&& f)
-    {
-        return TrySubmit(job_t{std::forward<F>(f)});
-    }
-
-private:
-    void WorkerLoop()
-    {
-        while (!stopping_.load(std::memory_order_acquire))
-        {
-            job_t job;
+            if (count_ == cap_)
             {
-                std::unique_lock lk(m_);
-                cv_.wait(lk, [&] { return stopping_.load(std::memory_order_relaxed) || count_ > 0; });
-                if (stopping_.load(std::memory_order_relaxed) && count_ == 0)
+                return false;
+            }
+
+            q_[tail_] = std::move(job);
+            tail_ = (tail_ + 1) % cap_;
+            ++count_;
+            cv_.notify_one();
+            return true;
+        }
+
+        // Convenience: submit with automatic move
+        template <typename F>
+        bool Submit(F&& f)
+        {
+            return TrySubmit(job_t{std::forward<F>(f)});
+        }
+
+    private:
+        void WorkerLoop()
+        {
+            while (!stopping_.load(std::memory_order_acquire))
+            {
+                job_t job;
                 {
-                    return;
+                    std::unique_lock lk(m_);
+                    cv_.wait(lk, [&] { return stopping_.load(std::memory_order_relaxed) || count_ > 0; });
+                    if (stopping_.load(std::memory_order_relaxed) && count_ == 0)
+                    {
+                        return;
+                    }
+                    if (count_ == 0)
+                    {
+                        continue;
+                    }
+                    job = std::move(q_[head_]);
+                    head_ = (head_ + 1) % cap_;
+                    --count_;
                 }
-                if (count_ == 0)
+
+                // check before running
+                if (stopping_.load(std::memory_order_acquire))
                 {
-                    continue;
+                    break;
                 }
-                job = std::move(q_[head_]);
-                head_ = (head_ + 1) % cap_;
-                --count_;
+                // Execute outside lock
+                job();
             }
-
-            // check before running
-            if (stopping_.load(std::memory_order_acquire))
-            {
-                break;
-            }
-            // Execute outside lock
-            job();
         }
-    }
 
-    std::atomic<bool> stopping_{false};
-    std::mutex m_;
-    std::condition_variable cv_;
+        std::atomic<bool> stopping_{false};
+        std::mutex m_;
+        std::condition_variable cv_;
 
-    const std::size_t cap_;
-    std::vector<job_t> q_;
-    std::size_t head_ = 0;
-    std::size_t tail_ = 0;
-    std::size_t count_ = 0;
+        const std::size_t cap_;
+        std::vector<job_t> q_;
+        std::size_t head_ = 0;
+        std::size_t tail_ = 0;
+        std::size_t count_ = 0;
 
-    std::vector<std::thread> workers_;
-};
+        std::vector<std::thread> workers_;
+    };
 
-// Awaitable that runs Fn on the blocking pool, then resumes on ctx's thread.
-//
-// IMPORTANT: Like the uring ops, this awaitable is embedded in the coroutine
-// frame. Destroying the coroutine while the offload is in flight is UB.
-// We "detect" this by tracking the awaitable in io_context's intrusive list
-// and untracking on completion (the same fail-fast model we use for io_uring).
-template <class Fn>
-struct OffloadOp : OperationState
-{
-    BlockingPool* pool = nullptr;
-    Fn fn;
-
-    using R = std::invoke_result_t<Fn>;
-    std::conditional_t<std::is_void_v<R>, bool, std::optional<R>> value;
-    std::exception_ptr ep;
-
-    OffloadOp(IoContext* c, BlockingPool* p, Fn&& f) : pool(p), fn(std::forward<Fn>(f)) { ctx = c; }
-
-    bool await_ready() const noexcept { return false; }
-
-    void await_suspend(std::coroutine_handle<> h)
+    // Awaitable that runs Fn on the blocking pool, then resumes on ctx's thread.
+    //
+    // IMPORTANT: Like the uring ops, this awaitable is embedded in the coroutine
+    // frame. Destroying the coroutine while the offload is in flight is UB.
+    // We "detect" this by tracking the awaitable in io_context's intrusive list
+    // and untracking on completion (the same fail-fast model we use for io_uring).
+    template <class Fn>
+    struct OffloadOp : OperationState
     {
-        handle = h;
-        ctx->Track(this);
+        BlockingPool* pool = nullptr;
+        Fn fn;
 
-        // Create lambda that captures 'this' - safe because we track lifetime
-        auto job = [this]() noexcept
+        using R = std::invoke_result_t<Fn>;
+        std::conditional_t<std::is_void_v<R>, bool, std::optional<R>> value;
+        std::exception_ptr ep;
+
+        OffloadOp(IoContext* c, BlockingPool* p, Fn&& f) : pool(p), fn(std::forward<Fn>(f)) { ctx = c; }
+
+        bool await_ready() const noexcept { return false; }
+
+        void await_suspend(std::coroutine_handle<> h)
         {
-            auto* ctx_local = ctx;
-            const int wake_fd = ctx_local->WakeFd();
-            try
-            {
-                if constexpr (std::is_void_v<R>)
-                {
-                    fn();
-                    value = true;
-                }
-                else
-                {
-                    value.emplace(fn());
-                }
-            }
-            catch (...)
-            {
-                ep = std::current_exception();
-            }
+            handle = h;
+            ctx->Track(this);
 
-            // Resume on io_context thread
-            if (ctx_local->EnqueueExternalDone(this))
+            // Create lambda that captures 'this' - safe because we track lifetime
+            auto job = [this]() noexcept
             {
-                // Wake the loop via the lightweight eventfd
-                detail::tls_waker.Wake(wake_fd);
-            }
-        };
+                auto* ctx_local = ctx;
+                try
+                {
+                    if constexpr (std::is_void_v<R>)
+                    {
+                        fn();
+                        value = true;
+                    }
+                    else
+                    {
+                        value.emplace(fn());
+                    }
+                }
+                catch (...)
+                {
+                    ep = std::current_exception();
+                }
 
-        if (!pool->TrySubmit(std::move(job)))
-        {
-            ctx->Untrack(this);
-            throw std::runtime_error("blocking_pool queue full");
+                // Resume on io_context thread
+                // Uses the lock-free submission queue with automatic notification logic
+                ctx_local->SubmitExternal(this);
+            };
+
+            if (!pool->TrySubmit(std::move(job)))
+            {
+                ctx->Untrack(this);
+                throw std::runtime_error("blocking_pool queue full");
+            }
         }
-    }
 
-    R await_resume()
+        R await_resume()
+        {
+            if (ep)
+                std::rethrow_exception(ep);
+            if constexpr (std::is_void_v<R>)
+            {
+                return;
+            }
+            else
+            {
+                return std::move(*value);
+            }
+        }
+    };
+
+    template <class Fn>
+    auto Offload(IoContext& ctx, BlockingPool& pool, Fn&& fn)
     {
-        if (ep)
-            std::rethrow_exception(ep);
-        if constexpr (std::is_void_v<R>)
-        {
-            return;
-        }
-        else
-        {
-            return std::move(*value);
-        }
+        return OffloadOp<std::decay_t<Fn>>{&ctx, &pool, std::forward<Fn>(fn)};
     }
-};
-
-template <class Fn>
-auto Offload(IoContext& ctx, BlockingPool& pool, Fn&& fn)
-{
-    return OffloadOp<std::decay_t<Fn>>{&ctx, &pool, std::forward<Fn>(fn)};
-}
-
-}  // namespace kio
+} // namespace kio
