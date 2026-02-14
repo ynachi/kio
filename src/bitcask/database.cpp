@@ -4,10 +4,7 @@
 
 #include <filesystem>
 #include <format>
-#include <cstdint>
 #include <exception>
-#include <limits>
-#include <span>
 #include <system_error>
 #include <utility>
 
@@ -17,16 +14,33 @@ namespace bitcask
 
     namespace
     {
-        fs::path PartitionDirectory(const fs::path& root, const size_t partition_id)
+        kio::Result<> EnsureDirectories(const BitcaskConfig& config) noexcept
         {
-            return root / std::format("partition_{}", partition_id);
-        }
-    } // namespace
+            const auto perms = static_cast<std::filesystem::perms>(config.dir_mode);
+            std::error_code ec;
 
-    BitKV::BitKV(BitcaskConfig db_cfg, const size_t partition_count)
-        : db_config_(std::move(db_cfg)), partition_count_(partition_count)
-    {
-        partitions_.reserve(partition_count_);
+            // Create the main directory and set permissions
+            std::filesystem::create_directories(config.directory, ec);
+            if (ec) return std::unexpected(ec);
+
+            // Enforce permissions even if it already existed (strict consistency)
+            std::filesystem::permissions(config.directory, perms, ec);
+            if (ec) return std::unexpected(ec);
+
+            for (size_t i = 0; i < BitKV::kPartitionCount; ++i)
+            {
+                // Construct path: "db_root/partition_N"
+                auto partition_dir = config.directory / std::format("partition_{}", i);
+
+                std::filesystem::create_directories(partition_dir, ec);
+                if (ec) return std::unexpected(ec);
+
+                std::filesystem::permissions(partition_dir, perms, ec);
+                if (ec) return std::unexpected(ec);
+            }
+
+            return {};
+        }
     }
 
     BitKV::~BitKV()
@@ -37,204 +51,118 @@ namespace bitcask
         }
     }
 
-    kio::Result<kio::IoContext*> BitKV::RequireCurrentContext()
+    void BitKV::StartIoThreads(const size_t io_worker_count)
     {
-        auto* ctx = kio::this_context();
-        if (ctx == nullptr)
+        for (size_t i = 0; i < io_worker_count; ++i)
         {
-            return std::unexpected(std::make_error_code(std::errc::operation_not_permitted));
+            io_threads_.emplace_back([i, this]
+            {
+                PinToCpu(static_cast<int>(i));
+                // SINGLE_ISSUER requires that the context is created in the thread
+                auto ctx = std::make_unique<kio::IoContext>(config_.max_tasks_per_io_engine);
+                // wait for the context to fully start
+                ctx->WaitReady();
+                // Save its pointer in the lookup table
+                ctx_lookup_[i] = ctx.get();
+                io_ctxs_[i] = std::move(ctx);
+                // signal the DB this thread is fully started
+                start_latch_.count_down();
+                // we can now run the context
+                ALOG_INFO("Io context {} created, now starting it", i);
+                io_ctxs_[i]->Run();
+                ALOG_INFO("Io context {} exited", i);
+            });
         }
-        return ctx;
     }
 
-    kio::Task<kio::Result<std::unique_ptr<BitKV>>> BitKV::Open(BitcaskConfig config, size_t partition_count)
+    kio::Task<kio::Result<>> BitKV::CreatePartitions()
     {
-        if (partition_count == 0)
-        {
-            partition_count = 1;
-        }
+        kio::TaskGroup<> tasks(kPartitionCount);
 
-        if (partition_count > std::numeric_limits<uint16_t>::max())
+        for (size_t i = 0; i < kPartitionCount; ++i)
         {
-            co_return std::unexpected(std::make_error_code(std::errc::invalid_argument));
-        }
+            const size_t ctx_idx = i % io_worker_count_;
+            kio::IoContext* target_ctx = io_ctxs_[ctx_idx].get();
 
-        try
-        {
-            config.Validate();
-        }
-        catch (const std::exception& ex)
-        {
-            ALOG_ERROR("BitKV::Open: invalid config: {}", ex.what());
-            co_return std::unexpected(std::make_error_code(std::errc::invalid_argument));
-        }
-
-        std::error_code ec;
-        fs::create_directories(config.directory, ec);
-        if (ec)
-        {
-            co_return std::unexpected(ec);
-        }
-
-        auto db = std::unique_ptr<BitKV>(new BitKV(std::move(config), partition_count));
-        auto* ctx = KIO_CO_TRY(RequireCurrentContext());
-        auto rollback_opened_partitions = [&]() -> kio::Task<>
-        {
-            for (auto& opened_partition : db->partitions_)
-            {
-                auto close_res = co_await opened_partition->AsyncClose(*ctx);
-                if (!close_res.has_value())
+            tasks.Spawn(
+                [&, i, target_ctx]() -> kio::Task<>
                 {
-                    ALOG_ERROR("BitKV::Open: failed to close partition {} during rollback: {}",
-                               opened_partition->GetID(), close_res.error().message());
-                }
-            }
-            db->partitions_.clear();
-        };
+                    ALOG_INFO("Opening partition {} on io worker {}", i, ctx_idx);
+                    co_await kio::SwitchTo(*target_ctx);
 
-        for (size_t partition_id = 0; partition_id < db->partition_count_; ++partition_id)
-        {
-            fs::create_directories(PartitionDirectory(db->db_config_.directory, partition_id), ec);
-            if (ec)
-            {
-                co_await rollback_opened_partitions();
-                co_return std::unexpected(ec);
-            }
+                    // Now we are on the worker thread. Safe to construct/open.
+                    auto res = co_await Partition::Open(*target_ctx, config_, i);
 
-            auto partition_res = co_await Partition::AsyncOpen(*ctx, db->db_config_, partition_id);
-            if (!partition_res.has_value())
-            {
-                co_await rollback_opened_partitions();
-                co_return std::unexpected(partition_res.error());
-            }
+                    if (!res.has_value())
+                    {
+                        //    If a partition is broken, the DB is broken.
+                        //    Log fatal error and kill the process to prevent data corruption.
+                        ALOG_ERROR("FATAL: Failed to open Partition {}: {}", i, res.error().message());
+                        std::terminate();
+                    }
 
-            db->partitions_.push_back(std::move(partition_res.value()));
+                    partitions_[i] = std::move(*res);
+
+                    co_return;
+                }()
+            );
         }
 
+        auto* current_ctx = kio::IoContext::Current();
+        co_await tasks.JoinAll(*current_ctx);
+
+        co_return {};
+    }
+
+    kio::Task<kio::Result<std::unique_ptr<BitKV>>> BitKV::Open(BitcaskConfig& config, size_t io_worker_count)
+    {
+        KIO_CO_TRY(config.Validate());
+
+        // config is good, now create directories
+        KIO_CO_TRY(EnsureDirectories(config));
+        auto db = std::unique_ptr<BitKV>(new BitKV(std::move(config), io_worker_count));
+
+        // create io threads
+        db->StartIoThreads(io_worker_count);
+
+        db->start_latch_.wait();
+
+        // create partitions
+        KIO_CO_TRY_LOG(co_await db->CreatePartitions());
+
+        db->BuildRoutes();
+
+        ALOG_INFO("BitKV started successfully with {} partitions", kPartitionCount);
         co_return std::move(db);
     }
 
-    uint32_t BitKV::RouteToPartition(const std::string_view key) const
+    void BitKV::BuildRoutes()
     {
-        return static_cast<uint32_t>(Hash(key) % partition_count_);
+        for (size_t i = 0; i < kPartitionCount; ++i)
+        {
+            const size_t ctx_idx = i % io_worker_count_;
+            route_[i] = {.partition = partitions_[i].get(), .ctx = io_ctxs_[ctx_idx].get()};
+        }
     }
 
-    kio::Result<Partition*> BitKV::GetPartitionForKey(const std::string_view key)
+    kio::Task<kio::Result<void>> BitKV::Put(std::string key, std::vector<std::byte> value) const
     {
-        if (partitions_.empty())
-        {
-            return std::unexpected(std::make_error_code(std::errc::state_not_recoverable));
-        }
-
-        const auto partition_id = RouteToPartition(key);
-        if (partition_id >= partitions_.size())
-        {
-            return std::unexpected(std::make_error_code(std::errc::no_such_device));
-        }
-
-        auto* partition = partitions_[partition_id].get();
-        if (partition == nullptr)
-        {
-            return std::unexpected(std::make_error_code(std::errc::no_such_device));
-        }
-
-        return partition;
+        const auto route = Route(key);
+        co_await kio::SwitchTo(route.ctx);
+        co_return co_await route.partition.Put(route.ctx, std::move(key), std::move(value));
     }
 
-    kio::Task<kio::Result<void>> BitKV::Put(std::string key, std::vector<std::byte> value)
+    kio::Task<kio::Result<std::optional<std::vector<std::byte>>>> BitKV::Get(std::string_view key) const
     {
-        if (shutting_down_.load(std::memory_order_acquire))
-        {
-            co_return std::unexpected(std::make_error_code(std::errc::operation_canceled));
-        }
-
-        auto* ctx = KIO_CO_TRY(RequireCurrentContext());
-        auto* partition = KIO_CO_TRY(GetPartitionForKey(key));
-        KIO_CO_TRY(co_await partition->Put(*ctx, std::move(key), std::span<const std::byte>(value)));
-        co_return {};
+        const auto route = Route(key);
+        co_await kio::SwitchTo(route.ctx);
+        co_return co_await route.partition.Get(route.ctx, key);
     }
 
-    kio::Task<kio::Result<std::optional<std::vector<std::byte>>>> BitKV::Get(std::string_view key)
+    kio::Task<kio::Result<void>> BitKV::Del(std::string key) const
     {
-        if (shutting_down_.load(std::memory_order_acquire))
-        {
-            co_return std::unexpected(std::make_error_code(std::errc::operation_canceled));
-        }
-
-        auto* ctx = KIO_CO_TRY(RequireCurrentContext());
-        std::string key_copy(key);
-        auto* partition = KIO_CO_TRY(GetPartitionForKey(key_copy));
-        auto value = KIO_CO_TRY(co_await partition->Get(*ctx, key_copy));
-        co_return value;
-    }
-
-    kio::Task<kio::Result<void>> BitKV::Del(std::string_view key)
-    {
-        if (shutting_down_.load(std::memory_order_acquire))
-        {
-            co_return std::unexpected(std::make_error_code(std::errc::operation_canceled));
-        }
-
-        auto* ctx = KIO_CO_TRY(RequireCurrentContext());
-        std::string key_copy(key);
-        auto* partition = KIO_CO_TRY(GetPartitionForKey(key_copy));
-        KIO_CO_TRY(co_await partition->Del(*ctx, std::move(key_copy)));
-        co_return {};
-    }
-
-    kio::Task<kio::Result<void>> BitKV::Sync()
-    {
-        if (shutting_down_.load(std::memory_order_acquire))
-        {
-            co_return std::unexpected(std::make_error_code(std::errc::operation_canceled));
-        }
-
-        // No explicit force-sync API exists at Partition level yet.
-        // Durability is controlled by sync_on_write/background sync in PartitionIO.
-        co_return {};
-    }
-
-    kio::Task<kio::Result<void>> BitKV::Compact()
-    {
-        if (shutting_down_.load(std::memory_order_acquire))
-        {
-            co_return std::unexpected(std::make_error_code(std::errc::operation_canceled));
-        }
-
-        auto* ctx = KIO_CO_TRY(RequireCurrentContext());
-        for (auto& partition : partitions_)
-        {
-            KIO_CO_TRY(co_await partition->Compact(*ctx));
-        }
-        co_return {};
-    }
-
-    kio::Task<kio::Result<void>> BitKV::Close()
-    {
-        if (shutting_down_.exchange(true, std::memory_order_acq_rel))
-        {
-            co_return {};
-        }
-
-        auto* ctx = KIO_CO_TRY(RequireCurrentContext());
-        std::optional<std::error_code> first_error;
-
-        for (auto& partition : partitions_)
-        {
-            auto close_res = co_await partition->AsyncClose(*ctx);
-            if (!close_res.has_value() && !first_error.has_value())
-            {
-                first_error = close_res.error();
-            }
-        }
-
-        partitions_.clear();
-
-        if (first_error.has_value())
-        {
-            co_return std::unexpected(*first_error);
-        }
-
-        co_return {};
+        const auto route = Route(key);
+        co_await kio::SwitchTo(route.ctx);
+        co_return co_await route.partition.Del(route.ctx, std::move(key));
     }
 } // namespace bitcask

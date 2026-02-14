@@ -26,6 +26,9 @@ kio_add_sanitizers(215_tls_echo_server)
 kio_add_demo(08_partition aio/08_partition.cpp TAGS bitcask LIBS kio bitcask)
 kio_add_sanitizers(08_partition)
 
+kio_add_demo(09_db_demo aio/09_db_demo.cpp TAGS bitcask LIBS kio bitcask)
+kio_add_sanitizers(09_db_demo)
+
 # Create a custom target to build all examples
 add_custom_target(examples
         DEPENDS

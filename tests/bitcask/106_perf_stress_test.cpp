@@ -88,7 +88,7 @@ TEST_F(PerfStressTest, WriteThroughput)
         const uint64_t key_count = GetEnvU64("BITCASK_PERF_KEYS", 50000);
         const uint64_t value_size = GetEnvU64("BITCASK_PERF_VALUE_BYTES", 1024);
 
-        auto open_res = co_await bitcask::Partition::AsyncOpen(ctx_, config_, 0);
+        auto open_res = co_await bitcask::Partition::Open(ctx_, config_, 0);
         EXPECT_TRUE(open_res.has_value());
         if (!open_res)
         {
@@ -133,7 +133,7 @@ TEST_F(PerfStressTest, RandomReadThroughput)
         const uint64_t read_count = GetEnvU64("BITCASK_PERF_READS", 100000);
         const uint64_t value_size = GetEnvU64("BITCASK_PERF_VALUE_BYTES", 1024);
 
-        auto open_res = co_await bitcask::Partition::AsyncOpen(ctx_, config_, 0);
+        auto open_res = co_await bitcask::Partition::Open(ctx_, config_, 0);
         EXPECT_TRUE(open_res.has_value());
         if (!open_res)
         {
@@ -195,7 +195,7 @@ TEST_F(PerfStressTest, MixedReadWriteDeleteWorkload)
         const uint64_t op_count = GetEnvU64("BITCASK_PERF_OPS", 100000);
         const uint64_t value_size = GetEnvU64("BITCASK_PERF_VALUE_BYTES", 512);
 
-        auto open_res = co_await bitcask::Partition::AsyncOpen(ctx_, config_, 0);
+        auto open_res = co_await bitcask::Partition::Open(ctx_, config_, 0);
         EXPECT_TRUE(open_res.has_value());
         if (!open_res)
         {

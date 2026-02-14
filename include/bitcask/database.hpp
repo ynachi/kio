@@ -35,15 +35,42 @@ namespace bitcask
     class BitKV
     {
     public:
+        static constexpr size_t kPartitionCount = CLUSTER_PARTITION_COUNT;
+        static constexpr bool kPartitionCountIsPow2 = (kPartitionCount & (kPartitionCount - 1)) == 0;
+        static constexpr size_t kPartitionMask = kPartitionCount - 1;
+
+        struct RouteTarget
+        {
+            uint16_t partition_id;
+            Partition& partition;
+            kio::IoContext& ctx;
+        };
+
+        // Fast hot-path route: key -> (partition, io_context)
+        [[nodiscard]] RouteTarget Route(std::string_view key) const noexcept
+        {
+            const uint16_t pid = ComputePartitionId(key);
+            const RouteSlot& slot = route_[pid];
+
+            assert(slot.partition != nullptr);
+            assert(slot.ctx != nullptr);
+
+            return RouteTarget{
+                .partition_id = pid,
+                .partition = *slot.partition,
+                .ctx = *slot.ctx,
+            };
+        }
+
         /**
-         * @brief Factory method to create and initialize database
+         * @brief Factory method to create and initialize a database
          *
          * @param config Database configuration
-         * @param partition_count Initial partition count
+         * @param io_worker_count
          * @return Initialized BitKV instance or error
          */
-        static kio::Task<kio::Result<std::unique_ptr<BitKV>>> Open(const BitcaskConfig& config,
-                                                                   size_t partition_count =
+        static kio::Task<kio::Result<std::unique_ptr<BitKV>>> Open(BitcaskConfig& config,
+                                                                   size_t io_worker_count =
                                                                        std::thread::hardware_concurrency());
 
         // ====================================================================
@@ -63,7 +90,7 @@ namespace bitcask
         /**
          * @brief Delete key
          */
-        kio::Task<kio::Result<void>> Del(std::string_view key) const;
+        kio::Task<kio::Result<void>> Del(std::string key) const;
 
         // ====================================================================
         // MANAGEMENT OPERATIONS
@@ -85,18 +112,52 @@ namespace bitcask
 
     private:
         // Private constructor - use open() factory
-        BitKV(const BitcaskConfig& db_cfg, size_t partition_count);
+        BitKV(const BitcaskConfig& config, size_t io_worker_count) : config_(config), io_worker_count_(io_worker_count),
+                                                                     partitions_(kPartitionCount),
+                                                                     io_ctxs_(io_worker_count),
+                                                                     start_latch_(io_worker_count)
+        {
+        }
 
-        /**
-         * @brief Map key to partition ID using hash modulo.
-         */
-        [[nodiscard]] uint32_t RouteToPartition(std::string_view key) const;
+        void StartIoThreads(size_t io_worker_count);
 
-        BitcaskConfig db_config_;
-        size_t partition_count_;
-        std::vector<kio::IoContext> io_ctxs_;
+        kio::Task<kio::Result<>> CreatePartitions();
+        void BuildRoutes();
+
+        struct RouteSlot
+        {
+            Partition* partition{nullptr};
+            kio::IoContext* ctx{nullptr};
+        };
+
+        static uint16_t ComputePartitionId(std::string_view key) noexcept
+        {
+            const uint64_t h = Hash(key);
+
+            if constexpr (kPartitionCountIsPow2)
+            {
+                return static_cast<uint16_t>(h & kPartitionMask); // fastest path
+            }
+            else
+            {
+                return static_cast<uint16_t>(h % kPartitionCount); // safe fallback
+            }
+        }
+
+        std::array<RouteSlot, kPartitionCount> route_{};
+
+        BitcaskConfig config_;
+        size_t io_worker_count_;
+
+        // Ownership / lifetime
+        std::vector<std::unique_ptr<Partition>> partitions_;
+        std::vector<std::unique_ptr<kio::IoContext>> io_ctxs_;
+        std::vector<std::jthread> io_threads_;
+        // non-owning, initialized at startup
+        std::array<kio::IoContext*, kPartitionCount> ctx_lookup_{};
 
         // Shutdown coordination
-        std::atomic<bool> shutting_down_{true};
+        std::atomic<bool> shutting_down_{false};
+        std::latch start_latch_;
     };
 } // namespace bitcask

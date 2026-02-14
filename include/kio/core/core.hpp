@@ -39,6 +39,18 @@ struct std::is_error_code_enum<kio::ParseError> : std::true_type
 {
 };
 
+static void PinToCpu(int cpu_id)
+{
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(cpu_id % static_cast<int>(std::thread::hardware_concurrency()), &cpuset);
+
+    if (const int rc = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset); rc != 0)
+    {
+        ALOG_INFO("Warning: Failed to pin to CPU {}: {}", cpu_id, std::generic_category().message(rc));
+    }
+}
+
 // =============================================================================
 // Core KIO Definitions
 // =============================================================================
@@ -586,7 +598,7 @@ namespace kio
         io_uring ring_{};
         std::vector<std::coroutine_handle<>> ready_;
         OperationState* pending_head_ = nullptr;
-        std::atomic<bool> running_ = false;
+        std::atomic<bool> stop_requested_{false};
         std::once_flag pipe_pool_flag_;
         std::latch ready_latch_{1};
         std::latch stopped_latch_{1};
@@ -686,7 +698,8 @@ namespace kio
             AssertOwnerThread();
             ScopedIoContext scope(this);
 
-            running_ = true;
+            stop_requested_.store(false, std::memory_order_relaxed);
+
             t.resume();
             while (!IsShuttingDown() && !t.Done())
             {
@@ -702,11 +715,14 @@ namespace kio
             AssertOwnerThread();
             ScopedIoContext scope(this);
 
-            running_ = true;
+            stop_requested_.store(false, std::memory_order_relaxed);
+
             while (!IsShuttingDown())
             {
                 Step();
             }
+
+            stopped_latch_.count_down();
         }
 
         template <typename Tick>
@@ -715,7 +731,8 @@ namespace kio
             AssertOwnerThread();
             ScopedIoContext scope(this);
 
-            running_ = true;
+            stop_requested_.store(false, std::memory_order_relaxed);
+
             while (IsShuttingDown())
             {
                 Step();
@@ -725,7 +742,32 @@ namespace kio
             stopped_latch_.count_down();
         }
 
-        void Stop() { running_ = false; }
+        /// Request stop and wait for complete shutdown if needed
+        void Stop(const bool wait = false)
+        {
+            bool was_already_stopped = stop_requested_.exchange(true, std::memory_order_release);
+
+            // NOTIFY: Wake up the thread if it's sleeping in io_uring_wait_cqe
+            // We only need to notify if we actually changed the state,
+            // but notifying safely is cheap enough to do unconditionally.
+            if (!was_already_stopped)
+            {
+                (void)Notify();
+            }
+
+            if (wait)
+            {
+                // If we are the worker thread, we CANNOT wait for ourselves to finish!
+                if (std::this_thread::get_id() != owner_thread_)
+                {
+                    WaitStop();
+                }
+                else
+                {
+                    ALOG_ERROR("We can not wait for ourself to stop");
+                }
+            }
+        }
 
         // ---------------------------------------------------------------------
         // Cross-thread completion injection (for blocking pool offload, etc.)
@@ -775,7 +817,6 @@ namespace kio
 
         void WaitReady() const { ready_latch_.wait(); }
         void WaitStop() const { stopped_latch_.wait(); }
-        bool Running() const { return running_.load(std::memory_order_relaxed); }
 #if AIO_STATS
         IoContextStats& Stats() { return stats_; }
         const IoContextStats& Stats() const { return stats_; }
@@ -817,7 +858,7 @@ namespace kio
     class SignalSet
     {
     public:
-        SignalSet(const std::initializer_list<int> sigs);
+        SignalSet(std::initializer_list<int> sigs);
         ~SignalSet();
 
         SignalSet(const SignalSet&) = delete;
@@ -1058,7 +1099,7 @@ namespace kio
         /// Wake returns true if succeeded and false otherwise
         static bool Wake(const int wake_fd) noexcept
         {
-            uint64_t val = 1;
+            constexpr uint64_t val = 1;
             // Writing to the eventfd held by IoContext interrupts io_uring_wait_cqe
             // because IoContext keeps a persistent read on it.
             return ::write(wake_fd, &val, sizeof(val)) == sizeof(val);
@@ -1253,18 +1294,6 @@ namespace kio
         [[nodiscard]] std::stop_token StopToken() const { return stop_token_; }
 
     private:
-        static void PinToCpu(int cpu_id)
-        {
-            cpu_set_t cpuset;
-            CPU_ZERO(&cpuset);
-            CPU_SET(cpu_id % static_cast<int>(std::thread::hardware_concurrency()), &cpuset);
-
-            if (const int rc = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset); rc != 0)
-            {
-                ALOG_INFO("Warning: Failed to pin to CPU {}: {}", cpu_id, std::generic_category().message(rc));
-            }
-        }
-
         static inline std::atomic<int> next_id_{0};
 
         std::jthread thread_;
@@ -1338,13 +1367,13 @@ namespace kio
         void await_suspend(std::coroutine_handle<> h)
         {
             handle = h;
-            // 1. Try Zero-Syscall path: IORING_OP_MSG_RING
+            // Try Zero-Syscall path: IORING_OP_MSG_RING
             if (IoContext::Current() && IoContext::Current()->TryMsgRing(*ctx, this))
             {
                 return;
             }
 
-            // 2. Fallback path: Lock-free intrusive stack + batched eventfd
+            // Fallback path: Lock-free intrusive stack + batched eventfd
             ctx->SubmitExternal(this);
         }
 
@@ -1386,7 +1415,7 @@ namespace kio
      * }));
      */
     template <typename Fun>
-    Task<void> CoSpawn(IoContext& ctx, Fun f)
+    Task<> CoSpawn(IoContext& ctx, Fun f)
     {
         // Suspend here and resume on the target context
         co_await SwitchTo(ctx);

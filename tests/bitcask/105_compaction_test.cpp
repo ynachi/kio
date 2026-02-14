@@ -95,7 +95,7 @@ TEST_F(CompactionTest, CompactionChangesDataFilesWhenFragmented)
 {
     auto task = [&]() -> kio::Task<>
     {
-        auto open_res = co_await bitcask::Partition::AsyncOpen(ctx_, config_, 0);
+        auto open_res = co_await bitcask::Partition::Open(ctx_, config_, 0);
         EXPECT_TRUE(open_res.has_value());
         if (!open_res)
         {
@@ -155,7 +155,7 @@ TEST_F(CompactionTest, CompactionDoesNotLoseLiveData)
 {
     auto task = [&]() -> kio::Task<>
     {
-        auto open_res = co_await bitcask::Partition::AsyncOpen(ctx_, config_, 0);
+        auto open_res = co_await bitcask::Partition::Open(ctx_, config_, 0);
         EXPECT_TRUE(open_res.has_value());
         if (!open_res)
         {
@@ -203,7 +203,7 @@ TEST_F(CompactionTest, CompactionDeletesStaleFilesAndHints)
 {
     auto task = [&]() -> kio::Task<>
     {
-        auto open_res = co_await bitcask::Partition::AsyncOpen(ctx_, config_, 0);
+        auto open_res = co_await bitcask::Partition::Open(ctx_, config_, 0);
         EXPECT_TRUE(open_res.has_value());
         if (!open_res)
         {

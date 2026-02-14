@@ -66,7 +66,7 @@ TEST_F(PartitionTest, PutGetDel)
 {
     auto task = [&]() -> kio::Task<>
     {
-        auto open_res = co_await bitcask::Partition::AsyncOpen(ctx_, config_, 0);
+        auto open_res = co_await bitcask::Partition::Open(ctx_, config_, 0);
         EXPECT_TRUE(open_res.has_value());
         if (!open_res)
         {
@@ -105,7 +105,7 @@ TEST_F(PartitionTest, RecoveryRespectsUpdatesAndDeletions)
     auto task = [&]() -> kio::Task<>
     {
         {
-            auto open_res = co_await bitcask::Partition::AsyncOpen(ctx_, config_, 0);
+            auto open_res = co_await bitcask::Partition::Open(ctx_, config_, 0);
             EXPECT_TRUE(open_res.has_value());
             if (!open_res)
             {
@@ -132,7 +132,7 @@ TEST_F(PartitionTest, RecoveryRespectsUpdatesAndDeletions)
         }
 
         {
-            auto open_res = co_await bitcask::Partition::AsyncOpen(ctx_, config_, 0);
+            auto open_res = co_await bitcask::Partition::Open(ctx_, config_, 0);
             EXPECT_TRUE(open_res.has_value());
             if (!open_res)
             {
@@ -174,7 +174,7 @@ TEST_F(PartitionTest, FileRotationCreatesMultipleFiles)
         bitcask::BitcaskConfig cfg = config_;
         cfg.max_file_size = 1024;
 
-        auto open_res = co_await bitcask::Partition::AsyncOpen(ctx_, cfg, 0);
+        auto open_res = co_await bitcask::Partition::Open(ctx_, cfg, 0);
         EXPECT_TRUE(open_res.has_value());
         if (!open_res)
         {
@@ -218,7 +218,7 @@ TEST_F(PartitionTest, RecoveryIgnoresTruncatedTail)
 
         // Phase 1: write a few entries and close cleanly
         {
-            auto open_res = co_await bitcask::Partition::AsyncOpen(ctx_, config_, 0);
+            auto open_res = co_await bitcask::Partition::Open(ctx_, config_, 0);
             EXPECT_TRUE(open_res.has_value());
             if (!open_res)
             {
@@ -272,7 +272,7 @@ TEST_F(PartitionTest, RecoveryIgnoresTruncatedTail)
 
         // Phase 2: reopen and verify only the first two entries are recovered
         {
-            auto open_res = co_await bitcask::Partition::AsyncOpen(ctx_, config_, 0);
+            auto open_res = co_await bitcask::Partition::Open(ctx_, config_, 0);
             EXPECT_TRUE(open_res.has_value());
             if (!open_res)
             {
@@ -369,7 +369,7 @@ TEST_F(PartitionTest, HintFileIsSourceOfTruth)
         }
 
         // Recover via Partition: hint should override the newer data in the log
-        auto open_res = co_await bitcask::Partition::AsyncOpen(ctx_, config_, 0);
+        auto open_res = co_await bitcask::Partition::Open(ctx_, config_, 0);
         EXPECT_TRUE(open_res.has_value());
         if (!open_res)
         {

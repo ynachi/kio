@@ -8,7 +8,7 @@
 
 namespace bitcask
 {
-    kio::Task<kio::Result<std::unique_ptr<Partition>>> Partition::AsyncOpen(
+    kio::Task<kio::Result<std::unique_ptr<Partition>>> Partition::Open(
         kio::IoContext& ctx, BitcaskConfig& config, size_t partition_id)
     {
         auto partition = std::unique_ptr<Partition>(new Partition(config, partition_id));

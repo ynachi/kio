@@ -235,7 +235,7 @@ namespace kio
         // Notification Logic: Only write if consumer is likely sleeping
         if (!ext_hint_.exchange(true, std::memory_order_release))
         {
-            Notify();
+            (void)Notify();
         }
     }
 
@@ -260,15 +260,15 @@ namespace kio
 
     void IoContext::DrainExternal(std::vector<std::coroutine_handle<>>& out)
     {
-        // 1. Clear hint
+        // Clear hint
         ext_hint_.store(false, std::memory_order_release);
 
-        // 2. Steal list
+        // Steal list
         OperationState* head = ext_submission_head_.exchange(nullptr, std::memory_order_acquire);
 
         if (head == nullptr) return;
 
-        // 3. Reverse LIFO -> FIFO
+        // Reverse LIFO -> FIFO
         OperationState* prev = nullptr;
         OperationState* curr = head;
         while (curr)
@@ -280,7 +280,7 @@ namespace kio
         }
         head = prev;
 
-        // 4. Process
+        // Process
         uint64_t count = 0;
         while (head)
         {

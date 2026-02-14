@@ -16,7 +16,7 @@ namespace bitcask
         // TODO: make the constructor private and use the factory method
         // Make it start background sync job of the active file if needed
         // also make it start the compaction loop if needed.
-        static kio::Task<kio::Result<std::unique_ptr<Partition>>> AsyncOpen(
+        static kio::Task<kio::Result<std::unique_ptr<Partition>>> Open(
             kio::IoContext& ctx,
             BitcaskConfig& config,
             size_t partition_id

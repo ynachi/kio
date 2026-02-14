@@ -316,6 +316,7 @@ if (KIO_BUILD_BITCASK)
             src/bitcask/partition.cpp
             src/bitcask/partition_io.cpp
             src/bitcask/partition_recovery.cpp
+            src/bitcask/database.cpp
     )
 
     # Include directories

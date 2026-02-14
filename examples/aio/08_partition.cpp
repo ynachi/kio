@@ -19,7 +19,7 @@ namespace
         // Partition expects: <directory>/partition_<id> to exist.
         std::filesystem::create_directories(cfg.directory / "partition_0");
 
-        auto open_res = co_await bitcask::Partition::AsyncOpen(ctx, cfg, 0);
+        auto open_res = co_await bitcask::Partition::Open(ctx, cfg, 0);
         if (!open_res)
         {
             // handle open_res.error()
