@@ -57,20 +57,29 @@ namespace bitcask
         {
             io_threads_.emplace_back([i, this]
             {
-                PinToCpu(static_cast<int>(i));
-                // SINGLE_ISSUER requires that the context is created in the thread
-                auto ctx = std::make_unique<kio::IoContext>(config_.max_tasks_per_io_engine);
-                // wait for the context to fully start
-                ctx->WaitReady();
-                // Save its pointer in the lookup table
-                ctx_lookup_[i] = ctx.get();
-                io_ctxs_[i] = std::move(ctx);
-                // signal the DB this thread is fully started
-                start_latch_.count_down();
-                // we can now run the context
-                ALOG_INFO("Io context {} created, now starting it", i);
-                io_ctxs_[i]->Run();
-                ALOG_INFO("Io context {} exited", i);
+                try
+                {
+                    PinToCpu(static_cast<int>(i));
+
+                    // SINGLE_ISSUER requires context creation in the thread
+                    auto ctx = std::make_unique<kio::IoContext>(config_.max_tasks_per_io_engine);
+
+                    ctx->WaitReady();
+                    ctx_lookup_[i] = ctx.get();
+                    io_ctxs_[i] = std::move(ctx);
+                    // Signal readiness
+                    start_latch_.count_down();
+
+                    // Run the loop
+                    io_ctxs_[i]->Run();
+                }
+                catch (const std::exception& e)
+                {
+                    ALOG_ERROR("FATAL: Worker thread {} failed to start: {}", i, e.what());
+                    // If we fail before the latch, we must prevent the main thread from hanging
+                    // (In a real app, you'd handle this better, but here we exit loudly)
+                    std::exit(EXIT_FAILURE);
+                }
             });
         }
     }
@@ -164,5 +173,11 @@ namespace bitcask
         const auto route = Route(key);
         co_await kio::SwitchTo(route.ctx);
         co_return co_await route.partition.Del(route.ctx, std::move(key));
+    }
+
+    kio::Task<kio::Result<void>> BitKV::Close() const
+    {
+        // TODO
+        co_return {};
     }
 } // namespace bitcask
