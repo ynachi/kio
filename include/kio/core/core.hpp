@@ -758,14 +758,14 @@ namespace kio
             if (wait)
             {
                 // If we are the worker thread, we CANNOT wait for ourselves to finish!
-                if (std::this_thread::get_id() != owner_thread_)
-                {
-                    WaitStop();
-                }
-                else
-                {
-                    ALOG_ERROR("We can not wait for ourself to stop");
-                }
+                // if (std::this_thread::get_id() != Current())
+                // {
+                WaitStop();
+                // }
+                // else
+                // {
+                //     ALOG_ERROR("We can not wait for ourself to stop");
+                // }
             }
         }
 
