@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <barrier>
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
@@ -14,15 +16,18 @@
 #include <expected>
 #include <fcntl.h>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
 DEFINE_uint64(buf_size, 4096, "Buffer size for IO");
 DEFINE_uint64(total_size, 256 * 1024 * 1024, "Total bytes to transfer");
 DEFINE_uint64(depth, 64, "Depth for streaming IO");
+DEFINE_uint64(workers, 1, "Number of parallel shard workers");
 
 using namespace std::chrono;
 
@@ -31,6 +36,7 @@ namespace {
 constexpr size_t kSampleCount = 5;
 constexpr size_t kSyncTotalBytes = 64 * 1024 * 1024;
 constexpr size_t kSyncEveryOps = 64;
+std::atomic_uint64_t g_temp_counter{0};
 
 struct BenchSample {
     uint64_t ops;
@@ -106,7 +112,8 @@ private:
 std::string GetTempPath(const char* prefix)
 {
     const auto now = system_clock::now().time_since_epoch().count();
-    return std::string("/tmp/") + prefix + "_" + std::to_string(now) + ".bin";
+    const auto counter = g_temp_counter.fetch_add(1, std::memory_order_relaxed);
+    return std::string("/tmp/") + prefix + "_" + std::to_string(now) + "_" + std::to_string(counter) + ".bin";
 }
 
 double OpsPerSec(const BenchSample& sample)
@@ -490,6 +497,65 @@ kio::Task<kio::Result<Series>> SampleCase(kio::IoContext& ctx, const char* label
     co_return series;
 }
 
+template <typename Factory>
+std::expected<BenchSample, std::error_code> RunWorkerCase(Factory&& factory)
+{
+    std::expected<BenchSample, std::error_code> result = std::unexpected(std::make_error_code(std::errc::state_not_recoverable));
+    kio::IoContext ctx;
+    ctx.RunUntilDone([&](kio::IoContext& inner) -> kio::Task<void> {
+        auto sample = co_await factory(inner);
+        if (!sample) {
+            result = std::unexpected(sample.error());
+            co_return;
+        }
+        result = *sample;
+    }(ctx));
+    return result;
+}
+
+template <typename Factory>
+Series SampleParallelCase(const char* label, size_t workers, Factory factory)
+{
+    Series series{.label = label};
+    for (size_t sample_index = 0; sample_index < kSampleCount; ++sample_index) {
+        std::barrier start_barrier(static_cast<std::ptrdiff_t>(workers + 1));
+        std::vector<std::thread> threads;
+        threads.reserve(workers);
+        std::vector<std::expected<BenchSample, std::error_code>> results(
+            workers, std::unexpected(std::make_error_code(std::errc::state_not_recoverable))
+        );
+
+        for (size_t worker = 0; worker < workers; ++worker) {
+            threads.emplace_back([&, worker, worker_factory = factory]() mutable {
+                start_barrier.arrive_and_wait();
+                results[worker] = RunWorkerCase(worker_factory);
+            });
+        }
+
+        start_barrier.arrive_and_wait();
+
+        uint64_t max_ns = 0;
+        uint64_t total_ops = 0;
+        uint64_t total_bytes = 0;
+        for (auto& thread : threads) {
+            thread.join();
+        }
+        for (const auto& result : results) {
+            if (!result) {
+                throw std::system_error(result.error());
+            }
+            total_ops += result->ops;
+            total_bytes += result->bytes;
+            max_ns = std::max(max_ns, result->ns);
+        }
+
+        series.ops = total_ops;
+        series.bytes = total_bytes;
+        series.samples_ns[sample_index] = max_ns;
+    }
+    return series;
+}
+
 kio::Task<kio::Result<void>> RunBench(kio::IoContext& ctx)
 {
     std::printf("kio storage benchmarks (normalized)\n");
@@ -559,6 +625,46 @@ kio::Task<kio::Result<void>> RunBench(kio::IoContext& ctx)
 int main(int argc, char** argv)
 {
     gflags::ParseCommandLineFlags(&argc, &argv, true);
+
+    if (FLAGS_workers > 1) {
+        std::printf("kio storage benchmarks (normalized)\n");
+        std::printf("target=linux-ish sample_count=%zu\n\n", kSampleCount);
+        std::printf("[kio_io_uring_mt_%luw]\n", FLAGS_workers);
+        try {
+            PrintSeries(SampleParallelCase("sequential write 4KiB", FLAGS_workers, [](kio::IoContext& inner) {
+                return BenchSequentialWrite(inner, false);
+            }));
+            PrintSeries(SampleParallelCase("sequential read 4KiB", FLAGS_workers, [](kio::IoContext& inner) {
+                return BenchSequentialRead(inner, false);
+            }));
+            PrintSeries(SampleParallelCase("streaming write depth64 4KiB", FLAGS_workers, [](kio::IoContext& inner) {
+                return BenchStreamingWrite(inner, false);
+            }));
+            PrintSeries(SampleParallelCase("streaming read depth64 4KiB", FLAGS_workers, [](kio::IoContext& inner) {
+                return BenchStreamingRead(inner, false);
+            }));
+            PrintSeries(SampleParallelCase("append fdatasync/64 4KiB", FLAGS_workers, [](kio::IoContext& inner) {
+                return BenchAppendFdatasync(inner);
+            }));
+            PrintSeries(SampleParallelCase("direct seq write 4KiB", FLAGS_workers, [](kio::IoContext& inner) {
+                return BenchSequentialWrite(inner, true);
+            }));
+            PrintSeries(SampleParallelCase("direct seq read 4KiB", FLAGS_workers, [](kio::IoContext& inner) {
+                return BenchSequentialRead(inner, true);
+            }));
+            PrintSeries(SampleParallelCase("direct streaming write depth64 4KiB", FLAGS_workers, [](kio::IoContext& inner) {
+                return BenchStreamingWrite(inner, true);
+            }));
+            PrintSeries(SampleParallelCase("direct streaming read depth64 4KiB", FLAGS_workers, [](kio::IoContext& inner) {
+                return BenchStreamingRead(inner, true);
+            }));
+            std::printf("\n");
+        } catch (const std::system_error& error) {
+            std::fprintf(stderr, "benchmark failed: %s\n", error.code().message().c_str());
+            return 1;
+        }
+        return 0;
+    }
 
     kio::IoContext ctx;
     ctx.RunUntilDone([](kio::IoContext& inner) -> kio::Task<void> {

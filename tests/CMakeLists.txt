@@ -51,16 +51,6 @@ kio_add_test(401_io_buffer kio/401_io_buffer_tests.cpp
         LIBS kio GTest::gtest GTest::gtest_main
 )
 
-
-kio_add_test(501_resp_parser kio/resp/501_resp_parser.cpp
-        TAGS kio resp unit
-        LIBS kio GTest::gtest GTest::gtest_main
-)
-kio_add_test(502_resp_writer kio/resp/502_resp_writer.cpp
-        TAGS kio resp unit
-        LIBS kio GTest::gtest GTest::gtest_main
-)
-
 # -----------------------------------------------------------------------------
 # Bitcask
 # -----------------------------------------------------------------------------

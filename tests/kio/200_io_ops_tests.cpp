@@ -261,6 +261,20 @@ TEST_F(IoOpsTest, FdatasyncAfterWrite) {
     ctx.RunUntilDone(std::move(task));
 }
 
+TEST_F(IoOpsTest, FsyncDir) {
+    auto dir = MakeTempDir();
+    ASSERT_TRUE(dir.Valid());
+
+    auto test = [&]() -> Task<void> {
+        auto fs = co_await AsyncFsyncDir(ctx, dir.Path());
+        EXPECT_TRUE(fs.has_value());
+        co_return;
+    };
+
+    auto task = test();
+    ctx.RunUntilDone(std::move(task));
+}
+
 // -----------------------------------------------------------------------------
 // AsyncFtruncate Tests
 // -----------------------------------------------------------------------------
@@ -316,6 +330,47 @@ TEST_F(IoOpsTest, FallocatePreallocate) {
     ctx.RunUntilDone(std::move(task));
 
     EXPECT_GE(GetFileSize(file.Get()), 4096);
+}
+
+TEST_F(IoOpsTest, MkdirRenameUnlink) {
+    auto dir = MakeTempDir();
+    ASSERT_TRUE(dir.Valid());
+
+    const auto original = dir.Path() / "segment.tmp";
+    const auto renamed = dir.Path() / "segment.dat";
+    const auto subdir = dir.Path() / "manifest";
+
+    auto test = [&]() -> Task<void> {
+        auto mk = co_await AsyncMkdir(ctx, subdir, 0755);
+        EXPECT_TRUE(mk.has_value());
+
+        auto fd_res = co_await AsyncOpen(ctx, original, O_CREAT | O_RDWR | O_TRUNC | O_CLOEXEC, 0644);
+        EXPECT_TRUE(fd_res.has_value());
+        if (!fd_res.has_value()) {
+            co_return;
+        }
+
+        auto write_res = co_await AsyncWrite(ctx, fd_res->Get(), AsBytes("hello"), 0);
+        EXPECT_TRUE(write_res.has_value());
+
+        auto close_res = co_await AsyncClose(ctx, fd_res->Release());
+        EXPECT_TRUE(close_res.has_value());
+
+        auto rename_res = co_await AsyncRename(ctx, original, renamed);
+        EXPECT_TRUE(rename_res.has_value());
+
+        auto unlink_res = co_await AsyncUnlink(ctx, renamed);
+        EXPECT_TRUE(unlink_res.has_value());
+
+        co_return;
+    };
+
+    auto task = test();
+    ctx.RunUntilDone(std::move(task));
+
+    EXPECT_TRUE(std::filesystem::exists(subdir));
+    EXPECT_FALSE(std::filesystem::exists(original));
+    EXPECT_FALSE(std::filesystem::exists(renamed));
 }
 
 // -----------------------------------------------------------------------------

@@ -9,6 +9,16 @@
 
 using namespace kio;
 
+namespace {
+std::string_view ByteSpanAsStringView(std::span<const std::byte> span)
+{
+    return {
+        reinterpret_cast<const char*>(span.data()),
+        span.size(),
+    };
+}
+}  // namespace
+
 class IoBufferTest : public ::testing::Test
 {
 protected:
@@ -43,7 +53,7 @@ TEST_F(IoBufferTest, AppendAndRead)
 
     EXPECT_EQ(buf.ReadableBytes(), data.size());
     auto span = buf.ReadableSpan();
-    EXPECT_EQ(std::string_view(span.data(), span.size()), data);
+    EXPECT_EQ(ByteSpanAsStringView(span), data);
 }
 
 TEST_F(IoBufferTest, ConsumeData)
@@ -56,7 +66,7 @@ TEST_F(IoBufferTest, ConsumeData)
     EXPECT_EQ(buf.ReadableBytes(), 6);
 
     auto span = buf.ReadableSpan();
-    EXPECT_EQ(std::string_view(span.data(), span.size()), "567890");
+    EXPECT_EQ(ByteSpanAsStringView(span), "567890");
 }
 
 TEST_F(IoBufferTest, ClearResetsIndices)
@@ -104,8 +114,6 @@ TEST_F(IoBufferTest, CompactionTrigger)
     buf.Commit();
     buf.Consume(1200);  // read_ is now 1200, which is > 1024
 
-    size_t prev_write = buf.ReadableSpan().data() != nullptr ? 0 : 0;  // Dummy
-
     // This should trigger compaction because we need more space than currently at the end
     buf.EnsureWritableBytes(buf.Capacity() - 100);
 
@@ -114,7 +122,7 @@ TEST_F(IoBufferTest, CompactionTrigger)
     buf.Commit();
     auto span = buf.ReadableSpan();
     EXPECT_EQ(span.size(), 300);
-    EXPECT_EQ(span[0], 'y');
+    EXPECT_EQ(span[0], std::byte{'y'});
 }
 
 // --- Protocol Helper Tests ---
@@ -169,7 +177,7 @@ TEST(IoBufferStress, RandomOperations)
         // Validation
         ASSERT_EQ(buffer.ReadableBytes(), mirror.size());
         auto span = buffer.ReadableSpan();
-        std::string_view buf_view(span.data(), span.size());
+        std::string_view buf_view = ByteSpanAsStringView(span);
         ASSERT_EQ(buf_view, mirror);
     }
 }

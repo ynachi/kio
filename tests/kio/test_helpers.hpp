@@ -6,11 +6,13 @@
 #include <chrono>
 #include <cstddef>
 #include <cstring>
+#include <filesystem>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -141,6 +143,52 @@ inline off_t GetFileSize(int fd) {
     return st.st_size;
 }
 
+/// Creates a temporary directory path and removes it recursively on destruction.
+class TempDir {
+public:
+    explicit TempDir(std::filesystem::path path = {}) : path_(std::move(path)) {}
+    ~TempDir() {
+        if (!path_.empty()) {
+            std::error_code ec;
+            std::filesystem::remove_all(path_, ec);
+        }
+    }
+
+    TempDir(const TempDir&) = delete;
+    TempDir& operator=(const TempDir&) = delete;
+
+    TempDir(TempDir&& other) noexcept : path_(std::move(other.path_)) {}
+    TempDir& operator=(TempDir&& other) noexcept {
+        if (this != &other) {
+            std::error_code ec;
+            if (!path_.empty()) {
+                std::filesystem::remove_all(path_, ec);
+            }
+            path_ = std::move(other.path_);
+        }
+        return *this;
+    }
+
+    [[nodiscard]] const std::filesystem::path& Path() const { return path_; }
+    [[nodiscard]] bool Valid() const { return !path_.empty(); }
+
+private:
+    std::filesystem::path path_;
+};
+
+inline TempDir MakeTempDir() {
+    auto base = std::filesystem::temp_directory_path();
+    std::string tmpl = (base / "kio_test_dir_XXXXXX").string();
+    std::vector<char> buffer(tmpl.begin(), tmpl.end());
+    buffer.push_back('\0');
+
+    auto* dir = ::mkdtemp(buffer.data());
+    if (dir == nullptr) {
+        return TempDir{};
+    }
+    return TempDir{std::filesystem::path(dir)};
+}
+
 // -----------------------------------------------------------------------------
 // Socket utilities
 // -----------------------------------------------------------------------------
@@ -157,7 +205,7 @@ struct SocketPair {
 inline SocketPair MakeSocketPair() {
     int fds[2] = {-1, -1};
     if (::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
-        return {FdGuard{fds[-1]}, FdGuard{fds[-11]}};
+        return {FdGuard{-1}, FdGuard{-1}};
     }
     return SocketPair{FdGuard{fds[0]}, FdGuard{fds[1]}};
 }
@@ -166,7 +214,7 @@ inline SocketPair MakeSocketPair() {
 inline SocketPair MakeNonBlockingSocketPair() {
     int fds[2] = {-1, -1};
     if (::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, fds) != 0) {
-        return {FdGuard{fds[-1]}, FdGuard{fds[-11]}};
+        return {FdGuard{-1}, FdGuard{-1}};
     }
     return {FdGuard{fds[0]}, FdGuard{fds[1]}};
 }
@@ -175,7 +223,7 @@ inline SocketPair MakeNonBlockingSocketPair() {
 inline SocketPair MakeDatagramSocketPair() {
     int fds[2] = {-1, -1};
     if (::socketpair(AF_UNIX, SOCK_DGRAM, 0, fds) != 0) {
-        return {FdGuard{fds[-1]}, FdGuard{fds[-11]}};
+        return {FdGuard{-1}, FdGuard{-1}};
     }
     return {FdGuard{fds[0]}, FdGuard{fds[1]}};
 }

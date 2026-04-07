@@ -9,6 +9,8 @@
 #include <span>
 #include <string_view>
 
+#include <fcntl.h>
+
 #include "core/core.hpp"
 
 namespace kio
@@ -514,38 +516,113 @@ namespace kio
     struct UnlinkAtOp : UringOp
     {
         int dirfd;
-        const char* path;
+        std::filesystem::path path;
         int flags;
 
-        UnlinkAtOp(IoContext* ctx, int d, const char* p, int f)
-            : UringOp(ctx), dirfd(d), path(p), flags(f)
+        UnlinkAtOp(IoContext* ctx, int d, std::filesystem::path p, int f)
+            : UringOp(ctx), dirfd(d), path(std::move(p)), flags(f)
         {
         }
 
         void PrepareSqe(io_uring_sqe* sqe)
         {
-            io_uring_prep_unlinkat(sqe, dirfd, path, flags);
+            io_uring_prep_unlinkat(sqe, dirfd, path.c_str(), flags);
         }
     };
 
     inline Task<Result<int>> AsyncUnlink(IoContext& ctx, int dirfd, const std::filesystem::path path, int flags)
     {
-        co_return co_await UnlinkAtOp(&ctx, dirfd, path.c_str(), flags);
+        co_return co_await UnlinkAtOp(&ctx, dirfd, path, flags);
+    }
+
+    inline Task<Result<int>> AsyncUnlink(IoContext& ctx, const std::filesystem::path path, int flags = 0)
+    {
+        co_return co_await UnlinkAtOp(&ctx, AT_FDCWD, path, flags);
+    }
+
+    struct MkdirAtOp : UringOp
+    {
+        int dirfd;
+        std::filesystem::path path;
+        mode_t mode;
+
+        MkdirAtOp(IoContext* ctx, int d, std::filesystem::path p, mode_t m)
+            : UringOp(ctx), dirfd(d), path(std::move(p)), mode(m)
+        {
+        }
+
+        void PrepareSqe(io_uring_sqe* sqe)
+        {
+            io_uring_prep_mkdirat(sqe, dirfd, path.c_str(), mode);
+        }
+    };
+
+    inline Task<Result<int>> AsyncMkdir(IoContext& ctx, int dirfd, const std::filesystem::path path, mode_t mode = 0755)
+    {
+        co_return co_await MkdirAtOp(&ctx, dirfd, path, mode);
+    }
+
+    inline Task<Result<int>> AsyncMkdir(IoContext& ctx, const std::filesystem::path path, mode_t mode = 0755)
+    {
+        co_return co_await MkdirAtOp(&ctx, AT_FDCWD, path, mode);
+    }
+
+    struct RenameAtOp : UringOp
+    {
+        int old_dirfd;
+        std::filesystem::path old_path;
+        int new_dirfd;
+        std::filesystem::path new_path;
+        unsigned flags;
+
+        RenameAtOp(
+            IoContext* ctx, int old_dfd, std::filesystem::path old_p, int new_dfd, std::filesystem::path new_p,
+            unsigned rename_flags
+        )
+            : UringOp(ctx),
+              old_dirfd(old_dfd),
+              old_path(std::move(old_p)),
+              new_dirfd(new_dfd),
+              new_path(std::move(new_p)),
+              flags(rename_flags)
+        {
+        }
+
+        void PrepareSqe(io_uring_sqe* sqe)
+        {
+            io_uring_prep_renameat(sqe, old_dirfd, old_path.c_str(), new_dirfd, new_path.c_str(), flags);
+        }
+    };
+
+    inline Task<Result<int>> AsyncRename(
+        IoContext& ctx, int old_dirfd, const std::filesystem::path old_path, int new_dirfd,
+        const std::filesystem::path new_path, unsigned flags = 0
+    )
+    {
+        co_return co_await RenameAtOp(&ctx, old_dirfd, old_path, new_dirfd, new_path, flags);
+    }
+
+    inline Task<Result<int>> AsyncRename(
+        IoContext& ctx, const std::filesystem::path old_path, const std::filesystem::path new_path, unsigned flags = 0
+    )
+    {
+        co_return co_await RenameAtOp(&ctx, AT_FDCWD, old_path, AT_FDCWD, new_path, flags);
     }
 
     struct OpenOp : UringOp
     {
         using UringOp::await_resume;
 
-        const char* path;
+        std::filesystem::path path;
         int flags;
         mode_t mode;
 
-        OpenOp(IoContext& ctx, const char* p, int f, mode_t m) : UringOp(&ctx), path(p), flags(f), mode(m)
+        OpenOp(IoContext& ctx, std::filesystem::path p, int f, mode_t m)
+            : UringOp(&ctx), path(std::move(p)), flags(f), mode(m)
         {
         }
 
-        void PrepareSqe(io_uring_sqe* sqe) { io_uring_prep_openat(sqe, AT_FDCWD, path, flags, mode); }
+        void PrepareSqe(io_uring_sqe* sqe) { io_uring_prep_openat(sqe, AT_FDCWD, path.c_str(), flags, mode); }
 
         Result<FDGuard> await_resume()
         {
@@ -574,7 +651,7 @@ namespace kio
     [[nodiscard]] inline OpenOp AsyncOpen(IoContext& ctx, const std::filesystem::path path, int flags,
                                           mode_t mode = 0644)
     {
-        return OpenOp(ctx, path.c_str(), flags, mode);
+        return OpenOp(ctx, path, flags, mode);
     }
 
     struct ReadOp : UringOp
@@ -875,6 +952,36 @@ namespace kio
     FsyncOp AsyncFsync(IoContext& ctx, const F& f)
     {
         return FsyncOp(ctx, f);
+    }
+
+    inline Task<Result<void>> AsyncFsyncDir(IoContext& ctx, const std::filesystem::path dir_path)
+    {
+        auto dir_res = co_await AsyncOpen(ctx, dir_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (!dir_res)
+        {
+            co_return std::unexpected(dir_res.error());
+        }
+
+        auto dir_fd = dir_res->Release();
+
+        auto sync_res = co_await AsyncFsync(ctx, dir_fd);
+        if (!sync_res)
+        {
+            const auto close_res = co_await AsyncClose(ctx, dir_fd);
+            if (!close_res)
+            {
+                ALOG_ERROR("AsyncClose failed after AsyncFsyncDir error: {}", close_res.error().message());
+            }
+            co_return std::unexpected(sync_res.error());
+        }
+
+        auto close_res = co_await AsyncClose(ctx, dir_fd);
+        if (!close_res)
+        {
+            co_return std::unexpected(close_res.error());
+        }
+
+        co_return Result<void>{};
     }
 
     struct FdatasyncOp : UringOp
