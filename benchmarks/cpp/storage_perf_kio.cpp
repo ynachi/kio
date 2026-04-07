@@ -1,679 +1,145 @@
 #include <gflags/gflags.h>
 #include <kio/kio.hpp>
 #include <kio/core/task_group.hpp>
-
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <barrier>
-#include <cerrno>
 #include <chrono>
-#include <cstddef>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <expected>
-#include <fcntl.h>
-#include <memory>
-#include <mutex>
-#include <span>
-#include <string>
-#include <system_error>
-#include <thread>
-#include <utility>
 #include <vector>
+#include <fcntl.h>
+#include <algorithm>
+#include <unistd.h>
 
 DEFINE_uint64(buf_size, 4096, "Buffer size for IO");
 DEFINE_uint64(total_size, 256 * 1024 * 1024, "Total bytes to transfer");
 DEFINE_uint64(depth, 64, "Depth for streaming IO");
-DEFINE_uint64(workers, 1, "Number of parallel shard workers");
 
 using namespace std::chrono;
 
-namespace {
-
-constexpr size_t kSampleCount = 5;
-constexpr size_t kSyncTotalBytes = 64 * 1024 * 1024;
-constexpr size_t kSyncEveryOps = 64;
-std::atomic_uint64_t g_temp_counter{0};
-
-struct BenchSample {
+struct BenchResult {
     uint64_t ops;
     uint64_t bytes;
-    uint64_t ns;
+    uint64_t elapsed_ns;
 };
 
-struct Series {
-    const char* label;
-    uint64_t ops = 0;
-    uint64_t bytes = 0;
-    std::array<uint64_t, kSampleCount> samples_ns{};
-
-    [[nodiscard]] uint64_t MedianNs() const
-    {
-        auto sorted = samples_ns;
-        std::sort(sorted.begin(), sorted.end());
-        return sorted[kSampleCount / 2];
-    }
-};
-
-class AlignedBuffer {
-public:
-    AlignedBuffer() = default;
-
-    AlignedBuffer(size_t size, size_t alignment) : size_(size)
-    {
-        void* ptr = nullptr;
-        if (posix_memalign(&ptr, alignment, size) != 0) {
-            throw std::bad_alloc();
-        }
-        ptr_ = static_cast<std::byte*>(ptr);
-    }
-
-    AlignedBuffer(AlignedBuffer&& other) noexcept : ptr_(std::exchange(other.ptr_, nullptr)), size_(std::exchange(other.size_, 0))
-    {
-    }
-
-    AlignedBuffer& operator=(AlignedBuffer&& other) noexcept
-    {
-        if (this != &other) {
-            Reset();
-            ptr_ = std::exchange(other.ptr_, nullptr);
-            size_ = std::exchange(other.size_, 0);
-        }
-        return *this;
-    }
-
-    AlignedBuffer(const AlignedBuffer&) = delete;
-    AlignedBuffer& operator=(const AlignedBuffer&) = delete;
-
-    ~AlignedBuffer() { Reset(); }
-
-    [[nodiscard]] std::span<std::byte> Bytes() { return {ptr_, size_}; }
-    [[nodiscard]] std::span<const std::byte> ConstBytes() const { return {ptr_, size_}; }
-
-    void Fill(uint8_t value) const { std::memset(ptr_, value, size_); }
-
-private:
-    void Reset()
-    {
-        if (ptr_ != nullptr) {
-            std::free(ptr_);
-            ptr_ = nullptr;
-            size_ = 0;
-        }
-    }
-
-    std::byte* ptr_ = nullptr;
-    size_t size_ = 0;
-};
-
-std::string GetTempPath(const char* prefix)
-{
-    const auto now = system_clock::now().time_since_epoch().count();
-    const auto counter = g_temp_counter.fetch_add(1, std::memory_order_relaxed);
-    return std::string("/tmp/") + prefix + "_" + std::to_string(now) + "_" + std::to_string(counter) + ".bin";
+std::string get_temp_path(const char* prefix) {
+    auto now = system_clock::now().time_since_epoch().count();
+    return std::string("/tmp/") + prefix + "_" + std::to_string(now) + ".bin";
 }
 
-double OpsPerSec(const BenchSample& sample)
-{
-    return static_cast<double>(sample.ops) / (static_cast<double>(sample.ns) / 1e9);
-}
-
-double MiBPerSec(const BenchSample& sample)
-{
-    return (static_cast<double>(sample.bytes) / (1024.0 * 1024.0)) / (static_cast<double>(sample.ns) / 1e9);
-}
-
-void PrintSeries(const Series& series)
-{
-    const BenchSample sample{
-        .ops = series.ops,
-        .bytes = series.bytes,
-        .ns = series.MedianNs(),
-    };
-    std::printf(
-        "%s: median %.3f ms, %.0f ops/s, %.1f MiB/s\n",
-        series.label,
-        static_cast<double>(sample.ns) / 1e6,
-        OpsPerSec(sample),
-        MiBPerSec(sample)
-    );
-}
-
-template <typename F>
-kio::Task<kio::Result<size_t>> WriteExactTask(kio::IoContext& ctx, const F& file, std::span<const std::byte> buffer, uint64_t offset)
-{
-    auto result = co_await kio::AsyncWriteExact(ctx, file, buffer, offset);
-    if (!result) {
-        co_return std::unexpected(result.error());
-    }
-    co_return buffer.size();
-}
-
-template <typename F>
-kio::Task<kio::Result<size_t>> ReadExactTask(kio::IoContext& ctx, const F& file, std::span<std::byte> buffer, uint64_t offset)
-{
-    auto result = co_await kio::AsyncReadExact(ctx, file, buffer, offset);
-    if (!result) {
-        co_return std::unexpected(result.error());
-    }
-    co_return buffer.size();
-}
-
-template <typename T>
-kio::Result<void> CheckGroup(kio::TaskGroup<T>& group)
-{
-    for (auto& task : group.Tasks()) {
-        auto result = task.Result();
-        if constexpr (requires { result.has_value(); }) {
-            if (!result) {
-                return std::unexpected(result.error());
-            }
-        }
-    }
-    return kio::Result<void>{};
-}
-
-kio::Task<kio::Result<BenchSample>> BenchSequentialWrite(kio::IoContext& ctx, bool direct)
-{
-    const auto path = GetTempPath(direct ? "kio_direct_seq_write" : "kio_seq_write");
-    const int flags = O_RDWR | O_CREAT | O_TRUNC | (direct ? O_DIRECT : 0);
-    auto open_res = co_await kio::AsyncOpen(ctx, path, flags, 0644);
-    if (!open_res) {
-        co_return std::unexpected(open_res.error());
-    }
-    auto file = std::move(*open_res);
-
-    const size_t total_ops = FLAGS_total_size / FLAGS_buf_size;
-    const auto started = high_resolution_clock::now();
-    if (direct) {
-        AlignedBuffer buf(FLAGS_buf_size, FLAGS_buf_size);
-        buf.Fill(0x5a);
-        for (size_t i = 0; i < total_ops; ++i) {
-            auto write_res = co_await kio::AsyncWriteExact(ctx, file, buf.ConstBytes(), i * FLAGS_buf_size);
-            if (!write_res) {
-                co_return std::unexpected(write_res.error());
-            }
-        }
-    } else {
-        std::vector<std::byte> buf(FLAGS_buf_size, std::byte{0x5a});
-        for (size_t i = 0; i < total_ops; ++i) {
-            auto write_res = co_await kio::AsyncWriteExact(ctx, file, std::span{buf}, i * FLAGS_buf_size);
-            if (!write_res) {
-                co_return std::unexpected(write_res.error());
-            }
-        }
-    }
-    const auto elapsed = duration_cast<nanoseconds>(high_resolution_clock::now() - started).count();
-
-    auto close_res = co_await kio::AsyncClose(ctx, file);
-    if (!close_res) {
-        co_return std::unexpected(close_res.error());
-    }
-    if (::unlink(path.c_str()) != 0) {
-        co_return std::unexpected(std::error_code(errno, std::generic_category()));
-    }
-    co_return BenchSample{
-        .ops = total_ops,
-        .bytes = FLAGS_total_size,
-        .ns = static_cast<uint64_t>(elapsed),
-    };
-}
-
-kio::Task<kio::Result<BenchSample>> BenchSequentialRead(kio::IoContext& ctx, bool direct)
-{
-    const auto path = GetTempPath(direct ? "kio_direct_seq_read" : "kio_seq_read");
-    const int flags = O_RDWR | O_CREAT | O_TRUNC | (direct ? O_DIRECT : 0);
-    auto open_res = co_await kio::AsyncOpen(ctx, path, flags, 0644);
-    if (!open_res) {
-        co_return std::unexpected(open_res.error());
-    }
-    auto file = std::move(*open_res);
-
-    const size_t total_ops = FLAGS_total_size / FLAGS_buf_size;
-    if (direct) {
-        AlignedBuffer seed(FLAGS_buf_size, FLAGS_buf_size);
-        seed.Fill(0x31);
-        for (size_t i = 0; i < total_ops; ++i) {
-            auto write_res = co_await kio::AsyncWriteExact(ctx, file, seed.ConstBytes(), i * FLAGS_buf_size);
-            if (!write_res) {
-                co_return std::unexpected(write_res.error());
-            }
-        }
-
-        AlignedBuffer read_buf(FLAGS_buf_size, FLAGS_buf_size);
-        const auto started = high_resolution_clock::now();
-        for (size_t i = 0; i < total_ops; ++i) {
-            auto read_res = co_await kio::AsyncReadExact(ctx, file, read_buf.Bytes(), i * FLAGS_buf_size);
-            if (!read_res) {
-                co_return std::unexpected(read_res.error());
-            }
-        }
-        const auto elapsed = duration_cast<nanoseconds>(high_resolution_clock::now() - started).count();
-
-        auto close_res = co_await kio::AsyncClose(ctx, file);
-        if (!close_res) {
-            co_return std::unexpected(close_res.error());
-        }
-        if (::unlink(path.c_str()) != 0) {
-            co_return std::unexpected(std::error_code(errno, std::generic_category()));
-        }
-        co_return BenchSample{.ops = total_ops, .bytes = FLAGS_total_size, .ns = static_cast<uint64_t>(elapsed)};
-    }
-
-    std::vector<std::byte> seed(FLAGS_buf_size, std::byte{0x31});
+kio::Task<BenchResult> run_sequential_write(kio::IoContext& ctx, int fd) {
+    std::vector<std::byte> buf(FLAGS_buf_size, std::byte{0x5a});
+    size_t total_ops = FLAGS_total_size / FLAGS_buf_size;
+    auto start = high_resolution_clock::now();
     for (size_t i = 0; i < total_ops; ++i) {
-        auto write_res = co_await kio::AsyncWriteExact(ctx, file, std::span{seed}, i * FLAGS_buf_size);
-        if (!write_res) {
-            co_return std::unexpected(write_res.error());
-        }
+        co_await kio::AsyncWrite(ctx, fd, std::span{buf}, i * FLAGS_buf_size);
     }
-
-    std::vector<std::byte> read_buf(FLAGS_buf_size);
-    const auto started = high_resolution_clock::now();
-    for (size_t i = 0; i < total_ops; ++i) {
-        auto read_res = co_await kio::AsyncReadExact(ctx, file, std::span{read_buf}, i * FLAGS_buf_size);
-        if (!read_res) {
-            co_return std::unexpected(read_res.error());
-        }
-    }
-    const auto elapsed = duration_cast<nanoseconds>(high_resolution_clock::now() - started).count();
-
-    auto close_res = co_await kio::AsyncClose(ctx, file);
-    if (!close_res) {
-        co_return std::unexpected(close_res.error());
-    }
-    if (::unlink(path.c_str()) != 0) {
-        co_return std::unexpected(std::error_code(errno, std::generic_category()));
-    }
-    co_return BenchSample{
-        .ops = total_ops,
-        .bytes = FLAGS_total_size,
-        .ns = static_cast<uint64_t>(elapsed),
-    };
+    auto end = high_resolution_clock::now();
+    co_return { total_ops, FLAGS_total_size, (uint64_t)duration_cast<nanoseconds>(end - start).count() };
 }
 
-kio::Task<kio::Result<BenchSample>> BenchStreamingWrite(kio::IoContext& ctx, bool direct)
-{
-    const auto path = GetTempPath(direct ? "kio_direct_stream_write" : "kio_stream_write");
-    const int flags = O_RDWR | O_CREAT | O_TRUNC | (direct ? O_DIRECT : 0);
-    auto open_res = co_await kio::AsyncOpen(ctx, path, flags, 0644);
-    if (!open_res) {
-        co_return std::unexpected(open_res.error());
+kio::Task<BenchResult> run_sequential_read(kio::IoContext& ctx, int fd) {
+    std::vector<std::byte> buf(FLAGS_buf_size);
+    size_t total_ops = FLAGS_total_size / FLAGS_buf_size;
+    auto start = high_resolution_clock::now();
+    for (size_t i = 0; i < total_ops; ++i) {
+        co_await kio::AsyncRead(ctx, fd, std::span{buf}, i * FLAGS_buf_size);
     }
-    auto file = std::move(*open_res);
-
-    const size_t total_ops = FLAGS_total_size / FLAGS_buf_size;
-    const size_t rounds = total_ops / FLAGS_depth;
-    const auto started = high_resolution_clock::now();
-
-    if (direct) {
-        std::vector<AlignedBuffer> buffers;
-        buffers.reserve(FLAGS_depth);
-        for (size_t i = 0; i < FLAGS_depth; ++i) {
-            buffers.emplace_back(FLAGS_buf_size, FLAGS_buf_size);
-        }
-
-        for (size_t round = 0; round < rounds; ++round) {
-            kio::TaskGroup<kio::Result<size_t>> group(FLAGS_depth);
-            for (size_t i = 0; i < FLAGS_depth; ++i) {
-                const size_t op_index = round * FLAGS_depth + i;
-                buffers[i].Fill(static_cast<uint8_t>(op_index & 0xff));
-                group.Spawn(WriteExactTask(ctx, file, buffers[i].ConstBytes(), op_index * FLAGS_buf_size));
-            }
-            co_await group.JoinAll(ctx);
-            auto group_res = CheckGroup(group);
-            if (!group_res) {
-                co_return std::unexpected(group_res.error());
-            }
-        }
-    } else {
-        std::vector<std::vector<std::byte>> buffers(FLAGS_depth, std::vector<std::byte>(FLAGS_buf_size));
-        for (size_t round = 0; round < rounds; ++round) {
-            kio::TaskGroup<kio::Result<size_t>> group(FLAGS_depth);
-            for (size_t i = 0; i < FLAGS_depth; ++i) {
-                const size_t op_index = round * FLAGS_depth + i;
-                std::fill(buffers[i].begin(), buffers[i].end(), static_cast<std::byte>(op_index & 0xff));
-                group.Spawn(WriteExactTask(ctx, file, std::span{buffers[i]}, op_index * FLAGS_buf_size));
-            }
-            co_await group.JoinAll(ctx);
-            auto group_res = CheckGroup(group);
-            if (!group_res) {
-                co_return std::unexpected(group_res.error());
-            }
-        }
-    }
-
-    const auto elapsed = duration_cast<nanoseconds>(high_resolution_clock::now() - started).count();
-    auto close_res = co_await kio::AsyncClose(ctx, file);
-    if (!close_res) {
-        co_return std::unexpected(close_res.error());
-    }
-    if (::unlink(path.c_str()) != 0) {
-        co_return std::unexpected(std::error_code(errno, std::generic_category()));
-    }
-    co_return BenchSample{.ops = total_ops, .bytes = FLAGS_total_size, .ns = static_cast<uint64_t>(elapsed)};
+    auto end = high_resolution_clock::now();
+    co_return { total_ops, FLAGS_total_size, (uint64_t)duration_cast<nanoseconds>(end - start).count() };
 }
 
-kio::Task<kio::Result<BenchSample>> BenchStreamingRead(kio::IoContext& ctx, bool direct)
-{
-    const auto path = GetTempPath(direct ? "kio_direct_stream_read" : "kio_stream_read");
-    const int flags = O_RDWR | O_CREAT | O_TRUNC | (direct ? O_DIRECT : 0);
-    auto open_res = co_await kio::AsyncOpen(ctx, path, flags, 0644);
-    if (!open_res) {
-        co_return std::unexpected(open_res.error());
-    }
-    auto file = std::move(*open_res);
+kio::Task<kio::Result<size_t>> wrap_write(kio::IoContext& ctx, int fd, std::span<const std::byte> buf, uint64_t off) {
+    co_return co_await kio::AsyncWrite(ctx, fd, buf, off);
+}
 
-    const size_t total_ops = FLAGS_total_size / FLAGS_buf_size;
-    const size_t rounds = total_ops / FLAGS_depth;
+kio::Task<kio::Result<size_t>> wrap_read(kio::IoContext& ctx, int fd, std::span<std::byte> buf, uint64_t off) {
+    co_return co_await kio::AsyncRead(ctx, fd, buf, off);
+}
 
-    if (direct) {
-        AlignedBuffer seed(FLAGS_buf_size, FLAGS_buf_size);
-        seed.Fill(0x41);
-        for (size_t i = 0; i < total_ops; ++i) {
-            auto write_res = co_await kio::AsyncWriteExact(ctx, file, seed.ConstBytes(), i * FLAGS_buf_size);
-            if (!write_res) {
-                co_return std::unexpected(write_res.error());
-            }
-        }
-
-        std::vector<AlignedBuffer> buffers;
-        buffers.reserve(FLAGS_depth);
+kio::Task<BenchResult> run_streaming_write(kio::IoContext& ctx, int fd) {
+    size_t total_ops = FLAGS_total_size / FLAGS_buf_size;
+    size_t rounds = total_ops / FLAGS_depth;
+    std::vector<std::vector<std::byte>> bufs(FLAGS_depth, std::vector<std::byte>(FLAGS_buf_size));
+    auto start = high_resolution_clock::now();
+    for (size_t r = 0; r < rounds; ++r) {
+        kio::TaskGroup<kio::Result<size_t>> group;
         for (size_t i = 0; i < FLAGS_depth; ++i) {
-            buffers.emplace_back(FLAGS_buf_size, FLAGS_buf_size);
-        }
-
-        const auto started = high_resolution_clock::now();
-        for (size_t round = 0; round < rounds; ++round) {
-            kio::TaskGroup<kio::Result<size_t>> group(FLAGS_depth);
-            for (size_t i = 0; i < FLAGS_depth; ++i) {
-                const size_t op_index = round * FLAGS_depth + i;
-                group.Spawn(ReadExactTask(ctx, file, buffers[i].Bytes(), op_index * FLAGS_buf_size));
-            }
-            co_await group.JoinAll(ctx);
-            auto group_res = CheckGroup(group);
-            if (!group_res) {
-                co_return std::unexpected(group_res.error());
-            }
-        }
-        const auto elapsed = duration_cast<nanoseconds>(high_resolution_clock::now() - started).count();
-        auto close_res = co_await kio::AsyncClose(ctx, file);
-        if (!close_res) {
-            co_return std::unexpected(close_res.error());
-        }
-        if (::unlink(path.c_str()) != 0) {
-            co_return std::unexpected(std::error_code(errno, std::generic_category()));
-        }
-        co_return BenchSample{.ops = total_ops, .bytes = FLAGS_total_size, .ns = static_cast<uint64_t>(elapsed)};
-    }
-
-    std::vector<std::byte> seed(FLAGS_buf_size, std::byte{0x41});
-    for (size_t i = 0; i < total_ops; ++i) {
-        auto write_res = co_await kio::AsyncWriteExact(ctx, file, std::span{seed}, i * FLAGS_buf_size);
-        if (!write_res) {
-            co_return std::unexpected(write_res.error());
-        }
-    }
-
-    std::vector<std::vector<std::byte>> buffers(FLAGS_depth, std::vector<std::byte>(FLAGS_buf_size));
-    const auto started = high_resolution_clock::now();
-    for (size_t round = 0; round < rounds; ++round) {
-        kio::TaskGroup<kio::Result<size_t>> group(FLAGS_depth);
-        for (size_t i = 0; i < FLAGS_depth; ++i) {
-            const size_t op_index = round * FLAGS_depth + i;
-            group.Spawn(ReadExactTask(ctx, file, std::span{buffers[i]}, op_index * FLAGS_buf_size));
+            size_t op_idx = r * FLAGS_depth + i;
+            bufs[i].assign(FLAGS_buf_size, std::byte{(uint8_t)op_idx});
+            group.Spawn(wrap_write(ctx, fd, std::span{bufs[i]}, op_idx * FLAGS_buf_size));
         }
         co_await group.JoinAll(ctx);
-        auto group_res = CheckGroup(group);
-        if (!group_res) {
-            co_return std::unexpected(group_res.error());
-        }
     }
-    const auto elapsed = duration_cast<nanoseconds>(high_resolution_clock::now() - started).count();
-
-    auto close_res = co_await kio::AsyncClose(ctx, file);
-    if (!close_res) {
-        co_return std::unexpected(close_res.error());
-    }
-    if (::unlink(path.c_str()) != 0) {
-        co_return std::unexpected(std::error_code(errno, std::generic_category()));
-    }
-    co_return BenchSample{.ops = total_ops, .bytes = FLAGS_total_size, .ns = static_cast<uint64_t>(elapsed)};
+    auto end = high_resolution_clock::now();
+    co_return { total_ops, FLAGS_total_size, (uint64_t)duration_cast<nanoseconds>(end - start).count() };
 }
 
-kio::Task<kio::Result<BenchSample>> BenchAppendFdatasync(kio::IoContext& ctx)
-{
-    const auto path = GetTempPath("kio_append_sync");
-    auto open_res = co_await kio::AsyncOpen(ctx, path, O_RDWR | O_CREAT | O_TRUNC, 0644);
-    if (!open_res) {
-        co_return std::unexpected(open_res.error());
-    }
-    auto file = std::move(*open_res);
-
-    const size_t total_ops = kSyncTotalBytes / FLAGS_buf_size;
-    std::vector<std::byte> buf(FLAGS_buf_size, std::byte{0x4d});
-
-    const auto started = high_resolution_clock::now();
-    for (size_t i = 0; i < total_ops; ++i) {
-        auto write_res = co_await kio::AsyncWriteExact(ctx, file, std::span{buf}, i * FLAGS_buf_size);
-        if (!write_res) {
-            co_return std::unexpected(write_res.error());
+kio::Task<BenchResult> run_streaming_read(kio::IoContext& ctx, int fd) {
+    size_t total_ops = FLAGS_total_size / FLAGS_buf_size;
+    size_t rounds = total_ops / FLAGS_depth;
+    std::vector<std::vector<std::byte>> bufs(FLAGS_depth, std::vector<std::byte>(FLAGS_buf_size));
+    auto start = high_resolution_clock::now();
+    for (size_t r = 0; r < rounds; ++r) {
+        kio::TaskGroup<kio::Result<size_t>> group;
+        for (size_t i = 0; i < FLAGS_depth; ++i) {
+            size_t op_idx = r * FLAGS_depth + i;
+            group.Spawn(wrap_read(ctx, fd, std::span{bufs[i]}, op_idx * FLAGS_buf_size));
         }
-        if ((i + 1) % kSyncEveryOps == 0 || i + 1 == total_ops) {
-            auto sync_res = co_await kio::AsyncFdatasync(ctx, file);
-            if (!sync_res) {
-                co_return std::unexpected(sync_res.error());
-            }
-        }
+        co_await group.JoinAll(ctx);
     }
-    const auto elapsed = duration_cast<nanoseconds>(high_resolution_clock::now() - started).count();
-
-    auto close_res = co_await kio::AsyncClose(ctx, file);
-    if (!close_res) {
-        co_return std::unexpected(close_res.error());
-    }
-    if (::unlink(path.c_str()) != 0) {
-        co_return std::unexpected(std::error_code(errno, std::generic_category()));
-    }
-    co_return BenchSample{.ops = total_ops, .bytes = kSyncTotalBytes, .ns = static_cast<uint64_t>(elapsed)};
+    auto end = high_resolution_clock::now();
+    co_return { total_ops, FLAGS_total_size, (uint64_t)duration_cast<nanoseconds>(end - start).count() };
 }
 
-template <typename Factory>
-kio::Task<kio::Result<Series>> SampleCase(kio::IoContext& ctx, const char* label, Factory&& factory)
-{
-    Series series{.label = label};
-    for (size_t i = 0; i < kSampleCount; ++i) {
-        auto result = co_await factory(ctx);
-        if (!result) {
-            co_return std::unexpected(result.error());
-        }
-        series.ops = result->ops;
-        series.bytes = result->bytes;
-        series.samples_ns[i] = result->ns;
+void print_res(const char* label, const std::vector<BenchResult>& results) {
+    std::vector<uint64_t> samples;
+    for (auto& r : results) samples.push_back(r.elapsed_ns);
+    std::sort(samples.begin(), samples.end());
+    uint64_t median = samples[samples.size()/2];
+    double secs = (double)median / 1e9;
+    double ops_per_sec = (double)results[0].ops / secs;
+    double mib_per_sec = ((double)results[0].bytes / (1024.0 * 1024.0)) / secs;
+    printf("%s: median %.3f ms, %.0f ops/s, %.1f MiB/s\n", label, secs * 1000.0, ops_per_sec, mib_per_sec);
+}
+
+kio::Task<void> run_all_benches(kio::IoContext& ctx) {
+    auto path = get_temp_path("kio_bench");
+    int fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) { perror("open"); co_return; }
+
+    printf("[KIO - 1 worker]\n");
+    std::vector<BenchResult> results;
+    for (int i=0; i<5; ++i) results.push_back(co_await run_sequential_write(ctx, fd));
+    print_res("sequential write 4KiB", results);
+    
+    results.clear();
+    for (int i=0; i<5; ++i) results.push_back(co_await run_sequential_read(ctx, fd));
+    print_res("sequential read 4KiB", results);
+
+    results.clear();
+    for (int i=0; i<5; ++i) results.push_back(co_await run_streaming_write(ctx, fd));
+    print_res("streaming write depth64 4KiB", results);
+
+    results.clear();
+    for (int i=0; i<5; ++i) results.push_back(co_await run_streaming_read(ctx, fd));
+    print_res("streaming read depth64 4KiB", results);
+
+    auto path_direct = get_temp_path("kio_direct_bench");
+    int fd_d = ::open(path_direct.c_str(), O_RDWR | O_CREAT | O_TRUNC | O_DIRECT, 0644);
+    if (fd_d >= 0) {
+        results.clear();
+        for (int i=0; i<5; ++i) results.push_back(co_await run_sequential_write(ctx, fd_d));
+        print_res("direct seq write 4KiB", results);
+        ::close(fd_d);
+        unlink(path_direct.c_str());
     }
-    co_return series;
+
+    ::close(fd);
+    unlink(path.c_str());
+    co_return;
 }
 
-template <typename Factory>
-std::expected<BenchSample, std::error_code> RunWorkerCase(Factory&& factory)
-{
-    std::expected<BenchSample, std::error_code> result = std::unexpected(std::make_error_code(std::errc::state_not_recoverable));
-    kio::IoContext ctx;
-    ctx.RunUntilDone([&](kio::IoContext& inner) -> kio::Task<void> {
-        auto sample = co_await factory(inner);
-        if (!sample) {
-            result = std::unexpected(sample.error());
-            co_return;
-        }
-        result = *sample;
-    }(ctx));
-    return result;
-}
-
-template <typename Factory>
-Series SampleParallelCase(const char* label, size_t workers, Factory factory)
-{
-    Series series{.label = label};
-    for (size_t sample_index = 0; sample_index < kSampleCount; ++sample_index) {
-        std::barrier start_barrier(static_cast<std::ptrdiff_t>(workers + 1));
-        std::vector<std::thread> threads;
-        threads.reserve(workers);
-        std::vector<std::expected<BenchSample, std::error_code>> results(
-            workers, std::unexpected(std::make_error_code(std::errc::state_not_recoverable))
-        );
-
-        for (size_t worker = 0; worker < workers; ++worker) {
-            threads.emplace_back([&, worker, worker_factory = factory]() mutable {
-                start_barrier.arrive_and_wait();
-                results[worker] = RunWorkerCase(worker_factory);
-            });
-        }
-
-        start_barrier.arrive_and_wait();
-
-        uint64_t max_ns = 0;
-        uint64_t total_ops = 0;
-        uint64_t total_bytes = 0;
-        for (auto& thread : threads) {
-            thread.join();
-        }
-        for (const auto& result : results) {
-            if (!result) {
-                throw std::system_error(result.error());
-            }
-            total_ops += result->ops;
-            total_bytes += result->bytes;
-            max_ns = std::max(max_ns, result->ns);
-        }
-
-        series.ops = total_ops;
-        series.bytes = total_bytes;
-        series.samples_ns[sample_index] = max_ns;
-    }
-    return series;
-}
-
-kio::Task<kio::Result<void>> RunBench(kio::IoContext& ctx)
-{
-    std::printf("kio storage benchmarks (normalized)\n");
-    std::printf("target=linux-ish sample_count=%zu\n\n", kSampleCount);
-    std::printf("[kio_io_uring]\n");
-
-    const auto seq_write = co_await SampleCase(ctx, "sequential write 4KiB", [](kio::IoContext& inner) {
-        return BenchSequentialWrite(inner, false);
-    });
-    if (!seq_write) co_return std::unexpected(seq_write.error());
-    PrintSeries(*seq_write);
-
-    const auto seq_read = co_await SampleCase(ctx, "sequential read 4KiB", [](kio::IoContext& inner) {
-        return BenchSequentialRead(inner, false);
-    });
-    if (!seq_read) co_return std::unexpected(seq_read.error());
-    PrintSeries(*seq_read);
-
-    const auto stream_write = co_await SampleCase(ctx, "streaming write depth64 4KiB", [](kio::IoContext& inner) {
-        return BenchStreamingWrite(inner, false);
-    });
-    if (!stream_write) co_return std::unexpected(stream_write.error());
-    PrintSeries(*stream_write);
-
-    const auto stream_read = co_await SampleCase(ctx, "streaming read depth64 4KiB", [](kio::IoContext& inner) {
-        return BenchStreamingRead(inner, false);
-    });
-    if (!stream_read) co_return std::unexpected(stream_read.error());
-    PrintSeries(*stream_read);
-
-    const auto sync_case = co_await SampleCase(ctx, "append fdatasync/64 4KiB", [](kio::IoContext& inner) {
-        return BenchAppendFdatasync(inner);
-    });
-    if (!sync_case) co_return std::unexpected(sync_case.error());
-    PrintSeries(*sync_case);
-
-    const auto direct_seq_write = co_await SampleCase(ctx, "direct seq write 4KiB", [](kio::IoContext& inner) {
-        return BenchSequentialWrite(inner, true);
-    });
-    if (!direct_seq_write) co_return std::unexpected(direct_seq_write.error());
-    PrintSeries(*direct_seq_write);
-
-    const auto direct_seq_read = co_await SampleCase(ctx, "direct seq read 4KiB", [](kio::IoContext& inner) {
-        return BenchSequentialRead(inner, true);
-    });
-    if (!direct_seq_read) co_return std::unexpected(direct_seq_read.error());
-    PrintSeries(*direct_seq_read);
-
-    const auto direct_stream_write = co_await SampleCase(ctx, "direct streaming write depth64 4KiB", [](kio::IoContext& inner) {
-        return BenchStreamingWrite(inner, true);
-    });
-    if (!direct_stream_write) co_return std::unexpected(direct_stream_write.error());
-    PrintSeries(*direct_stream_write);
-
-    const auto direct_stream_read = co_await SampleCase(ctx, "direct streaming read depth64 4KiB", [](kio::IoContext& inner) {
-        return BenchStreamingRead(inner, true);
-    });
-    if (!direct_stream_read) co_return std::unexpected(direct_stream_read.error());
-    PrintSeries(*direct_stream_read);
-
-    std::printf("\n");
-    co_return kio::Result<void>{};
-}
-
-}  // namespace
-
-int main(int argc, char** argv)
-{
+int main(int argc, char** argv) {
     gflags::ParseCommandLineFlags(&argc, &argv, true);
-
-    if (FLAGS_workers > 1) {
-        std::printf("kio storage benchmarks (normalized)\n");
-        std::printf("target=linux-ish sample_count=%zu\n\n", kSampleCount);
-        std::printf("[kio_io_uring_mt_%luw]\n", FLAGS_workers);
-        try {
-            PrintSeries(SampleParallelCase("sequential write 4KiB", FLAGS_workers, [](kio::IoContext& inner) {
-                return BenchSequentialWrite(inner, false);
-            }));
-            PrintSeries(SampleParallelCase("sequential read 4KiB", FLAGS_workers, [](kio::IoContext& inner) {
-                return BenchSequentialRead(inner, false);
-            }));
-            PrintSeries(SampleParallelCase("streaming write depth64 4KiB", FLAGS_workers, [](kio::IoContext& inner) {
-                return BenchStreamingWrite(inner, false);
-            }));
-            PrintSeries(SampleParallelCase("streaming read depth64 4KiB", FLAGS_workers, [](kio::IoContext& inner) {
-                return BenchStreamingRead(inner, false);
-            }));
-            PrintSeries(SampleParallelCase("append fdatasync/64 4KiB", FLAGS_workers, [](kio::IoContext& inner) {
-                return BenchAppendFdatasync(inner);
-            }));
-            PrintSeries(SampleParallelCase("direct seq write 4KiB", FLAGS_workers, [](kio::IoContext& inner) {
-                return BenchSequentialWrite(inner, true);
-            }));
-            PrintSeries(SampleParallelCase("direct seq read 4KiB", FLAGS_workers, [](kio::IoContext& inner) {
-                return BenchSequentialRead(inner, true);
-            }));
-            PrintSeries(SampleParallelCase("direct streaming write depth64 4KiB", FLAGS_workers, [](kio::IoContext& inner) {
-                return BenchStreamingWrite(inner, true);
-            }));
-            PrintSeries(SampleParallelCase("direct streaming read depth64 4KiB", FLAGS_workers, [](kio::IoContext& inner) {
-                return BenchStreamingRead(inner, true);
-            }));
-            std::printf("\n");
-        } catch (const std::system_error& error) {
-            std::fprintf(stderr, "benchmark failed: %s\n", error.code().message().c_str());
-            return 1;
-        }
-        return 0;
-    }
-
     kio::IoContext ctx;
-    ctx.RunUntilDone([](kio::IoContext& inner) -> kio::Task<void> {
-        auto result = co_await RunBench(inner);
-        if (!result) {
-            std::fprintf(stderr, "benchmark failed: %s\n", result.error().message().c_str());
-            std::exit(1);
-        }
-    }(ctx));
-
+    ctx.RunUntilDone(run_all_benches(ctx));
     return 0;
 }

@@ -170,12 +170,14 @@ void IoContext::CancelAllPending(const OpCancelReason reason)
         op->cancel_reason = reason;
     }
 
-    //  IORING_ASYNC_CANCEL_ANY = "Cancel everything in this ring"
+    // IORING_ASYNC_CANCEL_ANY = "Cancel everything in this ring"
     io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
     if (sqe != nullptr)
     {
         io_uring_prep_cancel(sqe, nullptr, IORING_ASYNC_CANCEL_ANY);
-        /// TODO: We don't need a callback for the cancel op itself
+        // We don't need a CQE if the cancellation itself succeeds.
+        // The individual cancelled operations will still return -ECANCELED.
+        sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
         io_uring_sqe_set_data(sqe, nullptr);
         io_uring_submit(&ring_);
     }
@@ -200,7 +202,6 @@ Result<> IoContext::RegisterFiles(const std::span<const int> fds)
 
 bool IoContext::TryMsgRing(const IoContext& target, OperationState* op)
 {
-    // 1. Get SQE from current ring
     EnsureSqes(1);
     io_uring_sqe* sqe = GetSqe();
 
@@ -377,6 +378,7 @@ void IoContext::SubmitWakeRead()
         }
     }
     io_uring_prep_read(sqe, wake_fd_, &wake_buffer_, sizeof(wake_buffer_), 0);
+    sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
     io_uring_sqe_set_data64(sqe, detail::WAKE_TAG);
 }
 

@@ -606,9 +606,7 @@ class IoContext
 #if AIO_STATS
     IoContextStats stats_{};
 #endif
-#ifndef NDEBUG
     std::thread::id owner_thread_ = std::this_thread::get_id();
-#endif
 
     void AssertOwnerThread() const
     {
