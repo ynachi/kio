@@ -196,8 +196,7 @@ public:
 ///   // OK in initialization code
 ///   auto addr = SocketAddress::Resolve("database.local", 5432);
 /// @endcode
-static Result<SocketAddress> Resolve(std::string_view host, uint16_t port);
-
+Result<SocketAddress> Resolve(std::string_view host, uint16_t port);
 /// @brief Asynchronously resolves a hostname without blocking the event loop.
 /// @param ctx The IoContext to run on
 /// @param pool BlockingPool to offload the DNS resolution

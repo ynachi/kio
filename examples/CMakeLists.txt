@@ -19,6 +19,9 @@ target_compile_definitions(04_ctx_switch_benchmark PRIVATE DAIO_STATS=1)
 kio_add_demo(211_dns_resolver aio/211_dns_resolve.cpp TAGS core LIBS kio)
 kio_add_sanitizers(211_dns_resolver)
 
+kio_add_demo(bench_io aio/bench_io.cpp TAGS core LIBS kio)
+kio_add_sanitizers(bench_io)
+
 
 kio_add_demo(215_tls_echo_server aio/215_tls_echo_server.cpp TAGS core LIBS gflags::gflags kio)
 kio_add_sanitizers(215_tls_echo_server)
