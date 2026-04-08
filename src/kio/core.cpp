@@ -18,7 +18,7 @@ namespace
 {
 using TimerQueue =
     std::priority_queue<kio::MemoryBackend::TimerEntry, std::vector<kio::MemoryBackend::TimerEntry>,
-                        std::greater<kio::MemoryBackend::TimerEntry>>;
+                        std::greater<>>;
 
 bool CanRead(const int flags)
 {
@@ -430,7 +430,8 @@ int MemoryBackend::SubmitAndWait(unsigned)
 {
     for (;;)
     {
-        DrainDueTimers(timers_, ready_, now_);
+        auto now = Now();
+        DrainDueTimers(timers_, ready_, now);
 
         if (!ready_.empty())
         {
@@ -440,14 +441,14 @@ int MemoryBackend::SubmitAndWait(unsigned)
         if (!timers_.empty())
         {
             const auto next_due = timers_.top().due;
-            if (next_due <= now_)
+            if (next_due <= now)
             {
                 continue;
             }
 
             if (config_.time_mode == TimeMode::AutoAdvance)
             {
-                now_ = next_due;
+                AdvanceTo(next_due);
                 continue;
             }
         }

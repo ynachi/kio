@@ -6,13 +6,13 @@
 #include <coroutine>
 #include <csignal>
 #include <deque>
-#include <queue>
 #include <expected>
 #include <filesystem>
 #include <format>
 #include <latch>
 #include <memory>
 #include <mutex>
+#include <queue>
 #include <span>
 #include <string>
 #include <system_error>
@@ -694,7 +694,7 @@ struct MemoryBackend
     Config config_{};
     std::deque<OperationState*> ready_;
     // Min-heap: soonest deadline at top — O(log n) insert, O(1) peek.
-    std::priority_queue<TimerEntry, std::vector<TimerEntry>, std::greater<TimerEntry>> timers_;
+    std::priority_queue<TimerEntry, std::vector<TimerEntry>, std::greater<>> timers_;
     std::unordered_map<std::string, std::shared_ptr<FileState>> files_;
     std::unordered_map<NativeFileHandle, OpenFileState> open_files_;
     std::deque<IoFault> open_faults_;
@@ -705,10 +705,59 @@ struct MemoryBackend
     NativeFileHandle next_handle_ = 1;
     int wake_fd_ = -1;
     uint64_t wake_buffer_ = 0;
-    clock::time_point now_{};
+    std::atomic<int64_t> now_ns_{0};
 
     MemoryBackend() = default;
-    explicit MemoryBackend(Config config) : config_(config), now_(clock::time_point(config.start_time)) {}
+    explicit MemoryBackend(Config config) : config_(config), now_ns_(config.start_time.count()) {}
+    MemoryBackend(MemoryBackend&& other) noexcept
+        : config_(other.config_),
+          ready_(std::move(other.ready_)),
+          timers_(std::move(other.timers_)),
+          files_(std::move(other.files_)),
+          open_files_(std::move(other.open_files_)),
+          open_faults_(std::move(other.open_faults_)),
+          read_faults_(std::move(other.read_faults_)),
+          write_faults_(std::move(other.write_faults_)),
+          close_faults_(std::move(other.close_faults_)),
+          fsync_faults_(std::move(other.fsync_faults_)),
+          next_handle_(other.next_handle_),
+          wake_fd_(other.wake_fd_),
+          wake_buffer_(other.wake_buffer_),
+          now_ns_(other.now_ns_.load(std::memory_order_acquire))
+    {
+        other.next_handle_ = 1;
+        other.wake_fd_ = -1;
+        other.wake_buffer_ = 0;
+        other.now_ns_.store(0, std::memory_order_release);
+    }
+    MemoryBackend& operator=(MemoryBackend&& other) noexcept
+    {
+        if (this != &other)
+        {
+            config_ = other.config_;
+            ready_ = std::move(other.ready_);
+            timers_ = std::move(other.timers_);
+            files_ = std::move(other.files_);
+            open_files_ = std::move(other.open_files_);
+            open_faults_ = std::move(other.open_faults_);
+            read_faults_ = std::move(other.read_faults_);
+            write_faults_ = std::move(other.write_faults_);
+            close_faults_ = std::move(other.close_faults_);
+            fsync_faults_ = std::move(other.fsync_faults_);
+            next_handle_ = other.next_handle_;
+            wake_fd_ = other.wake_fd_;
+            wake_buffer_ = other.wake_buffer_;
+            now_ns_.store(other.now_ns_.load(std::memory_order_acquire), std::memory_order_release);
+
+            other.next_handle_ = 1;
+            other.wake_fd_ = -1;
+            other.wake_buffer_ = 0;
+            other.now_ns_.store(0, std::memory_order_release);
+        }
+        return *this;
+    }
+    MemoryBackend(const MemoryBackend&) = delete;
+    MemoryBackend& operator=(const MemoryBackend&) = delete;
 
     void Init(unsigned);
     void Shutdown() noexcept;
@@ -722,13 +771,18 @@ struct MemoryBackend
     void FlushAfterWake() {}
     void AddTimer(OperationState* op, clock::time_point due);
     void Complete(OperationState* op, int32_t res);
-    clock::time_point Now() const noexcept { return now_; }
-    void AdvanceTime(clock::duration delta) noexcept { now_ += delta; }
+    clock::time_point Now() const noexcept
+    {
+        return clock::time_point(clock::duration(now_ns_.load(std::memory_order_acquire)));
+    }
+    void AdvanceTime(clock::duration delta) noexcept { now_ns_.fetch_add(delta.count(), std::memory_order_acq_rel); }
     void AdvanceTo(clock::time_point tp) noexcept
     {
-        if (tp > now_)
+        auto desired = tp.time_since_epoch().count();
+        auto current = now_ns_.load(std::memory_order_acquire);
+        while (desired > current &&
+               !now_ns_.compare_exchange_weak(current, desired, std::memory_order_acq_rel, std::memory_order_acquire))
         {
-            now_ = tp;
         }
     }
     void QueueOpenError(int error) { open_faults_.push_back(IoFault{.error = error}); }
