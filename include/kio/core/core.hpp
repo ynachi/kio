@@ -18,6 +18,7 @@
 
 #include <sys/eventfd.h>
 
+#include "operation.hpp"
 #include "pipe_pool.hpp"
 #include "stats.hpp"
 #include <openssl/err.h>
@@ -56,7 +57,10 @@ static void PinToCpu(int cpu_id)
 namespace kio
 {
 // forward declaration
-class IoContext;
+struct UringBackend;
+template <typename Backend>
+class BasicIoContext;
+using IoContext = BasicIoContext<UringBackend>;
 template <typename T>
 class TaskGroup;
 
@@ -317,7 +321,8 @@ public:
     }
 
 private:
-    friend class IoContext;
+    template <typename Backend>
+    friend class BasicIoContext;
     template <typename U>
     friend class TaskGroup;
 
@@ -426,7 +431,8 @@ public:
     }
 
 private:
-    friend class IoContext;
+    template <typename Backend>
+    friend class BasicIoContext;
     template <typename U>
     friend class TaskGroup;
 
@@ -439,82 +445,6 @@ private:
     }
 
     handle_type handle_;
-};
-
-////////////////////////////////////////////////////////////////////////////////
-// Operation State (Intrusive Tracking)
-////////////////////////////////////////////////////////////////////////////////
-enum class OpCancelReason : uint8_t
-{
-    None,
-    Timeout,
-    ExplicitCancel,
-    ContextShutdown,
-};
-
-/**
- * Base state for all pending I/O operations.
- *
- * Linked into io_context's pending list on submission, unlinked on completion.
- * If destroyed while still linked, the program terminates — this catches bugs
- * where a coroutine frame is destroyed while its I/O is still in flight.
- *
- * WARNING: This is detection, not prevention. The operation is embedded in the
- * coroutine frame, so destroying the task destroys the operation. The terminate()
- * is a fail-fast to avoid silent memory corruption.
- *
- * Movable only when not tracked (before await_suspend).
- */
-struct OperationState
-{
-    IoContext* ctx = nullptr;
-    int32_t res = 0;
-    std::coroutine_handle<> handle;
-
-    // Intrusive doubly linked list pointers for internal tracking
-    OperationState* next = nullptr;
-    OperationState* prev = nullptr;
-
-    // Intrusive list pointer for lock-free external submission
-    std::atomic<OperationState*> next_ext{nullptr};
-
-    bool tracked = false;
-    OpCancelReason cancel_reason = OpCancelReason::None;
-
-    OperationState() = default;
-
-    // Move allowed only when not tracked
-    OperationState(OperationState&& other) noexcept : ctx(other.ctx), res(other.res), handle(other.handle)
-    {
-        // Source must not be tracked
-        if (other.tracked)
-        {
-            ALOG_ERROR(
-                "[kio] FATAL: Attempted to move an OperationState that is currently tracked by "
-                "IoContext.\n[kio]        This usually means a Task was moved while suspended on I/O.");
-            std::terminate();
-        }
-        other.ctx = nullptr;
-        other.handle = nullptr;
-    }
-
-    OperationState& operator=(OperationState&&) = delete;
-    OperationState(const OperationState&) = delete;
-    OperationState& operator=(const OperationState&) = delete;
-
-    ~OperationState()
-    {
-        if (tracked == true)
-        {
-            // Coroutine destroyed while I/O pending → memory corruption risk
-            // Terminate loudly rather than corrupt silently
-            ALOG_ERROR(
-                "[kio] FATAL: OperationState destroyed while still tracked by IoContext (I/O pending).\n[kio] "
-                "       CAUSE: A Task was destroyed while suspended on an async operation.\n[kio]        FIX: "
-                "  Ensure the Task is kept alive (e.g., in a TaskGroup) until it completes.");
-            std::terminate();
-        }
-    }
 };
 
 struct UringOp : OperationState
@@ -572,26 +502,99 @@ constexpr uint64_t WAKE_TAG = 1;
 class ScopedIoContext
 {
 public:
-    explicit ScopedIoContext(IoContext* ctx);
+    explicit ScopedIoContext(void* ctx);
     ~ScopedIoContext();
 };
 
-class IoContext
+struct UringBackend
+{
+    io_uring ring_{};
+    int wake_fd_ = -1;
+    uint64_t wake_buffer_ = 0;
+
+    void Init(unsigned entries);
+    void Shutdown() noexcept;
+    bool Notify() const noexcept;
+    int SubmitAndWait(unsigned wait_nr);
+    bool TryMsgRing(const UringBackend& target, OperationState* op);
+    void CancelAllPending();
+    Result<> RegisterFiles(std::span<const int> fds);
+
+    io_uring* Ring() { return &ring_; }
+    const io_uring* Ring() const { return &ring_; }
+    int RingFd() const { return ring_.ring_fd; }
+
+    void EnsureSqes(unsigned n);
+    io_uring_sqe* GetSqe();
+    void SubmitWakeRead();
+
+    template <typename OnCompletion>
+    bool DrainWithoutResume(OnCompletion&& on_completion)
+    {
+        io_uring_cqe* cqe = nullptr;
+        int ret = 0;
+        do
+        {
+            ret = io_uring_wait_cqe(&ring_, &cqe);
+        } while (ret == -EINTR);
+
+        if (ret < 0)
+        {
+            return false;
+        }
+
+        const auto user_data = io_uring_cqe_get_data64(cqe);
+        on_completion(user_data);
+        io_uring_cqe_seen(&ring_, cqe);
+        return true;
+    }
+
+    template <typename OnCompletion>
+    std::pair<unsigned, bool> ProcessReadyCompletions(OnCompletion&& on_completion)
+    {
+        io_uring_cqe* cqe = nullptr;
+        unsigned head = 0;
+        unsigned count = 0;
+        bool saw_wake = false;
+
+        io_uring_for_each_cqe(&ring_, head, cqe)
+        {
+            count++;
+            const auto user_data = io_uring_cqe_get_data64(cqe);
+
+            if (user_data == 0)
+            {
+                continue;
+            }
+
+            if (user_data == detail::WAKE_TAG)
+            {
+                saw_wake = true;
+                SubmitWakeRead();
+                continue;
+            }
+
+            on_completion(reinterpret_cast<OperationState*>(static_cast<uintptr_t>(user_data)), cqe->res);
+        }
+
+        io_uring_cq_advance(&ring_, count);
+        return {count, saw_wake};
+    }
+};
+
+template <typename Backend>
+class BasicIoContext
 {
     //
     // IoContext clss members
     //
-    io_uring ring_{};
+    Backend backend_{};
     std::vector<std::coroutine_handle<>> ready_;
     OperationState* pending_head_ = nullptr;
     std::atomic<bool> stop_requested_{false};
     std::once_flag pipe_pool_flag_;
     std::latch ready_latch_{1};
     std::latch stopped_latch_{1};
-
-    // Internal Wake Mechanism (eventfd)
-    int wake_fd_ = -1;
-    uint64_t wake_buffer_ = 0;
 
     // External completions (lock-free MPSC intrusive stack)
     std::atomic<OperationState*> ext_submission_head_{nullptr};
@@ -621,16 +624,16 @@ class IoContext
 public:
     // user can pass their own io uring flag.
     // Note: using single issuer must ensure single issuer constraints are met.
-    explicit IoContext(unsigned entries = 16800);
+    explicit BasicIoContext(unsigned entries = 16800);
 
-    ~IoContext() noexcept;
+    ~BasicIoContext() noexcept;
 
     // --- Static Access ---
     /// Returns the IoContext running on the current thread, or nullptr.
-    static IoContext* Current() noexcept;
+    static BasicIoContext* Current() noexcept;
 
-    IoContext(const IoContext&) = delete;
-    IoContext& operator=(const IoContext&) = delete;
+    BasicIoContext(const BasicIoContext&) = delete;
+    BasicIoContext& operator=(const BasicIoContext&) = delete;
 
     // -------------------------------------------------------------------------
     // Thread-Safe Signaling
@@ -643,6 +646,8 @@ public:
      * * @return true if the signal was sent, false on error (check errno)
      */
     bool Notify() const noexcept;
+    Backend& GetBackend() { return backend_; }
+    const Backend& GetBackend() const { return backend_; }
 
     // -------------------------------------------------------------------------
     // Operation Tracking
@@ -764,17 +769,11 @@ public:
      * @brief Tries to send an IORING_OP_MSG_RING to target. Returns true on success.
      * Fails if current thread has no ring.
      */
-    bool TryMsgRing(const IoContext& target, OperationState* op);
+    bool TryMsgRing(const BasicIoContext& target, OperationState* op);
 
     // -------------------------------------------------------------------------
     // Low-level Access
     // -------------------------------------------------------------------------
-
-    io_uring* Ring() { return &ring_; }
-    int RingFd() const { return ring_.ring_fd; }
-
-    // Returns the file descriptor used to wake this context from other threads.
-    int WakeFd() const { return wake_fd_; }
 
     /**
      * Get the pipe pool for sendfile operations.
@@ -788,12 +787,9 @@ public:
 
     void EnsureSqes(unsigned n);
 
-    io_uring_sqe* GetSqe()
-    {
-        AssertOwnerThread();
+    io_uring_sqe* GetSqe();
 
-        return io_uring_get_sqe(&ring_);
-    }
+    int WakeFd() const { return backend_.wake_fd_; }
 
     void WaitReady() const { ready_latch_.wait(); }
     void WaitStop() const { stopped_latch_.wait(); }
@@ -1350,7 +1346,8 @@ struct ScheduleOp : OperationState
  * @brief Low-level primitive to schedule resumption on this context.
  * @note Prefer using the `SwitchTo(ctx)` helper for better readability.
  */
-inline auto IoContext::Schedule()
+template <typename Backend>
+inline auto BasicIoContext<Backend>::Schedule()
 {
     return ScheduleOp(this);
 }

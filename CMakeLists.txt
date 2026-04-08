@@ -286,7 +286,6 @@ add_library(kio
         src/kio/core.cpp
         src/kio/io.cpp
         src/kio/net.cpp
-        #        src/kio/parser.cpp
         src/kio/tls_context.cpp
 )
 # Include directories

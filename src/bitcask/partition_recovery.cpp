@@ -61,7 +61,7 @@ namespace bitcask
     }
 
     kio::Task<kio::Result<uint64_t>> RecoverFromHintFile(kio::IoContext& ctx, PartitionIO& io,
-                                                         const kio::FDGuard& fh, const uint64_t file_id)
+                                                         const kio::FD& fh, const uint64_t file_id)
     {
         const int fd = fh.Get();
         const uint64_t file_size = KIO_CO_TRY_LOG(GetFileSize(fd));
@@ -123,7 +123,7 @@ namespace bitcask
         kio::IoContext& ctx,
         PartitionIO& io,
         const BitcaskConfig& config,
-        const kio::FDGuard& fh,
+        const kio::FD& fh,
         uint64_t file_id
     )
     {

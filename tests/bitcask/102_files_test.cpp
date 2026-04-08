@@ -154,7 +154,7 @@ TEST_F(FileTest, BasicWrite)
     const int fd = open(path.c_str(), config.write_flags, config.file_mode);
     ASSERT_GE(fd, 0) << "Failed to create test file";
 
-    auto shared_fd = std::make_shared<kio::FDGuard>(fd);
+    auto shared_fd = std::make_shared<kio::FD>(fd);
     DataFile df = DataFile(shared_fd, 1, config);
 
     auto test = [&](kio::IoContext& io) -> kio::Task<>
@@ -189,7 +189,7 @@ TEST_F(FileTest, SequentialAsyncWrites)
     const int fd = open(path.c_str(), config.write_flags, config.file_mode);
     ASSERT_GE(fd, 0) << "Failed to create test file";
 
-    auto shared_fd = std::make_shared<kio::FDGuard>(fd);
+    auto shared_fd = std::make_shared<kio::FD>(fd);
     DataFile df = DataFile(shared_fd, 1, config);
 
     auto test = [&](kio::IoContext& io) -> kio::Task<>
@@ -264,8 +264,8 @@ TEST_F(FileTest, MultipleDataFileInstances_CausesCorruption)
     const int fd2 = open(path.c_str(), config.write_flags, config.file_mode);
     ASSERT_GE(fd2, 0) << "Failed to open same file again";
 
-    auto shared_fd1 = std::make_shared<kio::FDGuard>(fd1);
-    auto shared_fd2 = std::make_shared<kio::FDGuard>(fd2);
+    auto shared_fd1 = std::make_shared<kio::FD>(fd1);
+    auto shared_fd2 = std::make_shared<kio::FD>(fd2);
     DataFile df1 = DataFile(shared_fd1, 1, config);
     DataFile df2 = DataFile(shared_fd2, 1, config);
 
@@ -320,7 +320,7 @@ TEST_F(FileTest, ShouldRotate_TriggersWhenSizeExceeded)
     const int fd = open(path.c_str(), config.write_flags, config.file_mode);
     ASSERT_GE(fd, 0) << "Failed to create test file";
 
-    auto shared_fd = std::make_shared<kio::FDGuard>(fd);
+    auto shared_fd = std::make_shared<kio::FD>(fd);
     DataFile df = DataFile(shared_fd, 1, config);
     const size_t max_size = 200; // Small limit for quick test
 
@@ -365,7 +365,7 @@ TEST_F(FileTest, DataSurvivesClose)
         const int fd = open(path.c_str(), config.write_flags, config.file_mode);
         ASSERT_GE(fd, 0) << "Failed to create test file";
 
-        auto shared_fd = std::make_shared<kio::FDGuard>(fd);
+        auto shared_fd = std::make_shared<kio::FD>(fd);
         DataFile df = DataFile(shared_fd, 1, config);
 
         auto write_task = [&](kio::IoContext& io) -> kio::Task<>

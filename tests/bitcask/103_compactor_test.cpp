@@ -73,7 +73,7 @@ protected:
         int fd = open(path.c_str(), config.write_flags, config.file_mode);
         if (fd < 0) throw std::runtime_error("Failed to open file");
 
-        auto shared_fd = std::make_shared<kio::FDGuard>(fd);
+        auto shared_fd = std::make_shared<kio::FD>(fd);
         DataFile df(shared_fd, file_id, config);
         std::vector<std::pair<std::string, ValueLocation>> locations;
 
@@ -190,7 +190,7 @@ TEST_F(CompactorTest, AllLiveNoReclaim)
                 failure_message = "Failed to open destination file";
                 co_return;
             }
-            auto shared_fd = std::make_shared<kio::FDGuard>(dst_fd);
+            auto shared_fd = std::make_shared<kio::FD>(dst_fd);
             DataFile dst_file(shared_fd, 200, config);
 
             result_ex = co_await compactor->CompactFiles(ctx, {100}, dst_file);
@@ -297,7 +297,7 @@ TEST_F(CompactorTest, MixedLiveAndStaleReclaimsSpace)
                 failure_message = "Failed to open destination file";
                 co_return;
             }
-            auto shared_fd = std::make_shared<kio::FDGuard>(dst_fd);
+            auto shared_fd = std::make_shared<kio::FD>(dst_fd);
             DataFile dst_file(shared_fd, 200, config);
 
             // Compact
@@ -387,7 +387,7 @@ TEST_F(CompactorTest, MultipleSourceFilesMerge)
                 failure_message = "Failed to open destination file";
                 co_return;
             }
-            auto shared_fd = std::make_shared<kio::FDGuard>(dst_fd);
+            auto shared_fd = std::make_shared<kio::FD>(dst_fd);
             DataFile dst_file(shared_fd, 200, config);
 
             // Compact {100, 101}
@@ -493,7 +493,7 @@ TEST_F(CompactorTest, TruncatedEntryIgnored)
                 failure_message = "Failed to open destination file";
                 co_return;
             }
-            auto shared_fd = std::make_shared<kio::FDGuard>(dst_fd);
+            auto shared_fd = std::make_shared<kio::FD>(dst_fd);
             DataFile dst_file(shared_fd, 200, config);
 
             // Run Compactor
@@ -554,7 +554,7 @@ TEST_F(CompactorTest, AllEntriesStaleFileDeleted)
                 failure_message = "Failed to open destination file";
                 co_return;
             }
-            auto shared_fd = std::make_shared<kio::FDGuard>(dst_fd);
+            auto shared_fd = std::make_shared<kio::FD>(dst_fd);
             DataFile dst_file(shared_fd, 200, config);
 
             result_opt = co_await compactor->CompactFiles(ctx, {100}, dst_file);
@@ -619,7 +619,7 @@ TEST_F(CompactorTest, LargeEntryExceedsBuffers)
                 failure_message = "Failed to open destination file";
                 co_return;
             }
-            auto shared_fd = std::make_shared<kio::FDGuard>(dst_fd);
+            auto shared_fd = std::make_shared<kio::FD>(dst_fd);
             DataFile dst_file(shared_fd, 200, config);
 
             result_opt = co_await compactor->CompactFiles(ctx, {100}, dst_file);
@@ -700,7 +700,7 @@ TEST_F(CompactorTest, ManySmallEntriesBufferFlushing)
                 failure_message = "Failed to open destination file";
                 co_return;
             }
-            auto shared_fd = std::make_shared<kio::FDGuard>(dst_fd);
+            auto shared_fd = std::make_shared<kio::FD>(dst_fd);
             DataFile dst_file(shared_fd, 200, config);
 
             result_opt = co_await compactor->CompactFiles(ctx, {100}, dst_file);

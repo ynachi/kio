@@ -215,7 +215,7 @@ namespace bitcask
             auto dst_fd =
                 KIO_CO_TRY_LOG(co_await kio::AsyncOpen(ctx, dst_path, config_.write_flags, config_.file_mode));
 
-            auto shared_fd = std::make_shared<kio::FDGuard>(std::move(dst_fd));
+            auto shared_fd = std::make_shared<kio::FD>(std::move(dst_fd));
 
             DataFile dst_file(shared_fd, dst_file_id, config_);
 

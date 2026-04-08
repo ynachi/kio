@@ -158,7 +158,7 @@ namespace bitcask
             KIO_CO_TRY_LOG(
                 co_await kio::AsyncOpen(ctx, GetDataFilePath(new_fid), config_.write_flags, config_.file_mode));
 
-        auto shared_fd = std::make_shared<kio::FDGuard>(std::move(fd_guard));
+        auto shared_fd = std::make_shared<kio::FD>(std::move(fd_guard));
         active_file_ = std::make_unique<DataFile>(shared_fd, new_fid, config_);
 
         // Pre-allocate file space

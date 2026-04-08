@@ -15,9 +15,9 @@ namespace kio
 // Context Tracking (Thread Local)
 // =============================================================================
 
-static thread_local IoContext* tl_current_context = nullptr;
+static thread_local void* tl_current_context = nullptr;
 
-ScopedIoContext::ScopedIoContext(IoContext* ctx)
+ScopedIoContext::ScopedIoContext(void* ctx)
 {
     tl_current_context = ctx;
 }
@@ -27,9 +27,10 @@ ScopedIoContext::~ScopedIoContext()
     tl_current_context = nullptr;
 }
 
-IoContext* IoContext::Current() noexcept
+template <typename Backend>
+BasicIoContext<Backend>* BasicIoContext<Backend>::Current() noexcept
 {
-    return tl_current_context;
+    return static_cast<BasicIoContext<Backend>*>(tl_current_context);
 }
 
 // =============================================================================
@@ -58,18 +59,15 @@ std::unexpected<std::error_code> ErrorFromOpenSSL() noexcept
     return std::unexpected(std::error_code(ev, detail::openssl_category()));
 }
 
-IoContext::IoContext(const unsigned entries)
+void UringBackend::Init(const unsigned entries)
 {
     io_uring_params params{};
-
     params.flags |= IORING_SETUP_COOP_TASKRUN | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN;
 
     if (const int ret = io_uring_queue_init_params(entries, &ring_, &params); ret < 0)
     {
         throw std::system_error(-ret, std::system_category(), "io_uring_queue_init_params");
     }
-
-    ready_.reserve(entries);
 
     wake_fd_ = eventfd(0, EFD_CLOEXEC);
     if (wake_fd_ < 0)
@@ -80,13 +78,10 @@ IoContext::IoContext(const unsigned entries)
 
     SubmitWakeRead();
     io_uring_submit(&ring_);
-
-    ready_latch_.count_down();
 }
 
-IoContext::~IoContext() noexcept
+void UringBackend::Shutdown() noexcept
 {
-    CancelAllPending();
     if (wake_fd_ >= 0)
     {
         ::close(wake_fd_);
@@ -95,7 +90,7 @@ IoContext::~IoContext() noexcept
     io_uring_queue_exit(&ring_);
 }
 
-bool IoContext::Notify() const noexcept
+bool UringBackend::Notify() const noexcept
 {
     if (wake_fd_ == -1)
     {
@@ -105,7 +100,114 @@ bool IoContext::Notify() const noexcept
     return ::write(wake_fd_, &val, sizeof(val)) == sizeof(val);
 }
 
-void IoContext::Track(OperationState* op)
+int UringBackend::SubmitAndWait(const unsigned wait_nr)
+{
+    int ret = 0;
+    do
+    {
+        ret = io_uring_submit_and_wait(&ring_, wait_nr);
+    } while (ret == -EINTR);
+
+    return ret;
+}
+
+bool UringBackend::TryMsgRing(const UringBackend& target, OperationState* op)
+{
+    auto* sqe = GetSqe();
+    if (sqe == nullptr)
+    {
+        return false;
+    }
+
+    io_uring_prep_msg_ring(sqe, target.RingFd(), 0, reinterpret_cast<uint64_t>(op), 0);
+    io_uring_sqe_set_flags(sqe, IOSQE_CQE_SKIP_SUCCESS);
+    io_uring_sqe_set_data64(sqe, 0);
+    return true;
+}
+
+void UringBackend::CancelAllPending()
+{
+    io_uring_sqe* sqe = GetSqe();
+    if (sqe == nullptr)
+    {
+        return;
+    }
+
+    io_uring_prep_cancel(sqe, nullptr, IORING_ASYNC_CANCEL_ANY);
+    sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
+    io_uring_sqe_set_data(sqe, nullptr);
+    io_uring_submit(&ring_);
+}
+
+Result<> UringBackend::RegisterFiles(const std::span<const int> fds)
+{
+    if (const int ret = io_uring_register_files(&ring_, fds.data(), fds.size()); ret < 0)
+    {
+        return ErrorFromErrno(-ret);
+    }
+    return {};
+}
+
+void UringBackend::EnsureSqes(const unsigned n)
+{
+    if (io_uring_sq_space_left(&ring_) < n)
+    {
+        io_uring_submit(&ring_);
+
+        if (io_uring_sq_space_left(&ring_) < n)
+        {
+            throw std::runtime_error("SQ full after submit");
+        }
+    }
+}
+
+io_uring_sqe* UringBackend::GetSqe()
+{
+    return io_uring_get_sqe(&ring_);
+}
+
+void UringBackend::SubmitWakeRead()
+{
+    auto* sqe = io_uring_get_sqe(&ring_);
+    if (!sqe)
+    {
+        io_uring_submit(&ring_);
+        sqe = io_uring_get_sqe(&ring_);
+        if (sqe == nullptr)
+        {
+            ALOG_ERROR("failed to get io completion, probably resource unavailable");
+            return;
+        }
+    }
+    io_uring_prep_read(sqe, wake_fd_, &wake_buffer_, sizeof(wake_buffer_), 0);
+    sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
+    io_uring_sqe_set_data64(sqe, detail::WAKE_TAG);
+}
+
+template <typename Backend>
+BasicIoContext<Backend>::BasicIoContext(const unsigned entries)
+{
+    ready_.reserve(entries);
+    backend_.Init(entries);
+
+    ready_latch_.count_down();
+}
+
+template <typename Backend>
+BasicIoContext<Backend>::~BasicIoContext() noexcept
+{
+    CancelAllPending();
+    backend_.Shutdown();
+}
+
+template <typename Backend>
+bool BasicIoContext<Backend>::Notify() const noexcept
+{
+    return backend_.Notify();
+}
+
+template <typename Backend>
+void BasicIoContext<Backend>::Track(OperationState* op)
 {
     AssertOwnerThread();
 
@@ -125,7 +227,8 @@ void IoContext::Track(OperationState* op)
 #endif
 }
 
-void IoContext::Untrack(OperationState* op)
+template <typename Backend>
+void BasicIoContext<Backend>::Untrack(OperationState* op)
 {
     AssertOwnerThread();
 
@@ -157,7 +260,8 @@ void IoContext::Untrack(OperationState* op)
 #endif
 }
 
-void IoContext::CancelAllPending(const OpCancelReason reason)
+template <typename Backend>
+void BasicIoContext<Backend>::CancelAllPending(const OpCancelReason reason)
 {
     if (pending_head_ == nullptr)
     {
@@ -170,56 +274,31 @@ void IoContext::CancelAllPending(const OpCancelReason reason)
         op->cancel_reason = reason;
     }
 
-    // IORING_ASYNC_CANCEL_ANY = "Cancel everything in this ring"
-    io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
-    if (sqe != nullptr)
-    {
-        io_uring_prep_cancel(sqe, nullptr, IORING_ASYNC_CANCEL_ANY);
-        // We don't need a CQE if the cancellation itself succeeds.
-        // The individual cancelled operations will still return -ECANCELED.
-        sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
-        io_uring_sqe_set_data(sqe, nullptr);
-        io_uring_submit(&ring_);
-    }
+    backend_.CancelAllPending();
 
     DrainWithoutResume();
 }
 
-Result<> IoContext::RegisterFiles(const std::span<const int> fds)
+template <typename Backend>
+Result<> BasicIoContext<Backend>::RegisterFiles(const std::span<const int> fds)
 {
     AssertOwnerThread();
-
-    if (const int ret = io_uring_register_files(&ring_, fds.data(), fds.size()); ret < 0)
-    {
-        return ErrorFromErrno(-ret);
-    }
-    return {};
+    return backend_.RegisterFiles(fds);
 }
 
 // -----------------------------------------------------------------------------
 // Cross-Thread Scheduling Logic
 // -----------------------------------------------------------------------------
 
-bool IoContext::TryMsgRing(const IoContext& target, OperationState* op)
+template <typename Backend>
+bool BasicIoContext<Backend>::TryMsgRing(const BasicIoContext& target, OperationState* op)
 {
     EnsureSqes(1);
-    io_uring_sqe* sqe = GetSqe();
-
-    // Prep MSG_RING
-    // target_fd = target.RingFd()
-    // len = 0 (res field of target CQE)
-    // data = op (user_data field of target CQE)
-    // flags = 0
-    io_uring_prep_msg_ring(sqe, target.RingFd(), 0, reinterpret_cast<uint64_t>(op), 0);
-
-    // Fire and forget the sender-side completion
-    io_uring_sqe_set_flags(sqe, IOSQE_CQE_SKIP_SUCCESS);
-    io_uring_sqe_set_data64(sqe, 0);
-
-    return true;
+    return backend_.TryMsgRing(target.GetBackend(), op);
 }
 
-void IoContext::SubmitExternal(OperationState* op)
+template <typename Backend>
+void BasicIoContext<Backend>::SubmitExternal(OperationState* op)
 {
     OperationState* old_head = ext_submission_head_.load(std::memory_order_relaxed);
     do
@@ -239,23 +318,23 @@ void IoContext::SubmitExternal(OperationState* op)
 // Loop & Step
 // -----------------------------------------------------------------------------
 
-void IoContext::EnsureSqes(const unsigned n)
+template <typename Backend>
+void BasicIoContext<Backend>::EnsureSqes(const unsigned n)
 {
     AssertOwnerThread();
 
-    if (io_uring_sq_space_left(&ring_) < n)
-    {
-        io_uring_submit(&ring_);
-
-        if (io_uring_sq_space_left(&ring_) < n)
-        {
-            // TODO: Do not throw, return an error instead
-            throw std::runtime_error("SQ full after submit");
-        }
-    }
+    backend_.EnsureSqes(n);
 }
 
-void IoContext::DrainExternal(std::vector<std::coroutine_handle<>>& out)
+template <typename Backend>
+io_uring_sqe* BasicIoContext<Backend>::GetSqe()
+{
+    AssertOwnerThread();
+    return backend_.GetSqe();
+}
+
+template <typename Backend>
+void BasicIoContext<Backend>::DrainExternal(std::vector<std::coroutine_handle<>>& out)
 {
     // Clear hint
     ext_hint_.store(false, std::memory_order_release);
@@ -297,7 +376,8 @@ void IoContext::DrainExternal(std::vector<std::coroutine_handle<>>& out)
 #endif
 }
 
-void IoContext::DrainExternalWithoutResume()
+template <typename Backend>
+void BasicIoContext<Backend>::DrainExternalWithoutResume()
 {
     ext_hint_.store(false, std::memory_order_release);
     OperationState* head = ext_submission_head_.exchange(nullptr, std::memory_order_acquire);
@@ -333,63 +413,43 @@ void IoContext::DrainExternalWithoutResume()
 #endif
 }
 
-void IoContext::DrainWithoutResume()
+template <typename Backend>
+void BasicIoContext<Backend>::DrainWithoutResume()
 {
     while (pending_head_ != nullptr)
     {
-        io_uring_cqe* cqe = nullptr;
-        int ret = 0;
-        do
+        const bool got_completion = backend_.DrainWithoutResume([&](const uint64_t user_data)
         {
-            ret = io_uring_wait_cqe(&ring_, &cqe);
-        } while (ret == -EINTR);
+            if (user_data == detail::WAKE_TAG)
+            {
+                DrainExternalWithoutResume();
+                SubmitWakeRead();
+                (void)io_uring_submit(backend_.Ring());
+            }
+            else if (user_data != 0)
+            {
+                auto* op = reinterpret_cast<OperationState*>(static_cast<uintptr_t>(user_data));
+                Untrack(op);
+            }
+        });
 
-        if (ret < 0)
+        if (!got_completion)
+        {
             break;
-
-        const auto ud = io_uring_cqe_get_data64(cqe);
-
-        if (ud == detail::WAKE_TAG)
-        {
-            DrainExternalWithoutResume();
-            SubmitWakeRead();
-            (void)io_uring_submit(&ring_);
         }
-        else if (ud)
-        {
-            auto* op = reinterpret_cast<OperationState*>(static_cast<uintptr_t>(ud));
-            Untrack(op);
-        }
-        io_uring_cqe_seen(&ring_, cqe);
     }
 }
 
-void IoContext::SubmitWakeRead()
+template <typename Backend>
+void BasicIoContext<Backend>::SubmitWakeRead()
 {
-    auto* sqe = io_uring_get_sqe(&ring_);
-    if (!sqe)
-    {
-        io_uring_submit(&ring_);
-        sqe = io_uring_get_sqe(&ring_);
-        if (sqe == nullptr)
-        {
-            ALOG_ERROR("failed to get io completion, probably resource unavailable");
-            return;
-        }
-    }
-    io_uring_prep_read(sqe, wake_fd_, &wake_buffer_, sizeof(wake_buffer_), 0);
-    sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
-    io_uring_sqe_set_data64(sqe, detail::WAKE_TAG);
+    backend_.SubmitWakeRead();
 }
 
-void IoContext::Step()
+template <typename Backend>
+void BasicIoContext<Backend>::Step()
 {
-    int ret = 0;
-    do
-    {
-        ret = io_uring_submit_and_wait(&ring_, 1);
-    } while (ret == -EINTR);
-
+    const int ret = backend_.SubmitAndWait(1);
     if (ret < 0)
         return;
 
@@ -417,43 +477,21 @@ void IoContext::Step()
     }
 }
 
-std::pair<unsigned, bool> IoContext::ProcessReadyCompletions()
+template <typename Backend>
+std::pair<unsigned, bool> BasicIoContext<Backend>::ProcessReadyCompletions()
 {
-    io_uring_cqe* cqe = nullptr;
-    unsigned head = 0;
-    unsigned count = 0;
-    bool saw_wake = false;
-
-    io_uring_for_each_cqe(&ring_, head, cqe)
+    return backend_.ProcessReadyCompletions([this](OperationState* op, const int32_t res)
     {
-        count++;
-        const auto user_data = io_uring_cqe_get_data64(cqe);
-
-        if (user_data == 0)
-            continue;
-
-        if (user_data == detail::WAKE_TAG)
-        {
-            saw_wake = true;
-            SubmitWakeRead();
-            continue;
-        }
-
-        // Handle normal IO OR MSG_RING injection
-        auto* op = reinterpret_cast<OperationState*>(static_cast<uintptr_t>(user_data));
         Untrack(op);
-        op->res = cqe->res;
+        op->res = res;
         ready_.push_back(op->handle);
 
 #if AIO_STATS
         AIO_STATS_INC(stats_, ops_completed);
-        if (cqe->res < 0)
+        if (res < 0)
             AIO_STATS_INC(stats_, ops_errors);
 #endif
-    }
-
-    io_uring_cq_advance(&ring_, count);
-    return {count, saw_wake};
+    });
 }
 
 SignalSet::SignalSet(const std::initializer_list<int> sigs) : fd_(eventfd(0, EFD_CLOEXEC))
@@ -506,4 +544,6 @@ Result<int> WaitSignalOp::await_resume()
         return std::unexpected(make_error_code(res));
     return static_cast<int>(signo);
 }
+
+template class BasicIoContext<UringBackend>;
 }  // namespace kio

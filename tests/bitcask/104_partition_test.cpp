@@ -332,7 +332,7 @@ TEST_F(PartitionTest, HintFileIsSourceOfTruth)
                 co_return;
             }
 
-            auto shared_fd = std::make_shared<kio::FDGuard>(fd);
+            auto shared_fd = std::make_shared<kio::FD>(fd);
             DataFile df(shared_fd, file_id, config_);
 
             DataEntry e1("key", std::as_bytes(std::span(old_val)));

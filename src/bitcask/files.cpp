@@ -60,7 +60,7 @@ namespace bitcask
         // Open file
         auto fd = KIO_CO_TRY_LOG(co_await kio::AsyncOpen(ctx, path, O_RDONLY, 0));
 
-        auto shared_fd = std::make_shared<kio::FDGuard>(std::move(fd));
+        auto shared_fd = std::make_shared<kio::FD>(std::move(fd));
 
         // Add to cache
         lru_list_.push_front(file_id);
