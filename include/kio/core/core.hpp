@@ -6,9 +6,9 @@
 #include <coroutine>
 #include <csignal>
 #include <deque>
+#include <queue>
 #include <expected>
 #include <format>
-#include <functional>
 #include <latch>
 #include <memory>
 #include <mutex>
@@ -40,7 +40,7 @@ struct std::is_error_code_enum<kio::ParseError> : std::true_type
 {
 };
 
-static void PinToCpu(int cpu_id)
+inline void PinToCpu(int cpu_id)
 {
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
@@ -80,8 +80,7 @@ using Result = std::expected<T, std::error_code>;
 
 template <typename Backend>
 concept IoBackend = requires(Backend backend, const Backend const_backend, unsigned entries, unsigned wait_nr,
-                             std::span<const int> fds, OperationState* op)
-{
+                             std::span<const int> fds, OperationState* op) {
     { backend.Init(entries) } -> std::same_as<void>;
     { backend.Shutdown() } -> std::same_as<void>;
     { const_backend.Notify() } -> std::convertible_to<bool>;
@@ -191,7 +190,7 @@ inline std::unexpected<std::error_code> ErrorFromOpenSSL(unsigned long err) noex
     return std::unexpected(std::error_code(static_cast<int>(err), detail::openssl_category()));
 }
 
-inline std::unexpected<std::error_code> ErrorFromOpenSSL() noexcept;
+std::unexpected<std::error_code> ErrorFromOpenSSL() noexcept;
 
 ////////////////////////////////////////////////////////////////////////////////
 // Error Propagation Macros (Rust-style ? operator)
@@ -313,6 +312,13 @@ public:
 
     T Result()
     {
+#ifndef NDEBUG
+        if (!handle_ || !handle_.done())
+        {
+            ALOG_ERROR("[kio] Task::Result() called on incomplete or empty task");
+            std::terminate();
+        }
+#endif
         if (handle_.promise().exception)
         {
             std::rethrow_exception(handle_.promise().exception);
@@ -425,6 +431,13 @@ public:
 
     void Result() const
     {
+#ifndef NDEBUG
+        if (!handle_ || !handle_.done())
+        {
+            ALOG_ERROR("[kio] Task::Result() called on incomplete or empty task");
+            std::terminate();
+        }
+#endif
         if (handle_.promise().exception)
         {
             std::rethrow_exception(handle_.promise().exception);
@@ -634,20 +647,23 @@ struct MemoryBackend
     {
         std::chrono::steady_clock::time_point due;
         OperationState* op = nullptr;
+        bool operator>(const TimerEntry& o) const noexcept { return due > o.due; }
     };
 
     std::deque<OperationState*> ready_;
-    std::vector<TimerEntry> timers_;
-    mutable bool notified_ = false;
+    // Min-heap: soonest deadline at top — O(log n) insert, O(1) peek.
+    std::priority_queue<TimerEntry, std::vector<TimerEntry>, std::greater<TimerEntry>> timers_;
+    int wake_fd_ = -1;
+    uint64_t wake_buffer_ = 0;
 
-    void Init(unsigned) {}
+    void Init(unsigned);
     void Shutdown() noexcept;
     bool Notify() const noexcept;
     int SubmitAndWait(unsigned);
     bool TryMsgRing(const MemoryBackend&, OperationState*) { return false; }
     void CancelAllPending();
     Result<> RegisterFiles(std::span<const int>) { return {}; }
-    int WakeFd() const { return -1; }
+    int WakeFd() const { return wake_fd_; }
     void SubmitWakeRead() {}
     void FlushAfterWake() {}
     void AddTimer(OperationState* op, std::chrono::steady_clock::time_point due);
@@ -672,7 +688,6 @@ struct MemoryBackend
     {
         std::deque<OperationState*> ready;
         ready.swap(ready_);
-        notified_ = false;
 
         for (auto* op : ready)
         {
@@ -789,9 +804,8 @@ public:
         stop_requested_.store(false, std::memory_order_relaxed);
 
         t.resume();
-        while (!IsShuttingDown() &&
-               (!t.Done() || pending_head_ != nullptr ||
-                ext_submission_head_.load(std::memory_order_acquire) != nullptr))
+        while (!IsShuttingDown() && (!t.Done() || pending_head_ != nullptr ||
+                                     ext_submission_head_.load(std::memory_order_acquire) != nullptr))
         {
             Step();
         }
@@ -822,7 +836,7 @@ public:
 
         stop_requested_.store(false, std::memory_order_relaxed);
 
-        while (IsShuttingDown())
+        while (!IsShuttingDown())
         {
             Step();
             tick();

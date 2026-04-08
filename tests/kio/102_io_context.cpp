@@ -48,15 +48,36 @@ TEST(MemoryIoContextTest, Lifecycle) {
 
 TEST(MemoryIoContextTest, SleepZeroDuration) {
     MemoryIoContext ctx;
-    auto task = [&]() -> Task<void> {
+    auto task = [](MemoryIoContext& c) -> Task<void> {
         auto start = std::chrono::steady_clock::now();
-        auto res = co_await AsyncSleep(ctx, std::chrono::milliseconds(0));
+        auto res = co_await AsyncSleep(c, std::chrono::milliseconds(0));
         EXPECT_TRUE(res.has_value());
         EXPECT_LE(std::chrono::steady_clock::now() - start, std::chrono::milliseconds(50));
         co_return;
-    }();
+    }(ctx);
 
     ctx.RunUntilDone(std::move(task));
+}
+
+TEST(MemoryIoContextTest, Notify) {
+    MemoryIoContext ctx;
+    bool notified = false;
+
+    std::thread t([&]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        notified = ctx.Notify();
+    });
+
+    auto task = [](MemoryIoContext& c) -> Task<void> {
+        auto res = co_await AsyncSleep(c, std::chrono::milliseconds(50));
+        EXPECT_TRUE(res.has_value());
+        co_return;
+    }(ctx);
+
+    ctx.RunUntilDone(std::move(task));
+    t.join();
+
+    ASSERT_TRUE(notified);
 }
 
 int main(int argc, char** argv)

@@ -118,7 +118,18 @@ public:
         Guard(const Guard&) = delete;
         Guard& operator=(const Guard&) = delete;
         Guard(Guard&& o) noexcept : pool_(o.pool_), pipe_(o.pipe_) { o.pool_ = nullptr; }
-        Guard& operator=(Guard&&) = delete;
+        Guard& operator=(Guard&& o) noexcept
+        {
+            if (this != &o)
+            {
+                if (pool_)
+                    pool_->Release(pipe_);
+                pool_ = o.pool_;
+                pipe_ = o.pipe_;
+                o.pool_ = nullptr;
+            }
+            return *this;
+        }
 
         Pipe& get() { return pipe_; }
         const Pipe& get() const { return pipe_; }

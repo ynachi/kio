@@ -93,8 +93,13 @@ public:
 
             if (ret == 0)
             {
-                // Sent our close_notify, waiting for peer's
-                // Call SSL_shutdown again to complete
+                // Sent our close_notify; wait for peer's before calling again.
+                auto remaining = deadline - std::chrono::steady_clock::now();
+                if (remaining <= std::chrono::nanoseconds{0})
+                    co_return Result<void>{};
+                auto poll_res = co_await AsyncPoll(ctx, sock_, POLLIN).WithTimeout(remaining);
+                if (!poll_res)
+                    co_return Result<void>{};  // Timed out or error — acceptable for shutdown
                 continue;
             }
 

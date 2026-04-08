@@ -24,12 +24,12 @@ bool HaveKtls();
 std::string GetKtlsInfo();
 }  // namespace detail
 
-static const std::string kDefaultTls1_2Ciphers =
+inline constexpr const char* kDefaultTls1_2Ciphers =
     "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:"
     "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:"
     "ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305";
 
-static const std::string kDefaultTls1_3Ciphers =
+inline constexpr const char* kDefaultTls1_3Ciphers =
     "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256";
 
 struct TlsConfig
@@ -68,8 +68,8 @@ private:
     SSLCtxPtr ctx_;
 
     // Stable storage for Server ALPN data.
-    // Must be unique_ptr so the address of the vector on the heap    // remains valid even if TlsContext is moved after
-    // creation.
+    // Must be unique_ptr so the address of the vector on the heap remains
+    // valid even if TlsContext is moved after creation.
     std::unique_ptr<std::vector<unsigned char>> alpn_store_;
     bool verify_hostname_ = true;
 

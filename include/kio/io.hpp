@@ -20,42 +20,42 @@ namespace kio
 //==============================================================
 
 /**
- * @brief High-performance ring buffer for I/O operations.
+ * @brief Linear I/O buffer with a three-region layout and two-phase writes.
  *
- * Key properties:
- * - Zero-copy reads/writes via span API
- * - Power-of-2 size for fast modulo via bit masking
- * - Handles wraparound transparently
- * - Copyable and movable
- * - NOT thread-safe (use one per thread in thread-per-core model)
+ * This is NOT a ring buffer. It is a flat, heap-allocated buffer with three
+ * monotonically-increasing position indices:
  *
- * Memory layout (ring buffer):
- * ```
- *   Logical view:    [consumed...][readable data...][writable space...]
- *   Physical view:   [...data...][wrap]--->[...more data...]
- *                    ^write_idx          ^read_idx
- * ```
+ *   read_ <= commit_ <= write_ <= capacity_
  *
- * The read_pos_ and write_pos_ are monotonically increasing indices.
- * Physical position = pos & mask_ (where mask_ = capacity - 1).
+ * Regions:
+ *   [read_,   commit_) = Published (readable) bytes.
+ *   [commit_, write_)  = Staged bytes (written but not yet published).
+ *   [write_,  capacity_) = Free writable space.
  *
- * Usage:
+ * When the read region becomes large enough, Compact() slides live data to the
+ * front of the buffer to reclaim space without reallocation.
+ *
+ * Thread safety: NOT thread-safe. Use one buffer per thread.
+ *
+ * Move-only: the internal allocation is managed by std::unique_ptr.
+ *
+ * Direct I/O pattern (e.g., recv/send):
  * @code
- *   IoBuffer buf(4096);
+ *   buf.EnsureWritableBytes(4096);
+ *   ssize_t n = recv(fd, buf.WritableSpan().data(), buf.WritableSpan().size(), 0);
+ *   buf.Commit(n);           // publish n bytes as readable
+ *   auto data = buf.ReadableSpan();
+ *   process(data);
+ *   buf.Consume(data.size());
+ * @endcode
  *
- *   // Zero-copy write
- *   auto writable = buf.WritableSpan();
- *   ssize_t n = recv(fd, writable.data(), writable.size(), 0);
- *   buf.Commit(n);
- *
- *   // Zero-copy read
- *   auto readable = buf.ReadableSpan();
- *   process(readable);
- *   buf.Consume(readable.size());
- *
- *   // For wrapped data, use spans pair
- *   auto [s1, s2] = buf.ReadableSpans();
- *   // s1 is tail, s2 is head (s2 may be empty)
+ * Two-phase output building pattern (e.g., protocol responses):
+ * @code
+ *   buf.Append("HTTP/1.1 200 OK\r\n");
+ *   buf.Append(header_line);
+ *   buf.Append("\r\n");
+ *   buf.Commit();          // publish all staged bytes atomically
+ *   // or buf.RollbackPending() to discard
  * @endcode
  */
 class IoBuffer
@@ -96,6 +96,8 @@ public:
     }
 
     // No allocations: single iovec.
+    // const_cast is required: POSIX iov_base is void* (not const void*), so
+    // callers must not write through this iovec for read-only data.
     [[nodiscard]] iovec ReadableIovec() const noexcept
     {
         auto b = ReadableSpan();
@@ -125,14 +127,14 @@ public:
         Grow(live + additional);
     }
 
-    [[nodiscard]] std::span<std::byte> WritableSpan() const noexcept
+    [[nodiscard]] std::span<std::byte> WritableSpan() noexcept
     {
         if (!data_)
             return {};
         return {data_.get() + write_, WritableBytes()};
     }
 
-    [[nodiscard]] iovec WritableIovec() const noexcept
+    [[nodiscard]] iovec WritableIovec() noexcept
     {
         auto b = WritableSpan();
         return iovec{b.data(), b.size()};
@@ -176,6 +178,9 @@ public:
     // ---------------------------
     // Append helpers (staged)
     // ---------------------------
+    // Stages bytes into the write region WITHOUT publishing them as readable.
+    // Call Commit() (no-arg) to publish all staged bytes, or RollbackPending()
+    // to discard them. This two-phase model lets you build a response atomically.
     void Append(std::span<const std::byte> data)
     {
         EnsureWritableBytes(data.size());
@@ -549,6 +554,13 @@ struct UnlinkAtOp : DispatchOp<UnlinkAtOp>
         : DispatchOp(&ctx), dirfd(d), path(std::move(p)), flags(f)
     {
     }
+
+    Result<> await_resume()
+    {
+        if (res < 0)
+            return std::unexpected(make_error_code(res));
+        return {};
+    }
 };
 
 inline void Submit(UringBackend& backend, IoContext&, UnlinkAtOp& op)
@@ -566,14 +578,14 @@ inline void SubmitWithTimeout(UringBackend& backend, IoContext&, UnlinkAtOp& op,
     io_uring_sqe_set_data(sqe_op, &op);
 }
 
-inline Task<Result<int>> AsyncUnlink(IoContext& ctx, int dirfd, const std::filesystem::path path, int flags)
+[[nodiscard]] inline UnlinkAtOp AsyncUnlink(IoContext& ctx, int dirfd, const std::filesystem::path path, int flags)
 {
-    co_return co_await UnlinkAtOp(ctx, dirfd, path, flags);
+    return UnlinkAtOp(ctx, dirfd, path, flags);
 }
 
-inline Task<Result<int>> AsyncUnlink(IoContext& ctx, const std::filesystem::path path, int flags = 0)
+[[nodiscard]] inline UnlinkAtOp AsyncUnlink(IoContext& ctx, const std::filesystem::path path, int flags = 0)
 {
-    co_return co_await UnlinkAtOp(ctx, AT_FDCWD, path, flags);
+    return UnlinkAtOp(ctx, AT_FDCWD, path, flags);
 }
 
 struct MkdirAtOp : DispatchOp<MkdirAtOp>
@@ -585,6 +597,13 @@ struct MkdirAtOp : DispatchOp<MkdirAtOp>
     MkdirAtOp(IoContext& ctx, int d, std::filesystem::path p, mode_t m)
         : DispatchOp(&ctx), dirfd(d), path(std::move(p)), mode(m)
     {
+    }
+
+    Result<> await_resume()
+    {
+        if (res < 0)
+            return std::unexpected(make_error_code(res));
+        return {};
     }
 };
 
@@ -603,14 +622,15 @@ inline void SubmitWithTimeout(UringBackend& backend, IoContext&, MkdirAtOp& op, 
     io_uring_sqe_set_data(sqe_op, &op);
 }
 
-inline Task<Result<int>> AsyncMkdir(IoContext& ctx, int dirfd, const std::filesystem::path path, mode_t mode = 0755)
+[[nodiscard]] inline MkdirAtOp AsyncMkdir(IoContext& ctx, int dirfd, const std::filesystem::path path,
+                                          mode_t mode = 0755)
 {
-    co_return co_await MkdirAtOp(ctx, dirfd, path, mode);
+    return MkdirAtOp(ctx, dirfd, path, mode);
 }
 
-inline Task<Result<int>> AsyncMkdir(IoContext& ctx, const std::filesystem::path path, mode_t mode = 0755)
+[[nodiscard]] inline MkdirAtOp AsyncMkdir(IoContext& ctx, const std::filesystem::path path, mode_t mode = 0755)
 {
-    co_return co_await MkdirAtOp(ctx, AT_FDCWD, path, mode);
+    return MkdirAtOp(ctx, AT_FDCWD, path, mode);
 }
 
 struct RenameAtOp : DispatchOp<RenameAtOp>
@@ -632,6 +652,12 @@ struct RenameAtOp : DispatchOp<RenameAtOp>
     {
     }
 
+    Result<> await_resume()
+    {
+        if (res < 0)
+            return std::unexpected(make_error_code(res));
+        return {};
+    }
 };
 
 inline void Submit(UringBackend& backend, IoContext&, RenameAtOp& op)
@@ -649,16 +675,17 @@ inline void SubmitWithTimeout(UringBackend& backend, IoContext&, RenameAtOp& op,
     io_uring_sqe_set_data(sqe_op, &op);
 }
 
-inline Task<Result<int>> AsyncRename(IoContext& ctx, int old_dirfd, const std::filesystem::path old_path, int new_dirfd,
-                                     const std::filesystem::path new_path, unsigned flags = 0)
+[[nodiscard]] inline RenameAtOp AsyncRename(IoContext& ctx, int old_dirfd,
+                                            const std::filesystem::path old_path, int new_dirfd,
+                                            const std::filesystem::path new_path, unsigned flags = 0)
 {
-    co_return co_await RenameAtOp(&ctx, old_dirfd, old_path, new_dirfd, new_path, flags);
+    return RenameAtOp(&ctx, old_dirfd, old_path, new_dirfd, new_path, flags);
 }
 
-inline Task<Result<int>> AsyncRename(IoContext& ctx, const std::filesystem::path old_path,
-                                     const std::filesystem::path new_path, unsigned flags = 0)
+[[nodiscard]] inline RenameAtOp AsyncRename(IoContext& ctx, const std::filesystem::path old_path,
+                                            const std::filesystem::path new_path, unsigned flags = 0)
 {
-    co_return co_await RenameAtOp(&ctx, AT_FDCWD, old_path, AT_FDCWD, new_path, flags);
+    return RenameAtOp(&ctx, AT_FDCWD, old_path, AT_FDCWD, new_path, flags);
 }
 
 struct OpenOp : DispatchOp<OpenOp>
@@ -1482,6 +1509,8 @@ struct SleepOp : DispatchOp<SleepOp<Backend>, Backend>
         ts.tv_sec = ns / 1'000'000'000;
         ts.tv_nsec = ns % 1'000'000'000;
     }
+
+    SleepOp(SleepOp&& other) noexcept : DispatchOp<SleepOp<Backend>, Backend>(std::move(other)), ts(other.ts) {}
 
     Result<void> await_resume()
     {

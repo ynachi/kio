@@ -5,6 +5,7 @@
 #include <coroutine>
 #include <functional>
 #include <mutex>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -52,24 +53,22 @@ namespace kio
             }
         }
 
-        // Submit a callable (lambda, function, etc)
-        // Returns false if queue is full
+        // Submit a callable (lambda, function, etc).
+        // Returns false if the queue is full or shutting down.
         bool TrySubmit(job_t&& job)
         {
-            std::scoped_lock lk(m_);
-            if (stopping_.load(std::memory_order_relaxed))
             {
-                return false;
+                std::scoped_lock lk(m_);
+                if (stopping_.load(std::memory_order_relaxed))
+                    return false;
+                if (count_ == cap_)
+                    return false;
+                q_[tail_] = std::move(job);
+                tail_ = (tail_ + 1) % cap_;
+                ++count_;
             }
-
-            if (count_ == cap_)
-            {
-                return false;
-            }
-
-            q_[tail_] = std::move(job);
-            tail_ = (tail_ + 1) % cap_;
-            ++count_;
+            // Notify outside the lock: the woken thread won't immediately
+            // block trying to re-acquire the mutex.
             cv_.notify_one();
             return true;
         }
@@ -148,7 +147,9 @@ namespace kio
 
         bool await_ready() const noexcept { return false; }
 
-        void await_suspend(std::coroutine_handle<> h)
+        // Returns false (resume immediately) if the pool is full, so the caller
+        // never truly suspends and await_resume() rethrows the stored exception.
+        bool await_suspend(std::coroutine_handle<> h)
         {
             handle = h;
             auto& ctx = Context();
@@ -183,8 +184,10 @@ namespace kio
             if (!pool->TrySubmit(std::move(job)))
             {
                 ctx.Untrack(this);
-                throw std::runtime_error("blocking_pool queue full");
+                ep = std::make_exception_ptr(std::runtime_error("blocking pool queue full"));
+                return false;  // do not suspend; await_resume() will rethrow
             }
+            return true;
         }
 
         R await_resume()

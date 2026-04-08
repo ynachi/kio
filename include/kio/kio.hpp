@@ -48,8 +48,10 @@
  * - C++23
  **/
 
-#include "resp/parser.h"
-#include "resp/writer.h"
+// RESP protocol headers are NOT included here by default.
+// Include them explicitly when needed:
+//   #include "kio/resp/parser.h"
+//   #include "kio/resp/writer.h"
 
 #include <liburing.h>
 

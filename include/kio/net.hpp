@@ -214,7 +214,7 @@ Result<SocketAddress> Resolve(std::string_view host, uint16_t port);
 ///   }
 ///   auto result = co_await AsyncConnect(ctx, socket, *addr);
 /// @endcode
-static Task<Result<SocketAddress>> ResolveAsync(IoContext& ctx, BlockingPool& pool, std::string host, uint16_t port)
+inline Task<Result<SocketAddress>> ResolveAsync(IoContext& ctx, BlockingPool& pool, std::string host, uint16_t port)
 {
     // We capture 'host' by value (std::string) to ensure it survives the thread switch
     auto result = co_await Offload(ctx, pool,

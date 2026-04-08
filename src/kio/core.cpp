@@ -7,10 +7,28 @@
 
 #include <liburing/io_uring.h>
 
+#include <poll.h>
 #include <sys/eventfd.h>
 
 namespace kio
 {
+namespace
+{
+using TimerQueue =
+    std::priority_queue<kio::MemoryBackend::TimerEntry, std::vector<kio::MemoryBackend::TimerEntry>,
+                        std::greater<kio::MemoryBackend::TimerEntry>>;
+
+void DrainDueTimers(TimerQueue& timers, std::deque<kio::OperationState*>& ready)
+{
+    const auto now = std::chrono::steady_clock::now();
+    while (!timers.empty() && timers.top().due <= now)
+    {
+        ready.push_back(timers.top().op);
+        timers.pop();
+    }
+}
+}  // namespace
+
 // =============================================================================
 // Context Tracking (Thread Local)
 // =============================================================================
@@ -197,61 +215,111 @@ void UringBackend::FlushAfterWake()
     (void)io_uring_submit(&ring_);
 }
 
+void MemoryBackend::Init(unsigned)
+{
+    wake_fd_ = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+    if (wake_fd_ < 0)
+    {
+        throw std::system_error(errno, std::system_category(), "eventfd");
+    }
+}
+
 void MemoryBackend::Shutdown() noexcept
 {
-    notified_ = true;
+    if (wake_fd_ >= 0)
+    {
+        ::close(wake_fd_);
+        wake_fd_ = -1;
+    }
+    wake_buffer_ = 0;
 }
 
 bool MemoryBackend::Notify() const noexcept
 {
-    notified_ = true;
-    return true;
+    if (wake_fd_ < 0)
+    {
+        return false;
+    }
+    constexpr uint64_t val = 1;
+    return ::write(wake_fd_, &val, sizeof(val)) == sizeof(val);
 }
 
 void MemoryBackend::AddTimer(OperationState* op, const std::chrono::steady_clock::time_point due)
 {
-    timers_.push_back({due, op});
+    timers_.push({due, op});
 }
 
 int MemoryBackend::SubmitAndWait(unsigned)
 {
-    const auto now = std::chrono::steady_clock::now();
-    for (auto it = timers_.begin(); it != timers_.end();)
+    for (;;)
     {
-        if (it->due <= now)
+        DrainDueTimers(timers_, ready_);
+
+        if (!ready_.empty())
         {
-            ready_.push_back(it->op);
-            it = timers_.erase(it);
+            return 0;
         }
-        else
+
+        int timeout_ms = -1;
+        if (!timers_.empty())
         {
-            ++it;
+            // Min-heap: top() is always the soonest deadline — O(1).
+            const auto next_due = timers_.top().due;
+
+            const auto now = std::chrono::steady_clock::now();
+            if (next_due <= now)
+            {
+                continue;
+            }
+
+            const auto wait_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(next_due - now + std::chrono::milliseconds(1));
+            timeout_ms = static_cast<int>(wait_ms.count());
+        }
+
+        pollfd pfd{
+            .fd = wake_fd_,
+            .events = POLLIN,
+            .revents = 0,
+        };
+        int ret = 0;
+        do
+        {
+            ret = ::poll(&pfd, 1, timeout_ms);
+        } while (ret < 0 && errno == EINTR);
+
+        if (ret < 0)
+        {
+            return -errno;
+        }
+
+        if (ret == 0)
+        {
+            continue;
+        }
+
+        if ((pfd.revents & POLLIN) != 0)
+        {
+            while (::read(wake_fd_, &wake_buffer_, sizeof(wake_buffer_)) == sizeof(wake_buffer_))
+            {
+            }
+        }
+
+        if ((pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0)
+        {
+            return -EIO;
         }
     }
-
-    if (ready_.empty() && !notified_ && !timers_.empty())
-    {
-        auto next_due = timers_.front().due;
-        for (const auto& timer : timers_)
-        {
-            next_due = std::min(next_due, timer.due);
-        }
-        std::this_thread::sleep_until(next_due);
-        return SubmitAndWait(0);
-    }
-
-    notified_ = false;
-    return 0;
 }
 
 void MemoryBackend::CancelAllPending()
 {
-    for (auto& timer : timers_)
+    while (!timers_.empty())
     {
-        ready_.push_back(timer.op);
+        ready_.push_back(timers_.top().op);
+        timers_.pop();
     }
-    timers_.clear();
-    notified_ = true;
+    (void)Notify();
 }
 
 template <typename Backend>

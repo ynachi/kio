@@ -55,14 +55,7 @@ struct OperationState
     OperationState() = default;
 
     OperationState(OperationState&& other) noexcept
-        : ctx(other.ctx),
-          res(other.res),
-          handle(other.handle),
-          next(nullptr),
-          prev(nullptr),
-          next_ext(nullptr),
-          tracked(false),
-          cancel_reason(other.cancel_reason)
+        : ctx(other.ctx), res(other.res), handle(other.handle), cancel_reason(other.cancel_reason)
     {
         if (other.tracked)
         {

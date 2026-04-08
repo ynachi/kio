@@ -1,6 +1,5 @@
 #pragma once
 
-#include <atomic>
 #include <cassert>
 #include <cstddef>
 #include <cstdlib>
@@ -34,7 +33,7 @@ public:
 
     std::byte* AllocateAligned(std::size_t bytes, std::size_t alignment = alignof(std::max_align_t));
 
-    [[nodiscard]] std::size_t MemoryUsage() const { return memory_usage_.load(std::memory_order_relaxed); }
+    [[nodiscard]] std::size_t MemoryUsage() const { return memory_usage_; }
 
 private:
     std::byte* AllocateFallback(std::size_t bytes, std::size_t alignment);
@@ -44,7 +43,7 @@ private:
     std::byte* alloc_ptr_;
     std::size_t alloc_bytes_remaining_;
     std::vector<std::byte*> blocks_;
-    std::atomic<std::size_t> memory_usage_;
+    std::size_t memory_usage_;
     std::size_t block_size_;
 };
 
