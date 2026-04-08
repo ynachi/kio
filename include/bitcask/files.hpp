@@ -12,7 +12,7 @@
 
 namespace bitcask
 {
-    using SharedFD = std::shared_ptr<kio::FDGuard>;
+    using SharedFD = std::shared_ptr<kio::FD>;
 
     //========================================
     // FD Cache
