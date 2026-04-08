@@ -120,6 +120,7 @@ int UringBackend::SubmitAndWait(const unsigned wait_nr)
 
 bool UringBackend::TryMsgRing(const UringBackend& target, OperationState* op)
 {
+    EnsureSqes(1);
     auto* sqe = GetSqe();
     if (sqe == nullptr)
     {
@@ -362,7 +363,6 @@ Result<> BasicIoContext<Backend>::RegisterFiles(const std::span<const int> fds)
 template <typename Backend>
 bool BasicIoContext<Backend>::TryMsgRing(const BasicIoContext& target, OperationState* op)
 {
-    EnsureSqes(1);
     return backend_.TryMsgRing(target.GetBackend(), op);
 }
 
@@ -386,21 +386,6 @@ void BasicIoContext<Backend>::SubmitExternal(OperationState* op)
 // -----------------------------------------------------------------------------
 // Loop & Step
 // -----------------------------------------------------------------------------
-
-template <typename Backend>
-void BasicIoContext<Backend>::EnsureSqes(const unsigned n)
-{
-    AssertOwnerThread();
-
-    backend_.EnsureSqes(n);
-}
-
-template <typename Backend>
-io_uring_sqe* BasicIoContext<Backend>::GetSqe()
-{
-    AssertOwnerThread();
-    return backend_.GetSqe();
-}
 
 template <typename Backend>
 void BasicIoContext<Backend>::DrainExternal(std::vector<std::coroutine_handle<>>& out)

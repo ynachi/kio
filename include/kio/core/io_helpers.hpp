@@ -35,27 +35,19 @@ struct SpliceOp : DispatchOp<SpliceOp>
     }
 };
 
-inline void Submit(UringBackend&, IoContext& ctx, SpliceOp& op)
+inline void Submit(UringBackend& backend, IoContext&, SpliceOp& op)
 {
-    ctx.EnsureSqes(1);
-    auto* sqe = ctx.GetSqe();
+    auto* sqe = PrepareSqe(backend);
     io_uring_prep_splice(sqe, op.fd_in, op.off_in, op.fd_out, op.off_out, op.len, op.flags);
     io_uring_sqe_set_data(sqe, &op);
 }
 
-inline void SubmitWithTimeout(UringBackend&, IoContext& ctx, SpliceOp& op, __kernel_timespec& ts)
+inline void SubmitWithTimeout(UringBackend& backend, IoContext&, SpliceOp& op, __kernel_timespec& ts)
 {
-    ctx.EnsureSqes(2);
-
-    auto* sqe_op = ctx.GetSqe();
+    auto [sqe_op, sqe_timer] = PrepareLinkedTimeoutSqes(backend, ts);
     io_uring_prep_splice(sqe_op, op.fd_in, op.off_in, op.fd_out, op.off_out, op.len, op.flags);
     sqe_op->flags |= IOSQE_IO_LINK;
     io_uring_sqe_set_data(sqe_op, &op);
-
-    auto* sqe_timer = ctx.GetSqe();
-    sqe_timer->flags |= IOSQE_CQE_SKIP_SUCCESS;
-    io_uring_prep_link_timeout(sqe_timer, &ts, 0);
-    io_uring_sqe_set_data(sqe_timer, nullptr);
 }
 
 inline SpliceOp AsyncSplice(IoContext& ctx, int fd_in, int64_t off_in, int fd_out, int64_t off_out, unsigned int len,

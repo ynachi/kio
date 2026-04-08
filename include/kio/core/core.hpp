@@ -78,6 +78,20 @@ class TaskGroup;
 template <typename T = void>
 using Result = std::expected<T, std::error_code>;
 
+template <typename Backend>
+concept IoBackend = requires(Backend backend, const Backend const_backend, unsigned entries, unsigned wait_nr,
+                             std::span<const int> fds, OperationState* op)
+{
+    { backend.Init(entries) } -> std::same_as<void>;
+    { backend.Shutdown() } -> std::same_as<void>;
+    { const_backend.Notify() } -> std::convertible_to<bool>;
+    { backend.SubmitAndWait(wait_nr) } -> std::same_as<int>;
+    { backend.CancelAllPending() } -> std::same_as<void>;
+    { backend.RegisterFiles(fds) } -> std::same_as<Result<>>;
+    { const_backend.WakeFd() } -> std::convertible_to<int>;
+    { backend.TryMsgRing(const_backend, op) } -> std::convertible_to<bool>;
+};
+
 inline std::unexpected<std::error_code> ErrorFromErrno(const int err) noexcept
 {
     return std::unexpected(std::error_code(err, std::system_category()));
@@ -596,6 +610,24 @@ struct UringBackend
     }
 };
 
+inline io_uring_sqe* PrepareSqe(UringBackend& backend)
+{
+    backend.EnsureSqes(1);
+    return backend.GetSqe();
+}
+
+inline std::pair<io_uring_sqe*, io_uring_sqe*> PrepareLinkedTimeoutSqes(UringBackend& backend, __kernel_timespec& ts)
+{
+    backend.EnsureSqes(2);
+
+    auto* sqe_op = backend.GetSqe();
+    auto* sqe_timer = backend.GetSqe();
+    sqe_timer->flags |= IOSQE_CQE_SKIP_SUCCESS;
+    io_uring_prep_link_timeout(sqe_timer, &ts, 0);
+    io_uring_sqe_set_data(sqe_timer, nullptr);
+    return {sqe_op, sqe_timer};
+}
+
 struct MemoryBackend
 {
     struct TimerEntry
@@ -616,9 +648,6 @@ struct MemoryBackend
     void CancelAllPending();
     Result<> RegisterFiles(std::span<const int>) { return {}; }
     int WakeFd() const { return -1; }
-
-    void EnsureSqes(unsigned) {}
-    io_uring_sqe* GetSqe() { return nullptr; }
     void SubmitWakeRead() {}
     void FlushAfterWake() {}
     void AddTimer(OperationState* op, std::chrono::steady_clock::time_point due);
@@ -657,6 +686,7 @@ struct MemoryBackend
 template <typename Backend>
 class BasicIoContext
 {
+    static_assert(IoBackend<Backend>, "BasicIoContext requires an IoBackend-compatible backend");
     //
     // IoContext clss members
     //
@@ -859,10 +889,6 @@ public:
         return *pipe_pool_;
     }
 
-    void EnsureSqes(unsigned n);
-
-    io_uring_sqe* GetSqe();
-
     int WakeFd() const { return backend_.WakeFd(); }
 
     void WaitReady() const { ready_latch_.wait(); }
@@ -935,27 +961,19 @@ struct WaitSignalOp : DispatchOp<WaitSignalOp>
     Result<int> await_resume();
 };
 
-inline void Submit(UringBackend&, IoContext& ctx, WaitSignalOp& op)
+inline void Submit(UringBackend& backend, IoContext&, WaitSignalOp& op)
 {
-    ctx.EnsureSqes(1);
-    auto* sqe = ctx.GetSqe();
+    auto* sqe = PrepareSqe(backend);
     io_uring_prep_read(sqe, op.fd, &op.signo, sizeof(op.signo), 0);
     io_uring_sqe_set_data(sqe, &op);
 }
 
-inline void SubmitWithTimeout(UringBackend&, IoContext& ctx, WaitSignalOp& op, __kernel_timespec& ts)
+inline void SubmitWithTimeout(UringBackend& backend, IoContext&, WaitSignalOp& op, __kernel_timespec& ts)
 {
-    ctx.EnsureSqes(2);
-
-    auto* sqe_op = ctx.GetSqe();
+    auto [sqe_op, sqe_timer] = PrepareLinkedTimeoutSqes(backend, ts);
     io_uring_prep_read(sqe_op, op.fd, &op.signo, sizeof(op.signo), 0);
     sqe_op->flags |= IOSQE_IO_LINK;
     io_uring_sqe_set_data(sqe_op, &op);
-
-    auto* sqe_timer = ctx.GetSqe();
-    sqe_timer->flags |= IOSQE_CQE_SKIP_SUCCESS;
-    io_uring_prep_link_timeout(sqe_timer, &ts, 0);
-    io_uring_sqe_set_data(sqe_timer, nullptr);
 }
 
 inline WaitSignalOp AsyncWaitSignal(IoContext& ctx, int signal_fd)
@@ -1113,27 +1131,19 @@ public:
         }
     };
 
-    friend inline void Submit(UringBackend&, IoContext& ctx, WaitOp& op)
+    friend inline void Submit(UringBackend& backend, IoContext&, WaitOp& op)
     {
-        ctx.EnsureSqes(1);
-        auto* sqe = ctx.GetSqe();
+        auto* sqe = PrepareSqe(backend);
         io_uring_prep_read(sqe, op.fd, &op.value, sizeof(op.value), 0);
         io_uring_sqe_set_data(sqe, &op);
     }
 
-    friend inline void SubmitWithTimeout(UringBackend&, IoContext& ctx, WaitOp& op, __kernel_timespec& ts)
+    friend inline void SubmitWithTimeout(UringBackend& backend, IoContext&, WaitOp& op, __kernel_timespec& ts)
     {
-        ctx.EnsureSqes(2);
-
-        auto* sqe_op = ctx.GetSqe();
+        auto [sqe_op, sqe_timer] = PrepareLinkedTimeoutSqes(backend, ts);
         io_uring_prep_read(sqe_op, op.fd, &op.value, sizeof(op.value), 0);
         sqe_op->flags |= IOSQE_IO_LINK;
         io_uring_sqe_set_data(sqe_op, &op);
-
-        auto* sqe_timer = ctx.GetSqe();
-        sqe_timer->flags |= IOSQE_CQE_SKIP_SUCCESS;
-        io_uring_prep_link_timeout(sqe_timer, &ts, 0);
-        io_uring_sqe_set_data(sqe_timer, nullptr);
     }
 
     /// Wait for one or more signals. Takes IoContext as a parameter.

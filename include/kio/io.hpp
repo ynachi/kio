@@ -358,27 +358,19 @@ struct AcceptOp : DispatchOp<AcceptOp>
     }
 };
 
-inline void Submit(UringBackend&, IoContext& ctx, AcceptOp& op)
+inline void Submit(UringBackend& backend, IoContext&, AcceptOp& op)
 {
-    ctx.EnsureSqes(1);
-    auto* sqe = ctx.GetSqe();
+    auto* sqe = PrepareSqe(backend);
     io_uring_prep_accept(sqe, op.fd, op.client_addr.GetMutable(), &op.client_addr.addrlen, 0);
     io_uring_sqe_set_data(sqe, &op);
 }
 
-inline void SubmitWithTimeout(UringBackend&, IoContext& ctx, AcceptOp& op, __kernel_timespec& ts)
+inline void SubmitWithTimeout(UringBackend& backend, IoContext&, AcceptOp& op, __kernel_timespec& ts)
 {
-    ctx.EnsureSqes(2);
-
-    auto* sqe_op = ctx.GetSqe();
+    auto [sqe_op, sqe_timer] = PrepareLinkedTimeoutSqes(backend, ts);
     io_uring_prep_accept(sqe_op, op.fd, op.client_addr.GetMutable(), &op.client_addr.addrlen, 0);
     sqe_op->flags |= IOSQE_IO_LINK;
     io_uring_sqe_set_data(sqe_op, &op);
-
-    auto* sqe_timer = ctx.GetSqe();
-    sqe_timer->flags |= IOSQE_CQE_SKIP_SUCCESS;
-    io_uring_prep_link_timeout(sqe_timer, &ts, 0);
-    io_uring_sqe_set_data(sqe_timer, nullptr);
 }
 
 /// @brief Accepts an incoming connection on a listening socket.
@@ -417,27 +409,19 @@ struct RecvOp : DispatchOp<RecvOp>
     }
 };
 
-inline void Submit(UringBackend&, IoContext& ctx, RecvOp& op)
+inline void Submit(UringBackend& backend, IoContext&, RecvOp& op)
 {
-    ctx.EnsureSqes(1);
-    auto* sqe = ctx.GetSqe();
+    auto* sqe = PrepareSqe(backend);
     io_uring_prep_recv(sqe, op.fd, op.buffer.data(), op.buffer.size(), op.flags);
     io_uring_sqe_set_data(sqe, &op);
 }
 
-inline void SubmitWithTimeout(UringBackend&, IoContext& ctx, RecvOp& op, __kernel_timespec& ts)
+inline void SubmitWithTimeout(UringBackend& backend, IoContext&, RecvOp& op, __kernel_timespec& ts)
 {
-    ctx.EnsureSqes(2);
-
-    auto* sqe_op = ctx.GetSqe();
+    auto [sqe_op, sqe_timer] = PrepareLinkedTimeoutSqes(backend, ts);
     io_uring_prep_recv(sqe_op, op.fd, op.buffer.data(), op.buffer.size(), op.flags);
     sqe_op->flags |= IOSQE_IO_LINK;
     io_uring_sqe_set_data(sqe_op, &op);
-
-    auto* sqe_timer = ctx.GetSqe();
-    sqe_timer->flags |= IOSQE_CQE_SKIP_SUCCESS;
-    io_uring_prep_link_timeout(sqe_timer, &ts, 0);
-    io_uring_sqe_set_data(sqe_timer, nullptr);
 }
 
 /// @brief Receives data from a socket.
@@ -495,27 +479,19 @@ struct SendOp : DispatchOp<SendOp>
     }
 };
 
-inline void Submit(UringBackend&, IoContext& ctx, SendOp& op)
+inline void Submit(UringBackend& backend, IoContext&, SendOp& op)
 {
-    ctx.EnsureSqes(1);
-    auto* sqe = ctx.GetSqe();
+    auto* sqe = PrepareSqe(backend);
     io_uring_prep_send(sqe, op.fd, op.buffer.data(), op.buffer.size(), op.flags);
     io_uring_sqe_set_data(sqe, &op);
 }
 
-inline void SubmitWithTimeout(UringBackend&, IoContext& ctx, SendOp& op, __kernel_timespec& ts)
+inline void SubmitWithTimeout(UringBackend& backend, IoContext&, SendOp& op, __kernel_timespec& ts)
 {
-    ctx.EnsureSqes(2);
-
-    auto* sqe_op = ctx.GetSqe();
+    auto [sqe_op, sqe_timer] = PrepareLinkedTimeoutSqes(backend, ts);
     io_uring_prep_send(sqe_op, op.fd, op.buffer.data(), op.buffer.size(), op.flags);
     sqe_op->flags |= IOSQE_IO_LINK;
     io_uring_sqe_set_data(sqe_op, &op);
-
-    auto* sqe_timer = ctx.GetSqe();
-    sqe_timer->flags |= IOSQE_CQE_SKIP_SUCCESS;
-    io_uring_prep_link_timeout(sqe_timer, &ts, 0);
-    io_uring_sqe_set_data(sqe_timer, nullptr);
 }
 
 /// @brief Sends data to a socket.
@@ -575,27 +551,19 @@ struct UnlinkAtOp : DispatchOp<UnlinkAtOp>
     }
 };
 
-inline void Submit(UringBackend&, IoContext& ctx, UnlinkAtOp& op)
+inline void Submit(UringBackend& backend, IoContext&, UnlinkAtOp& op)
 {
-    ctx.EnsureSqes(1);
-    auto* sqe = ctx.GetSqe();
+    auto* sqe = PrepareSqe(backend);
     io_uring_prep_unlinkat(sqe, op.dirfd, op.path.c_str(), op.flags);
     io_uring_sqe_set_data(sqe, &op);
 }
 
-inline void SubmitWithTimeout(UringBackend&, IoContext& ctx, UnlinkAtOp& op, __kernel_timespec& ts)
+inline void SubmitWithTimeout(UringBackend& backend, IoContext&, UnlinkAtOp& op, __kernel_timespec& ts)
 {
-    ctx.EnsureSqes(2);
-
-    auto* sqe_op = ctx.GetSqe();
+    auto [sqe_op, sqe_timer] = PrepareLinkedTimeoutSqes(backend, ts);
     io_uring_prep_unlinkat(sqe_op, op.dirfd, op.path.c_str(), op.flags);
     sqe_op->flags |= IOSQE_IO_LINK;
     io_uring_sqe_set_data(sqe_op, &op);
-
-    auto* sqe_timer = ctx.GetSqe();
-    sqe_timer->flags |= IOSQE_CQE_SKIP_SUCCESS;
-    io_uring_prep_link_timeout(sqe_timer, &ts, 0);
-    io_uring_sqe_set_data(sqe_timer, nullptr);
 }
 
 inline Task<Result<int>> AsyncUnlink(IoContext& ctx, int dirfd, const std::filesystem::path path, int flags)
@@ -620,27 +588,19 @@ struct MkdirAtOp : DispatchOp<MkdirAtOp>
     }
 };
 
-inline void Submit(UringBackend&, IoContext& ctx, MkdirAtOp& op)
+inline void Submit(UringBackend& backend, IoContext&, MkdirAtOp& op)
 {
-    ctx.EnsureSqes(1);
-    auto* sqe = ctx.GetSqe();
+    auto* sqe = PrepareSqe(backend);
     io_uring_prep_mkdirat(sqe, op.dirfd, op.path.c_str(), op.mode);
     io_uring_sqe_set_data(sqe, &op);
 }
 
-inline void SubmitWithTimeout(UringBackend&, IoContext& ctx, MkdirAtOp& op, __kernel_timespec& ts)
+inline void SubmitWithTimeout(UringBackend& backend, IoContext&, MkdirAtOp& op, __kernel_timespec& ts)
 {
-    ctx.EnsureSqes(2);
-
-    auto* sqe_op = ctx.GetSqe();
+    auto [sqe_op, sqe_timer] = PrepareLinkedTimeoutSqes(backend, ts);
     io_uring_prep_mkdirat(sqe_op, op.dirfd, op.path.c_str(), op.mode);
     sqe_op->flags |= IOSQE_IO_LINK;
     io_uring_sqe_set_data(sqe_op, &op);
-
-    auto* sqe_timer = ctx.GetSqe();
-    sqe_timer->flags |= IOSQE_CQE_SKIP_SUCCESS;
-    io_uring_prep_link_timeout(sqe_timer, &ts, 0);
-    io_uring_sqe_set_data(sqe_timer, nullptr);
 }
 
 inline Task<Result<int>> AsyncMkdir(IoContext& ctx, int dirfd, const std::filesystem::path path, mode_t mode = 0755)
@@ -674,27 +634,19 @@ struct RenameAtOp : DispatchOp<RenameAtOp>
 
 };
 
-inline void Submit(UringBackend&, IoContext& ctx, RenameAtOp& op)
+inline void Submit(UringBackend& backend, IoContext&, RenameAtOp& op)
 {
-    ctx.EnsureSqes(1);
-    auto* sqe = ctx.GetSqe();
+    auto* sqe = PrepareSqe(backend);
     io_uring_prep_renameat(sqe, op.old_dirfd, op.old_path.c_str(), op.new_dirfd, op.new_path.c_str(), op.flags);
     io_uring_sqe_set_data(sqe, &op);
 }
 
-inline void SubmitWithTimeout(UringBackend&, IoContext& ctx, RenameAtOp& op, __kernel_timespec& ts)
+inline void SubmitWithTimeout(UringBackend& backend, IoContext&, RenameAtOp& op, __kernel_timespec& ts)
 {
-    ctx.EnsureSqes(2);
-
-    auto* sqe_op = ctx.GetSqe();
+    auto [sqe_op, sqe_timer] = PrepareLinkedTimeoutSqes(backend, ts);
     io_uring_prep_renameat(sqe_op, op.old_dirfd, op.old_path.c_str(), op.new_dirfd, op.new_path.c_str(), op.flags);
     sqe_op->flags |= IOSQE_IO_LINK;
     io_uring_sqe_set_data(sqe_op, &op);
-
-    auto* sqe_timer = ctx.GetSqe();
-    sqe_timer->flags |= IOSQE_CQE_SKIP_SUCCESS;
-    io_uring_prep_link_timeout(sqe_timer, &ts, 0);
-    io_uring_sqe_set_data(sqe_timer, nullptr);
 }
 
 inline Task<Result<int>> AsyncRename(IoContext& ctx, int old_dirfd, const std::filesystem::path old_path, int new_dirfd,
@@ -730,27 +682,19 @@ struct OpenOp : DispatchOp<OpenOp>
     }
 };
 
-inline void Submit(UringBackend&, IoContext& ctx, OpenOp& op)
+inline void Submit(UringBackend& backend, IoContext&, OpenOp& op)
 {
-    ctx.EnsureSqes(1);
-    auto* sqe = ctx.GetSqe();
+    auto* sqe = PrepareSqe(backend);
     io_uring_prep_openat(sqe, AT_FDCWD, op.path.c_str(), op.flags, op.mode);
     io_uring_sqe_set_data(sqe, &op);
 }
 
-inline void SubmitWithTimeout(UringBackend&, IoContext& ctx, OpenOp& op, __kernel_timespec& ts)
+inline void SubmitWithTimeout(UringBackend& backend, IoContext&, OpenOp& op, __kernel_timespec& ts)
 {
-    ctx.EnsureSqes(2);
-
-    auto* sqe_op = ctx.GetSqe();
+    auto [sqe_op, sqe_timer] = PrepareLinkedTimeoutSqes(backend, ts);
     io_uring_prep_openat(sqe_op, AT_FDCWD, op.path.c_str(), op.flags, op.mode);
     sqe_op->flags |= IOSQE_IO_LINK;
     io_uring_sqe_set_data(sqe_op, &op);
-
-    auto* sqe_timer = ctx.GetSqe();
-    sqe_timer->flags |= IOSQE_CQE_SKIP_SUCCESS;
-    io_uring_prep_link_timeout(sqe_timer, &ts, 0);
-    io_uring_sqe_set_data(sqe_timer, nullptr);
 }
 
 /// @brief Opens a file asynchronously.
@@ -785,27 +729,19 @@ struct ReadOp : DispatchOp<ReadOp>
     }
 };
 
-inline void Submit(UringBackend&, IoContext& ctx, ReadOp& op)
+inline void Submit(UringBackend& backend, IoContext&, ReadOp& op)
 {
-    ctx.EnsureSqes(1);
-    auto* sqe = ctx.GetSqe();
+    auto* sqe = PrepareSqe(backend);
     io_uring_prep_read(sqe, op.fd, op.buffer.data(), op.buffer.size(), op.offset);
     io_uring_sqe_set_data(sqe, &op);
 }
 
-inline void SubmitWithTimeout(UringBackend&, IoContext& ctx, ReadOp& op, __kernel_timespec& ts)
+inline void SubmitWithTimeout(UringBackend& backend, IoContext&, ReadOp& op, __kernel_timespec& ts)
 {
-    ctx.EnsureSqes(2);
-
-    auto* sqe_op = ctx.GetSqe();
+    auto [sqe_op, sqe_timer] = PrepareLinkedTimeoutSqes(backend, ts);
     io_uring_prep_read(sqe_op, op.fd, op.buffer.data(), op.buffer.size(), op.offset);
     sqe_op->flags |= IOSQE_IO_LINK;
     io_uring_sqe_set_data(sqe_op, &op);
-
-    auto* sqe_timer = ctx.GetSqe();
-    sqe_timer->flags |= IOSQE_CQE_SKIP_SUCCESS;
-    io_uring_prep_link_timeout(sqe_timer, &ts, 0);
-    io_uring_sqe_set_data(sqe_timer, nullptr);
 }
 
 /// @brief Reads data from a file descriptor.
@@ -845,27 +781,19 @@ struct WriteOp : DispatchOp<WriteOp>
     }
 };
 
-inline void Submit(UringBackend&, IoContext& ctx, WriteOp& op)
+inline void Submit(UringBackend& backend, IoContext&, WriteOp& op)
 {
-    ctx.EnsureSqes(1);
-    auto* sqe = ctx.GetSqe();
+    auto* sqe = PrepareSqe(backend);
     io_uring_prep_write(sqe, op.fd, op.buffer.data(), op.buffer.size(), op.offset);
     io_uring_sqe_set_data(sqe, &op);
 }
 
-inline void SubmitWithTimeout(UringBackend&, IoContext& ctx, WriteOp& op, __kernel_timespec& ts)
+inline void SubmitWithTimeout(UringBackend& backend, IoContext&, WriteOp& op, __kernel_timespec& ts)
 {
-    ctx.EnsureSqes(2);
-
-    auto* sqe_op = ctx.GetSqe();
+    auto [sqe_op, sqe_timer] = PrepareLinkedTimeoutSqes(backend, ts);
     io_uring_prep_write(sqe_op, op.fd, op.buffer.data(), op.buffer.size(), op.offset);
     sqe_op->flags |= IOSQE_IO_LINK;
     io_uring_sqe_set_data(sqe_op, &op);
-
-    auto* sqe_timer = ctx.GetSqe();
-    sqe_timer->flags |= IOSQE_CQE_SKIP_SUCCESS;
-    io_uring_prep_link_timeout(sqe_timer, &ts, 0);
-    io_uring_sqe_set_data(sqe_timer, nullptr);
 }
 
 /// @brief Writes data to a file descriptor.
@@ -905,27 +833,19 @@ struct CloseOp : DispatchOp<CloseOp>
     }
 };
 
-inline void Submit(UringBackend&, IoContext& ctx, CloseOp& op)
+inline void Submit(UringBackend& backend, IoContext&, CloseOp& op)
 {
-    ctx.EnsureSqes(1);
-    auto* sqe = ctx.GetSqe();
+    auto* sqe = PrepareSqe(backend);
     io_uring_prep_close(sqe, op.fd);
     io_uring_sqe_set_data(sqe, &op);
 }
 
-inline void SubmitWithTimeout(UringBackend&, IoContext& ctx, CloseOp& op, __kernel_timespec& ts)
+inline void SubmitWithTimeout(UringBackend& backend, IoContext&, CloseOp& op, __kernel_timespec& ts)
 {
-    ctx.EnsureSqes(2);
-
-    auto* sqe_op = ctx.GetSqe();
+    auto [sqe_op, sqe_timer] = PrepareLinkedTimeoutSqes(backend, ts);
     io_uring_prep_close(sqe_op, op.fd);
     sqe_op->flags |= IOSQE_IO_LINK;
     io_uring_sqe_set_data(sqe_op, &op);
-
-    auto* sqe_timer = ctx.GetSqe();
-    sqe_timer->flags |= IOSQE_CQE_SKIP_SUCCESS;
-    io_uring_prep_link_timeout(sqe_timer, &ts, 0);
-    io_uring_sqe_set_data(sqe_timer, nullptr);
 }
 
 struct ReadFixedOp : DispatchOp<ReadFixedOp>
@@ -941,28 +861,21 @@ struct ReadFixedOp : DispatchOp<ReadFixedOp>
     }
 };
 
-inline void Submit(UringBackend&, IoContext& ctx, ReadFixedOp& op)
+inline void Submit(UringBackend& backend, IoContext&, ReadFixedOp& op)
 {
-    ctx.EnsureSqes(1);
-    auto* sqe = ctx.GetSqe();
+    auto* sqe = PrepareSqe(backend);
     io_uring_prep_read(sqe, op.file_index, op.buffer, op.len, op.offset);
     sqe->flags |= IOSQE_FIXED_FILE;
     io_uring_sqe_set_data(sqe, &op);
 }
 
-inline void SubmitWithTimeout(UringBackend&, IoContext& ctx, ReadFixedOp& op, __kernel_timespec& ts)
+inline void SubmitWithTimeout(UringBackend& backend, IoContext&, ReadFixedOp& op, __kernel_timespec& ts)
 {
-    ctx.EnsureSqes(2);
-
-    auto* sqe_op = ctx.GetSqe();
+    auto [sqe_op, sqe_timer] = PrepareLinkedTimeoutSqes(backend, ts);
     io_uring_prep_read(sqe_op, op.file_index, op.buffer, op.len, op.offset);
-    sqe_op->flags |= IOSQE_FIXED_FILE | IOSQE_IO_LINK;
+    sqe_op->flags |= IOSQE_FIXED_FILE;
+    sqe_op->flags |= IOSQE_IO_LINK;
     io_uring_sqe_set_data(sqe_op, &op);
-
-    auto* sqe_timer = ctx.GetSqe();
-    sqe_timer->flags |= IOSQE_CQE_SKIP_SUCCESS;
-    io_uring_prep_link_timeout(sqe_timer, &ts, 0);
-    io_uring_sqe_set_data(sqe_timer, nullptr);
 }
 
 /// @brief Reads from a registered file using its index (IOSQE_FIXED_FILE).
@@ -1002,28 +915,21 @@ struct WriteFixedOp : DispatchOp<WriteFixedOp>
     }
 };
 
-inline void Submit(UringBackend&, IoContext& ctx, WriteFixedOp& op)
+inline void Submit(UringBackend& backend, IoContext&, WriteFixedOp& op)
 {
-    ctx.EnsureSqes(1);
-    auto* sqe = ctx.GetSqe();
+    auto* sqe = PrepareSqe(backend);
     io_uring_prep_write(sqe, op.file_index, op.buffer, op.len, op.offset);
     sqe->flags |= IOSQE_FIXED_FILE;
     io_uring_sqe_set_data(sqe, &op);
 }
 
-inline void SubmitWithTimeout(UringBackend&, IoContext& ctx, WriteFixedOp& op, __kernel_timespec& ts)
+inline void SubmitWithTimeout(UringBackend& backend, IoContext&, WriteFixedOp& op, __kernel_timespec& ts)
 {
-    ctx.EnsureSqes(2);
-
-    auto* sqe_op = ctx.GetSqe();
+    auto [sqe_op, sqe_timer] = PrepareLinkedTimeoutSqes(backend, ts);
     io_uring_prep_write(sqe_op, op.file_index, op.buffer, op.len, op.offset);
-    sqe_op->flags |= IOSQE_FIXED_FILE | IOSQE_IO_LINK;
+    sqe_op->flags |= IOSQE_FIXED_FILE;
+    sqe_op->flags |= IOSQE_IO_LINK;
     io_uring_sqe_set_data(sqe_op, &op);
-
-    auto* sqe_timer = ctx.GetSqe();
-    sqe_timer->flags |= IOSQE_CQE_SKIP_SUCCESS;
-    io_uring_prep_link_timeout(sqe_timer, &ts, 0);
-    io_uring_sqe_set_data(sqe_timer, nullptr);
 }
 
 /// @brief Writes to a registered file using its index (IOSQE_FIXED_FILE).
@@ -1089,27 +995,19 @@ struct ConnectOp : DispatchOp<ConnectOp>
     }
 };
 
-inline void Submit(UringBackend&, IoContext& ctx, ConnectOp& op)
+inline void Submit(UringBackend& backend, IoContext&, ConnectOp& op)
 {
-    ctx.EnsureSqes(1);
-    auto* sqe = ctx.GetSqe();
+    auto* sqe = PrepareSqe(backend);
     io_uring_prep_connect(sqe, op.fd, reinterpret_cast<sockaddr*>(&op.addr_store), op.addrlen);
     io_uring_sqe_set_data(sqe, &op);
 }
 
-inline void SubmitWithTimeout(UringBackend&, IoContext& ctx, ConnectOp& op, __kernel_timespec& ts)
+inline void SubmitWithTimeout(UringBackend& backend, IoContext&, ConnectOp& op, __kernel_timespec& ts)
 {
-    ctx.EnsureSqes(2);
-
-    auto* sqe_op = ctx.GetSqe();
+    auto [sqe_op, sqe_timer] = PrepareLinkedTimeoutSqes(backend, ts);
     io_uring_prep_connect(sqe_op, op.fd, reinterpret_cast<sockaddr*>(&op.addr_store), op.addrlen);
     sqe_op->flags |= IOSQE_IO_LINK;
     io_uring_sqe_set_data(sqe_op, &op);
-
-    auto* sqe_timer = ctx.GetSqe();
-    sqe_timer->flags |= IOSQE_CQE_SKIP_SUCCESS;
-    io_uring_prep_link_timeout(sqe_timer, &ts, 0);
-    io_uring_sqe_set_data(sqe_timer, nullptr);
 }
 
 /// @brief Connects a socket to a remote address.
@@ -1164,27 +1062,19 @@ struct FsyncOp : DispatchOp<FsyncOp>
     }
 };
 
-inline void Submit(UringBackend&, IoContext& ctx, FsyncOp& op)
+inline void Submit(UringBackend& backend, IoContext&, FsyncOp& op)
 {
-    ctx.EnsureSqes(1);
-    auto* sqe = ctx.GetSqe();
+    auto* sqe = PrepareSqe(backend);
     io_uring_prep_fsync(sqe, op.fd, 0);
     io_uring_sqe_set_data(sqe, &op);
 }
 
-inline void SubmitWithTimeout(UringBackend&, IoContext& ctx, FsyncOp& op, __kernel_timespec& ts)
+inline void SubmitWithTimeout(UringBackend& backend, IoContext&, FsyncOp& op, __kernel_timespec& ts)
 {
-    ctx.EnsureSqes(2);
-
-    auto* sqe_op = ctx.GetSqe();
+    auto [sqe_op, sqe_timer] = PrepareLinkedTimeoutSqes(backend, ts);
     io_uring_prep_fsync(sqe_op, op.fd, 0);
     sqe_op->flags |= IOSQE_IO_LINK;
     io_uring_sqe_set_data(sqe_op, &op);
-
-    auto* sqe_timer = ctx.GetSqe();
-    sqe_timer->flags |= IOSQE_CQE_SKIP_SUCCESS;
-    io_uring_prep_link_timeout(sqe_timer, &ts, 0);
-    io_uring_sqe_set_data(sqe_timer, nullptr);
 }
 
 /// @brief Flushes file data and metadata to disk (fsync).
@@ -1245,27 +1135,19 @@ struct FdatasyncOp : DispatchOp<FdatasyncOp>
     }
 };
 
-inline void Submit(UringBackend&, IoContext& ctx, FdatasyncOp& op)
+inline void Submit(UringBackend& backend, IoContext&, FdatasyncOp& op)
 {
-    ctx.EnsureSqes(1);
-    auto* sqe = ctx.GetSqe();
+    auto* sqe = PrepareSqe(backend);
     io_uring_prep_fsync(sqe, op.fd, IORING_FSYNC_DATASYNC);
     io_uring_sqe_set_data(sqe, &op);
 }
 
-inline void SubmitWithTimeout(UringBackend&, IoContext& ctx, FdatasyncOp& op, __kernel_timespec& ts)
+inline void SubmitWithTimeout(UringBackend& backend, IoContext&, FdatasyncOp& op, __kernel_timespec& ts)
 {
-    ctx.EnsureSqes(2);
-
-    auto* sqe_op = ctx.GetSqe();
+    auto [sqe_op, sqe_timer] = PrepareLinkedTimeoutSqes(backend, ts);
     io_uring_prep_fsync(sqe_op, op.fd, IORING_FSYNC_DATASYNC);
     sqe_op->flags |= IOSQE_IO_LINK;
     io_uring_sqe_set_data(sqe_op, &op);
-
-    auto* sqe_timer = ctx.GetSqe();
-    sqe_timer->flags |= IOSQE_CQE_SKIP_SUCCESS;
-    io_uring_prep_link_timeout(sqe_timer, &ts, 0);
-    io_uring_sqe_set_data(sqe_timer, nullptr);
 }
 
 /// @brief Flushes file data to disk, skipping metadata (fdatasync).
@@ -1300,27 +1182,19 @@ struct FallocateOp : DispatchOp<FallocateOp>
     }
 };
 
-inline void Submit(UringBackend&, IoContext& ctx, FallocateOp& op)
+inline void Submit(UringBackend& backend, IoContext&, FallocateOp& op)
 {
-    ctx.EnsureSqes(1);
-    auto* sqe = ctx.GetSqe();
+    auto* sqe = PrepareSqe(backend);
     io_uring_prep_fallocate(sqe, op.fd, op.mode, op.offset, op.len);
     io_uring_sqe_set_data(sqe, &op);
 }
 
-inline void SubmitWithTimeout(UringBackend&, IoContext& ctx, FallocateOp& op, __kernel_timespec& ts)
+inline void SubmitWithTimeout(UringBackend& backend, IoContext&, FallocateOp& op, __kernel_timespec& ts)
 {
-    ctx.EnsureSqes(2);
-
-    auto* sqe_op = ctx.GetSqe();
+    auto [sqe_op, sqe_timer] = PrepareLinkedTimeoutSqes(backend, ts);
     io_uring_prep_fallocate(sqe_op, op.fd, op.mode, op.offset, op.len);
     sqe_op->flags |= IOSQE_IO_LINK;
     io_uring_sqe_set_data(sqe_op, &op);
-
-    auto* sqe_timer = ctx.GetSqe();
-    sqe_timer->flags |= IOSQE_CQE_SKIP_SUCCESS;
-    io_uring_prep_link_timeout(sqe_timer, &ts, 0);
-    io_uring_sqe_set_data(sqe_timer, nullptr);
 }
 
 /// @brief Pre-allocates or manipulates file space (fallocate).
@@ -1355,27 +1229,19 @@ struct FtruncateOp : DispatchOp<FtruncateOp>
     }
 };
 
-inline void Submit(UringBackend&, IoContext& ctx, FtruncateOp& op)
+inline void Submit(UringBackend& backend, IoContext&, FtruncateOp& op)
 {
-    ctx.EnsureSqes(1);
-    auto* sqe = ctx.GetSqe();
+    auto* sqe = PrepareSqe(backend);
     io_uring_prep_ftruncate(sqe, op.fd, op.len);
     io_uring_sqe_set_data(sqe, &op);
 }
 
-inline void SubmitWithTimeout(UringBackend&, IoContext& ctx, FtruncateOp& op, __kernel_timespec& ts)
+inline void SubmitWithTimeout(UringBackend& backend, IoContext&, FtruncateOp& op, __kernel_timespec& ts)
 {
-    ctx.EnsureSqes(2);
-
-    auto* sqe_op = ctx.GetSqe();
+    auto [sqe_op, sqe_timer] = PrepareLinkedTimeoutSqes(backend, ts);
     io_uring_prep_ftruncate(sqe_op, op.fd, op.len);
     sqe_op->flags |= IOSQE_IO_LINK;
     io_uring_sqe_set_data(sqe_op, &op);
-
-    auto* sqe_timer = ctx.GetSqe();
-    sqe_timer->flags |= IOSQE_CQE_SKIP_SUCCESS;
-    io_uring_prep_link_timeout(sqe_timer, &ts, 0);
-    io_uring_sqe_set_data(sqe_timer, nullptr);
 }
 
 /// @brief Truncates or extends a file to the specified length.
@@ -1408,27 +1274,19 @@ struct PollOp : DispatchOp<PollOp>
     }
 };
 
-inline void Submit(UringBackend&, IoContext& ctx, PollOp& op)
+inline void Submit(UringBackend& backend, IoContext&, PollOp& op)
 {
-    ctx.EnsureSqes(1);
-    auto* sqe = ctx.GetSqe();
+    auto* sqe = PrepareSqe(backend);
     io_uring_prep_poll_add(sqe, op.fd, op.poll_mask);
     io_uring_sqe_set_data(sqe, &op);
 }
 
-inline void SubmitWithTimeout(UringBackend&, IoContext& ctx, PollOp& op, __kernel_timespec& ts)
+inline void SubmitWithTimeout(UringBackend& backend, IoContext&, PollOp& op, __kernel_timespec& ts)
 {
-    ctx.EnsureSqes(2);
-
-    auto* sqe_op = ctx.GetSqe();
+    auto [sqe_op, sqe_timer] = PrepareLinkedTimeoutSqes(backend, ts);
     io_uring_prep_poll_add(sqe_op, op.fd, op.poll_mask);
     sqe_op->flags |= IOSQE_IO_LINK;
     io_uring_sqe_set_data(sqe_op, &op);
-
-    auto* sqe_timer = ctx.GetSqe();
-    sqe_timer->flags |= IOSQE_CQE_SKIP_SUCCESS;
-    io_uring_prep_link_timeout(sqe_timer, &ts, 0);
-    io_uring_sqe_set_data(sqe_timer, nullptr);
 }
 
 /// @brief Waits for events on a file descriptor (poll).
@@ -1466,27 +1324,19 @@ struct ReadvOp : DispatchOp<ReadvOp>
     }
 };
 
-inline void Submit(UringBackend&, IoContext& ctx, ReadvOp& op)
+inline void Submit(UringBackend& backend, IoContext&, ReadvOp& op)
 {
-    ctx.EnsureSqes(1);
-    auto* sqe = ctx.GetSqe();
+    auto* sqe = PrepareSqe(backend);
     io_uring_prep_readv(sqe, op.fd, op.iovecs.data(), static_cast<unsigned>(op.iovecs.size()), op.offset);
     io_uring_sqe_set_data(sqe, &op);
 }
 
-inline void SubmitWithTimeout(UringBackend&, IoContext& ctx, ReadvOp& op, __kernel_timespec& ts)
+inline void SubmitWithTimeout(UringBackend& backend, IoContext&, ReadvOp& op, __kernel_timespec& ts)
 {
-    ctx.EnsureSqes(2);
-
-    auto* sqe_op = ctx.GetSqe();
+    auto [sqe_op, sqe_timer] = PrepareLinkedTimeoutSqes(backend, ts);
     io_uring_prep_readv(sqe_op, op.fd, op.iovecs.data(), static_cast<unsigned>(op.iovecs.size()), op.offset);
     sqe_op->flags |= IOSQE_IO_LINK;
     io_uring_sqe_set_data(sqe_op, &op);
-
-    auto* sqe_timer = ctx.GetSqe();
-    sqe_timer->flags |= IOSQE_CQE_SKIP_SUCCESS;
-    io_uring_prep_link_timeout(sqe_timer, &ts, 0);
-    io_uring_sqe_set_data(sqe_timer, nullptr);
 }
 
 /// @brief Reads data into multiple buffers (scatter read).
@@ -1526,27 +1376,19 @@ struct WritevOp : DispatchOp<WritevOp>
     }
 };
 
-inline void Submit(UringBackend&, IoContext& ctx, WritevOp& op)
+inline void Submit(UringBackend& backend, IoContext&, WritevOp& op)
 {
-    ctx.EnsureSqes(1);
-    auto* sqe = ctx.GetSqe();
+    auto* sqe = PrepareSqe(backend);
     io_uring_prep_writev(sqe, op.fd, op.iovecs.data(), static_cast<unsigned>(op.iovecs.size()), op.offset);
     io_uring_sqe_set_data(sqe, &op);
 }
 
-inline void SubmitWithTimeout(UringBackend&, IoContext& ctx, WritevOp& op, __kernel_timespec& ts)
+inline void SubmitWithTimeout(UringBackend& backend, IoContext&, WritevOp& op, __kernel_timespec& ts)
 {
-    ctx.EnsureSqes(2);
-
-    auto* sqe_op = ctx.GetSqe();
+    auto [sqe_op, sqe_timer] = PrepareLinkedTimeoutSqes(backend, ts);
     io_uring_prep_writev(sqe_op, op.fd, op.iovecs.data(), static_cast<unsigned>(op.iovecs.size()), op.offset);
     sqe_op->flags |= IOSQE_IO_LINK;
     io_uring_sqe_set_data(sqe_op, &op);
-
-    auto* sqe_timer = ctx.GetSqe();
-    sqe_timer->flags |= IOSQE_CQE_SKIP_SUCCESS;
-    io_uring_prep_link_timeout(sqe_timer, &ts, 0);
-    io_uring_sqe_set_data(sqe_timer, nullptr);
 }
 
 /// @brief Writes data from multiple buffers (gather write).
@@ -1586,27 +1428,19 @@ struct SendmsgOp : DispatchOp<SendmsgOp>
     }
 };
 
-inline void Submit(UringBackend&, IoContext& ctx, SendmsgOp& op)
+inline void Submit(UringBackend& backend, IoContext&, SendmsgOp& op)
 {
-    ctx.EnsureSqes(1);
-    auto* sqe = ctx.GetSqe();
+    auto* sqe = PrepareSqe(backend);
     io_uring_prep_sendmsg(sqe, op.fd, op.msg, op.flags);
     io_uring_sqe_set_data(sqe, &op);
 }
 
-inline void SubmitWithTimeout(UringBackend&, IoContext& ctx, SendmsgOp& op, __kernel_timespec& ts)
+inline void SubmitWithTimeout(UringBackend& backend, IoContext&, SendmsgOp& op, __kernel_timespec& ts)
 {
-    ctx.EnsureSqes(2);
-
-    auto* sqe_op = ctx.GetSqe();
+    auto [sqe_op, sqe_timer] = PrepareLinkedTimeoutSqes(backend, ts);
     io_uring_prep_sendmsg(sqe_op, op.fd, op.msg, op.flags);
     sqe_op->flags |= IOSQE_IO_LINK;
     io_uring_sqe_set_data(sqe_op, &op);
-
-    auto* sqe_timer = ctx.GetSqe();
-    sqe_timer->flags |= IOSQE_CQE_SKIP_SUCCESS;
-    io_uring_prep_link_timeout(sqe_timer, &ts, 0);
-    io_uring_sqe_set_data(sqe_timer, nullptr);
 }
 
 /// @brief Sends a message with optional ancillary data (sendmsg).
@@ -1659,27 +1493,19 @@ struct SleepOp : DispatchOp<SleepOp<Backend>, Backend>
     }
 };
 
-inline void Submit(UringBackend&, IoContext& ctx, SleepOp<UringBackend>& op)
+inline void Submit(UringBackend& backend, IoContext&, SleepOp<UringBackend>& op)
 {
-    ctx.EnsureSqes(1);
-    auto* sqe = ctx.GetSqe();
+    auto* sqe = PrepareSqe(backend);
     io_uring_prep_timeout(sqe, &op.ts, 0, 0);
     io_uring_sqe_set_data(sqe, &op);
 }
 
-inline void SubmitWithTimeout(UringBackend&, IoContext& ctx, SleepOp<UringBackend>& op, __kernel_timespec& ts)
+inline void SubmitWithTimeout(UringBackend& backend, IoContext&, SleepOp<UringBackend>& op, __kernel_timespec& ts)
 {
-    ctx.EnsureSqes(2);
-
-    auto* sqe_op = ctx.GetSqe();
+    auto [sqe_op, sqe_timer] = PrepareLinkedTimeoutSqes(backend, ts);
     io_uring_prep_timeout(sqe_op, &op.ts, 0, 0);
     sqe_op->flags |= IOSQE_IO_LINK;
     io_uring_sqe_set_data(sqe_op, &op);
-
-    auto* sqe_timer = ctx.GetSqe();
-    sqe_timer->flags |= IOSQE_CQE_SKIP_SUCCESS;
-    io_uring_prep_link_timeout(sqe_timer, &ts, 0);
-    io_uring_sqe_set_data(sqe_timer, nullptr);
 }
 
 inline void Submit(MemoryBackend& backend, MemoryIoContext&, SleepOp<MemoryBackend>& op)
