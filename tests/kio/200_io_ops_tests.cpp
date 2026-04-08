@@ -26,6 +26,11 @@ protected:
     IoContext ctx{256};
 };
 
+class MemoryIoOpsTest : public ::testing::Test {
+protected:
+    MemoryIoContext ctx{MakeMemoryIoContext()};
+};
+
 // -----------------------------------------------------------------------------
 // AsyncRead / AsyncWrite Tests
 // -----------------------------------------------------------------------------
@@ -105,6 +110,241 @@ TEST_F(IoOpsTest, ReadEOF) {
         auto rr = co_await AsyncRead(ctx, file.Get(), buf, 0);
         EXPECT_TRUE(rr.has_value());
         EXPECT_EQ(*rr, 5u);  // Only 5 bytes available
+        co_return;
+    };
+
+    auto task = test();
+    ctx.RunUntilDone(std::move(task));
+}
+
+TEST_F(MemoryIoOpsTest, OpenWriteReadCloseFile) {
+    auto test = [&]() -> Task<void> {
+        auto fd_res = co_await AsyncOpen(ctx, "/mem/file.txt", O_CREAT | O_RDWR | O_TRUNC, 0644);
+        EXPECT_TRUE(fd_res.has_value());
+        if (!fd_res)
+        {
+            co_return;
+        }
+
+        auto data = AsBytes("hello");
+        auto wr = co_await AsyncWrite(ctx, *fd_res, data, 0);
+        EXPECT_TRUE(wr.has_value());
+        EXPECT_EQ(*wr, 5u);
+
+        auto fs = co_await AsyncFsync(ctx, *fd_res);
+        EXPECT_TRUE(fs.has_value());
+
+        std::array<std::byte, 5> buf{};
+        auto rr = co_await AsyncRead(ctx, *fd_res, buf, 0);
+        EXPECT_TRUE(rr.has_value());
+        EXPECT_EQ(*rr, 5u);
+        EXPECT_EQ(AsString(buf), "hello");
+
+        auto cr = co_await AsyncClose(ctx, *fd_res);
+        EXPECT_TRUE(cr.has_value());
+        co_return;
+    };
+
+    auto task = test();
+    ctx.RunUntilDone(std::move(task));
+}
+
+TEST_F(MemoryIoOpsTest, OpenMissingFileFails) {
+    auto test = [&]() -> Task<void> {
+        auto fd_res = co_await AsyncOpen(ctx, "/mem/missing.txt", O_RDONLY, 0);
+        EXPECT_FALSE(fd_res.has_value());
+        EXPECT_EQ(fd_res.error(), make_error_code(ENOENT));
+        co_return;
+    };
+
+    auto task = test();
+    ctx.RunUntilDone(std::move(task));
+}
+
+TEST(MemoryIoBackendConfigTest, QueuedOpenFaultFailsDeterministically) {
+    auto ctx = MakeMemoryIoContext(MemoryBackendBuilder{}.QueueOpenError(EIO));
+
+    auto test = [&]() -> Task<void> {
+        auto fd_res = co_await AsyncOpen(ctx, "/mem/open-fault.txt", O_CREAT | O_RDWR | O_TRUNC, 0644);
+        EXPECT_FALSE(fd_res.has_value());
+        EXPECT_EQ(fd_res.error(), make_error_code(EIO));
+        co_return;
+    };
+
+    auto task = test();
+    ctx.RunUntilDone(std::move(task));
+}
+
+TEST_F(MemoryIoOpsTest, ReadAfterCloseFails) {
+    auto test = [&]() -> Task<void> {
+        auto fd_res = co_await AsyncOpen(ctx, "/mem/closed.txt", O_CREAT | O_RDWR | O_TRUNC, 0644);
+        EXPECT_TRUE(fd_res.has_value());
+        if (!fd_res)
+        {
+            co_return;
+        }
+
+        auto close_res = co_await AsyncClose(ctx, *fd_res);
+        EXPECT_TRUE(close_res.has_value());
+        if (!close_res)
+        {
+            co_return;
+        }
+
+        std::array<std::byte, 4> buf{};
+        auto rr = co_await AsyncRead(ctx, *fd_res, buf, 0);
+        EXPECT_FALSE(rr.has_value());
+        EXPECT_EQ(rr.error(), make_error_code(EBADF));
+        co_return;
+    };
+
+    auto task = test();
+    ctx.RunUntilDone(std::move(task));
+}
+
+TEST(MemoryIoBackendConfigTest, DefaultPartialWriteCap) {
+    auto ctx = MakeMemoryIoContext(MemoryBackendBuilder{}.WithDefaultMaxWriteBytes(2));
+
+    auto test = [&]() -> Task<void> {
+        auto fd_res = co_await AsyncOpen(ctx, "/mem/partial-write.txt", O_CREAT | O_RDWR | O_TRUNC, 0644);
+        EXPECT_TRUE(fd_res.has_value());
+        if (!fd_res)
+        {
+            co_return;
+        }
+
+        auto wr = co_await AsyncWrite(ctx, *fd_res, AsBytes("hello"), 0);
+        EXPECT_TRUE(wr.has_value());
+        EXPECT_EQ(*wr, 2u);
+
+        std::array<std::byte, 5> buf{};
+        auto rr = co_await AsyncRead(ctx, *fd_res, buf, 0);
+        EXPECT_TRUE(rr.has_value());
+        EXPECT_EQ(*rr, 2u);
+        EXPECT_EQ(AsString(std::span{buf}.subspan(0, 2)), "he");
+        co_return;
+    };
+
+    auto task = test();
+    ctx.RunUntilDone(std::move(task));
+}
+
+TEST_F(MemoryIoOpsTest, QueuedReadFaultFailsDeterministically) {
+    auto ctx = MakeMemoryIoContext(MemoryBackendBuilder{}.QueueReadError(EIO));
+
+    auto test = [&]() -> Task<void> {
+        auto fd_res = co_await AsyncOpen(ctx, "/mem/read-fault.txt", O_CREAT | O_RDWR | O_TRUNC, 0644);
+        EXPECT_TRUE(fd_res.has_value());
+        if (!fd_res)
+        {
+            co_return;
+        }
+
+        auto wr = co_await AsyncWrite(ctx, *fd_res, AsBytes("abc"), 0);
+        EXPECT_TRUE(wr.has_value());
+
+        std::array<std::byte, 3> buf{};
+        auto rr = co_await AsyncRead(ctx, *fd_res, buf, 0);
+        EXPECT_FALSE(rr.has_value());
+        EXPECT_EQ(rr.error(), make_error_code(EIO));
+        co_return;
+    };
+
+    auto task = test();
+    ctx.RunUntilDone(std::move(task));
+}
+
+TEST_F(MemoryIoOpsTest, QueuedWriteFaultFailsDeterministically) {
+    auto ctx = MakeMemoryIoContext(MemoryBackendBuilder{}.QueueWriteError(EIO));
+
+    auto test = [&]() -> Task<void> {
+        auto fd_res = co_await AsyncOpen(ctx, "/mem/write-fault.txt", O_CREAT | O_RDWR | O_TRUNC, 0644);
+        EXPECT_TRUE(fd_res.has_value());
+        if (!fd_res)
+        {
+            co_return;
+        }
+
+        auto wr = co_await AsyncWrite(ctx, *fd_res, AsBytes("abc"), 0);
+        EXPECT_FALSE(wr.has_value());
+        EXPECT_EQ(wr.error(), make_error_code(EIO));
+        co_return;
+    };
+
+    auto task = test();
+    ctx.RunUntilDone(std::move(task));
+}
+
+TEST_F(MemoryIoOpsTest, QueuedFsyncFaultFailsDeterministically) {
+    auto ctx = MakeMemoryIoContext(MemoryBackendBuilder{}.QueueFsyncError(EIO));
+
+    auto test = [&]() -> Task<void> {
+        auto fd_res = co_await AsyncOpen(ctx, "/mem/fsync-fault.txt", O_CREAT | O_RDWR | O_TRUNC, 0644);
+        EXPECT_TRUE(fd_res.has_value());
+        if (!fd_res)
+        {
+            co_return;
+        }
+
+        auto wr = co_await AsyncWrite(ctx, *fd_res, AsBytes("abc"), 0);
+        EXPECT_TRUE(wr.has_value());
+
+        auto fs = co_await AsyncFsync(ctx, *fd_res);
+        EXPECT_FALSE(fs.has_value());
+        EXPECT_EQ(fs.error(), make_error_code(EIO));
+        co_return;
+    };
+
+    auto task = test();
+    ctx.RunUntilDone(std::move(task));
+}
+
+TEST_F(MemoryIoOpsTest, QueuedCloseFaultFailsDeterministically) {
+    auto ctx = MakeMemoryIoContext(MemoryBackendBuilder{}.QueueCloseError(EIO));
+
+    auto test = [&]() -> Task<void> {
+        auto fd_res = co_await AsyncOpen(ctx, "/mem/close-fault.txt", O_CREAT | O_RDWR | O_TRUNC, 0644);
+        EXPECT_TRUE(fd_res.has_value());
+        if (!fd_res)
+        {
+            co_return;
+        }
+
+        auto cr = co_await AsyncClose(ctx, *fd_res);
+        EXPECT_FALSE(cr.has_value());
+        EXPECT_EQ(cr.error(), make_error_code(EIO));
+        co_return;
+    };
+
+    auto task = test();
+    ctx.RunUntilDone(std::move(task));
+}
+
+TEST_F(MemoryIoOpsTest, QueuedPartialReadIsOneShot) {
+    auto ctx = MakeMemoryIoContext(MemoryBackendBuilder{}.QueueReadPartial(2));
+
+    auto test = [&]() -> Task<void> {
+        auto fd_res = co_await AsyncOpen(ctx, "/mem/partial-read.txt", O_CREAT | O_RDWR | O_TRUNC, 0644);
+        EXPECT_TRUE(fd_res.has_value());
+        if (!fd_res)
+        {
+            co_return;
+        }
+
+        auto wr = co_await AsyncWrite(ctx, *fd_res, AsBytes("hello"), 0);
+        EXPECT_TRUE(wr.has_value());
+
+        std::array<std::byte, 5> first{};
+        auto rr1 = co_await AsyncRead(ctx, *fd_res, first, 0);
+        EXPECT_TRUE(rr1.has_value());
+        EXPECT_EQ(*rr1, 2u);
+        EXPECT_EQ(AsString(std::span{first}.subspan(0, 2)), "he");
+
+        std::array<std::byte, 5> second{};
+        auto rr2 = co_await AsyncRead(ctx, *fd_res, second, 0);
+        EXPECT_TRUE(rr2.has_value());
+        EXPECT_EQ(*rr2, 5u);
+        EXPECT_EQ(AsString(second), "hello");
         co_return;
     };
 

@@ -8,11 +8,15 @@
 #include <deque>
 #include <queue>
 #include <expected>
+#include <filesystem>
 #include <format>
 #include <latch>
 #include <memory>
 #include <mutex>
+#include <span>
+#include <string>
 #include <system_error>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -646,19 +650,65 @@ inline std::pair<io_uring_sqe*, io_uring_sqe*> PrepareLinkedTimeoutSqes(UringBac
 struct MemoryBackend
 {
     using NativeFileHandle = uint64_t;
+    using clock = std::chrono::steady_clock;
+
+    enum class TimeMode : uint8_t
+    {
+        AutoAdvance,
+        ManualAdvance,
+    };
+
+    struct Config
+    {
+        TimeMode time_mode = TimeMode::AutoAdvance;
+        clock::duration start_time{};
+        size_t default_max_read_bytes = 0;
+        size_t default_max_write_bytes = 0;
+    };
+
+    struct IoFault
+    {
+        int error = 0;
+        size_t max_bytes = 0;
+    };
+
+    struct FileState
+    {
+        std::vector<std::byte> data;
+        bool fsynced = false;
+    };
+
+    struct OpenFileState
+    {
+        std::shared_ptr<FileState> file;
+        int flags = 0;
+    };
 
     struct TimerEntry
     {
-        std::chrono::steady_clock::time_point due;
+        clock::time_point due;
         OperationState* op = nullptr;
         bool operator>(const TimerEntry& o) const noexcept { return due > o.due; }
     };
 
+    Config config_{};
     std::deque<OperationState*> ready_;
     // Min-heap: soonest deadline at top — O(log n) insert, O(1) peek.
     std::priority_queue<TimerEntry, std::vector<TimerEntry>, std::greater<TimerEntry>> timers_;
+    std::unordered_map<std::string, std::shared_ptr<FileState>> files_;
+    std::unordered_map<NativeFileHandle, OpenFileState> open_files_;
+    std::deque<IoFault> open_faults_;
+    std::deque<IoFault> read_faults_;
+    std::deque<IoFault> write_faults_;
+    std::deque<IoFault> close_faults_;
+    std::deque<IoFault> fsync_faults_;
+    NativeFileHandle next_handle_ = 1;
     int wake_fd_ = -1;
     uint64_t wake_buffer_ = 0;
+    clock::time_point now_{};
+
+    MemoryBackend() = default;
+    explicit MemoryBackend(Config config) : config_(config), now_(clock::time_point(config.start_time)) {}
 
     void Init(unsigned);
     void Shutdown() noexcept;
@@ -670,7 +720,31 @@ struct MemoryBackend
     int WakeFd() const { return wake_fd_; }
     void SubmitWakeRead() {}
     void FlushAfterWake() {}
-    void AddTimer(OperationState* op, std::chrono::steady_clock::time_point due);
+    void AddTimer(OperationState* op, clock::time_point due);
+    void Complete(OperationState* op, int32_t res);
+    clock::time_point Now() const noexcept { return now_; }
+    void AdvanceTime(clock::duration delta) noexcept { now_ += delta; }
+    void AdvanceTo(clock::time_point tp) noexcept
+    {
+        if (tp > now_)
+        {
+            now_ = tp;
+        }
+    }
+    void QueueOpenError(int error) { open_faults_.push_back(IoFault{.error = error}); }
+    void QueueReadError(int error) { read_faults_.push_back(IoFault{.error = error}); }
+    void QueueWriteError(int error) { write_faults_.push_back(IoFault{.error = error}); }
+    void QueueCloseError(int error) { close_faults_.push_back(IoFault{.error = error}); }
+    void QueueFsyncError(int error) { fsync_faults_.push_back(IoFault{.error = error}); }
+    void QueueReadPartial(size_t max_bytes) { read_faults_.push_back(IoFault{.max_bytes = max_bytes}); }
+    void QueueWritePartial(size_t max_bytes) { write_faults_.push_back(IoFault{.max_bytes = max_bytes}); }
+    void SetDefaultMaxReadBytes(size_t max_bytes) noexcept { config_.default_max_read_bytes = max_bytes; }
+    void SetDefaultMaxWriteBytes(size_t max_bytes) noexcept { config_.default_max_write_bytes = max_bytes; }
+    Result<NativeFileHandle> OpenFile(const std::filesystem::path& path, int flags, mode_t mode);
+    Result<size_t> ReadFile(NativeFileHandle handle, std::span<std::byte> buffer, uint64_t offset);
+    Result<size_t> WriteFile(NativeFileHandle handle, std::span<const std::byte> buffer, uint64_t offset);
+    Result<void> CloseFile(NativeFileHandle handle);
+    Result<void> FsyncFile(NativeFileHandle handle);
 
     template <typename OnCompletion>
     bool DrainWithoutResume(OnCompletion&& on_completion)
@@ -746,6 +820,7 @@ public:
     // user can pass their own io uring flag.
     // Note: using single issuer must ensure single issuer constraints are met.
     explicit BasicIoContext(unsigned entries = 16800);
+    BasicIoContext(Backend backend, unsigned entries);
 
     ~BasicIoContext() noexcept;
 

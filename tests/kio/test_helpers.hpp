@@ -57,6 +57,108 @@ inline void RunSync(Task<> task) {
 }
 
 // -----------------------------------------------------------------------------
+// Memory backend test helpers
+// -----------------------------------------------------------------------------
+
+class MemoryBackendBuilder {
+public:
+    MemoryBackendBuilder& WithTimeMode(MemoryBackend::TimeMode mode) {
+        config_.time_mode = mode;
+        return *this;
+    }
+
+    MemoryBackendBuilder& WithStartTime(MemoryBackend::clock::duration start_time) {
+        config_.start_time = start_time;
+        return *this;
+    }
+
+    MemoryBackendBuilder& WithDefaultMaxReadBytes(size_t max_bytes) {
+        config_.default_max_read_bytes = max_bytes;
+        return *this;
+    }
+
+    MemoryBackendBuilder& WithDefaultMaxWriteBytes(size_t max_bytes) {
+        config_.default_max_write_bytes = max_bytes;
+        return *this;
+    }
+
+    MemoryBackendBuilder& QueueOpenError(int error) {
+        open_errors_.push_back(error);
+        return *this;
+    }
+
+    MemoryBackendBuilder& QueueReadError(int error) {
+        read_errors_.push_back(error);
+        return *this;
+    }
+
+    MemoryBackendBuilder& QueueWriteError(int error) {
+        write_errors_.push_back(error);
+        return *this;
+    }
+
+    MemoryBackendBuilder& QueueCloseError(int error) {
+        close_errors_.push_back(error);
+        return *this;
+    }
+
+    MemoryBackendBuilder& QueueFsyncError(int error) {
+        fsync_errors_.push_back(error);
+        return *this;
+    }
+
+    MemoryBackendBuilder& QueueReadPartial(size_t max_bytes) {
+        read_partials_.push_back(max_bytes);
+        return *this;
+    }
+
+    MemoryBackendBuilder& QueueWritePartial(size_t max_bytes) {
+        write_partials_.push_back(max_bytes);
+        return *this;
+    }
+
+    MemoryBackend Build() const {
+        MemoryBackend backend(config_);
+        for (int error : open_errors_) {
+            backend.QueueOpenError(error);
+        }
+        for (int error : read_errors_) {
+            backend.QueueReadError(error);
+        }
+        for (int error : write_errors_) {
+            backend.QueueWriteError(error);
+        }
+        for (int error : close_errors_) {
+            backend.QueueCloseError(error);
+        }
+        for (int error : fsync_errors_) {
+            backend.QueueFsyncError(error);
+        }
+        for (size_t max_bytes : read_partials_) {
+            backend.QueueReadPartial(max_bytes);
+        }
+        for (size_t max_bytes : write_partials_) {
+            backend.QueueWritePartial(max_bytes);
+        }
+        return backend;
+    }
+
+private:
+    MemoryBackend::Config config_{};
+    std::vector<int> open_errors_;
+    std::vector<int> read_errors_;
+    std::vector<int> write_errors_;
+    std::vector<int> close_errors_;
+    std::vector<int> fsync_errors_;
+    std::vector<size_t> read_partials_;
+    std::vector<size_t> write_partials_;
+};
+
+inline MemoryIoContext MakeMemoryIoContext(MemoryBackendBuilder builder = {}, unsigned entries = 64) {
+    return MemoryIoContext(builder.Build(), entries);
+}
+
+// -----------------------------------------------------------------------------
 // File descriptor utilities
 // -----------------------------------------------------------------------------
 

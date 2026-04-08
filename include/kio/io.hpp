@@ -290,7 +290,7 @@ private:
 template <typename Backend>
 struct BasicFileHandle
 {
-    using native_handle_type = typename Backend::NativeFileHandle;
+    using native_handle_type = Backend::NativeFileHandle;
 
     native_handle_type handle = static_cast<native_handle_type>(-1);
 
@@ -694,7 +694,9 @@ struct RenameAtOp : DispatchOp<RenameAtOp>
     Result<> await_resume()
     {
         if (res < 0)
+        {
             return std::unexpected(make_error_code(res));
+        }
         return {};
     }
 };
@@ -714,9 +716,9 @@ inline void SubmitWithTimeout(UringBackend& backend, IoContext&, RenameAtOp& op,
     io_uring_sqe_set_data(sqe_op, &op);
 }
 
-[[nodiscard]] inline RenameAtOp AsyncRename(IoContext& ctx, int old_dirfd,
-                                            const std::filesystem::path old_path, int new_dirfd,
-                                            const std::filesystem::path new_path, unsigned flags = 0)
+[[nodiscard]] inline RenameAtOp AsyncRename(IoContext& ctx, int old_dirfd, const std::filesystem::path old_path,
+                                            const int new_dirfd, const std::filesystem::path new_path,
+                                            const unsigned flags = 0)
 {
     return RenameAtOp(&ctx, old_dirfd, old_path, new_dirfd, new_path, flags);
 }
@@ -733,6 +735,7 @@ struct OpenOp : DispatchOp<OpenOp<Backend>, Backend>
     std::filesystem::path path;
     int flags;
     mode_t mode;
+    typename Backend::NativeFileHandle opened_handle{};
 
     OpenOp(BasicIoContext<Backend>& ctx, std::filesystem::path p, int f, mode_t m)
         : DispatchOp<OpenOp<Backend>, Backend>(&ctx), path(std::move(p)), flags(f), mode(m)
@@ -745,23 +748,49 @@ struct OpenOp : DispatchOp<OpenOp<Backend>, Backend>
         {
             return std::unexpected(make_error_code(this->res));
         }
-        return BasicFileHandle<Backend>(static_cast<typename Backend::NativeFileHandle>(this->res));
+        if constexpr (std::same_as<Backend, MemoryBackend>)
+        {
+            return BasicFileHandle<Backend>(opened_handle);
+        }
+        else
+        {
+            return BasicFileHandle<Backend>(static_cast<Backend::NativeFileHandle>(this->res));
+        }
     }
 };
 
-inline void Submit(UringBackend& backend, IoContext&, OpenOp<UringBackend>& op)
+inline void Submit(UringBackend& backend, IoContext&, OpenOp<>& op)
 {
     auto* sqe = PrepareSqe(backend);
     io_uring_prep_openat(sqe, AT_FDCWD, op.path.c_str(), op.flags, op.mode);
     io_uring_sqe_set_data(sqe, &op);
 }
 
-inline void SubmitWithTimeout(UringBackend& backend, IoContext&, OpenOp<UringBackend>& op, __kernel_timespec& ts)
+inline void SubmitWithTimeout(UringBackend& backend, IoContext&, OpenOp<>& op, __kernel_timespec& ts)
 {
     auto [sqe_op, sqe_timer] = PrepareLinkedTimeoutSqes(backend, ts);
     io_uring_prep_openat(sqe_op, AT_FDCWD, op.path.c_str(), op.flags, op.mode);
     sqe_op->flags |= IOSQE_IO_LINK;
     io_uring_sqe_set_data(sqe_op, &op);
+}
+
+inline void Submit(MemoryBackend& backend, MemoryIoContext&, OpenOp<MemoryBackend>& op)
+{
+    const auto result = backend.OpenFile(op.path, op.flags, op.mode);
+    if (!result)
+    {
+        backend.Complete(&op, -result.error().value());
+        return;
+    }
+
+    op.opened_handle = *result;
+    backend.Complete(&op, 0);
+}
+
+inline void SubmitWithTimeout(MemoryBackend& backend, MemoryIoContext& ctx, OpenOp<MemoryBackend>& op,
+                              __kernel_timespec&)
+{
+    Submit(backend, ctx, op);
 }
 
 /// @brief Opens a file asynchronously.
@@ -779,8 +808,8 @@ inline void SubmitWithTimeout(UringBackend& backend, IoContext&, OpenOp<UringBac
 ///   }
 /// @endcode
 template <typename Backend>
-[[nodiscard]] inline OpenOp<Backend> AsyncOpen(BasicIoContext<Backend>& ctx, const std::filesystem::path path, int flags,
-                                               mode_t mode = 0644)
+[[nodiscard]] inline OpenOp<Backend> AsyncOpen(BasicIoContext<Backend>& ctx, const std::filesystem::path path,
+                                               int flags, mode_t mode = 0644)
 {
     return OpenOp<Backend>(ctx, path, flags, mode);
 }
@@ -818,6 +847,18 @@ inline void SubmitWithTimeout(UringBackend& backend, IoContext&, ReadOp<UringBac
     io_uring_sqe_set_data(sqe_op, &op);
 }
 
+inline void Submit(MemoryBackend& backend, MemoryIoContext&, ReadOp<MemoryBackend>& op)
+{
+    const auto result = backend.ReadFile(op.fd, op.buffer, op.offset);
+    backend.Complete(&op, result ? static_cast<int32_t>(*result) : -result.error().value());
+}
+
+inline void SubmitWithTimeout(MemoryBackend& backend, MemoryIoContext& ctx, ReadOp<MemoryBackend>& op,
+                              __kernel_timespec&)
+{
+    Submit(backend, ctx, op);
+}
+
 /// @brief Reads data from a file descriptor.
 /// @param ctx The IoContext to run on
 /// @param f File descriptor to read from
@@ -843,45 +884,55 @@ template <typename Backend>
     return ReadOp<Backend>{ctx, f, buffer, offset};
 }
 
-[[nodiscard]] inline ReadOp<UringBackend> AsyncRead(IoContext& ctx, int fd, std::span<std::byte> buffer,
-                                                    uint64_t offset = 0)
+[[nodiscard]] inline ReadOp<> AsyncRead(IoContext& ctx, int fd, std::span<std::byte> buffer, uint64_t offset = 0)
 {
-    return ReadOp<UringBackend>{ctx, fd, buffer, offset};
+    return ReadOp{ctx, fd, buffer, offset};
 }
 
 template <typename Backend = UringBackend>
 struct WriteOp : DispatchOp<WriteOp<Backend>, Backend>
 {
-    typename Backend::NativeFileHandle fd;
+    Backend::NativeFileHandle fd;
     std::span<const std::byte> buffer;
     uint64_t offset;
 
-    WriteOp(BasicIoContext<Backend>& ctx, typename Backend::NativeFileHandle f, std::span<const std::byte> buf,
-            uint64_t off)
-        : DispatchOp<WriteOp<Backend>, Backend>(&ctx), fd(f), buffer(buf), offset(off)
+    WriteOp(BasicIoContext<Backend>& ctx, Backend::NativeFileHandle f, std::span<const std::byte> buf, uint64_t off)
+        : DispatchOp<WriteOp, Backend>(&ctx), fd(f), buffer(buf), offset(off)
     {
     }
 
     WriteOp(BasicIoContext<Backend>& ctx, const BasicFileHandle<Backend>& f, std::span<const std::byte> buf,
             uint64_t off)
-        : DispatchOp<WriteOp<Backend>, Backend>(&ctx), fd(GetFileHandle(f)), buffer(buf), offset(off)
+        : DispatchOp<WriteOp, Backend>(&ctx), fd(GetFileHandle(f)), buffer(buf), offset(off)
     {
     }
 };
 
-inline void Submit(UringBackend& backend, IoContext&, WriteOp<UringBackend>& op)
+inline void Submit(UringBackend& backend, IoContext&, WriteOp<>& op)
 {
     auto* sqe = PrepareSqe(backend);
     io_uring_prep_write(sqe, op.fd, op.buffer.data(), op.buffer.size(), op.offset);
     io_uring_sqe_set_data(sqe, &op);
 }
 
-inline void SubmitWithTimeout(UringBackend& backend, IoContext&, WriteOp<UringBackend>& op, __kernel_timespec& ts)
+inline void SubmitWithTimeout(UringBackend& backend, IoContext&, WriteOp<>& op, __kernel_timespec& ts)
 {
     auto [sqe_op, sqe_timer] = PrepareLinkedTimeoutSqes(backend, ts);
     io_uring_prep_write(sqe_op, op.fd, op.buffer.data(), op.buffer.size(), op.offset);
     sqe_op->flags |= IOSQE_IO_LINK;
     io_uring_sqe_set_data(sqe_op, &op);
+}
+
+inline void Submit(MemoryBackend& backend, MemoryIoContext&, WriteOp<MemoryBackend>& op)
+{
+    const auto result = backend.WriteFile(op.fd, op.buffer, op.offset);
+    backend.Complete(&op, result ? static_cast<int32_t>(*result) : -result.error().value());
+}
+
+inline void SubmitWithTimeout(MemoryBackend& backend, MemoryIoContext& ctx, WriteOp<MemoryBackend>& op,
+                              __kernel_timespec&)
+{
+    Submit(backend, ctx, op);
 }
 
 /// @brief Writes data to a file descriptor.
@@ -905,10 +956,10 @@ template <typename Backend>
     return WriteOp<Backend>{ctx, f, buffer, offset};
 }
 
-[[nodiscard]] inline WriteOp<UringBackend> AsyncWrite(IoContext& ctx, int fd, std::span<const std::byte> buffer,
-                                                      uint64_t offset = 0)
+[[nodiscard]] inline WriteOp<> AsyncWrite(IoContext& ctx, int fd, std::span<const std::byte> buffer,
+                                          uint64_t offset = 0)
 {
-    return WriteOp<UringBackend>{ctx, fd, buffer, offset};
+    return WriteOp{ctx, fd, buffer, offset};
 }
 
 template <typename Backend = UringBackend>
@@ -916,13 +967,10 @@ struct CloseOp : DispatchOp<CloseOp<Backend>, Backend>
 {
     typename Backend::NativeFileHandle fd;
 
-    CloseOp(BasicIoContext<Backend>& ctx, typename Backend::NativeFileHandle f)
-        : DispatchOp<CloseOp<Backend>, Backend>(&ctx), fd(f)
-    {
-    }
+    CloseOp(BasicIoContext<Backend>& ctx, Backend::NativeFileHandle f) : DispatchOp<CloseOp, Backend>(&ctx), fd(f) {}
 
     CloseOp(BasicIoContext<Backend>& ctx, const BasicFileHandle<Backend>& f)
-        : DispatchOp<CloseOp<Backend>, Backend>(&ctx), fd(GetFileHandle(f))
+        : DispatchOp<CloseOp, Backend>(&ctx), fd(GetFileHandle(f))
     {
     }
 
@@ -934,19 +982,31 @@ struct CloseOp : DispatchOp<CloseOp<Backend>, Backend>
     }
 };
 
-inline void Submit(UringBackend& backend, IoContext&, CloseOp<UringBackend>& op)
+inline void Submit(UringBackend& backend, IoContext&, CloseOp<>& op)
 {
     auto* sqe = PrepareSqe(backend);
     io_uring_prep_close(sqe, op.fd);
     io_uring_sqe_set_data(sqe, &op);
 }
 
-inline void SubmitWithTimeout(UringBackend& backend, IoContext&, CloseOp<UringBackend>& op, __kernel_timespec& ts)
+inline void SubmitWithTimeout(UringBackend& backend, IoContext&, CloseOp<>& op, __kernel_timespec& ts)
 {
     auto [sqe_op, sqe_timer] = PrepareLinkedTimeoutSqes(backend, ts);
     io_uring_prep_close(sqe_op, op.fd);
     sqe_op->flags |= IOSQE_IO_LINK;
     io_uring_sqe_set_data(sqe_op, &op);
+}
+
+inline void Submit(MemoryBackend& backend, MemoryIoContext&, CloseOp<MemoryBackend>& op)
+{
+    const auto result = backend.CloseFile(op.fd);
+    backend.Complete(&op, result ? 0 : -result.error().value());
+}
+
+inline void SubmitWithTimeout(MemoryBackend& backend, MemoryIoContext& ctx, CloseOp<MemoryBackend>& op,
+                              __kernel_timespec&)
+{
+    Submit(backend, ctx, op);
 }
 
 struct ReadFixedOp : DispatchOp<ReadFixedOp>
@@ -1059,24 +1119,24 @@ inline void SubmitWithTimeout(UringBackend& backend, IoContext&, WriteFixedOp& o
 ///   co_await AsyncClose(ctx, client_socket);
 ///   // client_socket is now invalid
 /// @endcode
-[[nodiscard]] inline CloseOp<UringBackend> AsyncClose(IoContext& ctx, net::Socket& s)
+[[nodiscard]] inline CloseOp<> AsyncClose(IoContext& ctx, net::Socket& s)
 {
     const auto fd = s.Release();
-    return CloseOp<UringBackend>(ctx, fd);
+    return CloseOp(ctx, fd);
 }
 
-inline CloseOp<UringBackend> AsyncClose(IoContext& ctx, int fd)
+inline CloseOp<> AsyncClose(IoContext& ctx, int fd)
 {
-    return CloseOp<UringBackend>(ctx, fd);
+    return CloseOp(ctx, fd);
 }
 
-inline CloseOp<UringBackend> AsyncClose(IoContext& ctx, const FD& fd)
+inline CloseOp<> AsyncClose(IoContext& ctx, const FD& fd)
 {
-    return CloseOp<UringBackend>(ctx, fd);
+    return CloseOp(ctx, fd);
 }
 
 template <typename Backend>
-[[nodiscard]] inline CloseOp<Backend> AsyncClose(BasicIoContext<Backend>& ctx, const BasicFileHandle<Backend>& fd)
+[[nodiscard]] CloseOp<Backend> AsyncClose(BasicIoContext<Backend>& ctx, const BasicFileHandle<Backend>& fd)
 {
     return CloseOp<Backend>(ctx, fd);
 }
@@ -1162,15 +1222,12 @@ ConnectOp AsyncConnect(IoContext& ctx, const F& f, const net::SocketAddress& add
 template <typename Backend = UringBackend>
 struct FsyncOp : DispatchOp<FsyncOp<Backend>, Backend>
 {
-    typename Backend::NativeFileHandle fd;
+    Backend::NativeFileHandle fd;
 
-    FsyncOp(BasicIoContext<Backend>& ctx, typename Backend::NativeFileHandle f)
-        : DispatchOp<FsyncOp<Backend>, Backend>(&ctx), fd(f)
-    {
-    }
+    FsyncOp(BasicIoContext<Backend>& ctx, Backend::NativeFileHandle f) : DispatchOp<FsyncOp, Backend>(&ctx), fd(f) {}
 
     FsyncOp(BasicIoContext<Backend>& ctx, const BasicFileHandle<Backend>& f)
-        : DispatchOp<FsyncOp<Backend>, Backend>(&ctx), fd(GetFileHandle(f))
+        : DispatchOp<FsyncOp, Backend>(&ctx), fd(GetFileHandle(f))
     {
     }
 };
@@ -1182,12 +1239,24 @@ inline void Submit(UringBackend& backend, IoContext&, FsyncOp<UringBackend>& op)
     io_uring_sqe_set_data(sqe, &op);
 }
 
-inline void SubmitWithTimeout(UringBackend& backend, IoContext&, FsyncOp<UringBackend>& op, __kernel_timespec& ts)
+inline void SubmitWithTimeout(UringBackend& backend, IoContext&, FsyncOp<>& op, __kernel_timespec& ts)
 {
     auto [sqe_op, sqe_timer] = PrepareLinkedTimeoutSqes(backend, ts);
     io_uring_prep_fsync(sqe_op, op.fd, 0);
     sqe_op->flags |= IOSQE_IO_LINK;
     io_uring_sqe_set_data(sqe_op, &op);
+}
+
+inline void Submit(MemoryBackend& backend, MemoryIoContext&, FsyncOp<MemoryBackend>& op)
+{
+    const auto result = backend.FsyncFile(op.fd);
+    backend.Complete(&op, result ? 0 : -result.error().value());
+}
+
+inline void SubmitWithTimeout(MemoryBackend& backend, MemoryIoContext& ctx, FsyncOp<MemoryBackend>& op,
+                              __kernel_timespec&)
+{
+    Submit(backend, ctx, op);
 }
 
 /// @brief Flushes file data and metadata to disk (fsync).
@@ -1208,9 +1277,9 @@ FsyncOp<Backend> AsyncFsync(BasicIoContext<Backend>& ctx, const BasicFileHandle<
     return FsyncOp<Backend>(ctx, f);
 }
 
-inline FsyncOp<UringBackend> AsyncFsync(IoContext& ctx, int fd)
+inline FsyncOp<> AsyncFsync(IoContext& ctx, int fd)
 {
-    return FsyncOp<UringBackend>(ctx, fd);
+    return FsyncOp(ctx, fd);
 }
 
 inline Task<Result<void>> AsyncFsyncDir(IoContext& ctx, const std::filesystem::path dir_path)
@@ -1342,7 +1411,7 @@ struct FtruncateOp : DispatchOp<FtruncateOp>
     off_t len;
 
     template <FileDescriptor F>
-    FtruncateOp(IoContext& ctx, const F& f, off_t len) : DispatchOp(&ctx), fd(GetRawFd(f)), len(len)
+    FtruncateOp(IoContext& ctx, const F& f, const off_t len) : DispatchOp(&ctx), fd(GetRawFd(f)), len(len)
     {
     }
 };
@@ -1594,7 +1663,8 @@ struct SleepOp : DispatchOp<SleepOp<Backend>, Backend>
     __kernel_timespec ts{};
 
     template <typename Rep, typename Period>
-    SleepOp(BasicIoContext<Backend>& ctx, std::chrono::duration<Rep, Period> dur) : DispatchOp<SleepOp<Backend>, Backend>(&ctx)
+    SleepOp(BasicIoContext<Backend>& ctx, std::chrono::duration<Rep, Period> dur)
+        : DispatchOp<SleepOp<Backend>, Backend>(&ctx)
     {
         auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(dur).count();
         ts.tv_sec = ns / 1'000'000'000;
@@ -1620,7 +1690,7 @@ inline void Submit(UringBackend& backend, IoContext&, SleepOp<UringBackend>& op)
     io_uring_sqe_set_data(sqe, &op);
 }
 
-inline void SubmitWithTimeout(UringBackend& backend, IoContext&, SleepOp<UringBackend>& op, __kernel_timespec& ts)
+inline void SubmitWithTimeout(UringBackend& backend, IoContext&, SleepOp<>& op, __kernel_timespec& ts)
 {
     auto [sqe_op, sqe_timer] = PrepareLinkedTimeoutSqes(backend, ts);
     io_uring_prep_timeout(sqe_op, &op.ts, 0, 0);
@@ -1631,7 +1701,7 @@ inline void SubmitWithTimeout(UringBackend& backend, IoContext&, SleepOp<UringBa
 inline void Submit(MemoryBackend& backend, MemoryIoContext&, SleepOp<MemoryBackend>& op)
 {
     using namespace std::chrono;
-    const auto due = steady_clock::now() + seconds(op.ts.tv_sec) + nanoseconds(op.ts.tv_nsec);
+    const auto due = backend.Now() + seconds(op.ts.tv_sec) + nanoseconds(op.ts.tv_nsec);
     op.res = 0;
     backend.AddTimer(&op, due);
 }
@@ -1657,7 +1727,7 @@ inline void Submit(MemoryBackend& backend, MemoryIoContext&, SleepOp<MemoryBacke
 template <typename Rep, typename Period>
 auto AsyncSleep(IoContext& ctx, std::chrono::duration<Rep, Period> dur)
 {
-    return SleepOp<UringBackend>(ctx, dur);
+    return SleepOp<>(ctx, dur);
 }
 
 template <typename Rep, typename Period>

@@ -7,6 +7,8 @@
 
 #include <liburing/io_uring.h>
 
+#include <cstring>
+#include <fcntl.h>
 #include <poll.h>
 #include <sys/eventfd.h>
 
@@ -18,9 +20,36 @@ using TimerQueue =
     std::priority_queue<kio::MemoryBackend::TimerEntry, std::vector<kio::MemoryBackend::TimerEntry>,
                         std::greater<kio::MemoryBackend::TimerEntry>>;
 
-void DrainDueTimers(TimerQueue& timers, std::deque<kio::OperationState*>& ready)
+bool CanRead(const int flags)
 {
-    const auto now = std::chrono::steady_clock::now();
+    return (flags & O_ACCMODE) != O_WRONLY;
+}
+
+bool CanWrite(const int flags)
+{
+    const int mode = flags & O_ACCMODE;
+    return mode == O_WRONLY || mode == O_RDWR;
+}
+
+std::string NormalizePath(const std::filesystem::path& path)
+{
+    return path.lexically_normal().generic_string();
+}
+
+kio::MemoryBackend::IoFault TakeFault(std::deque<kio::MemoryBackend::IoFault>& faults)
+{
+    if (faults.empty())
+    {
+        return {};
+    }
+
+    auto fault = faults.front();
+    faults.pop_front();
+    return fault;
+}
+
+void DrainDueTimers(TimerQueue& timers, std::deque<kio::OperationState*>& ready, const kio::MemoryBackend::clock::time_point now)
+{
     while (!timers.empty() && timers.top().due <= now)
     {
         ready.push_back(timers.top().op);
@@ -244,37 +273,183 @@ bool MemoryBackend::Notify() const noexcept
     return ::write(wake_fd_, &val, sizeof(val)) == sizeof(val);
 }
 
-void MemoryBackend::AddTimer(OperationState* op, const std::chrono::steady_clock::time_point due)
+void MemoryBackend::AddTimer(OperationState* op, const clock::time_point due)
 {
     timers_.push({due, op});
+}
+
+void MemoryBackend::Complete(OperationState* op, const int32_t res)
+{
+    op->res = res;
+    ready_.push_back(op);
+}
+
+Result<MemoryBackend::NativeFileHandle> MemoryBackend::OpenFile(const std::filesystem::path& path, const int flags,
+                                                                mode_t)
+{
+    if (const auto fault = TakeFault(open_faults_); fault.error != 0)
+    {
+        return std::unexpected(make_error_code(fault.error));
+    }
+
+    const auto normalized = NormalizePath(path);
+    auto it = files_.find(normalized);
+
+    if ((flags & O_CREAT) != 0)
+    {
+        if ((flags & O_EXCL) != 0 && it != files_.end())
+        {
+            return std::unexpected(make_error_code(EEXIST));
+        }
+
+        if (it == files_.end())
+        {
+            it = files_.emplace(normalized, std::make_shared<FileState>()).first;
+        }
+    }
+    else if (it == files_.end())
+    {
+        return std::unexpected(make_error_code(ENOENT));
+    }
+
+    auto file = it->second;
+    if ((flags & O_TRUNC) != 0 && CanWrite(flags))
+    {
+        file->data.clear();
+        file->fsynced = false;
+    }
+
+    const auto handle = next_handle_++;
+    open_files_[handle] = OpenFileState{.file = std::move(file), .flags = flags};
+    return handle;
+}
+
+Result<size_t> MemoryBackend::ReadFile(const NativeFileHandle handle, const std::span<std::byte> buffer,
+                                       const uint64_t offset)
+{
+    const auto fault = TakeFault(read_faults_);
+    if (fault.error != 0)
+    {
+        return std::unexpected(make_error_code(fault.error));
+    }
+
+    const auto it = open_files_.find(handle);
+    if (it == open_files_.end() || !CanRead(it->second.flags))
+    {
+        return std::unexpected(make_error_code(EBADF));
+    }
+
+    const auto& data = it->second.file->data;
+    if (offset >= data.size())
+    {
+        return size_t{0};
+    }
+
+    const auto available = data.size() - static_cast<size_t>(offset);
+    auto n = std::min(buffer.size(), available);
+    const auto max_bytes = fault.max_bytes != 0 ? fault.max_bytes : config_.default_max_read_bytes;
+    if (max_bytes != 0)
+    {
+        n = std::min(n, max_bytes);
+    }
+    std::memcpy(buffer.data(), data.data() + static_cast<size_t>(offset), n);
+    return n;
+}
+
+Result<size_t> MemoryBackend::WriteFile(const NativeFileHandle handle, const std::span<const std::byte> buffer,
+                                        uint64_t offset)
+{
+    const auto fault = TakeFault(write_faults_);
+    if (fault.error != 0)
+    {
+        return std::unexpected(make_error_code(fault.error));
+    }
+
+    const auto it = open_files_.find(handle);
+    if (it == open_files_.end() || !CanWrite(it->second.flags))
+    {
+        return std::unexpected(make_error_code(EBADF));
+    }
+
+    auto& file = *it->second.file;
+    if ((it->second.flags & O_APPEND) != 0)
+    {
+        offset = file.data.size();
+    }
+
+    auto bytes_to_write = buffer.size();
+    const auto max_bytes = fault.max_bytes != 0 ? fault.max_bytes : config_.default_max_write_bytes;
+    if (max_bytes != 0)
+    {
+        bytes_to_write = std::min(bytes_to_write, max_bytes);
+    }
+
+    const auto end = static_cast<size_t>(offset) + bytes_to_write;
+    if (file.data.size() < end)
+    {
+        file.data.resize(end);
+    }
+
+    std::memcpy(file.data.data() + static_cast<size_t>(offset), buffer.data(), bytes_to_write);
+    file.fsynced = false;
+    return bytes_to_write;
+}
+
+Result<void> MemoryBackend::CloseFile(const NativeFileHandle handle)
+{
+    if (const auto fault = TakeFault(close_faults_); fault.error != 0)
+    {
+        return std::unexpected(make_error_code(fault.error));
+    }
+
+    if (!open_files_.erase(handle))
+    {
+        return std::unexpected(make_error_code(EBADF));
+    }
+    return {};
+}
+
+Result<void> MemoryBackend::FsyncFile(const NativeFileHandle handle)
+{
+    if (const auto fault = TakeFault(fsync_faults_); fault.error != 0)
+    {
+        return std::unexpected(make_error_code(fault.error));
+    }
+
+    const auto it = open_files_.find(handle);
+    if (it == open_files_.end())
+    {
+        return std::unexpected(make_error_code(EBADF));
+    }
+
+    it->second.file->fsynced = true;
+    return {};
 }
 
 int MemoryBackend::SubmitAndWait(unsigned)
 {
     for (;;)
     {
-        DrainDueTimers(timers_, ready_);
+        DrainDueTimers(timers_, ready_, now_);
 
         if (!ready_.empty())
         {
             return 0;
         }
 
-        int timeout_ms = -1;
         if (!timers_.empty())
         {
-            // Min-heap: top() is always the soonest deadline — O(1).
             const auto next_due = timers_.top().due;
-
-            const auto now = std::chrono::steady_clock::now();
-            if (next_due <= now)
+            if (next_due <= now_)
             {
                 continue;
             }
 
-            const auto wait_ms =
-                std::chrono::duration_cast<std::chrono::milliseconds>(next_due - now + std::chrono::milliseconds(1));
-            timeout_ms = static_cast<int>(wait_ms.count());
+            if (config_.time_mode == TimeMode::AutoAdvance)
+            {
+                now_ = next_due;
+                continue;
+            }
         }
 
         pollfd pfd{
@@ -285,7 +460,7 @@ int MemoryBackend::SubmitAndWait(unsigned)
         int ret = 0;
         do
         {
-            ret = ::poll(&pfd, 1, timeout_ms);
+            ret = ::poll(&pfd, 1, -1);
         } while (ret < 0 && errno == EINTR);
 
         if (ret < 0)
@@ -324,6 +499,15 @@ void MemoryBackend::CancelAllPending()
 
 template <typename Backend>
 BasicIoContext<Backend>::BasicIoContext(const unsigned entries)
+{
+    ready_.reserve(entries);
+    backend_.Init(entries);
+
+    ready_latch_.count_down();
+}
+
+template <typename Backend>
+BasicIoContext<Backend>::BasicIoContext(Backend backend, const unsigned entries) : backend_(std::move(backend))
 {
     ready_.reserve(entries);
     backend_.Init(entries);
