@@ -547,6 +547,8 @@ const void* BackendTag() noexcept
 
 struct UringBackend
 {
+    using NativeFileHandle = int;
+
     io_uring ring_{};
     int wake_fd_ = -1;
     uint64_t wake_buffer_ = 0;
@@ -643,6 +645,8 @@ inline std::pair<io_uring_sqe*, io_uring_sqe*> PrepareLinkedTimeoutSqes(UringBac
 
 struct MemoryBackend
 {
+    using NativeFileHandle = uint64_t;
+
     struct TimerEntry
     {
         std::chrono::steady_clock::time_point due;
