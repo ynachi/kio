@@ -20,7 +20,7 @@ constexpr uint64_t kUseFilePos = std::numeric_limits<uint64_t>::max();
 namespace detail
 {
 
-struct SpliceOp : UringOp
+struct SpliceOp : DispatchOp<SpliceOp>
 {
     int fd_in;
     int64_t off_in;
@@ -30,12 +30,33 @@ struct SpliceOp : UringOp
     unsigned int flags;
 
     SpliceOp(IoContext& ctx, int in, int64_t off_in, int out, int64_t off_out, unsigned int length, unsigned int fl)
-        : UringOp(&ctx), fd_in(in), off_in(off_in), fd_out(out), off_out(off_out), len(length), flags(fl)
+        : DispatchOp(&ctx), fd_in(in), off_in(off_in), fd_out(out), off_out(off_out), len(length), flags(fl)
     {
     }
-
-    void PrepareSqe(io_uring_sqe* sqe) { io_uring_prep_splice(sqe, fd_in, off_in, fd_out, off_out, len, flags); }
 };
+
+inline void Submit(UringBackend&, IoContext& ctx, SpliceOp& op)
+{
+    ctx.EnsureSqes(1);
+    auto* sqe = ctx.GetSqe();
+    io_uring_prep_splice(sqe, op.fd_in, op.off_in, op.fd_out, op.off_out, op.len, op.flags);
+    io_uring_sqe_set_data(sqe, &op);
+}
+
+inline void SubmitWithTimeout(UringBackend&, IoContext& ctx, SpliceOp& op, __kernel_timespec& ts)
+{
+    ctx.EnsureSqes(2);
+
+    auto* sqe_op = ctx.GetSqe();
+    io_uring_prep_splice(sqe_op, op.fd_in, op.off_in, op.fd_out, op.off_out, op.len, op.flags);
+    sqe_op->flags |= IOSQE_IO_LINK;
+    io_uring_sqe_set_data(sqe_op, &op);
+
+    auto* sqe_timer = ctx.GetSqe();
+    sqe_timer->flags |= IOSQE_CQE_SKIP_SUCCESS;
+    io_uring_prep_link_timeout(sqe_timer, &ts, 0);
+    io_uring_sqe_set_data(sqe_timer, nullptr);
+}
 
 inline SpliceOp AsyncSplice(IoContext& ctx, int fd_in, int64_t off_in, int fd_out, int64_t off_out, unsigned int len,
                             unsigned int flags = 0)

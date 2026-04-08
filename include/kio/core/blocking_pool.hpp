@@ -144,17 +144,20 @@ namespace kio
 
         OffloadOp(IoContext* c, BlockingPool* p, Fn&& f) : pool(p), fn(std::forward<Fn>(f)) { ctx = c; }
 
+        IoContext& Context() { return *static_cast<IoContext*>(ctx); }
+
         bool await_ready() const noexcept { return false; }
 
         void await_suspend(std::coroutine_handle<> h)
         {
             handle = h;
-            ctx->Track(this);
+            auto& ctx = Context();
+            ctx.Track(this);
 
             // Create lambda that captures 'this' - safe because we track lifetime
             auto job = [this]() noexcept
             {
-                auto* ctx_local = ctx;
+                auto* ctx_local = &Context();
                 try
                 {
                     if constexpr (std::is_void_v<R>)
@@ -179,7 +182,7 @@ namespace kio
 
             if (!pool->TrySubmit(std::move(job)))
             {
-                ctx->Untrack(this);
+                ctx.Untrack(this);
                 throw std::runtime_error("blocking_pool queue full");
             }
         }

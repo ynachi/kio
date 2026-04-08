@@ -39,6 +39,26 @@ TEST(IoContextTest, Notify) {
     ASSERT_TRUE(notified);
 }
 
+TEST(MemoryIoContextTest, Lifecycle) {
+    MemoryIoContext ctx;
+    Task<int> t = []() -> Task<int> { co_return 7; }();
+    ctx.RunUntilDone(std::move(t));
+    ASSERT_EQ(t.Result(), 7);
+}
+
+TEST(MemoryIoContextTest, SleepZeroDuration) {
+    MemoryIoContext ctx;
+    auto task = [&]() -> Task<void> {
+        auto start = std::chrono::steady_clock::now();
+        auto res = co_await AsyncSleep(ctx, std::chrono::milliseconds(0));
+        EXPECT_TRUE(res.has_value());
+        EXPECT_LE(std::chrono::steady_clock::now() - start, std::chrono::milliseconds(50));
+        co_return;
+    }();
+
+    ctx.RunUntilDone(std::move(task));
+}
+
 int main(int argc, char** argv)
 {
     ::testing::InitGoogleTest(&argc, argv);

@@ -2,8 +2,10 @@
 #include "kio/logger.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <coroutine>
 #include <csignal>
+#include <deque>
 #include <expected>
 #include <format>
 #include <functional>
@@ -58,9 +60,11 @@ namespace kio
 {
 // forward declaration
 struct UringBackend;
+struct MemoryBackend;
 template <typename Backend>
 class BasicIoContext;
 using IoContext = BasicIoContext<UringBackend>;
+using MemoryIoContext = BasicIoContext<MemoryBackend>;
 template <typename T>
 class TaskGroup;
 
@@ -447,28 +451,29 @@ private:
     handle_type handle_;
 };
 
-struct UringOp : OperationState
+template <typename Derived, typename Backend = UringBackend>
+struct DispatchOp : OperationState
 {
 protected:
-    explicit UringOp(IoContext* c) { ctx = c; }
+    explicit DispatchOp(BasicIoContext<Backend>* c) { ctx = c; }
 
-    UringOp(UringOp&& other) noexcept : OperationState(std::move(other)) {}
+    DispatchOp(DispatchOp&& other) noexcept : OperationState(std::move(other)) {}
 
 public:
+    BasicIoContext<Backend>& Context() { return *static_cast<BasicIoContext<Backend>*>(ctx); }
+    const BasicIoContext<Backend>& Context() const { return *static_cast<const BasicIoContext<Backend>*>(ctx); }
+
     bool await_ready() const noexcept { return false; }
 
     void await_suspend(this auto& self, std::coroutine_handle<> h)
     {
         self.handle = h;
         auto* op = static_cast<OperationState*>(&self);
-        self.ctx->Track(op);
-        self.ctx->EnsureSqes(1);
-        auto* sqe = self.ctx->GetSqe();
-        self.PrepareSqe(sqe);
-        io_uring_sqe_set_data(sqe, op);
+        auto& ctx = self.Context();
+        ctx.Track(op);
+        Submit(ctx.GetBackend(), ctx, self);
     }
 
-    // Default: return size_t for read/write style ops
     Result<size_t> await_resume()
     {
         if (res < 0)
@@ -502,9 +507,16 @@ constexpr uint64_t WAKE_TAG = 1;
 class ScopedIoContext
 {
 public:
-    explicit ScopedIoContext(void* ctx);
+    ScopedIoContext(void* ctx, const void* backend_tag);
     ~ScopedIoContext();
 };
+
+template <typename Backend>
+const void* BackendTag() noexcept
+{
+    static const int tag = 0;
+    return &tag;
+}
 
 struct UringBackend
 {
@@ -523,10 +535,12 @@ struct UringBackend
     io_uring* Ring() { return &ring_; }
     const io_uring* Ring() const { return &ring_; }
     int RingFd() const { return ring_.ring_fd; }
+    int WakeFd() const { return wake_fd_; }
 
     void EnsureSqes(unsigned n);
     io_uring_sqe* GetSqe();
     void SubmitWakeRead();
+    void FlushAfterWake();
 
     template <typename OnCompletion>
     bool DrainWithoutResume(OnCompletion&& on_completion)
@@ -579,6 +593,64 @@ struct UringBackend
 
         io_uring_cq_advance(&ring_, count);
         return {count, saw_wake};
+    }
+};
+
+struct MemoryBackend
+{
+    struct TimerEntry
+    {
+        std::chrono::steady_clock::time_point due;
+        OperationState* op = nullptr;
+    };
+
+    std::deque<OperationState*> ready_;
+    std::vector<TimerEntry> timers_;
+    mutable bool notified_ = false;
+
+    void Init(unsigned) {}
+    void Shutdown() noexcept;
+    bool Notify() const noexcept;
+    int SubmitAndWait(unsigned);
+    bool TryMsgRing(const MemoryBackend&, OperationState*) { return false; }
+    void CancelAllPending();
+    Result<> RegisterFiles(std::span<const int>) { return {}; }
+    int WakeFd() const { return -1; }
+
+    void EnsureSqes(unsigned) {}
+    io_uring_sqe* GetSqe() { return nullptr; }
+    void SubmitWakeRead() {}
+    void FlushAfterWake() {}
+    void AddTimer(OperationState* op, std::chrono::steady_clock::time_point due);
+
+    template <typename OnCompletion>
+    bool DrainWithoutResume(OnCompletion&& on_completion)
+    {
+        if (ready_.empty())
+        {
+            return false;
+        }
+
+        auto* op = ready_.front();
+        ready_.pop_front();
+
+        on_completion(reinterpret_cast<uint64_t>(op));
+        return true;
+    }
+
+    template <typename OnCompletion>
+    std::pair<unsigned, bool> ProcessReadyCompletions(OnCompletion&& on_completion)
+    {
+        std::deque<OperationState*> ready;
+        ready.swap(ready_);
+        notified_ = false;
+
+        for (auto* op : ready)
+        {
+            on_completion(op, op->res);
+        }
+
+        return {static_cast<unsigned>(ready.size()), false};
     }
 };
 
@@ -682,12 +754,14 @@ public:
     void RunUntilDone(Task<T>&& t)
     {
         AssertOwnerThread();
-        ScopedIoContext scope(this);
+        ScopedIoContext scope(this, BackendTag<Backend>());
 
         stop_requested_.store(false, std::memory_order_relaxed);
 
         t.resume();
-        while (!IsShuttingDown() && !t.Done())
+        while (!IsShuttingDown() &&
+               (!t.Done() || pending_head_ != nullptr ||
+                ext_submission_head_.load(std::memory_order_acquire) != nullptr))
         {
             Step();
         }
@@ -698,7 +772,7 @@ public:
     void Run()
     {
         AssertOwnerThread();
-        ScopedIoContext scope(this);
+        ScopedIoContext scope(this, BackendTag<Backend>());
 
         stop_requested_.store(false, std::memory_order_relaxed);
 
@@ -714,7 +788,7 @@ public:
     void Run(Tick&& tick)
     {
         AssertOwnerThread();
-        ScopedIoContext scope(this);
+        ScopedIoContext scope(this, BackendTag<Backend>());
 
         stop_requested_.store(false, std::memory_order_relaxed);
 
@@ -743,7 +817,7 @@ public:
         if (wait)
         {
             // If we are the worker thread, we CANNOT wait for ourselves to finish!
-            if (std::this_thread::get_id() != Current()->owner_thread_)
+            if (std::this_thread::get_id() != owner_thread_)
             {
                 WaitStop();
             }
@@ -789,7 +863,7 @@ public:
 
     io_uring_sqe* GetSqe();
 
-    int WakeFd() const { return backend_.wake_fd_; }
+    int WakeFd() const { return backend_.WakeFd(); }
 
     void WaitReady() const { ready_latch_.wait(); }
     void WaitStop() const { stopped_latch_.wait(); }
@@ -851,17 +925,38 @@ private:
     static inline std::atomic<SignalSet*> instance_{nullptr};
 };
 
-struct WaitSignalOp : UringOp
+struct WaitSignalOp : DispatchOp<WaitSignalOp>
 {
     int fd;
     uint64_t signo{};
 
-    WaitSignalOp(IoContext& ctx, const int signal_fd) : UringOp(&ctx), fd(signal_fd) {}
-
-    void PrepareSqe(io_uring_sqe* sqe) { io_uring_prep_read(sqe, fd, &signo, sizeof(signo), 0); }
+    WaitSignalOp(IoContext& ctx, const int signal_fd) : DispatchOp(&ctx), fd(signal_fd) {}
 
     Result<int> await_resume();
 };
+
+inline void Submit(UringBackend&, IoContext& ctx, WaitSignalOp& op)
+{
+    ctx.EnsureSqes(1);
+    auto* sqe = ctx.GetSqe();
+    io_uring_prep_read(sqe, op.fd, &op.signo, sizeof(op.signo), 0);
+    io_uring_sqe_set_data(sqe, &op);
+}
+
+inline void SubmitWithTimeout(UringBackend&, IoContext& ctx, WaitSignalOp& op, __kernel_timespec& ts)
+{
+    ctx.EnsureSqes(2);
+
+    auto* sqe_op = ctx.GetSqe();
+    io_uring_prep_read(sqe_op, op.fd, &op.signo, sizeof(op.signo), 0);
+    sqe_op->flags |= IOSQE_IO_LINK;
+    io_uring_sqe_set_data(sqe_op, &op);
+
+    auto* sqe_timer = ctx.GetSqe();
+    sqe_timer->flags |= IOSQE_CQE_SKIP_SUCCESS;
+    io_uring_prep_link_timeout(sqe_timer, &ts, 0);
+    io_uring_sqe_set_data(sqe_timer, nullptr);
+}
 
 inline WaitSignalOp AsyncWaitSignal(IoContext& ctx, int signal_fd)
 {
@@ -897,20 +992,9 @@ struct WithTimeoutOp
     void await_suspend(std::coroutine_handle<> h)
     {
         op.handle = h;
-        op.ctx->Track(&op);
-        op.ctx->EnsureSqes(2);
-
-        // Main operation with IOSQE_IO_LINK
-        auto* sqe_op = op.ctx->GetSqe();
-        op.PrepareSqe(sqe_op);
-        sqe_op->flags |= IOSQE_IO_LINK;
-        io_uring_sqe_set_data(sqe_op, &op);
-
-        // Linked timeout (user_data = nullptr so we skip its CQE)
-        auto* sqe_timer = op.ctx->GetSqe();
-        sqe_timer->flags |= IOSQE_CQE_SKIP_SUCCESS;
-        io_uring_prep_link_timeout(sqe_timer, &ts, 0);
-        io_uring_sqe_set_data(sqe_timer, nullptr);
+        auto& ctx = op.Context();
+        ctx.Track(&op);
+        SubmitWithTimeout(ctx.GetBackend(), ctx, op, ts);
     }
 
     auto await_resume()
@@ -926,7 +1010,7 @@ struct WithTimeoutOp
             if (op.cancel_reason == OpCancelReason::None || op.cancel_reason == OpCancelReason::Timeout)
             {
 #if AIO_STATS
-                AIO_STATS_INC(op.ctx->Stats(), timeouts);
+                AIO_STATS_INC(op.Context().Stats(), timeouts);
 #endif
                 return decltype(r)(std::unexpected(std::make_error_code(std::errc::timed_out)));
             }
@@ -937,9 +1021,9 @@ struct WithTimeoutOp
     }
 };
 
-// Builder method to apply a timeout to an io operation
+template <typename Derived, typename Backend>
 template <typename Rep, typename Period>
-auto UringOp::WithTimeout(this auto&& self, std::chrono::duration<Rep, Period> dur)
+auto DispatchOp<Derived, Backend>::WithTimeout(this auto&& self, std::chrono::duration<Rep, Period> dur)
     requires std::is_rvalue_reference_v<decltype(self)> && (!std::is_const_v<std::remove_reference_t<decltype(self)>>)
 {
     using Op = std::remove_cvref_t<decltype(self)>;
@@ -1011,14 +1095,12 @@ public:
         return *this;
     }
 
-    struct WaitOp : UringOp
+    struct WaitOp : DispatchOp<WaitOp>
     {
         int fd;
         uint64_t value{};
 
-        WaitOp(IoContext* ctx, int f) : UringOp(ctx), fd(f) {}
-
-        void PrepareSqe(io_uring_sqe* sqe) { io_uring_prep_read(sqe, fd, &value, sizeof(value), 0); }
+        WaitOp(IoContext& ctx, int f) : DispatchOp(&ctx), fd(f) {}
 
         /// Returns the number of signals that were pending
         Result<uint64_t> await_resume()
@@ -1031,8 +1113,31 @@ public:
         }
     };
 
+    friend inline void Submit(UringBackend&, IoContext& ctx, WaitOp& op)
+    {
+        ctx.EnsureSqes(1);
+        auto* sqe = ctx.GetSqe();
+        io_uring_prep_read(sqe, op.fd, &op.value, sizeof(op.value), 0);
+        io_uring_sqe_set_data(sqe, &op);
+    }
+
+    friend inline void SubmitWithTimeout(UringBackend&, IoContext& ctx, WaitOp& op, __kernel_timespec& ts)
+    {
+        ctx.EnsureSqes(2);
+
+        auto* sqe_op = ctx.GetSqe();
+        io_uring_prep_read(sqe_op, op.fd, &op.value, sizeof(op.value), 0);
+        sqe_op->flags |= IOSQE_IO_LINK;
+        io_uring_sqe_set_data(sqe_op, &op);
+
+        auto* sqe_timer = ctx.GetSqe();
+        sqe_timer->flags |= IOSQE_CQE_SKIP_SUCCESS;
+        io_uring_prep_link_timeout(sqe_timer, &ts, 0);
+        io_uring_sqe_set_data(sqe_timer, nullptr);
+    }
+
     /// Wait for one or more signals. Takes IoContext as a parameter.
-    [[nodiscard]] WaitOp Wait(IoContext& ctx) { return {&ctx, fd_}; }
+    [[nodiscard]] WaitOp Wait(IoContext& ctx) { return {ctx, fd_}; }
 
     /// Signal the notifier (thread-safe). Wakes up one pending Wait().
     void Signal(uint64_t count = 1) const { [[maybe_unused]] auto r = ::write(fd_, &count, sizeof(count)); }
@@ -1316,27 +1421,30 @@ namespace kio
  * This awaits internally, suspending the coroutine on the current thread,
  * and resuming it on the target IoContext thread.
  */
+template <typename Backend>
 struct ScheduleOp : OperationState
 {
-    explicit ScheduleOp(IoContext* target) { ctx = target; }
+    BasicIoContext<Backend>* target;
+
+    explicit ScheduleOp(BasicIoContext<Backend>* t) : target(t) { ctx = t; }
 
     bool await_ready() const noexcept
     {
         // If we are already on the target context, don't suspend.
-        return IoContext::Current() == ctx;
+        return BasicIoContext<Backend>::Current() == target;
     }
 
     void await_suspend(std::coroutine_handle<> h)
     {
         handle = h;
         // Try Zero-Syscall path: IORING_OP_MSG_RING
-        if (IoContext::Current() && IoContext::Current()->TryMsgRing(*ctx, this))
+        if (auto* current = BasicIoContext<Backend>::Current(); current && current->TryMsgRing(*target, this))
         {
             return;
         }
 
         // Fallback path: Lock-free intrusive stack + batched eventfd
-        ctx->SubmitExternal(this);
+        target->SubmitExternal(this);
     }
 
     void await_resume() const noexcept {}
@@ -1349,7 +1457,7 @@ struct ScheduleOp : OperationState
 template <typename Backend>
 inline auto BasicIoContext<Backend>::Schedule()
 {
-    return ScheduleOp(this);
+    return ScheduleOp<Backend>(this);
 }
 
 /**
@@ -1361,8 +1469,9 @@ inline auto BasicIoContext<Backend>::Schedule()
  * If the coroutine is already running on target_ctx, this is a no-op (no suspension).
  * Otherwise, it migrates the coroutine to the target thread.
  */
+template <typename Backend>
 [[nodiscard]]
-inline auto SwitchTo(IoContext& target)
+inline auto SwitchTo(BasicIoContext<Backend>& target)
 {
     return target.Schedule();
 }

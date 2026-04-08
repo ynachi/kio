@@ -9,9 +9,11 @@
 namespace kio
 {
 struct UringBackend;
+struct MemoryBackend;
 template <typename Backend>
 class BasicIoContext;
 using IoContext = BasicIoContext<UringBackend>;
+using MemoryIoContext = BasicIoContext<MemoryBackend>;
 
 enum class OpCancelReason : uint8_t
 {
@@ -36,7 +38,7 @@ enum class OpCancelReason : uint8_t
  */
 struct OperationState
 {
-    IoContext* ctx = nullptr;
+    void* ctx = nullptr;
     int32_t res = 0;
     std::coroutine_handle<> handle;
 
@@ -52,7 +54,15 @@ struct OperationState
 
     OperationState() = default;
 
-    OperationState(OperationState&& other) noexcept : ctx(other.ctx), res(other.res), handle(other.handle)
+    OperationState(OperationState&& other) noexcept
+        : ctx(other.ctx),
+          res(other.res),
+          handle(other.handle),
+          next(nullptr),
+          prev(nullptr),
+          next_ext(nullptr),
+          tracked(false),
+          cancel_reason(other.cancel_reason)
     {
         if (other.tracked)
         {
@@ -62,7 +72,13 @@ struct OperationState
             std::terminate();
         }
         other.ctx = nullptr;
+        other.res = 0;
         other.handle = nullptr;
+        other.next = nullptr;
+        other.prev = nullptr;
+        other.next_ext.store(nullptr, std::memory_order_relaxed);
+        other.tracked = false;
+        other.cancel_reason = OpCancelReason::None;
     }
 
     OperationState& operator=(OperationState&&) = delete;

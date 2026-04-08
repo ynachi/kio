@@ -16,20 +16,27 @@ namespace kio
 // =============================================================================
 
 static thread_local void* tl_current_context = nullptr;
+static thread_local const void* tl_current_backend_tag = nullptr;
 
-ScopedIoContext::ScopedIoContext(void* ctx)
+ScopedIoContext::ScopedIoContext(void* ctx, const void* backend_tag)
 {
     tl_current_context = ctx;
+    tl_current_backend_tag = backend_tag;
 }
 
 ScopedIoContext::~ScopedIoContext()
 {
     tl_current_context = nullptr;
+    tl_current_backend_tag = nullptr;
 }
 
 template <typename Backend>
 BasicIoContext<Backend>* BasicIoContext<Backend>::Current() noexcept
 {
+    if (tl_current_backend_tag != BackendTag<Backend>())
+    {
+        return nullptr;
+    }
     return static_cast<BasicIoContext<Backend>*>(tl_current_context);
 }
 
@@ -182,6 +189,68 @@ void UringBackend::SubmitWakeRead()
     io_uring_prep_read(sqe, wake_fd_, &wake_buffer_, sizeof(wake_buffer_), 0);
     sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
     io_uring_sqe_set_data64(sqe, detail::WAKE_TAG);
+}
+
+void UringBackend::FlushAfterWake()
+{
+    (void)io_uring_submit(&ring_);
+}
+
+void MemoryBackend::Shutdown() noexcept
+{
+    notified_ = true;
+}
+
+bool MemoryBackend::Notify() const noexcept
+{
+    notified_ = true;
+    return true;
+}
+
+void MemoryBackend::AddTimer(OperationState* op, const std::chrono::steady_clock::time_point due)
+{
+    timers_.push_back({due, op});
+}
+
+int MemoryBackend::SubmitAndWait(unsigned)
+{
+    const auto now = std::chrono::steady_clock::now();
+    for (auto it = timers_.begin(); it != timers_.end();)
+    {
+        if (it->due <= now)
+        {
+            ready_.push_back(it->op);
+            it = timers_.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+
+    if (ready_.empty() && !notified_ && !timers_.empty())
+    {
+        auto next_due = timers_.front().due;
+        for (const auto& timer : timers_)
+        {
+            next_due = std::min(next_due, timer.due);
+        }
+        std::this_thread::sleep_until(next_due);
+        return SubmitAndWait(0);
+    }
+
+    notified_ = false;
+    return 0;
+}
+
+void MemoryBackend::CancelAllPending()
+{
+    for (auto& timer : timers_)
+    {
+        ready_.push_back(timer.op);
+    }
+    timers_.clear();
+    notified_ = true;
 }
 
 template <typename Backend>
@@ -424,7 +493,7 @@ void BasicIoContext<Backend>::DrainWithoutResume()
             {
                 DrainExternalWithoutResume();
                 SubmitWakeRead();
-                (void)io_uring_submit(backend_.Ring());
+                backend_.FlushAfterWake();
             }
             else if (user_data != 0)
             {
@@ -546,4 +615,5 @@ Result<int> WaitSignalOp::await_resume()
 }
 
 template class BasicIoContext<UringBackend>;
+template class BasicIoContext<MemoryBackend>;
 }  // namespace kio
