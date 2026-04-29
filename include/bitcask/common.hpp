@@ -72,7 +72,7 @@ namespace bitcask
             if (directory.empty())
             {
                 ALOG_ERROR("BitcaskConfig: directory cannot be empty");
-                return std::unexpected(std::make_error_code(std::errc::invalid_argument));
+                return ErrorFromErrc(std::errc::invalid_argument);
             }
 
             if ((write_flags & O_APPEND) != 0)
@@ -80,13 +80,13 @@ namespace bitcask
                 ALOG_ERROR(
                     "BitcaskConfig: write_flags must NOT include O_APPEND. "
                     "O_APPEND breaks pwrite() offset semantics and causes data corruption.");
-                return std::unexpected(std::make_error_code(std::errc::invalid_argument));
+                return ErrorFromErrc(std::errc::invalid_argument);
             }
 
             if (max_file_size == 0)
             {
                 ALOG_ERROR("BitcaskConfig: max_file_size must be > 0");
-                return std::unexpected(std::make_error_code(std::errc::invalid_argument));
+                return ErrorFromErrc(std::errc::invalid_argument);
             }
         }
     };
@@ -196,7 +196,7 @@ namespace bitcask
         struct stat st{};
         if (::fstat(fd, &st) < 0)
         {
-            return std::unexpected(kio::ErrorFromErrno(errno));
+            return kio::ErrorFromErrno(errno);
         }
         return st.st_size;
     }
@@ -216,4 +216,3 @@ namespace bitcask
         return XXH3_64bits(data.data(), data.size());
     }
 } // namespace bitcask
-

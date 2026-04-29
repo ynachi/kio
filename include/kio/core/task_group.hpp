@@ -8,6 +8,7 @@
 #include "core.hpp"
 
 namespace kio
+
 {
 
 /**
@@ -96,7 +97,7 @@ public:
         return before - tasks_.size();
     }
 
-    void SetSweepInterval(size_t interval)
+    void SetSweepInterval(const size_t interval)
     {
         size_t pow2 = 1;
         while (pow2 < interval)
@@ -118,7 +119,7 @@ public:
         Sweep();
     }
 
-    Task<bool> JoinAllTimeout(IoContext& ctx, std::chrono::milliseconds timeout)
+    Task<bool> JoinAllTimeout(IoContext& ctx, const std::chrono::milliseconds timeout)
     {
         if (active_count_ == 0)
             co_return true;

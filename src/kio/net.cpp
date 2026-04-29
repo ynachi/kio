@@ -17,57 +17,65 @@ namespace kio::net
 
 void Socket::Close()
 {
-    if (fd_ >= 0)
+    if (state_)
     {
-        ::close(fd_);
-        fd_ = -1;
+        if (*state_ >= 0)
+        {
+            ::close(*state_);
+            *state_ = -1;
+        }
+        state_.reset();
     }
 }
 
 Result<void> Socket::SetNonBlocking() const
 {
-    int flags = ::fcntl(fd_, F_GETFL, 0);
+    const int fd = Get();
+    int flags = ::fcntl(fd, F_GETFL, 0);
     if (flags == -1)
         return ErrorFromErrno(errno);
-    if (::fcntl(fd_, F_SETFL, flags | O_NONBLOCK) == -1)
+    if (::fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1)
         return ErrorFromErrno(errno);
     return {};
 }
 
 Result<> Socket::SetReuseAddr(bool enable) const
 {
+    const int fd = Get();
     int opt = enable ? 1 : 0;
-    if (::setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
+    if (::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
         return ErrorFromErrno(errno);
     return {};
 }
 
 Result<> Socket::SetReusePort(bool enable) const
 {
+    const int fd = Get();
     int opt = enable ? 1 : 0;
-    if (::setsockopt(fd_, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0)
+    if (::setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0)
         return ErrorFromErrno(errno);
     return {};
 }
 
 Result<> Socket::SetNodelay(bool enable) const
 {
+    const int fd = Get();
     int opt = enable ? 1 : 0;
-    if (::setsockopt(fd_, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt)) < 0)
+    if (::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt)) < 0)
         return ErrorFromErrno(errno);
     return {};
 }
 
 Result<> Socket::SetSendBuffer(int size) const
 {
-    if (::setsockopt(fd_, SOL_SOCKET, SO_SNDBUF, &size, sizeof(size)) < 0)
+    if (::setsockopt(Get(), SOL_SOCKET, SO_SNDBUF, &size, sizeof(size)) < 0)
         return ErrorFromErrno(errno);
     return {};
 }
 
 Result<> Socket::SetRecvBuffer(int size) const
 {
-    if (::setsockopt(fd_, SOL_SOCKET, SO_RCVBUF, &size, sizeof(size)) < 0)
+    if (::setsockopt(Get(), SOL_SOCKET, SO_RCVBUF, &size, sizeof(size)) < 0)
         return ErrorFromErrno(errno);
     return {};
 }
@@ -88,7 +96,7 @@ Result<SocketAddress> Resolve(std::string_view host, uint16_t port)
     if (const int rc = getaddrinfo(hostname.c_str(), service.c_str(), &hints, &res); rc != 0)
     {
         // getaddrinfo returns EAI_* errors, not errno, but we map to std::error_code generically
-        return std::unexpected(std::make_error_code(std::errc::address_not_available));
+        return ErrorFromErrc(std::errc::address_not_available);
     }
 
     SocketAddress out;
@@ -141,7 +149,12 @@ Result<Socket> TcpListener::Bind(const SocketAddress& addr, int backlog)
 
 Result<Socket> TcpListener::BindV4(uint16_t port, std::string ipv4)
 {
-    return Bind(SocketAddress::V4(port, ipv4.c_str()));
+    auto addr = SocketAddress::TryV4(port, ipv4.c_str());
+    if (!addr)
+    {
+        return std::unexpected(addr.error());
+    }
+    return Bind(*addr);
 }
 
 }  // namespace kio::net

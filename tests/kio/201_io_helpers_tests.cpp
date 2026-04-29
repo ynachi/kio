@@ -4,6 +4,7 @@
 
 #include <array>
 #include <chrono>
+#include <optional>
 #include <vector>
 
 #include <fcntl.h>
@@ -76,6 +77,30 @@ TEST_F(IoHelpersTest, ReadExactEOF) {
 
     auto task = test();
     ctx.RunUntilDone(std::move(task));
+}
+
+TEST_F(IoHelpersTest, ReadExactKeepsFdAliveAfterOwnerDrop) {
+    auto temp = MakeTempFileWithContent("hello world!");
+    ASSERT_TRUE(temp.Valid());
+
+    FD fd(temp.Release());
+    auto buf = std::make_shared<std::array<std::byte, 12>>();
+    auto read_result = std::make_shared<std::optional<Result<void>>>();
+    TaskGroup<> group(1);
+
+    group.Spawn([&, buf, read_result]() -> Task<void> {
+        *read_result = co_await AsyncReadExact(ctx, fd, std::span<std::byte>{*buf}, 0);
+        co_return;
+    }());
+
+    fd = FD{};
+
+    auto join = group.JoinAll(ctx);
+    ctx.RunUntilDone(std::move(join));
+
+    ASSERT_TRUE(read_result->has_value());
+    ASSERT_TRUE((*read_result)->has_value());
+    EXPECT_EQ(AsString(std::span<const std::byte>{*buf}), "hello world!");
 }
 
 // -----------------------------------------------------------------------------

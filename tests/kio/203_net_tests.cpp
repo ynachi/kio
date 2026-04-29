@@ -2,7 +2,10 @@
 #include "kio/kio.hpp"
 #include "kio/net.hpp"
 
+#include <cerrno>
 #include <chrono>
+#include <fcntl.h>
+#include <system_error>
 #include <thread>
 
 #include <unistd.h>
@@ -54,6 +57,17 @@ TEST(SocketAddressTest, V4SpecificAddress) {
     EXPECT_STREQ(ip_str, "192.168.1.100");
 }
 
+TEST(SocketAddressTest, TryV4RejectsInvalidLiteral) {
+    auto result = SocketAddress::TryV4(80, "not-an-ipv4-address");
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), make_error_code(EINVAL));
+}
+
+TEST(SocketAddressTest, V4ThrowsOnInvalidLiteral) {
+    EXPECT_THROW((void)SocketAddress::V4(80, "not-an-ipv4-address"), std::system_error);
+}
+
 TEST(SocketAddressTest, V6Any) {
     const auto sa = SocketAddress::V6(8080);
     const auto* in6 = reinterpret_cast<const sockaddr_in6*>(&sa.addr);
@@ -77,6 +91,17 @@ TEST(SocketAddressTest, V6SpecificAddress) {
     char ip_str[INET6_ADDRSTRLEN];
     inet_ntop(AF_INET6, &in6->sin6_addr, ip_str, sizeof(ip_str));
     EXPECT_STREQ(ip_str, "2001:db8::1");
+}
+
+TEST(SocketAddressTest, TryV6RejectsInvalidLiteral) {
+    auto result = SocketAddress::TryV6(443, "not-an-ipv6-address");
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), make_error_code(EINVAL));
+}
+
+TEST(SocketAddressTest, V6ThrowsOnInvalidLiteral) {
+    EXPECT_THROW((void)SocketAddress::V6(443, "not-an-ipv6-address"), std::system_error);
 }
 
 TEST(SocketAddressTest, GetPointer) {
@@ -248,6 +273,13 @@ TEST(TcpListenerTest, BindPortOnly) {
     EXPECT_TRUE(result->IsValid());
 }
 
+TEST(TcpListenerTest, BindV4RejectsInvalidAddress) {
+    auto result = TcpListener::BindV4(0, "not-an-ipv4-address");
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), make_error_code(EINVAL));
+}
+
 // -----------------------------------------------------------------------------
 // AsyncConnect Tests
 // -----------------------------------------------------------------------------
@@ -294,6 +326,60 @@ TEST(AsyncConnectTest, ConnectToListener) {
     acceptor.join();
 }
 
+TEST(AsyncAcceptTest, AcceptedSocketIsNonBlockingAndCloseOnExec) {
+    IoContext ctx;
+
+    auto listener_result = TcpListener::Bind(SocketAddress::V4(0, "127.0.0.1"));
+    ASSERT_TRUE(listener_result.has_value());
+    Socket listener = std::move(*listener_result);
+
+    sockaddr_in addr{};
+    socklen_t len = sizeof(addr);
+    ASSERT_EQ(::getsockname(listener.Get(), reinterpret_cast<sockaddr*>(&addr), &len), 0);
+    const uint16_t port = ntohs(addr.sin_port);
+
+    std::thread connector([port]() {
+        const int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        EXPECT_GE(fd, 0);
+        if (fd < 0) {
+            return;
+        }
+        FdGuard client(fd);
+
+        const auto server_addr = SocketAddress::V4(port, "127.0.0.1");
+        EXPECT_EQ(::connect(fd, server_addr.Get(), server_addr.addrlen), 0);
+    });
+
+    auto test = [&]() -> Task<void> {
+        auto accepted = co_await AsyncAccept(ctx, listener).WithTimeout(1s);
+        EXPECT_TRUE(accepted.has_value());
+        if (!accepted.has_value()) {
+            co_return;
+        }
+        FdGuard accepted_fd(accepted->fd);
+
+        const int status_flags = ::fcntl(accepted_fd.Get(), F_GETFL, 0);
+        EXPECT_NE(status_flags, -1);
+        if (status_flags == -1) {
+            co_return;
+        }
+        EXPECT_TRUE((status_flags & O_NONBLOCK) != 0);
+
+        const int fd_flags = ::fcntl(accepted_fd.Get(), F_GETFD, 0);
+        EXPECT_NE(fd_flags, -1);
+        if (fd_flags == -1) {
+            co_return;
+        }
+        EXPECT_TRUE((fd_flags & FD_CLOEXEC) != 0);
+
+        co_return;
+    };
+
+    auto task = test();
+    ctx.RunUntilDone(std::move(task));
+    connector.join();
+}
+
 TEST(AsyncConnectTest, ConnectRefused) {
     IoContext ctx;
 
@@ -324,4 +410,3 @@ int main(int argc, char** argv)
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }
-

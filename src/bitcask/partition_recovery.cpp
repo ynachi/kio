@@ -109,7 +109,7 @@ namespace bitcask
         if (!std::filesystem::exists(hint_path))
         {
             ALOG_DEBUG("Hint file {} does not exist", file_id);
-            co_return std::unexpected(std::make_error_code(std::errc::no_such_file_or_directory));
+            co_return ErrorFromErrc(std::errc::no_such_file_or_directory);
         }
 
         const auto fd = KIO_CO_TRY_LOG(co_await AsyncOpen(ctx, hint_path, config.read_flags, config.file_mode));

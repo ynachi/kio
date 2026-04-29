@@ -7,6 +7,7 @@
 ////////////////////////////////////////////////////////////////////////////////
 
 #include <expected>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -49,6 +50,7 @@ struct SocketAddress
     /// @param port Port number in host byte order (automatically converted to network order)
     /// @param ip IPv4 address string (e.g., "127.0.0.1"). Pass nullptr for INADDR_ANY (0.0.0.0).
     /// @return SocketAddress configured for IPv4
+    /// @throws std::system_error if ip is not a valid IPv4 literal.
     ///
     /// @code
     ///   auto any = SocketAddress::V4(8080);              // Bind to all interfaces
@@ -56,16 +58,23 @@ struct SocketAddress
     /// @endcode
     static SocketAddress V4(uint16_t port, const char* ip = nullptr);
 
+    /// @brief Creates an IPv4 address without throwing on invalid literals.
+    static Result<SocketAddress> TryV4(uint16_t port, const char* ip = nullptr);
+
     /// @brief Creates an IPv6 address.
     /// @param port Port number in host byte order (automatically converted to network order)
     /// @param ip IPv6 address string (e.g., "::1"). Pass nullptr for in6addr_any (::).
     /// @return SocketAddress configured for IPv6
+    /// @throws std::system_error if ip is not a valid IPv6 literal.
     ///
     /// @code
     ///   auto any = SocketAddress::V6(8080);         // Bind to all IPv6 interfaces
     ///   auto local = SocketAddress::V6(8080, "::1"); // IPv6 localhost only
     /// @endcode
     static SocketAddress V6(uint16_t port, const char* ip = nullptr);
+
+    /// @brief Creates an IPv6 address without throwing on invalid literals.
+    static Result<SocketAddress> TryV6(uint16_t port, const char* ip = nullptr);
 
     /// @brief Returns the raw sockaddr pointer.
     [[nodiscard]] const sockaddr* Get() const { return reinterpret_cast<const sockaddr*>(&addr); }
@@ -101,40 +110,39 @@ struct SocketAddress
 /// @endcode
 class Socket
 {
-    int fd_ = -1;
+    std::shared_ptr<int> state_{};
 
 public:
     Socket() = default;
-    explicit Socket(int fd) : fd_(fd) {}
-
-    ~Socket() noexcept
+    explicit Socket(int fd)
     {
-        if (fd_ >= 0)
-            ::close(fd_);
+        if (fd >= 0)
+        {
+            state_ = std::shared_ptr<int>(new int(fd), [](int* raw) {
+                if (*raw >= 0)
+                {
+                    ::close(*raw);
+                }
+                delete raw;
+            });
+        }
     }
+
+    ~Socket() noexcept = default;
 
     // Move-only
-    Socket(Socket&& other) noexcept : fd_(std::exchange(other.fd_, -1)) {}
-    Socket& operator=(Socket&& other) noexcept
-    {
-        if (this != &other)
-        {
-            if (fd_ >= 0)
-                ::close(fd_);
-            fd_ = std::exchange(other.fd_, -1);
-        }
-        return *this;
-    }
+    Socket(Socket&&) noexcept = default;
+    Socket& operator=(Socket&&) noexcept = default;
 
     Socket(const Socket&) = delete;
     Socket& operator=(const Socket&) = delete;
 
     /// @brief Returns the raw file descriptor.
     /// @note The Socket retains ownership. Do not close the returned fd directly.
-    [[nodiscard]] int Get() const { return fd_; }
+    [[nodiscard]] int Get() const { return state_ ? *state_ : -1; }
 
     /// @brief Checks if the socket holds a valid file descriptor.
-    [[nodiscard]] bool IsValid() const { return fd_ >= 0; }
+    [[nodiscard]] bool IsValid() const { return Get() >= 0; }
 
     /// @brief Boolean conversion for validity checks.
     explicit operator bool() const { return IsValid(); }
@@ -142,7 +150,21 @@ public:
     /// @brief Releases ownership of the file descriptor.
     /// @return The raw file descriptor. Caller is responsible for closing it.
     /// @warning After calling Release(), the Socket is empty and must not be used.
-    int Release() { return std::exchange(fd_, -1); }
+    int Release()
+    {
+        const int fd = Get();
+        if (state_)
+        {
+            *state_ = -1;
+            state_.reset();
+        }
+        return fd;
+    }
+
+    [[nodiscard]] std::shared_ptr<void> HoldState() const noexcept
+    {
+        return std::static_pointer_cast<void>(state_);
+    }
 
     /// @brief Closes the socket explicitly (before destruction).
     /// @note Safe to call multiple times; subsequent calls are no-ops.

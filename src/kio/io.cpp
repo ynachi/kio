@@ -6,6 +6,9 @@
 
 #include "kio/net.hpp"
 
+#include <cerrno>
+#include <system_error>
+
 #include <arpa/inet.h>
 namespace kio
 {
@@ -16,13 +19,31 @@ namespace kio
 
 net::SocketAddress net::SocketAddress::V4(uint16_t port, const char* ip)
 {
+    auto result = TryV4(port, ip);
+    if (!result)
+    {
+        throw std::system_error(result.error().code(), "SocketAddress::V4");
+    }
+    return *result;
+}
+
+Result<net::SocketAddress> net::SocketAddress::TryV4(uint16_t port, const char* ip)
+{
     SocketAddress sa;
     auto* in = reinterpret_cast<sockaddr_in*>(&sa.addr);
     in->sin_family = AF_INET;
     in->sin_port = htons(port);
     if (ip && *ip)
     {
-        inet_pton(AF_INET, ip, &in->sin_addr);
+        const int rc = inet_pton(AF_INET, ip, &in->sin_addr);
+        if (rc == 0)
+        {
+            return std::unexpected(make_error_code(EINVAL));
+        }
+        if (rc < 0)
+        {
+            return ErrorFromErrno(errno);
+        }
     }
     else
     {
@@ -34,13 +55,31 @@ net::SocketAddress net::SocketAddress::V4(uint16_t port, const char* ip)
 
 net::SocketAddress net::SocketAddress::V6(uint16_t port, const char* ip)
 {
+    auto result = TryV6(port, ip);
+    if (!result)
+    {
+        throw std::system_error(result.error().code(), "SocketAddress::V6");
+    }
+    return *result;
+}
+
+Result<net::SocketAddress> net::SocketAddress::TryV6(uint16_t port, const char* ip)
+{
     SocketAddress sa;
     auto* in6 = reinterpret_cast<sockaddr_in6*>(&sa.addr);
     in6->sin6_family = AF_INET6;
     in6->sin6_port = htons(port);
     if (ip && *ip)
     {
-        inet_pton(AF_INET6, ip, &in6->sin6_addr);
+        const int rc = inet_pton(AF_INET6, ip, &in6->sin6_addr);
+        if (rc == 0)
+        {
+            return std::unexpected(make_error_code(EINVAL));
+        }
+        if (rc < 0)
+        {
+            return ErrorFromErrno(errno);
+        }
     }
     else
     {

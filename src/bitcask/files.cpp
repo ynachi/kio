@@ -173,8 +173,7 @@ namespace bitcask
             // Partial write - also creates a hole/corrupt entry
             ALOG_ERROR("Partial write: expected {} bytes, wrote {} at offset {}", entry_size, bytes_written,
                        entry_offset);
-            co_return std::unexpected(std::make_error_code(std::errc::io_error) // EIO
-            );
+            co_return ErrorFromErrc(std::errc::io_error);
         }
 
         if (config_.sync_on_write)

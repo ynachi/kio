@@ -30,17 +30,23 @@ Task<Result<TlsSocket>> AsyncTlsHandshake(IoContext& ctx, net::Socket sock, TlsC
 {
     if (auto nb = sock.SetNonBlocking(); !nb)
     {
+        ALOG_ERROR("AsyncTlsHandshake SetNonBlocking failed: {}", nb.error().message());
         co_return std::unexpected(nb.error());
     }
 
     SSL* ssl = SSL_new(tls_ctx.NativeHandle());
     if (!ssl)
-        co_return std::unexpected(std::make_error_code(std::errc::not_enough_memory));
+    {
+        ALOG_ERROR("AsyncTlsHandshake SSL_new failed");
+        co_return ErrorFromErrc(std::errc::not_enough_memory);
+    }
 
     if (SSL_set_fd(ssl, sock.Get()) != 1)
     {
+        auto err = ErrorFromOpenSSL();
         SSL_free(ssl);
-        co_return ErrorFromOpenSSL();
+        ALOG_ERROR("AsyncTlsHandshake SSL_set_fd failed: {}", err.error().message());
+        co_return err;
     }
 
     if (is_server)
@@ -56,15 +62,19 @@ Task<Result<TlsSocket>> AsyncTlsHandshake(IoContext& ctx, net::Socket sock, TlsC
         server_name = std::string(hostname);
         if (SSL_set_tlsext_host_name(ssl, server_name.c_str()) != 1)
         {
+            auto err = ErrorFromOpenSSL();
             SSL_free(ssl);
-            co_return ErrorFromOpenSSL();
+            ALOG_ERROR("AsyncTlsHandshake SSL_set_tlsext_host_name failed for {}: {}", server_name, err.error().message());
+            co_return err;
         }
         if (tls_ctx.VerifyHostname())
         {
             if (SSL_set1_host(ssl, server_name.c_str()) != 1)
             {
+                auto err = ErrorFromOpenSSL();
                 SSL_free(ssl);
-                co_return ErrorFromOpenSSL();
+                ALOG_ERROR("AsyncTlsHandshake SSL_set1_host failed for {}: {}", server_name, err.error().message());
+                co_return err;
             }
         }
     }
@@ -86,7 +96,8 @@ Task<Result<TlsSocket>> AsyncTlsHandshake(IoContext& ctx, net::Socket sock, TlsC
             if (remaining <= std::chrono::nanoseconds{0})
             {
                 SSL_free(ssl);
-                co_return std::unexpected(std::make_error_code(std::errc::timed_out));
+                ALOG_ERROR("AsyncTlsHandshake timed out");
+                co_return ErrorFromErrc(std::errc::timed_out);
             }
 
             const unsigned poll_mask = (err == SSL_ERROR_WANT_READ) ? POLLIN : POLLOUT;
@@ -95,6 +106,7 @@ Task<Result<TlsSocket>> AsyncTlsHandshake(IoContext& ctx, net::Socket sock, TlsC
             if (!poll_res)
             {
                 SSL_free(ssl);
+                ALOG_ERROR("AsyncTlsHandshake AsyncPoll failed: {}", poll_res.error().message());
                 co_return std::unexpected(poll_res.error());
             }
         }
@@ -102,6 +114,7 @@ Task<Result<TlsSocket>> AsyncTlsHandshake(IoContext& ctx, net::Socket sock, TlsC
         {
             auto final_err = ErrorFromOpenSSL();
             SSL_free(ssl);
+            ALOG_ERROR("AsyncTlsHandshake SSL_do_handshake failed: {}", final_err.error().message());
             co_return final_err;
         }
     }
@@ -114,7 +127,8 @@ Task<Result<TlsSocket>> AsyncTlsHandshake(IoContext& ctx, net::Socket sock, TlsC
             if (const auto verify_res = SSL_get_verify_result(ssl); verify_res != X509_V_OK)
             {
                 SSL_free(ssl);
-                co_return std::unexpected(std::make_error_code(std::errc::permission_denied));
+                ALOG_ERROR("AsyncTlsHandshake verify failed for {}: {}", server_name, verify_res);
+                co_return ErrorFromErrc(std::errc::permission_denied);
             }
         }
     }
@@ -129,11 +143,13 @@ Task<Result<TlsSocket>> AsyncTlsHandshake(IoContext& ctx, net::Socket sock, TlsC
         std::fprintf(stderr, "KTLS failed: TX=%d, RX=%d\n", ktls_tx, ktls_rx);
         std::fprintf(stderr, "  Cipher: %s\n", SSL_get_cipher_name(ssl));
         SSL_free(ssl);
-        co_return std::unexpected(std::make_error_code(std::errc::operation_not_supported));
+        ALOG_ERROR("AsyncTlsHandshake KTLS unavailable after handshake");
+        co_return ErrorFromErrc(std::errc::operation_not_supported);
     }
 #else
     SSL_free(ssl);
-    co_return std::unexpected(std::make_error_code(std::errc::operation_not_supported));
+    ALOG_ERROR("AsyncTlsHandshake requires OpenSSL KTLS support");
+    co_return ErrorFromErrc(std::errc::operation_not_supported);
 #endif
 
     co_return TlsSocket(std::move(sock), ssl);

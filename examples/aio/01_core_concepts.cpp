@@ -6,7 +6,7 @@
 // 3. Handling time (AsyncSleep).
 // 4. Graceful shutdown via SignalSet.
 
-#include "kio/aio.hpp"
+#include "kio/io.hpp"
 #include "kio/logger.hpp"
 
 #include <chrono>

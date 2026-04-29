@@ -7,54 +7,44 @@
 
 #include <liburing/io_uring.h>
 
+#include <cstdio>
 #include <cstring>
-#include <fcntl.h>
-#include <poll.h>
+
 #include <sys/eventfd.h>
+#include <sys/utsname.h>
 
 namespace kio
 {
 namespace
 {
-using TimerQueue =
-    std::priority_queue<kio::MemoryBackend::TimerEntry, std::vector<kio::MemoryBackend::TimerEntry>,
-                        std::greater<>>;
-
-bool CanRead(const int flags)
+std::optional<std::pair<unsigned, unsigned>> KernelRelease() noexcept
 {
-    return (flags & O_ACCMODE) != O_WRONLY;
-}
-
-bool CanWrite(const int flags)
-{
-    const int mode = flags & O_ACCMODE;
-    return mode == O_WRONLY || mode == O_RDWR;
-}
-
-std::string NormalizePath(const std::filesystem::path& path)
-{
-    return path.lexically_normal().generic_string();
-}
-
-kio::MemoryBackend::IoFault TakeFault(std::deque<kio::MemoryBackend::IoFault>& faults)
-{
-    if (faults.empty())
+    struct utsname uts{};
+    if (uname(&uts) != 0)
     {
-        return {};
+        return std::nullopt;
     }
 
-    auto fault = faults.front();
-    faults.pop_front();
-    return fault;
+    unsigned major = 0;
+    unsigned minor = 0;
+    if (std::sscanf(uts.release, "%u.%u", &major, &minor) != 2)
+    {
+        return std::nullopt;
+    }
+
+    return std::pair{major, minor};
 }
 
-void DrainDueTimers(TimerQueue& timers, std::deque<kio::OperationState*>& ready, const kio::MemoryBackend::clock::time_point now)
+bool KernelAtLeast(const unsigned major, const unsigned minor) noexcept
 {
-    while (!timers.empty() && timers.top().due <= now)
+    const auto version = KernelRelease();
+    if (!version)
     {
-        ready.push_back(timers.top().op);
-        timers.pop();
+        return false;
     }
+
+    const auto [kernel_major, kernel_minor] = *version;
+    return kernel_major > major || (kernel_major == major && kernel_minor >= minor);
 }
 }  // namespace
 
@@ -77,27 +67,26 @@ ScopedIoContext::~ScopedIoContext()
     tl_current_backend_tag = nullptr;
 }
 
-template <typename Backend>
-BasicIoContext<Backend>* BasicIoContext<Backend>::Current() noexcept
+IoContext* IoContext::Current() noexcept
 {
-    if (tl_current_backend_tag != BackendTag<Backend>())
+    if (tl_current_backend_tag != BackendTag())
     {
         return nullptr;
     }
-    return static_cast<BasicIoContext<Backend>*>(tl_current_context);
+    return static_cast<IoContext*>(tl_current_context);
 }
 
 // =============================================================================
 // Core Implementation
 // =============================================================================
 
-std::unexpected<std::error_code> ErrorFromOpenSSL() noexcept
+std::unexpected<IoError> ErrorFromOpenSSL() noexcept
 {
     // Pull at least one error
     unsigned long e = ERR_get_error();
     if (e == 0)
     {
-        return std::unexpected(std::make_error_code(std::errc::protocol_error));
+        return ErrorFromErrc(std::errc::protocol_error);
     }
 
     // Drain remaining errors; keep the last (often most informative)
@@ -107,21 +96,21 @@ std::unexpected<std::error_code> ErrorFromOpenSSL() noexcept
         last = e;
     }
 
-    const auto bits = static_cast<uint32_t>(last);
-    const int ev = std::bit_cast<int>(bits);
-
-    return std::unexpected(std::error_code(ev, detail::openssl_category()));
+    return std::unexpected(IoError::FromOpenSSL(last));
 }
 
 void UringBackend::Init(const unsigned entries)
 {
     io_uring_params params{};
     params.flags |= IORING_SETUP_COOP_TASKRUN | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN;
+    setup_flags_ = params.flags;
 
     if (const int ret = io_uring_queue_init_params(entries, &ring_, &params); ret < 0)
     {
         throw std::system_error(-ret, std::system_category(), "io_uring_queue_init_params");
     }
+
+    capabilities_.ring_resize = KernelAtLeast(6, 13) && (setup_flags_ & IORING_SETUP_DEFER_TASKRUN);
 
     wake_fd_ = eventfd(0, EFD_CLOEXEC);
     if (wake_fd_ < 0)
@@ -188,7 +177,7 @@ void UringBackend::CancelAllPending()
         return;
     }
 
-    io_uring_prep_cancel(sqe, nullptr, IORING_ASYNC_CANCEL_ANY);
+    io_uring_prep_cancel(sqe, nullptr, IORING_ASYNC_CANCEL_ANY | IORING_ASYNC_CANCEL_ALL);
     sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
     io_uring_sqe_set_data(sqe, nullptr);
     io_uring_submit(&ring_);
@@ -200,6 +189,45 @@ Result<> UringBackend::RegisterFiles(const std::span<const int> fds)
     {
         return ErrorFromErrno(-ret);
     }
+    return {};
+}
+
+Result<> UringBackend::Resize(const unsigned entries, const std::optional<unsigned> cq_entries)
+{
+    if (entries == 0)
+    {
+        return ErrorFromErrc(std::errc::invalid_argument);
+    }
+    if (cq_entries.has_value() && (*cq_entries == 0 || *cq_entries < entries))
+    {
+        return ErrorFromErrc(std::errc::invalid_argument);
+    }
+
+    if (!capabilities_.ring_resize)
+    {
+        return ErrorFromErrc(std::errc::operation_not_supported);
+    }
+
+    io_uring_params params{};
+    params.flags = IORING_SETUP_CLAMP;
+    params.sq_entries = entries;
+
+    if (cq_entries.has_value())
+    {
+        params.flags |= IORING_SETUP_CQSIZE;
+        params.cq_entries = *cq_entries;
+    }
+
+    const int ret = io_uring_resize_rings(&ring_, &params);
+    if (ret < 0)
+    {
+        if (ret == -EINVAL || ret == -EOPNOTSUPP)
+        {
+            return ErrorFromErrc(std::errc::operation_not_supported);
+        }
+        return ErrorFromErrno(-ret);
+    }
+
     return {};
 }
 
@@ -244,262 +272,7 @@ void UringBackend::FlushAfterWake()
     (void)io_uring_submit(&ring_);
 }
 
-void MemoryBackend::Init(unsigned)
-{
-    wake_fd_ = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
-    if (wake_fd_ < 0)
-    {
-        throw std::system_error(errno, std::system_category(), "eventfd");
-    }
-}
-
-void MemoryBackend::Shutdown() noexcept
-{
-    if (wake_fd_ >= 0)
-    {
-        ::close(wake_fd_);
-        wake_fd_ = -1;
-    }
-    wake_buffer_ = 0;
-}
-
-bool MemoryBackend::Notify() const noexcept
-{
-    if (wake_fd_ < 0)
-    {
-        return false;
-    }
-    constexpr uint64_t val = 1;
-    return ::write(wake_fd_, &val, sizeof(val)) == sizeof(val);
-}
-
-void MemoryBackend::AddTimer(OperationState* op, const clock::time_point due)
-{
-    timers_.push({due, op});
-}
-
-void MemoryBackend::Complete(OperationState* op, const int32_t res)
-{
-    op->res = res;
-    ready_.push_back(op);
-}
-
-Result<MemoryBackend::NativeFileHandle> MemoryBackend::OpenFile(const std::filesystem::path& path, const int flags,
-                                                                mode_t)
-{
-    if (const auto fault = TakeFault(open_faults_); fault.error != 0)
-    {
-        return std::unexpected(make_error_code(fault.error));
-    }
-
-    const auto normalized = NormalizePath(path);
-    auto it = files_.find(normalized);
-
-    if ((flags & O_CREAT) != 0)
-    {
-        if ((flags & O_EXCL) != 0 && it != files_.end())
-        {
-            return std::unexpected(make_error_code(EEXIST));
-        }
-
-        if (it == files_.end())
-        {
-            it = files_.emplace(normalized, std::make_shared<FileState>()).first;
-        }
-    }
-    else if (it == files_.end())
-    {
-        return std::unexpected(make_error_code(ENOENT));
-    }
-
-    auto file = it->second;
-    if ((flags & O_TRUNC) != 0 && CanWrite(flags))
-    {
-        file->data.clear();
-        file->fsynced = false;
-    }
-
-    const auto handle = next_handle_++;
-    open_files_[handle] = OpenFileState{.file = std::move(file), .flags = flags};
-    return handle;
-}
-
-Result<size_t> MemoryBackend::ReadFile(const NativeFileHandle handle, const std::span<std::byte> buffer,
-                                       const uint64_t offset)
-{
-    const auto fault = TakeFault(read_faults_);
-    if (fault.error != 0)
-    {
-        return std::unexpected(make_error_code(fault.error));
-    }
-
-    const auto it = open_files_.find(handle);
-    if (it == open_files_.end() || !CanRead(it->second.flags))
-    {
-        return std::unexpected(make_error_code(EBADF));
-    }
-
-    const auto& data = it->second.file->data;
-    if (offset >= data.size())
-    {
-        return size_t{0};
-    }
-
-    const auto available = data.size() - static_cast<size_t>(offset);
-    auto n = std::min(buffer.size(), available);
-    const auto max_bytes = fault.max_bytes != 0 ? fault.max_bytes : config_.default_max_read_bytes;
-    if (max_bytes != 0)
-    {
-        n = std::min(n, max_bytes);
-    }
-    std::memcpy(buffer.data(), data.data() + static_cast<size_t>(offset), n);
-    return n;
-}
-
-Result<size_t> MemoryBackend::WriteFile(const NativeFileHandle handle, const std::span<const std::byte> buffer,
-                                        uint64_t offset)
-{
-    const auto fault = TakeFault(write_faults_);
-    if (fault.error != 0)
-    {
-        return std::unexpected(make_error_code(fault.error));
-    }
-
-    const auto it = open_files_.find(handle);
-    if (it == open_files_.end() || !CanWrite(it->second.flags))
-    {
-        return std::unexpected(make_error_code(EBADF));
-    }
-
-    auto& file = *it->second.file;
-    if ((it->second.flags & O_APPEND) != 0)
-    {
-        offset = file.data.size();
-    }
-
-    auto bytes_to_write = buffer.size();
-    const auto max_bytes = fault.max_bytes != 0 ? fault.max_bytes : config_.default_max_write_bytes;
-    if (max_bytes != 0)
-    {
-        bytes_to_write = std::min(bytes_to_write, max_bytes);
-    }
-
-    const auto end = static_cast<size_t>(offset) + bytes_to_write;
-    if (file.data.size() < end)
-    {
-        file.data.resize(end);
-    }
-
-    std::memcpy(file.data.data() + static_cast<size_t>(offset), buffer.data(), bytes_to_write);
-    file.fsynced = false;
-    return bytes_to_write;
-}
-
-Result<void> MemoryBackend::CloseFile(const NativeFileHandle handle)
-{
-    if (const auto fault = TakeFault(close_faults_); fault.error != 0)
-    {
-        return std::unexpected(make_error_code(fault.error));
-    }
-
-    if (!open_files_.erase(handle))
-    {
-        return std::unexpected(make_error_code(EBADF));
-    }
-    return {};
-}
-
-Result<void> MemoryBackend::FsyncFile(const NativeFileHandle handle)
-{
-    if (const auto fault = TakeFault(fsync_faults_); fault.error != 0)
-    {
-        return std::unexpected(make_error_code(fault.error));
-    }
-
-    const auto it = open_files_.find(handle);
-    if (it == open_files_.end())
-    {
-        return std::unexpected(make_error_code(EBADF));
-    }
-
-    it->second.file->fsynced = true;
-    return {};
-}
-
-int MemoryBackend::SubmitAndWait(unsigned)
-{
-    for (;;)
-    {
-        auto now = Now();
-        DrainDueTimers(timers_, ready_, now);
-
-        if (!ready_.empty())
-        {
-            return 0;
-        }
-
-        if (!timers_.empty())
-        {
-            const auto next_due = timers_.top().due;
-            if (next_due <= now)
-            {
-                continue;
-            }
-
-            if (config_.time_mode == TimeMode::AutoAdvance)
-            {
-                AdvanceTo(next_due);
-                continue;
-            }
-        }
-
-        pollfd pfd{
-            .fd = wake_fd_,
-            .events = POLLIN,
-            .revents = 0,
-        };
-        int ret = 0;
-        do
-        {
-            ret = ::poll(&pfd, 1, -1);
-        } while (ret < 0 && errno == EINTR);
-
-        if (ret < 0)
-        {
-            return -errno;
-        }
-
-        if (ret == 0)
-        {
-            continue;
-        }
-
-        if ((pfd.revents & POLLIN) != 0)
-        {
-            while (::read(wake_fd_, &wake_buffer_, sizeof(wake_buffer_)) == sizeof(wake_buffer_))
-            {
-            }
-        }
-
-        if ((pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0)
-        {
-            return -EIO;
-        }
-    }
-}
-
-void MemoryBackend::CancelAllPending()
-{
-    while (!timers_.empty())
-    {
-        ready_.push_back(timers_.top().op);
-        timers_.pop();
-    }
-    (void)Notify();
-}
-
-template <typename Backend>
-BasicIoContext<Backend>::BasicIoContext(const unsigned entries)
+IoContext::IoContext(const unsigned entries)
 {
     ready_.reserve(entries);
     backend_.Init(entries);
@@ -507,8 +280,7 @@ BasicIoContext<Backend>::BasicIoContext(const unsigned entries)
     ready_latch_.count_down();
 }
 
-template <typename Backend>
-BasicIoContext<Backend>::BasicIoContext(Backend backend, const unsigned entries) : backend_(std::move(backend))
+IoContext::IoContext(UringBackend backend, const unsigned entries) : backend_(std::move(backend))
 {
     ready_.reserve(entries);
     backend_.Init(entries);
@@ -516,21 +288,18 @@ BasicIoContext<Backend>::BasicIoContext(Backend backend, const unsigned entries)
     ready_latch_.count_down();
 }
 
-template <typename Backend>
-BasicIoContext<Backend>::~BasicIoContext() noexcept
+IoContext::~IoContext() noexcept
 {
     CancelAllPending();
     backend_.Shutdown();
 }
 
-template <typename Backend>
-bool BasicIoContext<Backend>::Notify() const noexcept
+bool IoContext::Notify() const noexcept
 {
     return backend_.Notify();
 }
 
-template <typename Backend>
-void BasicIoContext<Backend>::Track(OperationState* op)
+void IoContext::Track(OperationState* op)
 {
     AssertOwnerThread();
 
@@ -550,8 +319,7 @@ void BasicIoContext<Backend>::Track(OperationState* op)
 #endif
 }
 
-template <typename Backend>
-void BasicIoContext<Backend>::Untrack(OperationState* op)
+void IoContext::Untrack(OperationState* op)
 {
     AssertOwnerThread();
 
@@ -583,8 +351,7 @@ void BasicIoContext<Backend>::Untrack(OperationState* op)
 #endif
 }
 
-template <typename Backend>
-void BasicIoContext<Backend>::CancelAllPending(const OpCancelReason reason)
+void IoContext::CancelAllPending(const OpCancelReason reason)
 {
     if (pending_head_ == nullptr)
     {
@@ -602,25 +369,38 @@ void BasicIoContext<Backend>::CancelAllPending(const OpCancelReason reason)
     DrainWithoutResume();
 }
 
-template <typename Backend>
-Result<> BasicIoContext<Backend>::RegisterFiles(const std::span<const int> fds)
+Result<> IoContext::RegisterFiles(const std::span<const int> fds)
 {
     AssertOwnerThread();
     return backend_.RegisterFiles(fds);
+}
+
+Result<> IoContext::Resize(const unsigned entries, const std::optional<unsigned> cq_entries)
+{
+    AssertOwnerThread();
+
+    if (auto result = backend_.Resize(entries, cq_entries); !result.has_value())
+    {
+        return result;
+    }
+
+    if (ready_.capacity() < backend_.SqEntries())
+    {
+        ready_.reserve(backend_.SqEntries());
+    }
+    return {};
 }
 
 // -----------------------------------------------------------------------------
 // Cross-Thread Scheduling Logic
 // -----------------------------------------------------------------------------
 
-template <typename Backend>
-bool BasicIoContext<Backend>::TryMsgRing(const BasicIoContext& target, OperationState* op)
+bool IoContext::TryMsgRing(const IoContext& target, OperationState* op)
 {
     return backend_.TryMsgRing(target.GetBackend(), op);
 }
 
-template <typename Backend>
-void BasicIoContext<Backend>::SubmitExternal(OperationState* op)
+void IoContext::SubmitExternal(OperationState* op)
 {
     OperationState* old_head = ext_submission_head_.load(std::memory_order_relaxed);
     do
@@ -640,8 +420,7 @@ void BasicIoContext<Backend>::SubmitExternal(OperationState* op)
 // Loop & Step
 // -----------------------------------------------------------------------------
 
-template <typename Backend>
-void BasicIoContext<Backend>::DrainExternal(std::vector<std::coroutine_handle<>>& out)
+void IoContext::DrainExternal(std::vector<std::coroutine_handle<>>& out)
 {
     // Clear hint
     ext_hint_.store(false, std::memory_order_release);
@@ -650,7 +429,9 @@ void BasicIoContext<Backend>::DrainExternal(std::vector<std::coroutine_handle<>>
     OperationState* head = ext_submission_head_.exchange(nullptr, std::memory_order_acquire);
 
     if (head == nullptr)
+    {
         return;
+    }
 
     // Reverse LIFO -> FIFO
     OperationState* prev = nullptr;
@@ -683,14 +464,15 @@ void BasicIoContext<Backend>::DrainExternal(std::vector<std::coroutine_handle<>>
 #endif
 }
 
-template <typename Backend>
-void BasicIoContext<Backend>::DrainExternalWithoutResume()
+void IoContext::DrainExternalWithoutResume()
 {
     ext_hint_.store(false, std::memory_order_release);
     OperationState* head = ext_submission_head_.exchange(nullptr, std::memory_order_acquire);
 
     if (head == nullptr)
+    {
         return;
+    }
 
     OperationState* prev = nullptr;
     OperationState* curr = head;
@@ -720,25 +502,25 @@ void BasicIoContext<Backend>::DrainExternalWithoutResume()
 #endif
 }
 
-template <typename Backend>
-void BasicIoContext<Backend>::DrainWithoutResume()
+void IoContext::DrainWithoutResume()
 {
     while (pending_head_ != nullptr)
     {
-        const bool got_completion = backend_.DrainWithoutResume([&](const uint64_t user_data)
-        {
-            if (user_data == detail::WAKE_TAG)
+        const bool got_completion = backend_.DrainWithoutResume(
+            [&](const uint64_t user_data)
             {
-                DrainExternalWithoutResume();
-                SubmitWakeRead();
-                backend_.FlushAfterWake();
-            }
-            else if (user_data != 0)
-            {
-                auto* op = reinterpret_cast<OperationState*>(static_cast<uintptr_t>(user_data));
-                Untrack(op);
-            }
-        });
+                if (user_data == detail::WAKE_TAG)
+                {
+                    DrainExternalWithoutResume();
+                    SubmitWakeRead();
+                    backend_.FlushAfterWake();
+                }
+                else if (user_data != 0)
+                {
+                    auto* op = reinterpret_cast<OperationState*>(static_cast<uintptr_t>(user_data));
+                    Untrack(op);
+                }
+            });
 
         if (!got_completion)
         {
@@ -747,18 +529,17 @@ void BasicIoContext<Backend>::DrainWithoutResume()
     }
 }
 
-template <typename Backend>
-void BasicIoContext<Backend>::SubmitWakeRead()
+void IoContext::SubmitWakeRead()
 {
     backend_.SubmitWakeRead();
 }
 
-template <typename Backend>
-void BasicIoContext<Backend>::Step()
+void IoContext::Step()
 {
-    const int ret = backend_.SubmitAndWait(1);
-    if (ret < 0)
+    if (const int ret = backend_.SubmitAndWait(1); ret < 0)
+    {
         return;
+    }
 
 #if AIO_STATS
     AIO_STATS_INC(stats_, loop_iterations);
@@ -780,31 +561,37 @@ void BasicIoContext<Backend>::Step()
     for (auto h : ready_)
     {
         if (h && !h.done())
+        {
             h.resume();
+        }
     }
 }
 
-template <typename Backend>
-std::pair<unsigned, bool> BasicIoContext<Backend>::ProcessReadyCompletions()
+std::pair<unsigned, bool> IoContext::ProcessReadyCompletions()
 {
-    return backend_.ProcessReadyCompletions([this](OperationState* op, const int32_t res)
-    {
-        Untrack(op);
-        op->res = res;
-        ready_.push_back(op->handle);
+    return backend_.ProcessReadyCompletions(
+        [this](OperationState* op, const int32_t res)
+        {
+            Untrack(op);
+            op->res = res;
+            ready_.push_back(op->handle);
 
 #if AIO_STATS
-        AIO_STATS_INC(stats_, ops_completed);
-        if (res < 0)
-            AIO_STATS_INC(stats_, ops_errors);
+            AIO_STATS_INC(stats_, ops_completed);
+            if (res < 0)
+            {
+                AIO_STATS_INC(stats_, ops_errors);
+            }
 #endif
-    });
+        });
 }
 
 SignalSet::SignalSet(const std::initializer_list<int> sigs) : fd_(eventfd(0, EFD_CLOEXEC))
 {
     if (fd_ < 0)
+    {
         throw std::system_error(errno, std::system_category(), "eventfd");
+    }
     instance_.store(this, std::memory_order_release);
 
     struct sigaction sa{};
@@ -833,7 +620,9 @@ SignalSet::~SignalSet()
     }
     instance_.store(nullptr, std::memory_order_release);
     if (fd_ >= 0)
+    {
         ::close(fd_);
+    }
 }
 
 void SignalSet::SignalHandler(int sig)
@@ -848,10 +637,10 @@ void SignalSet::SignalHandler(int sig)
 Result<int> WaitSignalOp::await_resume()
 {
     if (res < 0)
+    {
         return std::unexpected(make_error_code(res));
+    }
     return static_cast<int>(signo);
 }
 
-template class BasicIoContext<UringBackend>;
-template class BasicIoContext<MemoryBackend>;
 }  // namespace kio

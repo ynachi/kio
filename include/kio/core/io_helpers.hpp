@@ -29,7 +29,8 @@ struct SpliceOp : DispatchOp<SpliceOp>
     unsigned int len;
     unsigned int flags;
 
-    SpliceOp(IoContext& ctx, int in, int64_t off_in, int out, int64_t off_out, unsigned int length, unsigned int fl)
+    SpliceOp(IoContext& ctx, const int in, const int64_t off_in, const int out, const int64_t off_out,
+             const unsigned int length, const unsigned int fl)
         : DispatchOp(&ctx), fd_in(in), off_in(off_in), fd_out(out), off_out(off_out), len(length), flags(fl)
     {
     }
@@ -50,8 +51,8 @@ inline void SubmitWithTimeout(UringBackend& backend, IoContext&, SpliceOp& op, _
     io_uring_sqe_set_data(sqe_op, &op);
 }
 
-inline SpliceOp AsyncSplice(IoContext& ctx, int fd_in, int64_t off_in, int fd_out, int64_t off_out, unsigned int len,
-                            unsigned int flags = 0)
+inline SpliceOp AsyncSplice(IoContext& ctx, const int fd_in, const int64_t off_in, const int fd_out,
+                            const int64_t off_out, const unsigned int len, const unsigned int flags = 0)
 {
     return SpliceOp(ctx, fd_in, off_in, fd_out, off_out, len, flags);
 }
@@ -80,16 +81,18 @@ inline SpliceOp AsyncSplice(IoContext& ctx, int fd_in, int64_t off_in, int fd_ou
 ///   }
 /// @endcode
 template <FileDescriptor F>
-Task<Result<void>> AsyncReadExact(IoContext& ctx, const F& f, std::span<std::byte> buffer, uint64_t offset = 0)
+Task<Result<void>> AsyncReadExact(IoContext& ctx, const F& f, std::span<std::byte> buffer, const uint64_t offset = 0)
 {
     assert(offset != kUseFilePos && "AsyncReadExact does not support kUseFilePos");
+    [[maybe_unused]] auto fd_owner = MaybeHoldFd(f);
+    const int raw_fd = GetRawFd(f);
 
     size_t total = 0;
     const size_t target = buffer.size();
 
     while (total < target)
     {
-        auto result = co_await AsyncRead(ctx, f, buffer.subspan(total), offset + total);
+        auto result = co_await AsyncRead(ctx, raw_fd, buffer.subspan(total), offset + total);
         if (!result)
         {
             co_return std::unexpected(result.error());
@@ -97,7 +100,7 @@ Task<Result<void>> AsyncReadExact(IoContext& ctx, const F& f, std::span<std::byt
 
         if (*result == 0)
         {
-            co_return std::unexpected(std::make_error_code(std::errc::no_message_available));  // EOF
+            co_return ErrorFromErrc(std::errc::no_message_available);  // EOF
         }
 
         total += *result;
@@ -123,13 +126,15 @@ template <FileDescriptor F>
 Task<Result<void>> AsyncWriteExact(IoContext& ctx, const F& f, std::span<const std::byte> buffer, uint64_t offset = 0)
 {
     assert(offset != kUseFilePos && "AsyncWriteExact does not support kUseFilePos");
+    [[maybe_unused]] auto fd_owner = MaybeHoldFd(f);
+    const int raw_fd = GetRawFd(f);
 
     size_t total = 0;
     const size_t target = buffer.size();
 
     while (total < target)
     {
-        auto result = co_await AsyncWrite(ctx, f, buffer.subspan(total), offset + total);
+        auto result = co_await AsyncWrite(ctx, raw_fd, buffer.subspan(total), offset + total);
         if (!result)
         {
             co_return std::unexpected(result.error());
@@ -137,7 +142,7 @@ Task<Result<void>> AsyncWriteExact(IoContext& ctx, const F& f, std::span<const s
 
         if (*result == 0)
         {
-            co_return std::unexpected(std::make_error_code(std::errc::no_message_available));
+            co_return ErrorFromErrc(std::errc::no_message_available);
         }
 
         total += *result;
@@ -181,7 +186,7 @@ Task<Result<void>> AsyncRecvExact(IoContext& ctx, const F& f, std::span<std::byt
 
         if (*result == 0)
         {
-            co_return std::unexpected(std::make_error_code(std::errc::no_message_available));  // Connection closed
+            co_return ErrorFromErrc(std::errc::no_message_available);  // Connection closed
         }
 
         total += *result;
@@ -220,7 +225,7 @@ Task<Result<void>> AsyncSendExact(IoContext& ctx, const F& f, std::span<const st
 
         if (*result == 0)
         {
-            co_return std::unexpected(std::make_error_code(std::errc::no_message_available));
+            co_return ErrorFromErrc(std::errc::no_message_available);
         }
 
         total += *result;
@@ -264,11 +269,16 @@ Task<Result<void>> AsyncSendExact(IoContext& ctx, const F& f, std::span<const st
 template <FileDescriptor Fout, FileDescriptor Fin>
 Task<Result<void>> AsyncSendfile(IoContext& ctx, const Fout& out_fd, const Fin& in_fd, off_t offset, size_t count)
 {
+    [[maybe_unused]] auto out_fd_owner = MaybeHoldFd(out_fd);
+    [[maybe_unused]] auto in_fd_owner = MaybeHoldFd(in_fd);
+    const int raw_out_fd = GetRawFd(out_fd);
+    const int raw_in_fd = GetRawFd(in_fd);
+
     // Acquire a pipe from the pool
     auto pipe_guard = ctx.GetPipePool().AcquireGuarded();
     if (!pipe_guard)
     {
-        co_return std::unexpected(std::make_error_code(std::errc::too_many_files_open));
+        co_return ErrorFromErrc(std::errc::too_many_files_open);
     }
 
     auto& pipe = pipe_guard->get();
@@ -289,7 +299,7 @@ Task<Result<void>> AsyncSendfile(IoContext& ctx, const Fout& out_fd, const Fin& 
         size_t bytes_in_pipe = 0;
         while (bytes_in_pipe < to_splice)
         {
-            auto res = co_await detail::AsyncSplice(ctx, GetRawFd(in_fd), current_offset, pipe_write, -1,
+            auto res = co_await detail::AsyncSplice(ctx, raw_in_fd, current_offset, pipe_write, -1,
                                                     to_splice - bytes_in_pipe, 0);
             if (!res)
                 co_return std::unexpected(res.error());
@@ -307,12 +317,12 @@ Task<Result<void>> AsyncSendfile(IoContext& ctx, const Fout& out_fd, const Fin& 
         size_t bytes_flushed = 0;
         while (bytes_flushed < bytes_in_pipe)
         {
-            auto res = co_await detail::AsyncSplice(ctx, pipe_read, -1, GetRawFd(out_fd), -1,
+            auto res = co_await detail::AsyncSplice(ctx, pipe_read, -1, raw_out_fd, -1,
                                                     bytes_in_pipe - bytes_flushed, 0);
             if (!res)
                 co_return std::unexpected(res.error());
             if (*res == 0)
-                co_return std::unexpected(std::make_error_code(std::errc::broken_pipe));
+                co_return ErrorFromErrc(std::errc::broken_pipe);
 
             bytes_flushed += *res;
         }

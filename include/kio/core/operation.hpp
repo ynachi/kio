@@ -9,11 +9,7 @@
 namespace kio
 {
 struct UringBackend;
-struct MemoryBackend;
-template <typename Backend>
-class BasicIoContext;
-using IoContext = BasicIoContext<UringBackend>;
-using MemoryIoContext = BasicIoContext<MemoryBackend>;
+class IoContext;
 
 enum class OpCancelReason : uint8_t
 {

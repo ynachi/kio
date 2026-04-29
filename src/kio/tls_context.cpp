@@ -86,7 +86,9 @@ static Result<> SetCiphers(SSL_CTX* ctx, const TlsConfig& config)
     {
         if (SSL_CTX_set_cipher_list(ctx, config.cipher_suites.c_str()) != 1)
         {
-            return ErrorFromOpenSSL();
+            auto err = ErrorFromOpenSSL();
+            ALOG_ERROR("TlsContext::SetCiphers SSL_CTX_set_cipher_list failed: {}", err.error().message());
+            return err;
         }
     }
 
@@ -96,7 +98,9 @@ static Result<> SetCiphers(SSL_CTX* ctx, const TlsConfig& config)
 
     if (SSL_CTX_set_ciphersuites(ctx, tls13_ciphers.c_str()) != 1)
     {
-        return ErrorFromOpenSSL();
+        auto err = ErrorFromOpenSSL();
+        ALOG_ERROR("TlsContext::SetCiphers SSL_CTX_set_ciphersuites failed: {}", err.error().message());
+        return err;
     }
 
     return {};
@@ -109,24 +113,33 @@ static Result<> LoadCerts(SSL_CTX* ctx, const TlsConfig& config, const bool serv
         // Load Certificate Chain
         if (SSL_CTX_use_certificate_chain_file(ctx, config.cert_path.string().c_str()) != 1)
         {
-            return ErrorFromOpenSSL();
+            auto err = ErrorFromOpenSSL();
+            ALOG_ERROR("TlsContext::LoadCerts certificate load failed for {}: {}", config.cert_path.string(),
+                       err.error().message());
+            return err;
         }
 
         // Load Private Key
         if (SSL_CTX_use_PrivateKey_file(ctx, config.key_path.string().c_str(), SSL_FILETYPE_PEM) != 1)
         {
-            return ErrorFromOpenSSL();
+            auto err = ErrorFromOpenSSL();
+            ALOG_ERROR("TlsContext::LoadCerts private key load failed for {}: {}", config.key_path.string(),
+                       err.error().message());
+            return err;
         }
 
         // Verify Key Matches Cert
         if (SSL_CTX_check_private_key(ctx) != 1)
         {
-            return ErrorFromOpenSSL();
+            auto err = ErrorFromOpenSSL();
+            ALOG_ERROR("TlsContext::LoadCerts private key check failed: {}", err.error().message());
+            return err;
         }
     }
     else if (server_mode)
     {
         // For servers, identity is mandatory
+        ALOG_ERROR("TlsContext::LoadCerts missing cert/key in server mode");
         return ErrorFromErrno(EINVAL);
     }
 
@@ -146,7 +159,10 @@ static Result<> TrustStore(SSL_CTX* ctx, const TlsConfig& config, const bool ser
         // 1. Load for Verification (Check signature)
         if (SSL_CTX_load_verify_locations(ctx, ca_file, ca_dir) != 1)
         {
-            return ErrorFromOpenSSL();
+            auto err = ErrorFromOpenSSL();
+            ALOG_ERROR("TlsContext::TrustStore load verify locations failed file={} dir={}: {}",
+                       config.ca_cert_path.string(), config.ca_dir_path.string(), err.error().message());
+            return err;
         }
 
         // 2. Load for Advertisement (Server mTLS only)
@@ -158,7 +174,10 @@ static Result<> TrustStore(SSL_CTX* ctx, const TlsConfig& config, const bool ser
             STACK_OF(X509_NAME)* list = SSL_load_client_CA_file(ca_file);
             if (list == nullptr)
             {
-                return ErrorFromOpenSSL();
+                auto err = ErrorFromOpenSSL();
+                ALOG_ERROR("TlsContext::TrustStore SSL_load_client_CA_file failed for {}: {}",
+                           config.ca_cert_path.string(), err.error().message());
+                return err;
             }
             // Takes ownership of the stack
             SSL_CTX_set_client_CA_list(ctx, list);
@@ -194,7 +213,9 @@ static Result<std::unique_ptr<std::vector<unsigned char>>> SetupAlpn(SSL_CTX* ct
                 // CLIENT: OpenSSL copies the data internally immediately.
                 if (SSL_CTX_set_alpn_protos(ctx, wire_data.data(), wire_data.size()) != 0)
                 {
-                    return ErrorFromOpenSSL();
+                    auto err = ErrorFromOpenSSL();
+                    ALOG_ERROR("TlsContext::SetupAlpn SSL_CTX_set_alpn_protos failed: {}", err.error().message());
+                    return err;
                 }
             }
         }
@@ -223,30 +244,45 @@ Result<TlsContext> TlsContext::Create(const TlsConfig& config, const bool server
 {
     // Ensure KTLS compile-time support
 #ifndef SSL_OP_ENABLE_KTLS
+    ALOG_ERROR("TlsContext::Create requires OpenSSL built with KTLS support");
     return ErrorFromErrno(EINVAL);
 #endif
 
     // Ensure KTLS runtime support
     if (!detail::HaveKtls())
     {
+        ALOG_ERROR("TlsContext::Create kernel tls module unavailable");
         return ErrorFromErrno(EINVAL);
     }
 
     // 1. Create Context
     const SSL_METHOD* method = server_mode ? TLS_server_method() : TLS_client_method();
     if (method == nullptr)
-        return ErrorFromOpenSSL();
+    {
+        auto err = ErrorFromOpenSSL();
+        ALOG_ERROR("TlsContext::Create TLS_*_method failed: {}", err.error().message());
+        return err;
+    }
 
     SSLCtxPtr ctx{SSL_CTX_new(method)};
     if (ctx == nullptr)
-        return ErrorFromOpenSSL();
+    {
+        auto err = ErrorFromOpenSSL();
+        ALOG_ERROR("TlsContext::Create SSL_CTX_new failed: {}", err.error().message());
+        return err;
+    }
 
     // 2. Protocols & Ciphers
     if (SSL_CTX_set_min_proto_version(ctx.get(), TLS1_2_VERSION) != 1)
-        return ErrorFromOpenSSL();
+    {
+        auto err = ErrorFromOpenSSL();
+        ALOG_ERROR("TlsContext::Create SSL_CTX_set_min_proto_version failed: {}", err.error().message());
+        return err;
+    }
 
     if (auto err = detail::SetCiphers(ctx.get(), config); !err.has_value())
     {
+        ALOG_ERROR("TlsContext::Create cipher setup failed: {}", err.error().message());
         return std::unexpected(err.error());
     }
 
@@ -264,12 +300,14 @@ Result<TlsContext> TlsContext::Create(const TlsConfig& config, const bool server
     // 4. Certificates & Trust
     if (auto err = detail::LoadCerts(ctx.get(), config, server_mode); !err.has_value())
     {
+        ALOG_ERROR("TlsContext::Create certificate setup failed: {}", err.error().message());
         return std::unexpected(err.error());
     }
 
     // Pass server_mode to TrustStore to enable CA Advertisement for mTLS
     if (auto err = detail::TrustStore(ctx.get(), config, server_mode); !err.has_value())
     {
+        ALOG_ERROR("TlsContext::Create trust store setup failed: {}", err.error().message());
         return std::unexpected(err.error());
     }
 
@@ -279,6 +317,7 @@ Result<TlsContext> TlsContext::Create(const TlsConfig& config, const bool server
     auto alpn_res = detail::SetupAlpn(ctx.get(), config, server_mode, AlpnSelectCb);
     if (!alpn_res.has_value())
     {
+        ALOG_ERROR("TlsContext::Create ALPN setup failed: {}", alpn_res.error().message());
         return std::unexpected(alpn_res.error());
     }
     std::unique_ptr<std::vector<unsigned char>> alpn_storage = std::move(alpn_res.value());

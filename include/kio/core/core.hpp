@@ -2,6 +2,7 @@
 #include "kio/logger.hpp"
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <coroutine>
 #include <csignal>
@@ -12,6 +13,7 @@
 #include <latch>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <span>
 #include <string>
@@ -19,6 +21,7 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include <bit>
 
 #include <liburing.h>
 
@@ -64,45 +67,288 @@ namespace kio
 {
 // forward declaration
 struct UringBackend;
-struct MemoryBackend;
-template <typename Backend>
-class BasicIoContext;
-using IoContext = BasicIoContext<UringBackend>;
-using MemoryIoContext = BasicIoContext<MemoryBackend>;
+class IoContext;
 template <typename T>
 class TaskGroup;
 
 ////////////////////////////////////////////////////////////////////////////////
 // Standardized Error Handling
-//
-// Unifies the project on std::expected<T, std::error_code>.
-// Allows usage of Result<int> or Result<> (defaults to void).
 ////////////////////////////////////////////////////////////////////////////////
 
-template <typename T = void>
-using Result = std::expected<T, std::error_code>;
-
-template <typename Backend>
-concept IoBackend = requires(Backend backend, const Backend const_backend, unsigned entries, unsigned wait_nr,
-                             std::span<const int> fds, OperationState* op) {
-    { backend.Init(entries) } -> std::same_as<void>;
-    { backend.Shutdown() } -> std::same_as<void>;
-    { const_backend.Notify() } -> std::convertible_to<bool>;
-    { backend.SubmitAndWait(wait_nr) } -> std::same_as<int>;
-    { backend.CancelAllPending() } -> std::same_as<void>;
-    { backend.RegisterFiles(fds) } -> std::same_as<Result<>>;
-    { const_backend.WakeFd() } -> std::convertible_to<int>;
-    { backend.TryMsgRing(const_backend, op) } -> std::convertible_to<bool>;
+enum class IoErrorKind : uint8_t
+{
+    Unknown = 0,
+    Invalid,
+    PermissionDenied,
+    TimedOut,
+    Cancelled,
+    WouldBlock,
+    NotFound,
+    AlreadyExists,
+    Unsupported,
+    BadFd,
+    BrokenPipe,
+    ConnectionRefused,
+    ConnectionReset,
+    AddressNotAvailable,
+    NotDirectory,
+    IsDirectory,
+    OutOfMemory,
+    Overflow,
+    NoSpace,
+    Protocol,
+    Incomplete,
+    Corrupted,
+    Io,
+    Internal,
 };
 
-inline std::unexpected<std::error_code> ErrorFromErrno(const int err) noexcept
+enum class IoOperation : uint8_t
 {
-    return std::unexpected(std::error_code(err, std::system_category()));
+    Unknown = 0,
+    Accept,
+    Connect,
+    Open,
+    Close,
+    Read,
+    Write,
+    Recv,
+    Send,
+    Poll,
+    Fsync,
+    Fdatasync,
+    Fallocate,
+    Ftruncate,
+    Readv,
+    Writev,
+    Rename,
+    Unlink,
+    Mkdir,
+    Wait,
+    Sleep,
+    Splice,
+};
+
+struct IoErrorDetail
+{
+    IoOperation op{IoOperation::Unknown};
+    std::optional<int> fd{};
+    std::optional<int> secondary_fd{};
+    std::optional<uint32_t> file_index{};
+    std::optional<uint64_t> offset{};
+    std::optional<size_t> len{};
+};
+
+class IoError
+{
+public:
+    IoError() = default;
+
+    explicit IoError(std::error_code code, std::optional<IoErrorDetail> detail = std::nullopt)
+        : code_(std::move(code)), kind_(Classify(code_)), detail_(std::move(detail))
+    {
+    }
+
+    explicit IoError(std::errc err, std::optional<IoErrorDetail> detail = std::nullopt)
+        : IoError(std::make_error_code(err), std::move(detail))
+    {
+    }
+
+    explicit IoError(ParseError err, std::optional<IoErrorDetail> detail = std::nullopt);
+
+    [[nodiscard]] static IoError FromErrno(int err, std::optional<IoErrorDetail> detail = std::nullopt)
+    {
+        return IoError(std::error_code(err > 0 ? err : -err, std::system_category()), std::move(detail));
+    }
+
+    [[nodiscard]] static IoError FromOpenSSL(unsigned long err, std::optional<IoErrorDetail> detail = std::nullopt);
+
+    [[nodiscard]] IoError WithDetail(IoErrorDetail detail) const
+    {
+        IoError copy = *this;
+        copy.detail_ = std::move(detail);
+        return copy;
+    }
+
+    [[nodiscard]] const std::error_code& code() const noexcept { return code_; }
+    [[nodiscard]] const std::error_category& category() const noexcept { return code_.category(); }
+    [[nodiscard]] int value() const noexcept { return code_.value(); }
+    [[nodiscard]] IoErrorKind kind() const noexcept { return kind_; }
+    [[nodiscard]] const std::optional<IoErrorDetail>& detail() const noexcept { return detail_; }
+
+    [[nodiscard]] std::string message() const
+    {
+        std::string msg = code_.message();
+        if (!detail_)
+        {
+            return msg;
+        }
+
+        auto append_sep = [&msg]() {
+            if (!msg.empty() && msg.back() != ' ')
+            {
+                msg += " ";
+            }
+        };
+
+        append_sep();
+        msg += "[";
+        bool first = true;
+        auto append_field = [&](std::string_view name, const auto& value) {
+            if (!first)
+            {
+                msg += " ";
+            }
+            first = false;
+            msg += name;
+            msg += "=";
+            msg += std::format("{}", value);
+        };
+
+        if (detail_->op != IoOperation::Unknown)
+        {
+            std::string_view op_name = "unknown";
+            switch (detail_->op)
+            {
+                case IoOperation::Accept:
+                    op_name = "accept";
+                    break;
+                case IoOperation::Connect:
+                    op_name = "connect";
+                    break;
+                case IoOperation::Open:
+                    op_name = "open";
+                    break;
+                case IoOperation::Close:
+                    op_name = "close";
+                    break;
+                case IoOperation::Read:
+                    op_name = "read";
+                    break;
+                case IoOperation::Write:
+                    op_name = "write";
+                    break;
+                case IoOperation::Recv:
+                    op_name = "recv";
+                    break;
+                case IoOperation::Send:
+                    op_name = "send";
+                    break;
+                case IoOperation::Poll:
+                    op_name = "poll";
+                    break;
+                case IoOperation::Fsync:
+                    op_name = "fsync";
+                    break;
+                case IoOperation::Fdatasync:
+                    op_name = "fdatasync";
+                    break;
+                case IoOperation::Fallocate:
+                    op_name = "fallocate";
+                    break;
+                case IoOperation::Ftruncate:
+                    op_name = "ftruncate";
+                    break;
+                case IoOperation::Readv:
+                    op_name = "readv";
+                    break;
+                case IoOperation::Writev:
+                    op_name = "writev";
+                    break;
+                case IoOperation::Rename:
+                    op_name = "rename";
+                    break;
+                case IoOperation::Unlink:
+                    op_name = "unlink";
+                    break;
+                case IoOperation::Mkdir:
+                    op_name = "mkdir";
+                    break;
+                case IoOperation::Wait:
+                    op_name = "wait";
+                    break;
+                case IoOperation::Sleep:
+                    op_name = "sleep";
+                    break;
+                case IoOperation::Splice:
+                    op_name = "splice";
+                    break;
+                case IoOperation::Unknown:
+                    break;
+            }
+            append_field("op", op_name);
+        }
+        if (detail_->fd)
+        {
+            append_field("fd", *detail_->fd);
+        }
+        if (detail_->secondary_fd)
+        {
+            append_field("fd2", *detail_->secondary_fd);
+        }
+        if (detail_->file_index)
+        {
+            append_field("file_index", *detail_->file_index);
+        }
+        if (detail_->offset)
+        {
+            append_field("offset", *detail_->offset);
+        }
+        if (detail_->len)
+        {
+            append_field("len", *detail_->len);
+        }
+        msg += "]";
+        return msg;
+    }
+
+    friend bool operator==(const IoError& lhs, const IoError& rhs)
+    {
+        return lhs.kind_ == rhs.kind_ && lhs.code_ == rhs.code_;
+    }
+
+    friend bool operator==(const IoError& lhs, std::errc rhs)
+    {
+        return lhs.code_.value() == static_cast<int>(rhs);
+    }
+
+    friend bool operator==(std::errc lhs, const IoError& rhs) { return rhs == lhs; }
+
+    friend bool operator==(const IoError& lhs, const std::error_code& rhs)
+    {
+        return lhs.code_ == rhs || lhs.code_.value() == rhs.value();
+    }
+
+    friend bool operator==(const std::error_code& lhs, const IoError& rhs) { return rhs == lhs; }
+
+    friend bool operator==(const IoError& lhs, ParseError rhs);
+    friend bool operator==(ParseError lhs, const IoError& rhs) { return rhs == lhs; }
+
+private:
+    [[nodiscard]] static IoErrorKind Classify(const std::error_code& code) noexcept;
+    [[nodiscard]] static IoErrorKind Classify(ParseError err) noexcept;
+
+    std::error_code code_{};
+    IoErrorKind kind_{IoErrorKind::Unknown};
+    std::optional<IoErrorDetail> detail_{};
+};
+
+template <typename T = void>
+using Result = std::expected<T, IoError>;
+
+inline std::unexpected<IoError> ErrorFromErrno(const int err) noexcept
+{
+    return std::unexpected(IoError::FromErrno(err));
 }
 
-inline std::error_code make_error_code(const int err) noexcept
+inline std::unexpected<IoError> ErrorFromErrc(const std::errc err) noexcept
 {
-    return std::error_code{err > 0 ? err : -err, std::system_category()};
+    return std::unexpected(IoError(err));
+}
+
+inline IoError make_error_code(const int err) noexcept
+{
+    return IoError::FromErrno(err);
 }
 
 namespace detail
@@ -123,6 +369,34 @@ inline const std::error_category& openssl_category() noexcept
 {
     static openssl_category_t cat;
     return cat;
+}
+
+inline int SubmissionFailureErrno(const std::exception_ptr& ep) noexcept
+{
+    try
+    {
+        if (ep)
+        {
+            std::rethrow_exception(ep);
+        }
+    }
+    catch (const std::system_error& e)
+    {
+        return e.code().value() > 0 ? e.code().value() : -e.code().value();
+    }
+    catch (const std::bad_alloc&)
+    {
+        return ENOMEM;
+    }
+    catch (const std::runtime_error&)
+    {
+        return EAGAIN;
+    }
+    catch (...)
+    {
+    }
+
+    return EIO;
 }
 }  // namespace detail
 
@@ -189,12 +463,134 @@ inline std::error_code make_error_code(ParseError e)
     return {static_cast<int>(e), GetParseErrorCategory()};
 }
 
-inline std::unexpected<std::error_code> ErrorFromOpenSSL(unsigned long err) noexcept
+inline IoError::IoError(ParseError err, std::optional<IoErrorDetail> detail)
+    : code_(make_error_code(err)), kind_(Classify(err)), detail_(std::move(detail))
 {
-    return std::unexpected(std::error_code(static_cast<int>(err), detail::openssl_category()));
 }
 
-std::unexpected<std::error_code> ErrorFromOpenSSL() noexcept;
+inline IoError IoError::FromOpenSSL(unsigned long err, std::optional<IoErrorDetail> detail)
+{
+    const auto bits = static_cast<uint32_t>(err);
+    return IoError(std::error_code(std::bit_cast<int>(bits), detail::openssl_category()), std::move(detail));
+}
+
+inline IoErrorKind IoError::Classify(ParseError err) noexcept
+{
+    switch (err)
+    {
+        case ParseError::Incomplete:
+            return IoErrorKind::Incomplete;
+        case ParseError::InvalidProtocol:
+            return IoErrorKind::Protocol;
+        case ParseError::Overflow:
+            return IoErrorKind::Overflow;
+        case ParseError::InternalError:
+            return IoErrorKind::Internal;
+        case ParseError::Corrupted:
+            return IoErrorKind::Corrupted;
+        case ParseError::Success:
+            return IoErrorKind::Unknown;
+    }
+    return IoErrorKind::Unknown;
+}
+
+inline IoErrorKind IoError::Classify(const std::error_code& code) noexcept
+{
+    if (code.category() == GetParseErrorCategory())
+    {
+        return Classify(static_cast<ParseError>(code.value()));
+    }
+
+    if (code.category() == detail::openssl_category())
+    {
+        return IoErrorKind::Protocol;
+    }
+
+    const int value = code.value();
+    if (value == EAGAIN)
+    {
+        return IoErrorKind::WouldBlock;
+    }
+#if defined(EWOULDBLOCK) && EWOULDBLOCK != EAGAIN
+    if (value == EWOULDBLOCK)
+    {
+        return IoErrorKind::WouldBlock;
+    }
+#endif
+    if (value == ENOTSUP)
+    {
+        return IoErrorKind::Unsupported;
+    }
+#if defined(EOPNOTSUPP) && EOPNOTSUPP != ENOTSUP
+    if (value == EOPNOTSUPP)
+    {
+        return IoErrorKind::Unsupported;
+    }
+#endif
+
+    switch (value)
+    {
+        case 0:
+            return IoErrorKind::Unknown;
+        case EINVAL:
+            return IoErrorKind::Invalid;
+        case EACCES:
+        case EPERM:
+            return IoErrorKind::PermissionDenied;
+        case ETIMEDOUT:
+            return IoErrorKind::TimedOut;
+        case ECANCELED:
+            return IoErrorKind::Cancelled;
+        case ENOENT:
+            return IoErrorKind::NotFound;
+        case EEXIST:
+            return IoErrorKind::AlreadyExists;
+        case EBADF:
+            return IoErrorKind::BadFd;
+        case EPIPE:
+            return IoErrorKind::BrokenPipe;
+        case ECONNREFUSED:
+            return IoErrorKind::ConnectionRefused;
+        case ECONNRESET:
+            return IoErrorKind::ConnectionReset;
+        case EADDRNOTAVAIL:
+            return IoErrorKind::AddressNotAvailable;
+        case ENOTDIR:
+            return IoErrorKind::NotDirectory;
+        case EISDIR:
+            return IoErrorKind::IsDirectory;
+        case ENOMEM:
+            return IoErrorKind::OutOfMemory;
+        case EOVERFLOW:
+            return IoErrorKind::Overflow;
+        case ENOSPC:
+        case EDQUOT:
+            return IoErrorKind::NoSpace;
+        case EPROTO:
+            return IoErrorKind::Protocol;
+        case EIO:
+            return IoErrorKind::Io;
+        default:
+            return IoErrorKind::Unknown;
+    }
+}
+
+inline bool operator==(const IoError& lhs, ParseError rhs)
+{
+    return lhs.code() == make_error_code(rhs);
+}
+
+inline std::unexpected<IoError> ErrorFromParse(ParseError err) noexcept
+{
+    return std::unexpected(IoError(err));
+}
+
+inline std::unexpected<IoError> ErrorFromOpenSSL(unsigned long err) noexcept
+{
+    return std::unexpected(IoError::FromOpenSSL(err));
+}
+
+std::unexpected<IoError> ErrorFromOpenSSL() noexcept;
 
 ////////////////////////////////////////////////////////////////////////////////
 // Error Propagation Macros (Rust-style ? operator)
@@ -349,8 +745,7 @@ public:
     }
 
 private:
-    template <typename Backend>
-    friend class BasicIoContext;
+    friend class IoContext;
     template <typename U>
     friend class TaskGroup;
 
@@ -466,8 +861,7 @@ public:
     }
 
 private:
-    template <typename Backend>
-    friend class BasicIoContext;
+    friend class IoContext;
     template <typename U>
     friend class TaskGroup;
 
@@ -482,27 +876,37 @@ private:
     handle_type handle_;
 };
 
-template <typename Derived, typename Backend = UringBackend>
+template <typename Derived>
 struct DispatchOp : OperationState
 {
 protected:
-    explicit DispatchOp(BasicIoContext<Backend>* c) { ctx = c; }
+    explicit DispatchOp(IoContext* c) { ctx = c; }
 
     DispatchOp(DispatchOp&& other) noexcept : OperationState(std::move(other)) {}
 
 public:
-    BasicIoContext<Backend>& Context() { return *static_cast<BasicIoContext<Backend>*>(ctx); }
-    const BasicIoContext<Backend>& Context() const { return *static_cast<const BasicIoContext<Backend>*>(ctx); }
+    IoContext& Context() { return *static_cast<IoContext*>(ctx); }
+    const IoContext& Context() const { return *static_cast<const IoContext*>(ctx); }
 
     bool await_ready() const noexcept { return false; }
 
-    void await_suspend(this auto& self, std::coroutine_handle<> h)
+    bool await_suspend(this auto& self, std::coroutine_handle<> h)
     {
         self.handle = h;
         auto* op = static_cast<OperationState*>(&self);
         auto& ctx = self.Context();
         ctx.Track(op);
-        Submit(ctx.GetBackend(), ctx, self);
+        try
+        {
+            Submit(ctx.GetBackend(), ctx, self);
+            return true;
+        }
+        catch (...)
+        {
+            ctx.Untrack(op);
+            self.res = -detail::SubmissionFailureErrno(std::current_exception());
+            return false;
+        }
     }
 
     Result<size_t> await_resume()
@@ -542,8 +946,7 @@ public:
     ~ScopedIoContext();
 };
 
-template <typename Backend>
-const void* BackendTag() noexcept
+inline const void* BackendTag() noexcept
 {
     static const int tag = 0;
     return &tag;
@@ -553,9 +956,16 @@ struct UringBackend
 {
     using NativeFileHandle = int;
 
+    struct Capabilities
+    {
+        bool ring_resize = false;
+    };
+
     io_uring ring_{};
     int wake_fd_ = -1;
     uint64_t wake_buffer_ = 0;
+    unsigned setup_flags_ = 0;
+    Capabilities capabilities_{};
 
     void Init(unsigned entries);
     void Shutdown() noexcept;
@@ -565,10 +975,19 @@ struct UringBackend
     void CancelAllPending();
     Result<> RegisterFiles(std::span<const int> fds);
 
+    /// Resize the SQ/CQ rings in place.
+    /// Requires Linux >= 6.13, liburing resize support, and a ring created with
+    /// IORING_SETUP_DEFER_TASKRUN. Caller must use the owner thread.
+    Result<> Resize(unsigned entries, std::optional<unsigned> cq_entries = std::nullopt);
+
     io_uring* Ring() { return &ring_; }
     const io_uring* Ring() const { return &ring_; }
     int RingFd() const { return ring_.ring_fd; }
     int WakeFd() const { return wake_fd_; }
+    unsigned SqEntries() const { return ring_.sq.ring_entries; }
+    unsigned CqEntries() const { return ring_.cq.ring_entries; }
+    bool SupportsRingResize() const noexcept { return capabilities_.ring_resize; }
+    const Capabilities& GetCapabilities() const noexcept { return capabilities_; }
 
     void EnsureSqes(unsigned n);
     io_uring_sqe* GetSqe();
@@ -647,197 +1066,9 @@ inline std::pair<io_uring_sqe*, io_uring_sqe*> PrepareLinkedTimeoutSqes(UringBac
     return {sqe_op, sqe_timer};
 }
 
-struct MemoryBackend
+class IoContext
 {
-    using NativeFileHandle = uint64_t;
-    using clock = std::chrono::steady_clock;
-
-    enum class TimeMode : uint8_t
-    {
-        AutoAdvance,
-        ManualAdvance,
-    };
-
-    struct Config
-    {
-        TimeMode time_mode = TimeMode::AutoAdvance;
-        clock::duration start_time{};
-        size_t default_max_read_bytes = 0;
-        size_t default_max_write_bytes = 0;
-    };
-
-    struct IoFault
-    {
-        int error = 0;
-        size_t max_bytes = 0;
-    };
-
-    struct FileState
-    {
-        std::vector<std::byte> data;
-        bool fsynced = false;
-    };
-
-    struct OpenFileState
-    {
-        std::shared_ptr<FileState> file;
-        int flags = 0;
-    };
-
-    struct TimerEntry
-    {
-        clock::time_point due;
-        OperationState* op = nullptr;
-        bool operator>(const TimerEntry& o) const noexcept { return due > o.due; }
-    };
-
-    Config config_{};
-    std::deque<OperationState*> ready_;
-    // Min-heap: soonest deadline at top — O(log n) insert, O(1) peek.
-    std::priority_queue<TimerEntry, std::vector<TimerEntry>, std::greater<>> timers_;
-    std::unordered_map<std::string, std::shared_ptr<FileState>> files_;
-    std::unordered_map<NativeFileHandle, OpenFileState> open_files_;
-    std::deque<IoFault> open_faults_;
-    std::deque<IoFault> read_faults_;
-    std::deque<IoFault> write_faults_;
-    std::deque<IoFault> close_faults_;
-    std::deque<IoFault> fsync_faults_;
-    NativeFileHandle next_handle_ = 1;
-    int wake_fd_ = -1;
-    uint64_t wake_buffer_ = 0;
-    std::atomic<int64_t> now_ns_{0};
-
-    MemoryBackend() = default;
-    explicit MemoryBackend(Config config) : config_(config), now_ns_(config.start_time.count()) {}
-    MemoryBackend(MemoryBackend&& other) noexcept
-        : config_(other.config_),
-          ready_(std::move(other.ready_)),
-          timers_(std::move(other.timers_)),
-          files_(std::move(other.files_)),
-          open_files_(std::move(other.open_files_)),
-          open_faults_(std::move(other.open_faults_)),
-          read_faults_(std::move(other.read_faults_)),
-          write_faults_(std::move(other.write_faults_)),
-          close_faults_(std::move(other.close_faults_)),
-          fsync_faults_(std::move(other.fsync_faults_)),
-          next_handle_(other.next_handle_),
-          wake_fd_(other.wake_fd_),
-          wake_buffer_(other.wake_buffer_),
-          now_ns_(other.now_ns_.load(std::memory_order_acquire))
-    {
-        other.next_handle_ = 1;
-        other.wake_fd_ = -1;
-        other.wake_buffer_ = 0;
-        other.now_ns_.store(0, std::memory_order_release);
-    }
-    MemoryBackend& operator=(MemoryBackend&& other) noexcept
-    {
-        if (this != &other)
-        {
-            config_ = other.config_;
-            ready_ = std::move(other.ready_);
-            timers_ = std::move(other.timers_);
-            files_ = std::move(other.files_);
-            open_files_ = std::move(other.open_files_);
-            open_faults_ = std::move(other.open_faults_);
-            read_faults_ = std::move(other.read_faults_);
-            write_faults_ = std::move(other.write_faults_);
-            close_faults_ = std::move(other.close_faults_);
-            fsync_faults_ = std::move(other.fsync_faults_);
-            next_handle_ = other.next_handle_;
-            wake_fd_ = other.wake_fd_;
-            wake_buffer_ = other.wake_buffer_;
-            now_ns_.store(other.now_ns_.load(std::memory_order_acquire), std::memory_order_release);
-
-            other.next_handle_ = 1;
-            other.wake_fd_ = -1;
-            other.wake_buffer_ = 0;
-            other.now_ns_.store(0, std::memory_order_release);
-        }
-        return *this;
-    }
-    MemoryBackend(const MemoryBackend&) = delete;
-    MemoryBackend& operator=(const MemoryBackend&) = delete;
-
-    void Init(unsigned);
-    void Shutdown() noexcept;
-    bool Notify() const noexcept;
-    int SubmitAndWait(unsigned);
-    bool TryMsgRing(const MemoryBackend&, OperationState*) { return false; }
-    void CancelAllPending();
-    Result<> RegisterFiles(std::span<const int>) { return {}; }
-    int WakeFd() const { return wake_fd_; }
-    void SubmitWakeRead() {}
-    void FlushAfterWake() {}
-    void AddTimer(OperationState* op, clock::time_point due);
-    void Complete(OperationState* op, int32_t res);
-    clock::time_point Now() const noexcept
-    {
-        return clock::time_point(clock::duration(now_ns_.load(std::memory_order_acquire)));
-    }
-    void AdvanceTime(clock::duration delta) noexcept { now_ns_.fetch_add(delta.count(), std::memory_order_acq_rel); }
-    void AdvanceTo(clock::time_point tp) noexcept
-    {
-        auto desired = tp.time_since_epoch().count();
-        auto current = now_ns_.load(std::memory_order_acquire);
-        while (desired > current &&
-               !now_ns_.compare_exchange_weak(current, desired, std::memory_order_acq_rel, std::memory_order_acquire))
-        {
-        }
-    }
-    void QueueOpenError(int error) { open_faults_.push_back(IoFault{.error = error}); }
-    void QueueReadError(int error) { read_faults_.push_back(IoFault{.error = error}); }
-    void QueueWriteError(int error) { write_faults_.push_back(IoFault{.error = error}); }
-    void QueueCloseError(int error) { close_faults_.push_back(IoFault{.error = error}); }
-    void QueueFsyncError(int error) { fsync_faults_.push_back(IoFault{.error = error}); }
-    void QueueReadPartial(size_t max_bytes) { read_faults_.push_back(IoFault{.max_bytes = max_bytes}); }
-    void QueueWritePartial(size_t max_bytes) { write_faults_.push_back(IoFault{.max_bytes = max_bytes}); }
-    void SetDefaultMaxReadBytes(size_t max_bytes) noexcept { config_.default_max_read_bytes = max_bytes; }
-    void SetDefaultMaxWriteBytes(size_t max_bytes) noexcept { config_.default_max_write_bytes = max_bytes; }
-    Result<NativeFileHandle> OpenFile(const std::filesystem::path& path, int flags, mode_t mode);
-    Result<size_t> ReadFile(NativeFileHandle handle, std::span<std::byte> buffer, uint64_t offset);
-    Result<size_t> WriteFile(NativeFileHandle handle, std::span<const std::byte> buffer, uint64_t offset);
-    Result<void> CloseFile(NativeFileHandle handle);
-    Result<void> FsyncFile(NativeFileHandle handle);
-
-    template <typename OnCompletion>
-    bool DrainWithoutResume(OnCompletion&& on_completion)
-    {
-        if (ready_.empty())
-        {
-            return false;
-        }
-
-        auto* op = ready_.front();
-        ready_.pop_front();
-
-        on_completion(reinterpret_cast<uint64_t>(op));
-        return true;
-    }
-
-    template <typename OnCompletion>
-    std::pair<unsigned, bool> ProcessReadyCompletions(OnCompletion&& on_completion)
-    {
-        std::deque<OperationState*> ready;
-        ready.swap(ready_);
-
-        for (auto* op : ready)
-        {
-            on_completion(op, op->res);
-        }
-
-        return {static_cast<unsigned>(ready.size()), false};
-    }
-};
-
-template <typename Backend>
-class BasicIoContext
-{
-    static_assert(IoBackend<Backend>, "BasicIoContext requires an IoBackend-compatible backend");
-    //
-    // IoContext clss members
-    //
-    Backend backend_{};
+    UringBackend backend_{};
     std::vector<std::coroutine_handle<>> ready_;
     OperationState* pending_head_ = nullptr;
     std::atomic<bool> stop_requested_{false};
@@ -873,17 +1104,17 @@ class BasicIoContext
 public:
     // user can pass their own io uring flag.
     // Note: using single issuer must ensure single issuer constraints are met.
-    explicit BasicIoContext(unsigned entries = 16800);
-    BasicIoContext(Backend backend, unsigned entries);
+    explicit IoContext(unsigned entries = 16800);
+    IoContext(UringBackend backend, unsigned entries);
 
-    ~BasicIoContext() noexcept;
+    ~IoContext() noexcept;
 
     // --- Static Access ---
     /// Returns the IoContext running on the current thread, or nullptr.
-    static BasicIoContext* Current() noexcept;
+    static IoContext* Current() noexcept;
 
-    BasicIoContext(const BasicIoContext&) = delete;
-    BasicIoContext& operator=(const BasicIoContext&) = delete;
+    IoContext(const IoContext&) = delete;
+    IoContext& operator=(const IoContext&) = delete;
 
     // -------------------------------------------------------------------------
     // Thread-Safe Signaling
@@ -896,8 +1127,8 @@ public:
      * * @return true if the signal was sent, false on error (check errno)
      */
     bool Notify() const noexcept;
-    Backend& GetBackend() { return backend_; }
-    const Backend& GetBackend() const { return backend_; }
+    UringBackend& GetBackend() { return backend_; }
+    const UringBackend& GetBackend() const { return backend_; }
 
     // -------------------------------------------------------------------------
     // Operation Tracking
@@ -916,6 +1147,16 @@ public:
 
     Result<> RegisterFiles(std::span<const int> fds);
 
+    /// Resize the underlying io_uring ring from the owner thread.
+    /// This is intended for explicit maintenance points, not concurrent use
+    /// while other threads are injecting work.
+    Result<> Resize(unsigned entries, std::optional<unsigned> cq_entries = std::nullopt);
+    unsigned SqEntries() const { return backend_.SqEntries(); }
+    unsigned CqEntries() const { return backend_.CqEntries(); }
+    /// Conservative runtime probe for ring-resize availability.
+    bool SupportsRingResize() const noexcept { return backend_.SupportsRingResize(); }
+    const UringBackend::Capabilities& GetCapabilities() const noexcept { return backend_.GetCapabilities(); }
+
     /// @brief Returns true if shutdown has been requested
     /// @note Coroutines can check this to perform graceful cleanup.
     [[nodiscard]] bool IsShuttingDown() const { return shutdown_requested_.load(std::memory_order_acquire); }
@@ -932,7 +1173,7 @@ public:
     void RunUntilDone(Task<T>&& t)
     {
         AssertOwnerThread();
-        ScopedIoContext scope(this, BackendTag<Backend>());
+        ScopedIoContext scope(this, BackendTag());
 
         stop_requested_.store(false, std::memory_order_relaxed);
 
@@ -949,7 +1190,7 @@ public:
     void Run()
     {
         AssertOwnerThread();
-        ScopedIoContext scope(this, BackendTag<Backend>());
+        ScopedIoContext scope(this, BackendTag());
 
         stop_requested_.store(false, std::memory_order_relaxed);
 
@@ -965,7 +1206,7 @@ public:
     void Run(Tick&& tick)
     {
         AssertOwnerThread();
-        ScopedIoContext scope(this, BackendTag<Backend>());
+        ScopedIoContext scope(this, BackendTag());
 
         stop_requested_.store(false, std::memory_order_relaxed);
 
@@ -1020,7 +1261,7 @@ public:
      * @brief Tries to send an IORING_OP_MSG_RING to target. Returns true on success.
      * Fails if current thread has no ring.
      */
-    bool TryMsgRing(const BasicIoContext& target, OperationState* op);
+    bool TryMsgRing(const IoContext& target, OperationState* op);
 
     // -------------------------------------------------------------------------
     // Low-level Access
@@ -1154,12 +1395,22 @@ struct WithTimeoutOp
 
     bool await_ready() const noexcept { return false; }
 
-    void await_suspend(std::coroutine_handle<> h)
+    bool await_suspend(std::coroutine_handle<> h)
     {
         op.handle = h;
         auto& ctx = op.Context();
         ctx.Track(&op);
-        SubmitWithTimeout(ctx.GetBackend(), ctx, op, ts);
+        try
+        {
+            SubmitWithTimeout(ctx.GetBackend(), ctx, op, ts);
+            return true;
+        }
+        catch (...)
+        {
+            ctx.Untrack(&op);
+            op.res = -detail::SubmissionFailureErrno(std::current_exception());
+            return false;
+        }
     }
 
     auto await_resume()
@@ -1177,7 +1428,7 @@ struct WithTimeoutOp
 #if AIO_STATS
                 AIO_STATS_INC(op.Context().Stats(), timeouts);
 #endif
-                return decltype(r)(std::unexpected(std::make_error_code(std::errc::timed_out)));
+                return decltype(r)(std::unexpected(IoError(std::errc::timed_out)));
             }
             return r;
         }
@@ -1186,9 +1437,9 @@ struct WithTimeoutOp
     }
 };
 
-template <typename Derived, typename Backend>
+template <typename Derived>
 template <typename Rep, typename Period>
-auto DispatchOp<Derived, Backend>::WithTimeout(this auto&& self, std::chrono::duration<Rep, Period> dur)
+auto DispatchOp<Derived>::WithTimeout(this auto&& self, std::chrono::duration<Rep, Period> dur)
     requires std::is_rvalue_reference_v<decltype(self)> && (!std::is_const_v<std::remove_reference_t<decltype(self)>>)
 {
     using Op = std::remove_cvref_t<decltype(self)>;
@@ -1532,10 +1783,10 @@ private:
 // Formatting Support
 ////////////////////////////////////////////////////////////////////////////////
 
-// Helper wrapper to format std::error_code nicely
+// Helper wrapper to format IoError nicely
 struct FmtErr
 {
-    const std::error_code& code;
+    const IoError& code;
 };
 }  // namespace kio
 
@@ -1555,13 +1806,93 @@ struct std::formatter<kio::ParseError>
 };
 
 template <>
+struct std::formatter<kio::IoOperation>
+{
+    constexpr auto parse(std::format_parse_context& ctx) { return ctx.begin(); }
+
+    auto format(kio::IoOperation op, std::format_context& ctx) const
+    {
+        using kio::IoOperation;
+        std::string_view name = "unknown";
+        switch (op)
+        {
+            case IoOperation::Accept:
+                name = "accept";
+                break;
+            case IoOperation::Connect:
+                name = "connect";
+                break;
+            case IoOperation::Open:
+                name = "open";
+                break;
+            case IoOperation::Close:
+                name = "close";
+                break;
+            case IoOperation::Read:
+                name = "read";
+                break;
+            case IoOperation::Write:
+                name = "write";
+                break;
+            case IoOperation::Recv:
+                name = "recv";
+                break;
+            case IoOperation::Send:
+                name = "send";
+                break;
+            case IoOperation::Poll:
+                name = "poll";
+                break;
+            case IoOperation::Fsync:
+                name = "fsync";
+                break;
+            case IoOperation::Fdatasync:
+                name = "fdatasync";
+                break;
+            case IoOperation::Fallocate:
+                name = "fallocate";
+                break;
+            case IoOperation::Ftruncate:
+                name = "ftruncate";
+                break;
+            case IoOperation::Readv:
+                name = "readv";
+                break;
+            case IoOperation::Writev:
+                name = "writev";
+                break;
+            case IoOperation::Rename:
+                name = "rename";
+                break;
+            case IoOperation::Unlink:
+                name = "unlink";
+                break;
+            case IoOperation::Mkdir:
+                name = "mkdir";
+                break;
+            case IoOperation::Wait:
+                name = "wait";
+                break;
+            case IoOperation::Sleep:
+                name = "sleep";
+                break;
+            case IoOperation::Splice:
+                name = "splice";
+                break;
+            case IoOperation::Unknown:
+                break;
+        }
+        return std::format_to(ctx.out(), "{}", name);
+    }
+};
+
+template <>
 struct std::formatter<kio::FmtErr>
 {
     constexpr auto parse(std::format_parse_context& ctx) { return ctx.begin(); }
 
     auto format(kio::FmtErr w, std::format_context& ctx) const
     {
-        // Output: "Category: Message (Value)"
         return std::format_to(ctx.out(), "{}: {} ({})", w.code.category().name(), w.code.message(), w.code.value());
     }
 };
@@ -1578,26 +1909,31 @@ namespace kio
  * This awaits internally, suspending the coroutine on the current thread,
  * and resuming it on the target IoContext thread.
  */
-template <typename Backend>
 struct ScheduleOp : OperationState
 {
-    BasicIoContext<Backend>* target;
+    IoContext* target;
 
-    explicit ScheduleOp(BasicIoContext<Backend>* t) : target(t) { ctx = t; }
+    explicit ScheduleOp(IoContext* t) : target(t) { ctx = t; }
 
     bool await_ready() const noexcept
     {
         // If we are already on the target context, don't suspend.
-        return BasicIoContext<Backend>::Current() == target;
+        return IoContext::Current() == target;
     }
 
     void await_suspend(std::coroutine_handle<> h)
     {
         handle = h;
         // Try Zero-Syscall path: IORING_OP_MSG_RING
-        if (auto* current = BasicIoContext<Backend>::Current(); current && current->TryMsgRing(*target, this))
+        try
         {
-            return;
+            if (auto* current = IoContext::Current(); current && current->TryMsgRing(*target, this))
+            {
+                return;
+            }
+        }
+        catch (...)
+        {
         }
 
         // Fallback path: Lock-free intrusive stack + batched eventfd
@@ -1611,10 +1947,9 @@ struct ScheduleOp : OperationState
  * @brief Low-level primitive to schedule resumption on this context.
  * @note Prefer using the `SwitchTo(ctx)` helper for better readability.
  */
-template <typename Backend>
-inline auto BasicIoContext<Backend>::Schedule()
+inline auto IoContext::Schedule()
 {
-    return ScheduleOp<Backend>(this);
+    return ScheduleOp(this);
 }
 
 /**
@@ -1626,9 +1961,8 @@ inline auto BasicIoContext<Backend>::Schedule()
  * If the coroutine is already running on target_ctx, this is a no-op (no suspension).
  * Otherwise, it migrates the coroutine to the target thread.
  */
-template <typename Backend>
 [[nodiscard]]
-inline auto SwitchTo(BasicIoContext<Backend>& target)
+inline auto SwitchTo(IoContext& target)
 {
     return target.Schedule();
 }
