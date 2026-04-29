@@ -27,6 +27,20 @@ protected:
     IoContext ctx{256};
 };
 
+namespace {
+
+Task<> StoreReadResult(ReadOp op, std::shared_ptr<std::optional<Result<size_t>>> out)
+{
+    *out = co_await op;
+}
+
+Task<> StoreRecvResult(RecvOp op, std::shared_ptr<std::optional<Result<size_t>>> out)
+{
+    *out = co_await op;
+}
+
+}  // namespace
+
 // -----------------------------------------------------------------------------
 // AsyncRead / AsyncWrite Tests
 // -----------------------------------------------------------------------------
@@ -121,11 +135,9 @@ TEST_F(IoOpsTest, ReadKeepsFdAliveAfterOwnerDrop) {
     auto buf = std::make_shared<std::array<std::byte, 5>>();
     auto read_result = std::make_shared<std::optional<Result<size_t>>>();
     TaskGroup<> group(1);
+    auto op = AsyncRead(ctx, fd, std::span<std::byte>{*buf}, 0);
 
-    group.Spawn([&, buf, read_result]() -> Task<void> {
-        *read_result = co_await AsyncRead(ctx, fd, std::span<std::byte>{*buf}, 0);
-        co_return;
-    }());
+    group.Spawn(StoreReadResult(std::move(op), read_result));
 
     fd = FD{};
 
@@ -211,11 +223,9 @@ TEST_F(IoOpsTest, RecvKeepsSocketAliveAfterOwnerDrop) {
     auto buf = std::make_shared<std::array<std::byte, 5>>();
     auto recv_result = std::make_shared<std::optional<Result<size_t>>>();
     TaskGroup<> group(1);
+    auto op = AsyncRecv(ctx, sock, std::span<std::byte>{*buf}, 0);
 
-    group.Spawn([&, buf, recv_result]() -> Task<void> {
-        *recv_result = co_await AsyncRecv(ctx, sock, std::span<std::byte>{*buf}, 0);
-        co_return;
-    }());
+    group.Spawn(StoreRecvResult(std::move(op), recv_result));
 
     sock = kio::net::Socket{};
     ASSERT_EQ(::write(sockets.fd1.Get(), "hello", 5), 5);

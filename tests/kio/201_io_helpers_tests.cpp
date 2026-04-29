@@ -22,6 +22,15 @@ protected:
     IoContext ctx{256};
 };
 
+namespace {
+
+Task<> StoreReadExactResult(Task<Result<void>> task, std::shared_ptr<std::optional<Result<void>>> out)
+{
+    *out = co_await task;
+}
+
+}  // namespace
+
 // -----------------------------------------------------------------------------
 // AsyncReadExact Tests
 // -----------------------------------------------------------------------------
@@ -87,11 +96,9 @@ TEST_F(IoHelpersTest, ReadExactKeepsFdAliveAfterOwnerDrop) {
     auto buf = std::make_shared<std::array<std::byte, 12>>();
     auto read_result = std::make_shared<std::optional<Result<void>>>();
     TaskGroup<> group(1);
+    auto task = AsyncReadExact(ctx, fd, std::span<std::byte>{*buf}, 0);
 
-    group.Spawn([&, buf, read_result]() -> Task<void> {
-        *read_result = co_await AsyncReadExact(ctx, fd, std::span<std::byte>{*buf}, 0);
-        co_return;
-    }());
+    group.Spawn(StoreReadExactResult(std::move(task), read_result));
 
     fd = FD{};
 

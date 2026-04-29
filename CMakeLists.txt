@@ -91,21 +91,8 @@ function(kio_add_demo target_name source_file)
 endfunction()
 
 function(kio_add_sanitizers target_name)
-    if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-        message(STATUS "🔍 ThreadSanitizer enabled on target ${target_name}")
-
-        # Check if we're using moodycamel
-        target_compile_options(${target_name}
-                PRIVATE
-                -fsanitize=thread
-                -g -O1
-                -fno-omit-frame-pointer
-        )
-        target_link_options(${target_name} PRIVATE -fsanitize=thread)
-
-
-        # But also enable general thread sanitizer flag for other code
-        target_compile_definitions(${target_name} PUBLIC __SANITIZE_THREAD__=1)
+    if (TARGET kio_sanitizers)
+        target_link_libraries(${target_name} PRIVATE kio_sanitizers)
     endif ()
 endfunction()
 
@@ -167,6 +154,42 @@ option(KIO_BUILD_DEMOS "Build the kio demo executables" ON)
 # pass -DKIO_DEMO_FILTER="core;http" to build specific subsets of demo.
 option(KIO_BUILD_BENCHMARK "Build codes used to benchmark kio against other libs" ON)
 option(ENABLE_CLANG_TIDY "Run clang-tidy during compilation" OFF)
+option(KIO_ENABLE_ASAN "Enable AddressSanitizer" OFF)
+option(KIO_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
+option(KIO_ENABLE_TSAN "Enable ThreadSanitizer" OFF)
+
+if (KIO_ENABLE_TSAN AND KIO_ENABLE_ASAN)
+    message(FATAL_ERROR "KIO_ENABLE_TSAN and KIO_ENABLE_ASAN cannot be enabled together")
+endif ()
+
+if (KIO_ENABLE_TSAN AND KIO_ENABLE_UBSAN)
+    message(FATAL_ERROR "KIO_ENABLE_TSAN and KIO_ENABLE_UBSAN cannot be enabled together")
+endif ()
+
+if (KIO_ENABLE_ASAN OR KIO_ENABLE_UBSAN OR KIO_ENABLE_TSAN)
+    add_library(kio_sanitizers INTERFACE)
+
+    target_compile_options(kio_sanitizers INTERFACE -g -O1 -fno-omit-frame-pointer)
+
+    if (KIO_ENABLE_ASAN)
+        target_compile_options(kio_sanitizers INTERFACE -fsanitize=address)
+        target_link_options(kio_sanitizers INTERFACE -fsanitize=address)
+        message(STATUS "AddressSanitizer enabled")
+    endif ()
+
+    if (KIO_ENABLE_UBSAN)
+        target_compile_options(kio_sanitizers INTERFACE -fsanitize=undefined)
+        target_link_options(kio_sanitizers INTERFACE -fsanitize=undefined)
+        message(STATUS "UndefinedBehaviorSanitizer enabled")
+    endif ()
+
+    if (KIO_ENABLE_TSAN)
+        target_compile_options(kio_sanitizers INTERFACE -fsanitize=thread)
+        target_link_options(kio_sanitizers INTERFACE -fsanitize=thread)
+        target_compile_definitions(kio_sanitizers INTERFACE __SANITIZE_THREAD__=1)
+        message(STATUS "ThreadSanitizer enabled")
+    endif ()
+endif ()
 
 # Enable clang-tidy during build if requested
 if (ENABLE_CLANG_TIDY)
@@ -303,6 +326,10 @@ target_link_libraries(kio PUBLIC
         cpp_library
 )
 
+if (TARGET kio_sanitizers)
+    target_link_libraries(kio PUBLIC kio_sanitizers)
+endif ()
+
 #-----------------------------------------------
 # bitcask lib
 #----------------------------------------------
@@ -334,6 +361,9 @@ if (KIO_BUILD_BITCASK)
             cpp_library
             crc32c
     )
+    if (TARGET kio_sanitizers)
+        target_link_libraries(bitcask PUBLIC kio_sanitizers)
+    endif ()
 endif ()
 #-----------------------------------------------
 # Includes
