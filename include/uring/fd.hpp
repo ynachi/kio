@@ -1,6 +1,9 @@
 #pragma once
 #include <unistd.h>
 
+#include "error.hpp"
+#include "net.hpp"
+
 namespace URing
 {
 struct Fd
@@ -49,6 +52,36 @@ struct Fd
         const int out = fd;
         fd = -1;
         return out;
+    }
+
+    /// Single option
+    /// @code
+    /// URing::Fd sock{raw_fd};
+    /// if (auto r = sock.SetOption(SockOpt::NoDelay{}); !r)
+    ///    return r;
+    /// @endcode
+    template <SocketOption Opt>
+    [[nodiscard]] Result<void> SetOption(const Opt& opt) const noexcept
+    {
+        return opt.Apply(fd);
+    }
+
+    /// Variadic — short-circuits on first error
+    /// @code
+    /// if (auto r = sock.SetOptions(
+    ///     SockOpt::ReuseAddr{},
+    ///     SockOpt::ReusePort{},
+    ///     SockOpt::NonBlocking{},
+    ///     SockOpt::RecvBuffer{256 * 1024},
+    ///     SockOpt::SendBuffer{256 * 1024}); !r)
+    /// return r;
+    /// @endcode
+    template <SocketOption... Opts>
+    [[nodiscard]] Result<void> SetOptions(Opts&&... opts) const noexcept
+    {
+        Result<void> r;
+        ((r = std::forward<Opts>(opts).Apply(fd), r.has_value()) && ...);
+        return r;
     }
 };
 }  // namespace URing

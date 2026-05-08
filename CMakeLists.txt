@@ -299,6 +299,30 @@ target_link_libraries(kio PUBLIC
 )
 
 #-----------------------------------------------
+# Aio lib, change later to kio
+#----------------------------------------------
+# Library definition
+add_library(uring
+        src/uring/context.cc
+        src/uring/net.cc
+        #        src/kio/net.cpp
+        #        src/kio/parser.cpp
+        #        src/kio/tls_context.cpp
+)
+# Include directories
+target_include_directories(uring PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>
+)
+# Link dependencies
+target_link_libraries(uring PUBLIC
+        PkgConfig::LibUring
+        pthread
+        OpenSSL::SSL
+        OpenSSL::Crypto
+)
+
+#-----------------------------------------------
 # Includes
 #----------------------------------------------
 include_directories(${CMAKE_SOURCE_DIR})
