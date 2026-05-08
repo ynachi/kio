@@ -70,6 +70,11 @@ public:
     void free_token(Token t) noexcept;
 
     void submit_job(Job job) noexcept;
+    void flush() noexcept
+    {
+        assert_owner();
+        io_uring_submit(&m_ring_);
+    }
 
     OpState& get_state(const Token t) noexcept { return m_op_slab_[t.idx]; }
     io_uring_sqe* get_sqe() noexcept
@@ -109,7 +114,7 @@ public:
     {
         assert_owner();
         auto timeout_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(tick_timeout);
-        while (!st.stop_requested() && (m_pending_ops_ != 0 || !m_runnable_queue.empty()))
+        while (!st.stop_requested())
         {
             tick(timeout_ns);
         }

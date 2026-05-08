@@ -98,7 +98,7 @@ function(kio_add_sanitizers target_name)
         target_compile_options(${target_name}
                 PRIVATE
                 -fsanitize=thread
-                -g -o1
+                -g -O1
                 -fno-omit-frame-pointer
         )
         target_link_options(${target_name} PRIVATE -fsanitize=thread)
@@ -362,4 +362,3 @@ if (KIO_BUILD_TESTS)
 
     message(STATUS "Added targets: check, check-quick")
 endif ()
-

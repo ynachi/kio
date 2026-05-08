@@ -163,7 +163,8 @@ void IoContext::tick(std::chrono::nanoseconds timeout_ns) noexcept
     __kernel_timespec ts{.tv_sec = static_cast<long long>(secs.count()),
                          .tv_nsec = static_cast<long long>(nsecs.count())};
 
-    io_uring_submit_and_wait_timeout(&m_ring_, nullptr, 1, &ts, nullptr);
+    io_uring_cqe* wait_cqe = nullptr;
+    io_uring_submit_and_wait_timeout(&m_ring_, &wait_cqe, 1, &ts, nullptr);
 
     // Batch process CQEs
     io_uring_cqe* cqe = nullptr;

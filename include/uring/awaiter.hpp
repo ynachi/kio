@@ -43,6 +43,7 @@ class IoAwaiter
     bool completed_ = false;
     [[no_unique_address]] SetupFunc setup_;
     [[no_unique_address]] CompletionFunc complete_;
+    bool suspended_ = false;
 
 public:
     IoAwaiter(IoContext& ctx, SetupFunc setup, CompletionFunc complete = {})
@@ -69,6 +70,7 @@ public:
     void await_suspend(std::coroutine_handle<> handle) noexcept
     {
         assert(ctx_ != nullptr && "Attempted to suspend moved-from Awaiter");
+        suspended_ = true;
         ctx_->get_state(token_).coro_handle = handle;
         ctx_->get_state(token_).is_abandoned = false;
 
@@ -89,12 +91,15 @@ public:
         return complete_(res);
     }
 
-    ~IoAwaiter()
-    {
-        if (ctx_ != nullptr && !completed_)
-        {
-            ctx_->get_state(token_).is_abandoned = true;
-            ctx_->submit_cancel(token_);
+    ~IoAwaiter() {
+        if (ctx_ != nullptr && !completed_) {
+            if (suspended_) {
+                ctx_->get_state(token_).is_abandoned = true;
+                ctx_->submit_cancel(token_);
+            } else {
+                // Never submitted to the kernel, safe to free immediately
+                ctx_->free_token(token_);
+            }
         }
     }
 };
