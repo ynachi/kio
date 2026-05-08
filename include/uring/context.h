@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <stop_token>
 #include <vector>
 
@@ -16,6 +17,7 @@ class IoContext
     io_uring m_ring_{};
     std::vector<OpState> m_op_slab_;
     uint32_t m_head_free_idx_ = 0;
+    uint32_t m_pending_ops_ = 0;
 
     // Local queue for immediate resumptions to avoid deep call stacks
     std::vector<std::coroutine_handle<>> m_runnable_queue;
