@@ -1,5 +1,6 @@
 #pragma once
 #include <coroutine>
+#include <cstdint>
 #include <cstddef>
 #include <memory_resource>
 
@@ -45,9 +46,11 @@ struct OpState
     std::uint32_t next_free_idx = 0;
 
     std::coroutine_handle<> coro_handle = nullptr;
-    std::uint32_t cqe_res = 0;
+    std::int32_t cqe_res = 0;
     // The Zombie flag
     bool is_abandoned = false;
+    bool is_in_use = false;
+    bool cancel_requested = false;
 };
 
 }  // namespace URing

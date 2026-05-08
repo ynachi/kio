@@ -1,11 +1,17 @@
 #pragma once
+#include <atomic>
 #include <cassert>
 #include <chrono>
+#include <functional>
+#include <limits>
+#include <mutex>
 #include <stop_token>
+#include <utility>
 #include <vector>
 
 #include <liburing.h>
 
+#include "libs/concurrentqueue.hpp"
 #include "token.hpp"
 
 namespace URing
@@ -15,6 +21,13 @@ constexpr unsigned kUringDefaultFlag =
 
 class IoContext
 {
+public:
+    using Job = std::move_only_function<void()>;
+
+private:
+    static constexpr std::uint64_t kWakeUserData = std::numeric_limits<std::uint64_t>::max();
+    static constexpr std::uint16_t kMaxJobsPerWakeup = 64;
+
     io_uring m_ring_{};
     std::vector<OpState> m_op_slab_;
     uint32_t m_head_free_idx_ = 0;
@@ -22,20 +35,42 @@ class IoContext
 
     // Local queue for immediate resumptions to avoid deep call stacks
     std::vector<std::coroutine_handle<>> m_runnable_queue;
+    moodycamel::ConcurrentQueue<Job> m_foreign_queue_;
 
+    int m_eventfd = -1;
+    uint64_t m_eventfd_buf = 0;  // Buffer for the 8-byte read
+
+    void arm_eventfd() noexcept;
+    void write_eventfd() const;
+
+    static void assert_owner() noexcept;
     void tick(std::chrono::nanoseconds timeout_ns) noexcept;
+    void process_foreign_jobs() noexcept;
+
+    std::thread::id m_owner_thread_;
 
 public:
     explicit IoContext(std::uint32_t entries = 16800, unsigned flags = kUringDefaultFlag);
+    IoContext(const IoContext&) = delete;
+    IoContext& operator=(const IoContext&) = delete;
+    IoContext(IoContext&&) = delete;
+    IoContext& operator=(IoContext&&) = delete;
 
     Token allocate_token() noexcept;
 
     void free_token(Token t) noexcept;
 
+    void submit_job(Job job) noexcept;
+
     OpState& get_state(const Token t) noexcept { return m_op_slab_[t.idx]; }
-    io_uring_sqe* get_sqe() noexcept { return io_uring_get_sqe(&m_ring_); }
+    io_uring_sqe* get_sqe() noexcept
+    {
+        assert_owner();
+        return io_uring_get_sqe(&m_ring_);
+    }
     io_uring_sqe* get_sqe_safe() noexcept
     {
+        assert_owner();
         io_uring_sqe* sqe = io_uring_get_sqe(&m_ring_);
         if (!sqe)
         {
@@ -49,7 +84,8 @@ public:
 
     void submit_cancel(const Token t) noexcept
     {
-        io_uring_sqe* sqe = get_sqe();
+        assert_owner();
+        io_uring_sqe* sqe = get_sqe_safe();
         io_uring_prep_cancel64(sqe, t.to_u64(), 0);
         io_uring_sqe_set_data64(sqe, 0);
     }
@@ -62,6 +98,7 @@ public:
     template <typename Rep, typename Period>
     void run(std::stop_token st, std::chrono::duration<Rep, Period> tick_timeout) noexcept
     {
+        assert_owner();
         auto timeout_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(tick_timeout);
         while (!st.stop_requested() && (m_pending_ops_ != 0 || !m_runnable_queue.empty()))
         {
@@ -72,13 +109,6 @@ public:
     // Convenience overload for the default timeout
     void run(std::stop_token st) noexcept { run(std::move(st), std::chrono::milliseconds(10)); }
 
-    ~IoContext()
-    {
-        if (m_ring_.ring_fd > 0)
-        {
-            io_uring_queue_exit(&m_ring_);
-            m_ring_.ring_fd = -1;
-        }
-    }
+    ~IoContext();
 };
 }  // namespace URing
