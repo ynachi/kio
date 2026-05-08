@@ -11,7 +11,16 @@
 
 #include <liburing.h>
 
+#ifdef BLOCK_SIZE
+    #pragma push_macro("BLOCK_SIZE")
+    #undef BLOCK_SIZE
+    #define URING_RESTORE_BLOCK_SIZE_MACRO
+#endif
 #include "libs/concurrentqueue.hpp"
+#ifdef URING_RESTORE_BLOCK_SIZE_MACRO
+    #pragma pop_macro("BLOCK_SIZE")
+    #undef URING_RESTORE_BLOCK_SIZE_MACRO
+#endif
 #include "token.hpp"
 
 namespace URing
@@ -43,7 +52,7 @@ private:
     void arm_eventfd() noexcept;
     void write_eventfd() const;
 
-    static void assert_owner() noexcept;
+    void assert_owner() const noexcept;
     void tick(std::chrono::nanoseconds timeout_ns) noexcept;
     void process_foreign_jobs() noexcept;
 

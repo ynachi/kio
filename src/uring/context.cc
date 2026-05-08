@@ -48,18 +48,21 @@ void IoContext::arm_eventfd() noexcept
 void IoContext::write_eventfd() const
 {
     constexpr uint64_t wake = 1;
-    // TODO: add max retry
+    // TODO: do max retry
     while (true)
     {
-        if (const auto written = ::write(m_eventfd, &wake, sizeof(wake)); written == sizeof(wake) || errno == EAGAIN)
+        const auto written = ::write(m_eventfd, &wake, sizeof(wake));
+        if (written == sizeof(wake) || errno == EAGAIN)
         {
             return;
         }
-        if (errno != EINTR)
+        if (errno == EINTR)
         {
-            assert(false && "eventfd wake failed");
-            return;
+            continue;  // Safely retry on interrupt
         }
+
+        assert(false && "eventfd wake failed");
+        return;
     }
 }
 
@@ -106,7 +109,7 @@ void IoContext::submit_job(Job job) noexcept
     write_eventfd();
 }
 
-void IoContext::assert_owner() noexcept
+void IoContext::assert_owner() const noexcept
 {
     assert(m_owner_thread_ == std::this_thread::get_id() && "IoContext used from a non-owner thread");
 }
@@ -186,9 +189,13 @@ void IoContext::tick(std::chrono::nanoseconds timeout_ns) noexcept
 void IoContext::on_cqe(const io_uring_cqe* cqe) noexcept
 {
     assert_owner();
-    // work on external jobs first
-    process_foreign_jobs();
-    
+
+    if (cqe->user_data == kWakeUserData)
+    {
+        process_foreign_jobs();
+        return;
+    }
+
     const Token t = Token::from_u64(cqe->user_data);
     OpState& state = m_op_slab_[t.idx];
 
