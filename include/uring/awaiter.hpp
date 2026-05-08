@@ -75,7 +75,7 @@ public:
         // THE FIX: Grab SQE and configure it NOW.
         // Any captured variables in setup_ are now mathematically guaranteed
         // to have a stable memory address inside the coroutine frame.
-        io_uring_sqe* sqe = ctx_->get_sqe();
+        io_uring_sqe* sqe = ctx_->get_sqe_safe();
         setup_(sqe);
         io_uring_sqe_set_data64(sqe, token_.to_u64());
     }

@@ -305,6 +305,7 @@ target_link_libraries(kio PUBLIC
 add_library(uring
         src/uring/context.cc
         src/uring/net.cc
+        src/uring/tcp_listener.cc
         #        src/kio/net.cpp
         #        src/kio/parser.cpp
         #        src/kio/tls_context.cpp

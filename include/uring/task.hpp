@@ -141,4 +141,28 @@ private:
     handle_type handle_ = nullptr;
 };
 
+/// A fire-and-forget coroutine that manages its own lifetime.
+/// It cannot be co_await'ed.
+struct DetachedTask
+{
+    struct promise_type
+    {
+        DetachedTask get_return_object() noexcept { return {}; }
+
+        // Start executing immediately upon creation until the first co_await
+        std::suspend_never initial_suspend() noexcept { return {}; }
+
+        // suspend_never here is the magic trick: it tells the compiler
+        // to automatically delete the coroutine frame when the function ends.
+        std::suspend_never final_suspend() noexcept { return {}; }
+
+        void return_void() noexcept {}
+        void unhandled_exception() noexcept { std::terminate(); }
+
+        // Hook into your blazing fast thread-local pool!
+        void* operator new(std::size_t size) { return tl_coro_pool.allocate(size); }
+        void operator delete(void* ptr, std::size_t size) { tl_coro_pool.deallocate(ptr, size); }
+    };
+};
+
 }  // namespace URing

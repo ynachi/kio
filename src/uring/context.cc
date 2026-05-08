@@ -19,6 +19,7 @@ IoContext::IoContext(const std::uint32_t entries, const unsigned flags)
     }
 }
 
+// TODO: allow ops slab resize or return an error
 Token IoContext::allocate_token() noexcept
 {
     assert(m_head_free_idx_ < m_op_slab_.size() && "IoContext ran out of operation slots");
@@ -38,18 +39,32 @@ void IoContext::free_token(Token t) noexcept
     --m_pending_ops_;
 }
 
-void IoContext::tick() noexcept
+void IoContext::tick(std::chrono::nanoseconds timeout_ns) noexcept
 {
     // drain the runnable queue first
-    auto runnable = std::move(m_runnable_queue);
+    const auto runnable = std::move(m_runnable_queue);
     m_runnable_queue.clear();
     for (const auto& coro : runnable)
     {
         coro.resume();
     }
 
-    // Submit pending work and wait (DEFER_TASKRUN makes this highly efficient)
-    io_uring_submit_and_wait(&m_ring_, 1);
+    // 2. If we have no pending I/O, just flush and return immediately.
+    //    The run() loop will check the stop_token and exit if requested.
+    if (m_pending_ops_ == 0)
+    {
+        io_uring_submit(&m_ring_);
+        return;
+    }
+
+    // Convert std::chrono::nanoseconds to __kernel_timespec safely
+    auto secs = std::chrono::duration_cast<std::chrono::seconds>(timeout_ns);
+    auto nsecs = timeout_ns - secs;  // The remaining nanoseconds
+
+    __kernel_timespec ts{.tv_sec = static_cast<long long>(secs.count()),
+                         .tv_nsec = static_cast<long long>(nsecs.count())};
+
+    io_uring_submit_and_wait_timeout(&m_ring_, nullptr, 1, &ts, nullptr);
 
     // Batch process CQEs
     io_uring_cqe* cqe = nullptr;
@@ -66,8 +81,10 @@ void IoContext::tick() noexcept
         ++count;
     }
 
-    // TODO: if count == 0 is noop but lets check if we have to guard against it
-    io_uring_cq_advance(&m_ring_, count);
+    if (count > 0)
+    {
+        io_uring_cq_advance(&m_ring_, count);
+    }
 }
 
 void IoContext::on_cqe(const io_uring_cqe* cqe) noexcept
@@ -88,13 +105,5 @@ void IoContext::on_cqe(const io_uring_cqe* cqe) noexcept
 
     state.cqe_res = cqe->res;
     m_runnable_queue.push_back(state.coro_handle);
-}
-
-void IoContext::run(std::stop_token st) noexcept
-{
-    while (!st.stop_requested() && (m_pending_ops_ != 0 || !m_runnable_queue.empty()))
-    {
-        tick();
-    }
 }
 }  // namespace URing
