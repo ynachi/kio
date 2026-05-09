@@ -41,6 +41,7 @@ private:
     std::vector<OpState> m_op_slab_;
     uint32_t m_head_free_idx_ = 0;
     uint32_t m_pending_ops_ = 0;
+    uint32_t m_kernel_ops_in_flight_ = 0; // SQEs submitted to kernel
 
     // Local queue for immediate resumptions to avoid deep call stacks
     std::vector<std::coroutine_handle<>> m_runnable_queue;
@@ -65,9 +66,12 @@ public:
     IoContext(IoContext&&) = delete;
     IoContext& operator=(IoContext&&) = delete;
 
+    ~IoContext();
+
     Token allocate_token() noexcept;
 
     void free_token(Token t) noexcept;
+    void on_sqe_submitted() noexcept { ++m_kernel_ops_in_flight_; }
 
     void submit_job(Job job) noexcept;
     void flush() noexcept
@@ -123,6 +127,8 @@ public:
     // Convenience overload for the default timeout
     void run(std::stop_token st) noexcept { run(std::move(st), std::chrono::milliseconds(10)); }
 
-    ~IoContext();
+    [[nodiscard]] bool is_owner_thread() const noexcept {
+        return m_owner_thread_ == std::this_thread::get_id();
+    }
 };
 }  // namespace URing
