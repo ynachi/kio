@@ -7,8 +7,6 @@
 
 #include <liburing.h>
 
-#include <sys/uio.h>
-
 #include "awaiter.hpp"
 #include "fd.hpp"
 

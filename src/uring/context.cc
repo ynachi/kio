@@ -11,7 +11,7 @@
 namespace URing
 {
 IoContext::IoContext(const std::uint32_t entries, const unsigned flags)
-    : op_pool_(entries), owner_thread_(std::this_thread::get_id())
+    : op_pool_(entries), spawn_consumer_token_(spawn_queue_), owner_thread_(std::this_thread::get_id())
 {
     io_uring_params params{};
 
@@ -19,6 +19,47 @@ IoContext::IoContext(const std::uint32_t entries, const unsigned flags)
     if (const int rc = io_uring_queue_init_params(entries, &ring_, &params); rc < 0)
     {
         throw std::runtime_error("io_uring_queue_init_params failed");
+    }
+
+    wake_fd_ = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (wake_fd_ < 0)
+    {
+        throw std::runtime_error("eventfd failed");
+    }
+    arm_wake_read();
+}
+
+void IoContext::arm_wake_read() noexcept
+{
+    io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
+    if (!sqe)
+    {
+        io_uring_submit(&ring_);
+        sqe = io_uring_get_sqe(&ring_);
+        if (sqe == nullptr)
+        {
+            // Serious backpressure case. Try again from the next tick.
+            wake_read_armed_ = false;
+            return;
+        }
+    }
+
+    wake_read_armed_ = true;
+
+    io_uring_prep_read(sqe, wake_fd_, &wake_value_, sizeof(wake_value_), 0);
+
+    io_uring_sqe_set_data64(sqe, kWakeTag);
+}
+
+void IoContext::drain_remote_spawns()
+{
+    std::array<std::move_only_function<DetachedTask(IoContext&)>, kMaxRemoteDrainPerTick> funcs;
+
+    const std::size_t n = spawn_queue_.try_dequeue_bulk(spawn_consumer_token_, funcs.begin(), kMaxRemoteDrainPerTick);
+
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        funcs[i](*this);
     }
 }
 
@@ -66,6 +107,19 @@ void IoContext::tick(const std::chrono::nanoseconds timeout_ns) noexcept
         if (ud == 0)
         {
             continue;  // cancel, ignore
+        }
+
+        if (ud == kWakeTag)
+        {
+            wake_read_armed_ = false;
+
+            if (cqe->res == sizeof(uint64_t))
+            {
+                drain_remote_spawns();
+            }
+
+            arm_wake_read();
+            continue;
         }
 
         const auto token = Token::unpack(ud);
