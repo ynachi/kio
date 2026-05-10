@@ -4,6 +4,8 @@
 #include <iostream>
 #include <string_view>
 
+#include <sys/socket.h>
+
 #include "uring/io.hpp"
 #include "uring/task.hpp"
 #include "uring/tcp_listener.hpp"
@@ -40,8 +42,7 @@ DetachedTask handle_client(IoContext& ctx, Fd client_fd)
             break;
         }
 
-        std::span<const std::byte> out_buf(reinterpret_cast<const std::byte*>(kHttpResponse.data()),
-                                           kHttpResponse.size());
+        std::span out_buf(reinterpret_cast<const std::byte*>(kHttpResponse.data()), kHttpResponse.size());
 
         auto write_res = co_await write(ctx, client_fd, out_buf);
 

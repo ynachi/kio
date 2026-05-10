@@ -35,7 +35,8 @@ inline auto accept(IoContext& ctx, Fd& server_fd, SocketAddress& client_addr, co
 }
 
 /// @brief Accepts a new connection without capturing the client's address
-inline auto accept(IoContext& ctx, Fd& server_fd, const int flags = 0)
+/// Accept default flag is set to SOCK_NONBLOCK | SOCK_CLOEXEC
+inline auto accept(IoContext& ctx, Fd& server_fd, const int flags = SOCK_NONBLOCK | SOCK_CLOEXEC)
 {
     return IoAwaiter(
         ctx, [raw_fd = server_fd.fd, flags](io_uring_sqe* sqe)
