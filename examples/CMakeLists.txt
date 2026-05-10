@@ -5,7 +5,7 @@
 kio_add_demo(01_tracing aio/01_tracing.cpp TAGS core LIBS uring)
 kio_add_sanitizers(01_tracing)
 
-kio_add_demo(02_echo_server aio/02_echo_server.cpp TAGS core LIBS gflags::gflags kio)
+kio_add_demo(02_echo_server aio/02_echo_server_dispatch.cpp TAGS core LIBS gflags::gflags uring)
 kio_add_sanitizers(02_echo_server)
 
 kio_add_demo(03_http_services aio/03_http_services.cpp TAGS core LIBS gflags::gflags uring)

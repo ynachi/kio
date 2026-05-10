@@ -41,7 +41,8 @@ public:
 
     ~IoAwaiter() = default;
 
-    void await_suspend(std::coroutine_handle<> h) noexcept
+    template <typename Promise>
+    void await_suspend(std::coroutine_handle<Promise> h) noexcept
     {
         auto* ring = &ctx_.ring();
         token_ = ctx_.pool().allocate(h);
@@ -62,12 +63,18 @@ public:
         }
 
         setup_(sqe);
-        io_uring_sqe_set_data(sqe, reinterpret_cast<void*>(token_.pack()));
+        op->original_ud = token_.pack();
+        io_uring_sqe_set_data64(sqe, token_.pack());
         Tracer::submit(token_);
 
-        auto ph = std::coroutine_handle<task_promise<T>>::from_address(h.address());
-        ph.promise().pending_op_idx_ = token_.idx;
-        ph.promise().ctx_ = &ctx_;
+        if constexpr (requires(Promise& p) {
+                          p.pending_op_idx_;
+                          p.ctx_;
+                      })
+        {
+            h.promise().pending_op_idx_ = token_.idx;
+            h.promise().ctx_ = &ctx_;
+        }
     }
 
     Result<T> await_resume()

@@ -3,6 +3,7 @@
 #include <csignal>
 #include <iostream>
 #include <string_view>
+#include <thread>
 
 #include <sys/socket.h>
 
@@ -54,12 +55,13 @@ DetachedTask handle_client(IoContext& ctx, Fd client_fd)
 }
 
 // Fire-and-forget task to accept incoming connections
-DetachedTask server_loop(IoContext& ctx, uint16_t port)
+DetachedTask server_loop(IoContext& ctx, uint16_t port, int thread_id)
 {
     auto listener = TcpListener::Bind(port, "0.0.0.0", 4096);
     if (!listener)
     {
-        std::cerr << "Failed to bind to port " << port << ": Error " << listener.error().value() << "\n";
+        std::cerr << "[Thread " << thread_id << "] Failed to bind to port " << port << ": Error "
+                  << listener.error().value() << "\n";
         co_return;
     }
 
@@ -73,7 +75,11 @@ DetachedTask server_loop(IoContext& ctx, uint16_t port)
 
         if (client_res)
         {
-            handle_client(ctx, std::move(*client_res));
+            if (!ctx.spawn([client_fd = std::move(*client_res)](IoContext& spawn_ctx) mutable -> DetachedTask
+                           { return handle_client(spawn_ctx, std::move(client_fd)); }))
+            {
+                std::cerr << "Failed to spawn client handler\n";
+            }
         }
         else
         {
@@ -82,25 +88,49 @@ DetachedTask server_loop(IoContext& ctx, uint16_t port)
     }
 }
 
+// The worker function executed by each thread
+void worker_thread(uint16_t port, int thread_id)
+{
+    try
+    {
+        // IoContext::pin_to_cpu(thread_id);
+        IoContext ctx{16384};
+        server_loop(ctx, port, thread_id);
+
+        ctx.run(global_stop_source.get_token(), std::chrono::milliseconds(10));
+
+        std::cout << "[Thread " << thread_id << "] Graceful shutdown complete.\n";
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "[Thread " << thread_id << "] Fatal error: " << e.what() << "\n";
+    }
+}
+
 int main()
 {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 
-    try
-    {
-        IoContext ctx{16384};
+    constexpr uint16_t port = 8080;
+    constexpr int num_threads = 4;
 
-        server_loop(ctx, 8080);
-        ctx.run(global_stop_source.get_token(), std::chrono::milliseconds(10));
+    std::cout << "Starting " << num_threads << " workers...\n";
 
-        std::cout << "\nGraceful shutdown complete.\n";
-    }
-    catch (const std::exception& e)
+    std::vector<std::jthread> threads;
+    for (int i = 0; i < num_threads; ++i)
     {
-        std::cerr << "Fatal error: " << e.what() << "\n";
-        return 1;
+        threads.emplace_back(worker_thread, port, i);
     }
 
+    for (auto& t : threads)
+    {
+        if (t.joinable())
+        {
+            t.join();
+        }
+    }
+
+    std::cout << "All workers terminated. Goodbye!\n";
     return 0;
 }

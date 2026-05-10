@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <functional>
 #include <mutex>
+#include <print>
 #include <stop_token>
 #include <thread>
 #include <utility>
@@ -118,5 +119,17 @@ public:
     }
 
     [[nodiscard]] bool is_owner_thread() const noexcept { return owner_thread_ == std::this_thread::get_id(); }
+
+    static void pin_to_cpu(int cpu_id)
+    {
+        cpu_set_t cpuset;
+        CPU_ZERO(&cpuset);
+        CPU_SET(cpu_id % static_cast<int>(std::thread::hardware_concurrency()), &cpuset);
+
+        if (const int rc = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset); rc != 0)
+        {
+            std::println("Warning: Failed to pin to CPU {}: {}", cpu_id, std::generic_category().message(rc));
+        }
+    }
 };
 }  // namespace URing
