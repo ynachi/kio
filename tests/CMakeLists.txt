@@ -58,3 +58,8 @@ kio_add_test(502_resp_writer kio/resp/502_resp_writer.cpp
         LIBS kio GTest::gtest GTest::gtest_main
 )
 
+#========= uring
+kio_add_test(op_pool_tests uring/op_pool_test.cpp
+        TAGS uring unit
+        LIBS uring GTest::gtest GTest::gtest_main
+)

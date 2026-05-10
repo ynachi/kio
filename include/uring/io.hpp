@@ -2,6 +2,7 @@
 #include "context.h"
 
 #include <chrono>
+#include <filesystem>
 #include <span>
 
 #include <liburing.h>
@@ -63,36 +64,40 @@ inline auto connect(IoContext& ctx, Fd& fd, const SocketAddress& addr)
 /// Unified Read (offset = -1 tells io_uring to use the current file offset)
 inline auto read(IoContext& ctx, Fd& fd, std::span<std::byte> buf, off_t offset = -1)
 {
-    return IoAwaiter(ctx, [raw_fd = fd.fd, buf, offset](io_uring_sqe* sqe)
-                     { io_uring_prep_read(sqe, raw_fd, buf.data(), buf.size(), offset); });
+    return IoAwaiter(
+        ctx, [raw_fd = fd.fd, buf, offset](io_uring_sqe* sqe)
+        { io_uring_prep_read(sqe, raw_fd, buf.data(), buf.size(), offset); }, detail::ResumeInt{});
 }
 
 inline auto readv(IoContext& ctx, Fd& fd, std::span<const iovec> iovecs, off_t offset = -1)
 {
     return IoAwaiter(
         ctx, [raw_fd = fd.fd, iovecs, offset](io_uring_sqe* sqe)
-        { io_uring_prep_readv(sqe, raw_fd, iovecs.data(), static_cast<unsigned>(iovecs.size()), offset); });
+        { io_uring_prep_readv(sqe, raw_fd, iovecs.data(), static_cast<unsigned>(iovecs.size()), offset); },
+        detail::ResumeInt{});
 }
 
 // Unified Write
 inline auto write(IoContext& ctx, Fd& fd, std::span<const std::byte> buf, off_t offset = -1)
 {
-    return IoAwaiter(ctx, [raw_fd = fd.fd, buf, offset](io_uring_sqe* sqe)
-                     { io_uring_prep_write(sqe, raw_fd, buf.data(), buf.size(), offset); });
+    return IoAwaiter(
+        ctx, [raw_fd = fd.fd, buf, offset](io_uring_sqe* sqe)
+        { io_uring_prep_write(sqe, raw_fd, buf.data(), buf.size(), offset); }, detail::ResumeInt{});
 }
 
 inline auto writev(IoContext& ctx, Fd& fd, std::span<const iovec> iovecs, off_t offset = -1)
 {
     return IoAwaiter(
         ctx, [raw_fd = fd.fd, iovecs, offset](io_uring_sqe* sqe)
-        { io_uring_prep_writev(sqe, raw_fd, iovecs.data(), static_cast<unsigned>(iovecs.size()), offset); });
+        { io_uring_prep_writev(sqe, raw_fd, iovecs.data(), static_cast<unsigned>(iovecs.size()), offset); },
+        detail::ResumeInt{});
 }
 
 // File Ops
-inline auto open(IoContext& ctx, const char* path, const int flags, const mode_t mode = 0644)
+inline auto open(IoContext& ctx, std::filesystem::path path, const int flags, const mode_t mode = 0644)
 {
     return IoAwaiter(
-        ctx, [path, flags, mode](io_uring_sqe* sqe) { io_uring_prep_openat(sqe, AT_FDCWD, path, flags, mode); },
+        ctx, [path, flags, mode](io_uring_sqe* sqe) { io_uring_prep_openat(sqe, AT_FDCWD, path.c_str(), flags, mode); },
         [](const int32_t res) -> Result<Fd>
         {
             if (res < 0)
@@ -101,10 +106,11 @@ inline auto open(IoContext& ctx, const char* path, const int flags, const mode_t
         });
 }
 
-inline auto remove(IoContext& ctx, const char* path)
+inline auto remove(IoContext& ctx, std::filesystem::path path)
 {
     return IoAwaiter(
-        ctx, [path](io_uring_sqe* sqe) { io_uring_prep_unlinkat(sqe, AT_FDCWD, path, 0); }, detail::ResumeVoid{});
+        ctx, [path](io_uring_sqe* sqe) { io_uring_prep_unlinkat(sqe, AT_FDCWD, path.c_str(), 0); },
+        detail::ResumeVoid{});
 }
 
 inline auto fsync(IoContext& ctx, Fd& fd, const bool full_sync = false)
@@ -131,7 +137,8 @@ inline auto ftruncate(IoContext& ctx, Fd& fd, const off_t len)
 inline auto poll(IoContext& ctx, Fd& fd, const unsigned poll_mask)
 {
     return IoAwaiter(
-        ctx, [raw_fd = fd.fd, poll_mask](io_uring_sqe* sqe) { io_uring_prep_poll_add(sqe, raw_fd, poll_mask); });
+        ctx, [raw_fd = fd.fd, poll_mask](io_uring_sqe* sqe) { io_uring_prep_poll_add(sqe, raw_fd, poll_mask); },
+        detail::ResumeVoid{});
 }
 
 // The New Timeout (Notice the 'mutable' lambda so we can take the address of ts)

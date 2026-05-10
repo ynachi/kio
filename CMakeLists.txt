@@ -16,6 +16,11 @@ if (ENABLE_AIO_STATS)
     add_compile_definitions(AIO_STATS=1)
 endif ()
 
+option(URING_ENABLE_TRACING "Enable URing tracer" OFF)
+if (URING_ENABLE_TRACING)
+    add_compile_definitions(URING_ENABLE_TRACING=1)
+endif ()
+
 # -----------------------------------------
 # Common Build Functions
 #------------------------------------------

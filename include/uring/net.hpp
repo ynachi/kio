@@ -152,6 +152,6 @@ struct SocketAddress
 ///   // OK in initialization code
 ///   auto addr = SocketAddress::Resolve("database.local", 5432);
 /// @endcode
-static Result<SocketAddress> ResolveIp(std::string_view host, uint16_t port);
+Result<SocketAddress> ResolveIp(std::string_view host, uint16_t port);
 
 }  // namespace URing
