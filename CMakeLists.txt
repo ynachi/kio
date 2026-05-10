@@ -229,8 +229,8 @@ find_program(CLANG_TIDY_EXE NAMES clang-tidy-22)
 
 # Collect all source files for formatting/linting
 file(GLOB_RECURSE ALL_SOURCE_FILES
-        ${CMAKE_SOURCE_DIR}/kio/*.cpp
-        ${CMAKE_SOURCE_DIR}/kio/*.h
+        ${CMAKE_SOURCE_DIR}/uring/*.cpp
+        ${CMAKE_SOURCE_DIR}/uring/*.h
         ${CMAKE_SOURCE_DIR}/bitcask/src/*.cpp
         ${CMAKE_SOURCE_DIR}/bitcask/include/*.h
         ${CMAKE_SOURCE_DIR}/examples/*.cpp
@@ -278,30 +278,6 @@ if (CLANG_TIDY_EXE)
 else ()
     message(WARNING "clang-tidy not found - tidy targets not available")
 endif ()
-
-#-----------------------------------------------
-# Aio lib, change later to kio
-#----------------------------------------------
-# Library definition
-add_library(kio
-        src/kio/core.cpp
-        src/kio/io.cpp
-        src/kio/net.cpp
-        src/kio/parser.cpp
-        src/kio/tls_context.cpp
-)
-# Include directories
-target_include_directories(kio PUBLIC
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-        $<INSTALL_INTERFACE:include>
-)
-# Link dependencies
-target_link_libraries(kio PUBLIC
-        PkgConfig::LibUring
-        pthread
-        OpenSSL::SSL
-        OpenSSL::Crypto
-)
 
 #-----------------------------------------------
 # Aio lib, change later to kio

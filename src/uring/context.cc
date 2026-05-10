@@ -2,6 +2,8 @@
 
 #include <array>
 #include <cassert>
+#include <cerrno>
+#include <cstring>
 
 #include <unistd.h>
 
@@ -29,6 +31,7 @@ IoContext::IoContext(const std::uint32_t entries, const unsigned flags)
         throw std::runtime_error("eventfd failed");
     }
     arm_wake_read();
+    ALOG_INFO("Started IO context with {} entries", entries);
 }
 
 void IoContext::wake() const noexcept
@@ -43,10 +46,14 @@ void IoContext::arm_wake_read() noexcept
     io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
     if (!sqe)
     {
-        io_uring_submit(&ring_);
+        if (const auto ret = io_uring_submit(&ring_); ret < 0)
+        {
+            ALOG_ERROR("io_uring_submit failed with err {}", std::strerror(-ret));
+        }
         sqe = io_uring_get_sqe(&ring_);
         if (sqe == nullptr)
         {
+            ALOG_DEBUG("failed to get a sqe, ring queue is full");
             // Serious backpressure case. Try again from the next tick.
             wake_read_armed_ = false;
             return;
@@ -72,8 +79,13 @@ void IoContext::drain_remote_spawns() noexcept
         {
             funcs[i](*this);
         }
+        catch (const std::exception& e)
+        {
+            ALOG_ERROR("detached task died with error: {}", e.what());
+        }
         catch (...)
         {
+            ALOG_ERROR("detached task died with error");
             // Fire-and-forget spawn failures cannot be reported to the caller.
         }
     }
@@ -95,9 +107,10 @@ void IoContext::request_cancel(const uint32_t op_idx) noexcept
     Tracer::cancel(Token{op_idx, op.generation});
 
     const auto sqe = io_uring_get_sqe(&ring_);
-    if (!sqe)
+    if (sqe == nullptr)
     {
-        return;  // Best-effort cancel if SQ is full
+        ALOG_DEBUG("failed to get a sqe, ring queue is full");
+        return;
     }
 
     // Kernel matches EXACT original user_data, preventing stale/race cancels
@@ -105,22 +118,18 @@ void IoContext::request_cancel(const uint32_t op_idx) noexcept
     io_uring_sqe_set_data(sqe, nullptr);  // Cancel CQE ignored by reactor
 }
 
-void IoContext::tick(const std::chrono::nanoseconds timeout_ns) noexcept
+void IoContext::tick() noexcept
 {
     if (!wake_read_armed_)
     {
         arm_wake_read();
     }
 
-    const auto secs = std::chrono::duration_cast<std::chrono::seconds>(timeout_ns);
-    auto nsecs = timeout_ns - secs;
-
-    __kernel_timespec ts{.tv_sec = static_cast<long long>(secs.count()),
-                         .tv_nsec = static_cast<long long>(nsecs.count())};
-
-    io_uring_cqe* wait_cqe = nullptr;
-
-    io_uring_submit_and_wait_timeout(&ring_, &wait_cqe, 1, &ts, nullptr);
+    const auto ret = io_uring_submit_and_wait(&ring_, 1);
+    if (ret < 0 && ret != -EINTR)
+    {
+        ALOG_ERROR("failed to submit and wait: {}", std::strerror(-ret));
+    }
 
     // Batch process CQEs
     io_uring_cqe* cqe = nullptr;
@@ -180,9 +189,10 @@ void IoContext::tick(const std::chrono::nanoseconds timeout_ns) noexcept
                 Tracer::wake();
                 h.resume();
             }
-            // Note: We DO NOT call h.destroy() here anymore.
-            // Remember the `safe_destroy` logic we put in ~Task() and final_awaiter.
-            // The Task memory lifecycle is fully self-managing now.
+        }
+        catch (const std::exception& e)
+        {
+            ALOG_ERROR("coroutine died with error: {}", e.what());
         }
         catch (...)
         {

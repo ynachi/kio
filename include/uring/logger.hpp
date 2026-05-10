@@ -321,6 +321,21 @@ inline uint64_t dropped_count()
 
 // ---- API ----
 
+inline void set_level(Level level) noexcept
+{
+    g_level.store(level, std::memory_order_relaxed);
+}
+
+inline Level level() noexcept
+{
+    return g_level.load(std::memory_order_relaxed);
+}
+
+inline void set_colors(bool enabled) noexcept
+{
+    g_colors.store(enabled, std::memory_order_relaxed);
+}
+
 template <Level L, typename... Args>
 void log_impl(std::source_location loc, std::format_string<Args...> fmt, Args&&... args)
 {

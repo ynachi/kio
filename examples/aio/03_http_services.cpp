@@ -1,3 +1,7 @@
+// curl -v http://127.0.0.1:8080/
+// curl -v --http1.1 -H 'Connection: close' http://127.0.0.1:8080/
+//  printf 'GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n' | nc 127.0.0.1 8080
+
 #include "uring/context.h"
 
 #include <csignal>
@@ -5,9 +9,8 @@
 #include <string_view>
 #include <thread>
 
-#include <sys/socket.h>
-
 #include "uring/io.hpp"
+#include "uring/logger.hpp"
 #include "uring/task.hpp"
 #include "uring/tcp_listener.hpp"
 
@@ -97,7 +100,7 @@ void worker_thread(uint16_t port, int thread_id)
         IoContext ctx{16384};
         server_loop(ctx, port, thread_id);
 
-        ctx.run(global_stop_source.get_token(), std::chrono::milliseconds(10));
+        ctx.run(global_stop_source.get_token());
 
         std::cout << "[Thread " << thread_id << "] Graceful shutdown complete.\n";
     }
@@ -109,6 +112,7 @@ void worker_thread(uint16_t port, int thread_id)
 
 int main()
 {
+    URing::ALOG::set_level(ALOG::Level::Debug);
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 

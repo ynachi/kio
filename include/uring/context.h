@@ -1,13 +1,12 @@
 #pragma once
 #include <atomic>
 #include <cassert>
-#include <chrono>
 #include <concepts>
 #include <cstdint>
 #include <functional>
 #include <mutex>
-#include <print>
 #include <stop_token>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -24,6 +23,7 @@
     #pragma pop_macro("BLOCK_SIZE")
     #undef URING_RESTORE_BLOCK_SIZE_MACRO
 #endif
+#include "logger.hpp"
 #include "operation.hpp"
 
 namespace URing
@@ -66,7 +66,7 @@ private:
 
     void request_cancel(uint32_t op_idx) noexcept;
 
-    void tick(std::chrono::nanoseconds timeout_ns) noexcept;
+    void tick() noexcept;
 
     void arm_wake_read() noexcept;
 
@@ -86,16 +86,12 @@ public:
     OpPool& pool() noexcept { return op_pool_; }
     io_uring& ring() noexcept { return ring_; }
 
-    // Templated run accepts any chrono duration, defaults to 10ms
-    /// tick_timeout is the time a tick will wait for the kernel IO to arrive
-    /// And alternative would have been an eventfd but lets start here for now
-    template <typename Rep, typename Period>
-    void run(std::stop_token st, std::chrono::duration<Rep, Period> tick_timeout) noexcept
+    void run(const std::stop_token st) noexcept
     {
-        auto timeout_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(tick_timeout);
+        std::stop_callback wake_on_stop{st, [this] { wake(); }};
         while (!st.stop_requested())
         {
-            tick(timeout_ns);
+            tick();
         }
     }
 
@@ -107,6 +103,8 @@ public:
             std::forward<F>(f)(*this);
             return true;
         }
+
+        ALOG_DEBUG("Using the external dispatch queue");
         std::move_only_function<void(IoContext&)> fn{[factory = std::forward<F>(f)](IoContext& ctx) mutable
                                                      { factory(ctx); }};
 
@@ -128,7 +126,7 @@ public:
 
         if (const int rc = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset); rc != 0)
         {
-            std::println("Warning: Failed to pin to CPU {}: {}", cpu_id, std::generic_category().message(rc));
+            ALOG_INFO("Warning: Failed to pin to CPU {}: {}", cpu_id, std::generic_category().message(rc));
         }
     }
 };

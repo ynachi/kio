@@ -112,7 +112,7 @@ void run_worker(std::promise<IoContext*> init_promise, int id)
         init_promise.set_value(&ctx);
 
         // 3. Block and process incoming cross-thread spawns and I/O
-        ctx.run(global_stop_source.get_token(), std::chrono::milliseconds(100));
+        ctx.run(global_stop_source.get_token());
         std::cout << "[Worker " << id << "] Shutdown.\n";
     }
     catch (const std::exception& e)
@@ -155,7 +155,7 @@ int main()
     dispatcher_loop(dispatcher_ctx, worker_ptrs, 8080);
 
     std::cout << "Starting cross-thread spawn demo...\n";
-    dispatcher_ctx.run(global_stop_source.get_token(), std::chrono::milliseconds(100));
+    dispatcher_ctx.run(global_stop_source.get_token());
 
     for (auto& t : threads)
     {

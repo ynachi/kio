@@ -53,7 +53,7 @@ int main()
     auto task = tracer_smoke_test(ctx, ss);
     task.handle_.resume();  // initial_suspend = suspend_always, so we kick it once
 
-    ctx.run(ss.get_token(), std::chrono::milliseconds(10));
+    ctx.run(ss.get_token());
 
     // Dump everything
     Tracer::flush();
