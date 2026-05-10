@@ -25,6 +25,9 @@
 
 namespace URing
 {
+template <typename T>
+struct Task;
+
 class IoContext
 {
 public:
@@ -32,6 +35,9 @@ public:
         IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_COOP_TASKRUN;
 
 private:
+    template <typename T>
+    friend struct Task;
+
     OpPool op_pool_;
     io_uring ring_{};
     std::vector<std::coroutine_handle<>> ready_queue_;

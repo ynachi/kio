@@ -66,17 +66,59 @@ struct task_promise
 
     final_awaiter final_suspend() noexcept { return {}; }
 
-    // 4. C++20 constraint checks to fix the return_value/return_void compiler error.
     void return_value(T val) noexcept
-        requires(!std::is_void_v<T>)
     {
         result_ = std::move(val);
     }
 
-    void return_void() noexcept
-        requires std::is_void_v<T>
+    void unhandled_exception() noexcept { result_ = std::unexpected(MakeErrorCode(EIO)); }
+};
+
+template <>
+struct task_promise<void>
+{
+    std::optional<Result<void>> result_;
+
+    uint32_t pending_op_idx_ = UINT32_MAX;
+    IoContext* ctx_ = nullptr;
+
+    std::coroutine_handle<> continuation_ = nullptr;
+    bool detached_ = false;
+
+    Task<void> get_return_object() noexcept;
+
+    std::suspend_always initial_suspend() noexcept { return {}; }
+
+    struct final_awaiter
     {
-        result_ = Result<T>{};
+        bool await_ready() const noexcept { return false; }
+
+        std::coroutine_handle<> await_suspend(std::coroutine_handle<task_promise> h) noexcept
+        {
+            auto& p = h.promise();
+
+            if (p.detached_)
+            {
+                h.destroy();
+                return std::noop_coroutine();
+            }
+
+            if (p.continuation_)
+            {
+                return p.continuation_;
+            }
+
+            return std::noop_coroutine();
+        }
+
+        void await_resume() noexcept {}
+    };
+
+    final_awaiter final_suspend() noexcept { return {}; }
+
+    void return_void() noexcept
+    {
+        result_ = Result<void>{};
     }
 
     void unhandled_exception() noexcept { result_ = std::unexpected(MakeErrorCode(EIO)); }
@@ -191,6 +233,11 @@ template <typename T>
 Task<T> task_promise<T>::get_return_object() noexcept
 {
     return Task<T>{std::coroutine_handle<task_promise>::from_promise(*this)};
+}
+
+inline Task<void> task_promise<void>::get_return_object() noexcept
+{
+    return Task<void>{std::coroutine_handle<task_promise>::from_promise(*this)};
 }
 
 struct DetachedTask

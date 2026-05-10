@@ -85,7 +85,7 @@ struct TracerImpl<true>
             const auto& r = buf[(start + i) % kCapacity];
             const auto us = std::chrono::duration_cast<std::chrono::microseconds>(r.ts.time_since_epoch()).count();
             std::cerr << std::format(
-                "[{:>10}μs] {:>8} tok={:08x}:{:08x} res={:>6} {}:{}\n", us,
+                "[{:>10}μs] {:>8} tok={:08x}:{:08x} res={} {}:{}\n", us,
                 [](TraceEvent e) -> std::string_view
                 {
                     switch (e)

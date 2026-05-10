@@ -2,8 +2,8 @@
 # Examples
 # ============================================================================
 
-kio_add_demo(01_core_concepts aio/01_core_concepts.cpp TAGS core LIBS kio)
-kio_add_sanitizers(01_core_concepts)
+kio_add_demo(01_tracing aio/01_tracing.cpp TAGS core LIBS uring)
+kio_add_sanitizers(01_tracing)
 
 kio_add_demo(02_echo_server aio/02_echo_server.cpp TAGS core LIBS gflags::gflags kio)
 kio_add_sanitizers(02_echo_server)
