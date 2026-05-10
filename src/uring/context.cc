@@ -107,9 +107,7 @@ void IoContext::request_cancel(const uint32_t op_idx) noexcept
         return;
     }
 
-#if URING_ENABLE_TRACING
-    Tracer::cancel(Token{op_idx, op.generation});
-#endif
+    URING_TRACE_CANCEL((Token{op_idx, op.generation}));
 
     const auto sqe = io_uring_get_sqe(&ring_);
     if (sqe == nullptr)
@@ -177,9 +175,7 @@ void IoContext::tick() noexcept
             continue;  // Stale CQE from recycled index
         }
 
-#if URING_ENABLE_TRACING
-        Tracer::complete(token, cqe->res, op->op_name);
-#endif
+        URING_TRACE_COMPLETE(token, cqe->res, op);
 
         op->result_code = cqe->res;
         ready_queue_.push_back(op->handle);
@@ -201,9 +197,7 @@ void IoContext::tick() noexcept
         {
             if (h && !h.done())
             {
-#if URING_ENABLE_TRACING
-                Tracer::wake();
-#endif
+                URING_TRACE_WAKE();
                 h.resume();
             }
         }

@@ -9,6 +9,7 @@
 #include <source_location>
 
 #include "operation.hpp"
+#include "trace_config.hpp"
 
 namespace URing
 {
@@ -36,10 +37,6 @@ struct TraceRecord
     std::int32_t res{};
     TraceEvent event{};
 };
-
-#ifndef URING_ENABLE_TRACING
-    #define URING_ENABLE_TRACING 0
-#endif
 
 template <bool Enabled>
 struct TracerImpl

@@ -101,16 +101,12 @@ public:
     {
         if (is_owner_thread())
         {
-#if URING_ENABLE_TRACING
-            Tracer::spawn_fast();
-#endif
+            URING_TRACE_SPAWN_FAST();
             std::forward<F>(f)(*this);
             return true;
         }
 
-#if URING_ENABLE_TRACING
-        Tracer::spawn_slow();
-#endif
+        URING_TRACE_SPAWN_SLOW();
         ALOG_DEBUG("Using the external dispatch queue");
         std::move_only_function<void(IoContext&)> fn{[factory = std::forward<F>(f)](IoContext& ctx) mutable
                                                      { factory(ctx); }};
@@ -121,9 +117,7 @@ public:
             return true;
         }
 
-#if URING_ENABLE_TRACING
-        Tracer::spawn_full();
-#endif
+        URING_TRACE_SPAWN_FULL();
         ALOG_WARN("failed to enqueue remote spawn");
         return false;
     }

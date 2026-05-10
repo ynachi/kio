@@ -25,24 +25,15 @@ class IoAwaiter
 
     IoContext& ctx_;
     Token token_ = {};
-#if URING_ENABLE_TRACING
-    const char* op_name_;
-#endif
+    URING_TRACE_OP_MEMBER
     [[no_unique_address]] SetupFunc setup_;
     [[no_unique_address]] MapperFunc mapper_;
 
 public:
-#if URING_ENABLE_TRACING
-    IoAwaiter(IoContext& ctx, const char* op_name, SetupFunc setup, MapperFunc mapper)
-        : ctx_(ctx), op_name_(op_name), setup_(std::move(setup)), mapper_(std::move(mapper))
+    IoAwaiter(IoContext& ctx, URING_TRACE_OP_PARAM SetupFunc setup, MapperFunc mapper)
+        : ctx_(ctx), URING_TRACE_OP_CTOR_INIT setup_(std::move(setup)), mapper_(std::move(mapper))
     {
     }
-#else
-    IoAwaiter(IoContext& ctx, SetupFunc setup, MapperFunc mapper)
-        : ctx_(ctx), setup_(std::move(setup)), mapper_(std::move(mapper))
-    {
-    }
-#endif
 
     bool await_ready() const noexcept { return false; }
 
@@ -58,18 +49,14 @@ public:
         auto* ring = &ctx_.ring();
         token_ = ctx_.pool().allocate(h);
         auto op = ctx_.pool().try_get(token_);
-#if URING_ENABLE_TRACING
-        op->op_name = op_name_;
-#endif
+        URING_TRACE_SET_OP_NAME(op);
 
         // prepare sqe
         io_uring_sqe* sqe = io_uring_get_sqe(ring);
         if (sqe == nullptr)
         {
             const int ret = io_uring_submit(ring);
-#if URING_ENABLE_TRACING
-            Tracer::sqe_slow(token_, ret, op_name_);
-#endif
+            URING_TRACE_SQE_SLOW(token_, ret);
             if (ret < 0)
             {
                 ALOG_WARN("io_uring_submit failed while trying to free SQE space: {}", std::strerror(-ret));
@@ -78,9 +65,7 @@ public:
             sqe = io_uring_get_sqe(ring);
             if (sqe == nullptr)
             {
-#if URING_ENABLE_TRACING
-                Tracer::sqe_full(token_, op_name_);
-#endif
+                URING_TRACE_SQE_FULL(token_);
                 ALOG_WARN("failed to get SQE after submit; completing operation with ENOSPC");
                 op->result_code = -ENOSPC;
                 h.resume();
@@ -89,17 +74,13 @@ public:
         }
         else
         {
-#if URING_ENABLE_TRACING
-            Tracer::sqe_fast(token_, op_name_);
-#endif
+            URING_TRACE_SQE_FAST(token_);
         }
 
         setup_(sqe);
         op->original_ud = token_.pack();
         io_uring_sqe_set_data64(sqe, token_.pack());
-#if URING_ENABLE_TRACING
-        Tracer::submit(token_, op_name_);
-#endif
+        URING_TRACE_SUBMIT(token_);
 
         if constexpr (requires(Promise& p) {
                           p.pending_op_idx_;
@@ -133,7 +114,9 @@ struct ResumeVoid
     Result<void> operator()(const int32_t res) const noexcept
     {
         if (res < 0)
+        {
             return std::unexpected(MakeErrorCode(res));
+        }
 
         return {};
     }
@@ -144,8 +127,9 @@ struct ResumeInt
     Result<int32_t> operator()(const int32_t res) const noexcept
     {
         if (res < 0)
+        {
             return std::unexpected(MakeErrorCode(res));
-        // std::expected will naturally wrap this integer into a success state
+        }
         return res;
     }
 };
