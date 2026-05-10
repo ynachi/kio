@@ -18,6 +18,9 @@ enum class SlotStatus : uint8_t
 struct PendingOp
 {
     std::coroutine_handle<> handle = nullptr;
+#if URING_ENABLE_TRACING
+    const char* op_name = "";
+#endif
     uint32_t generation = 0;
     int result_code = 0;
     union
@@ -96,6 +99,9 @@ public:
 
         auto& op = entries_[idx];
         op.handle = h;
+#if URING_ENABLE_TRACING
+        op.op_name = "";
+#endif
         op.generation = next_gen_++;
         if (next_gen_ == 0)
             next_gen_ = 1;
@@ -117,6 +123,9 @@ public:
 
         // Clean up active state
         op.handle = nullptr;
+#if URING_ENABLE_TRACING
+        op.op_name = "";
+#endif
         op.status = SlotStatus::free;
 
         // Push this slot onto the FRONT of the free list.

@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "error.hpp"
+#include "logger.hpp"
 
 namespace URing
 {
@@ -258,8 +259,8 @@ struct DetachedTask
 
         void unhandled_exception() noexcept
         {
-            // Background tasks shouldn't bring down the server, but
-            // you should log this in a real application.
+            ALOG_FATAL("detached task died with unhandled exception");
+            ALOG::stop();
             std::terminate();
         }
     };

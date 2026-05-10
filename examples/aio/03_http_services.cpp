@@ -113,6 +113,7 @@ void worker_thread(uint16_t port, int thread_id)
 int main()
 {
     URing::ALOG::set_level(ALOG::Level::Debug);
+    ALOG_DEBUG("Debug logging enabled");
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 

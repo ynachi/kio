@@ -25,6 +25,7 @@
 #endif
 #include "logger.hpp"
 #include "operation.hpp"
+#include "tracer.hpp"
 
 namespace URing
 {
@@ -100,10 +101,16 @@ public:
     {
         if (is_owner_thread())
         {
+#if URING_ENABLE_TRACING
+            Tracer::spawn_fast();
+#endif
             std::forward<F>(f)(*this);
             return true;
         }
 
+#if URING_ENABLE_TRACING
+        Tracer::spawn_slow();
+#endif
         ALOG_DEBUG("Using the external dispatch queue");
         std::move_only_function<void(IoContext&)> fn{[factory = std::forward<F>(f)](IoContext& ctx) mutable
                                                      { factory(ctx); }};
@@ -113,6 +120,11 @@ public:
             wake();
             return true;
         }
+
+#if URING_ENABLE_TRACING
+        Tracer::spawn_full();
+#endif
+        ALOG_WARN("failed to enqueue remote spawn");
         return false;
     }
 

@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "uring/io.hpp"
+#include "uring/logger.hpp"
 #include "uring/task.hpp"
 #include "uring/tcp_listener.hpp"
 
@@ -71,8 +72,11 @@ DetachedTask dispatcher_loop(IoContext& dispatcher_ctx, std::vector<IoContext*> 
 
         if (client_res)
         {
-            IoContext* target_worker = workers[worker_idx % workers.size()];
+            const size_t selected_worker = worker_idx % workers.size();
+            IoContext* target_worker = workers[selected_worker];
             worker_idx++;
+
+            ALOG_DEBUG("Dispatching accepted client to worker {}", selected_worker);
 
             // Cross-thread spawn: the dispatcher owns the accepted fd, but the
             // handler coroutine is constructed and started on the worker ctx.
@@ -130,6 +134,9 @@ void run_worker(std::promise<IoContext*> init_promise, int id)
 
 int main()
 {
+    URing::ALOG::set_level(ALOG::Level::Debug);
+    ALOG_DEBUG("Debug logging enabled");
+
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 

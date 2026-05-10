@@ -38,7 +38,10 @@ void IoContext::wake() const noexcept
 {
     constexpr uint64_t one = 1;
     const ssize_t n = ::write(wake_fd_, &one, sizeof(one));
-    (void)n;
+    if (n != sizeof(one) && errno != EINTR)
+    {
+        ALOG_WARN("failed to wake io context with eventfd: {}", std::strerror(errno));
+    }
 }
 
 void IoContext::arm_wake_read() noexcept
@@ -104,12 +107,14 @@ void IoContext::request_cancel(const uint32_t op_idx) noexcept
         return;
     }
 
+#if URING_ENABLE_TRACING
     Tracer::cancel(Token{op_idx, op.generation});
+#endif
 
     const auto sqe = io_uring_get_sqe(&ring_);
     if (sqe == nullptr)
     {
-        ALOG_DEBUG("failed to get a sqe, ring queue is full");
+        ALOG_WARN("failed to enqueue cancel operation: SQE queue is full");
         return;
     }
 
@@ -152,6 +157,14 @@ void IoContext::tick() noexcept
             {
                 drain_remote_spawns();
             }
+            else if (cqe->res < 0)
+            {
+                ALOG_WARN("wake eventfd read failed: {}", std::strerror(-cqe->res));
+            }
+            else
+            {
+                ALOG_WARN("wake eventfd read returned unexpected size {}", cqe->res);
+            }
 
             arm_wake_read();
             continue;
@@ -164,7 +177,9 @@ void IoContext::tick() noexcept
             continue;  // Stale CQE from recycled index
         }
 
-        Tracer::complete(token, cqe->res);
+#if URING_ENABLE_TRACING
+        Tracer::complete(token, cqe->res, op->op_name);
+#endif
 
         op->result_code = cqe->res;
         ready_queue_.push_back(op->handle);
@@ -186,7 +201,9 @@ void IoContext::tick() noexcept
         {
             if (h && !h.done())
             {
+#if URING_ENABLE_TRACING
                 Tracer::wake();
+#endif
                 h.resume();
             }
         }
@@ -196,7 +213,7 @@ void IoContext::tick() noexcept
         }
         catch (...)
         {
-            // Log catastrophic user exception
+            ALOG_ERROR("coroutine died with unknown error");
         }
     }
     process_queue_.clear();
