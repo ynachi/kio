@@ -1,5 +1,6 @@
 #include "uring/context.h"
 
+#include <array>
 #include <cassert>
 
 #include <unistd.h>
@@ -21,12 +22,20 @@ IoContext::IoContext(const std::uint32_t entries, const unsigned flags)
         throw std::runtime_error("io_uring_queue_init_params failed");
     }
 
-    wake_fd_ = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    wake_fd_ = eventfd(0, EFD_CLOEXEC);
     if (wake_fd_ < 0)
     {
+        io_uring_queue_exit(&ring_);
         throw std::runtime_error("eventfd failed");
     }
     arm_wake_read();
+}
+
+void IoContext::wake() const noexcept
+{
+    constexpr uint64_t one = 1;
+    const ssize_t n = ::write(wake_fd_, &one, sizeof(one));
+    (void)n;
 }
 
 void IoContext::arm_wake_read() noexcept
@@ -51,15 +60,27 @@ void IoContext::arm_wake_read() noexcept
     io_uring_sqe_set_data64(sqe, kWakeTag);
 }
 
-void IoContext::drain_remote_spawns()
+void IoContext::drain_remote_spawns() noexcept
 {
-    std::array<std::move_only_function<DetachedTask(IoContext&)>, kMaxRemoteDrainPerTick> funcs;
+    std::array<std::move_only_function<void(IoContext&)>, kMaxRemoteDrainPerTick> funcs;
 
-    const std::size_t n = spawn_queue_.try_dequeue_bulk(spawn_consumer_token_, funcs.begin(), kMaxRemoteDrainPerTick);
+    const std::size_t n = spawn_queue_.try_dequeue_bulk(spawn_consumer_token_, funcs.begin(), funcs.size());
 
     for (std::size_t i = 0; i < n; ++i)
     {
-        funcs[i](*this);
+        try
+        {
+            funcs[i](*this);
+        }
+        catch (...)
+        {
+            // Fire-and-forget spawn failures cannot be reported to the caller.
+        }
+    }
+
+    if (n == funcs.size())
+    {
+        wake();
     }
 }
 
@@ -86,6 +107,11 @@ void IoContext::request_cancel(const uint32_t op_idx) noexcept
 
 void IoContext::tick(const std::chrono::nanoseconds timeout_ns) noexcept
 {
+    if (!wake_read_armed_)
+    {
+        arm_wake_read();
+    }
+
     const auto secs = std::chrono::duration_cast<std::chrono::seconds>(timeout_ns);
     auto nsecs = timeout_ns - secs;
 
@@ -172,6 +198,12 @@ IoContext::~IoContext()
     {
         io_uring_queue_exit(&ring_);
         ring_.ring_fd = -1;
+    }
+
+    if (wake_fd_ >= 0)
+    {
+        ::close(wake_fd_);
+        wake_fd_ = -1;
     }
 }
 }  // namespace URing

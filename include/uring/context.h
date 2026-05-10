@@ -2,10 +2,12 @@
 #include <atomic>
 #include <cassert>
 #include <chrono>
+#include <concepts>
+#include <cstdint>
 #include <functional>
-#include <limits>
 #include <mutex>
 #include <stop_token>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -39,7 +41,7 @@ class IoContext
 public:
     static constexpr unsigned kUringDefaultFlag =
         IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_COOP_TASKRUN;
-    static static constexpr uint64_t kWakeTag = UINT64_MAX;
+    static constexpr uint64_t kWakeTag = UINT64_MAX;
 
 private:
     template <typename T>
@@ -53,7 +55,7 @@ private:
 
     std::vector<std::coroutine_handle<>> ready_queue_;
     std::vector<std::coroutine_handle<>> process_queue_;
-    moodycamel::ConcurrentQueue<std::move_only_function<DetachedTask(IoContext&)>> spawn_queue_;
+    moodycamel::ConcurrentQueue<std::move_only_function<void(IoContext&)>> spawn_queue_;
     moodycamel::ConsumerToken spawn_consumer_token_;
 
     static constexpr size_t kMaxResumesPerTick = 128;
@@ -67,14 +69,9 @@ private:
 
     void arm_wake_read() noexcept;
 
-    void wake() const noexcept
-    {
-        constexpr uint64_t one = 1;
-        const ssize_t n = ::write(wake_fd_, &one, sizeof(one));
-        (void)n;
-    }
+    void wake() const noexcept;
 
-    void drain_remote_spawns();
+    void drain_remote_spawns() noexcept;
 
 public:
     explicit IoContext(std::uint32_t entries = 16800, unsigned flags = kUringDefaultFlag);
@@ -109,7 +106,10 @@ public:
             std::forward<F>(f)(*this);
             return true;
         }
-        if (auto res = spawn_queue_.try_enqueue(std::forward<F>(f)); res)
+        std::move_only_function<void(IoContext&)> fn{[factory = std::forward<F>(f)](IoContext& ctx) mutable
+                                                     { factory(ctx); }};
+
+        if (spawn_queue_.enqueue(std::move(fn)))
         {
             wake();
             return true;
