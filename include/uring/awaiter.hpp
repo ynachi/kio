@@ -83,15 +83,6 @@ public:
         io_uring_sqe_set_data64(sqe, token_.pack());
         URING_TRACE_SUBMIT(token_);
 
-        if constexpr (requires(Promise& p) {
-                          p.pending_op_idx_;
-                          p.ctx_;
-                      })
-        {
-            h.promise().pending_op_idx_ = token_.idx;
-            h.promise().ctx_ = &ctx_;
-        }
-
         return std::noop_coroutine();
     }
 

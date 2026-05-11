@@ -1,6 +1,7 @@
 #pragma once
 
 #include <coroutine>
+#include <exception>
 #include <optional>
 #include <stdexcept>
 #include <type_traits>
@@ -18,38 +19,40 @@ struct Task;
 
 class IoContext;
 
-static constexpr uint32_t kNoPendingOp = std::numeric_limits<uint32_t>::max();
-
 struct task_promise_base
 {
     std::coroutine_handle<> continuation_ = nullptr;
     std::exception_ptr exception_ = nullptr;
-    uint32_t pending_op_idx_ = kNoPendingOp;
-    IoContext* ctx_ = nullptr;
-    bool detached_ = false;
+    bool started_ = false;
 
-    std::suspend_always initial_suspend() noexcept { return {}; }
+    struct initial_awaiter
+    {
+        task_promise_base* base_;
+
+        bool await_ready() const noexcept { return false; }
+        void await_suspend(std::coroutine_handle<>) const noexcept {}
+        void await_resume() const noexcept { base_->started_ = true; }
+    };
+
+    initial_awaiter initial_suspend() noexcept { return initial_awaiter{this}; }
     void unhandled_exception() noexcept { exception_ = std::current_exception(); }
 
     struct final_awaiter
     {
-        task_promise_base* base_;  // set by final_suspend()
         bool await_ready() const noexcept { return false; }
-        std::coroutine_handle<> await_suspend(std::coroutine_handle<> h) noexcept
+
+        template <typename Promise>
+        std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> h) noexcept
         {
-            if (base_->detached_)
-            {
-                h.destroy();
-                return std::noop_coroutine();
-            }
-            if (base_->continuation_)
-                return base_->continuation_;
+            auto& p = h.promise();
+            if (p.continuation_)
+                return p.continuation_;
             return std::noop_coroutine();
         }
         void await_resume() noexcept {}
     };
 
-    final_awaiter final_suspend() noexcept { return final_awaiter{this}; }
+    final_awaiter final_suspend() noexcept { return {}; }
 };
 
 template <typename T>
@@ -177,12 +180,11 @@ private:
 
         auto& p = handle_.promise();
 
-        // destroying an in-fligh IO is a programming error
-        if (p.pending_op_idx_ != kNoPendingOp)
+        // Destroying a started coroutine before completion leaves reactor queues
+        // or child-task continuations with dangling coroutine handles.
+        if (p.started_)
         {
-            ALOG_ERROR("destroying Task while an async I/O is pending is a bug");
-            // for lib dev
-            ALOG_DEBUG("destroying Task while an async I/O is pending is a bug, op_id={}", p.pending_op_idx_);
+            ALOG_ERROR("destroying a started Task before completion is a bug");
             std::terminate();
         }
 
