@@ -49,7 +49,7 @@ struct task_promise_base
         void await_resume() noexcept {}
     };
 
-    final_awaiter final_suspend() noexcept { return {}; }
+    final_awaiter final_suspend() noexcept { return final_awaiter{this}; }
 };
 
 template <typename T>
@@ -164,29 +164,29 @@ private:
     // 6. Safe Destruction Logic
     void safe_destroy() noexcept
     {
-        if (!handle_.done())
+        if (handle_ == nullptr)
         {
-            auto& p = handle_.promise();
-            if (p.pending_op_idx_ != kNoPendingOp && p.ctx_)
-            {
-                // Async I/O is active. Issue the cancel command to the kernel.
-                p.ctx_->request_cancel(p.pending_op_idx_);
+            return;
+        }
 
-                // Detach the frame. DO NOT call handle_.destroy() here.
-                // The final_awaiter will destroy it when the kernel is actually done.
-                p.detached_ = true;
-            }
-            else
-            {
-                // No pending async I/O. Safe to destroy immediately.
-                handle_.destroy();
-            }
-        }
-        else
+        if (handle_.done())
         {
-            // Task completed normally.
             handle_.destroy();
+            return;
         }
+
+        auto& p = handle_.promise();
+
+        // destroying an in-fligh IO is a programming error
+        if (p.pending_op_idx_ != kNoPendingOp)
+        {
+            ALOG_ERROR("destroying Task while an async I/O is pending is a bug");
+            // for lib dev
+            ALOG_DEBUG("destroying Task while an async I/O is pending is a bug, op_id={}", p.pending_op_idx_);
+            std::terminate();
+        }
+
+        handle_.destroy();
     }
 };
 
