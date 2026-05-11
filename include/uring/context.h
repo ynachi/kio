@@ -26,6 +26,7 @@
 #include "logger.hpp"
 #include "operation.hpp"
 #include "tracer.hpp"
+#include "uring/coro_allocator.hpp"
 
 namespace URing
 {
@@ -89,6 +90,13 @@ public:
 
     void run(const std::stop_token st) noexcept
     {
+        // 128-byte frames: 64 preallocated
+        // 256-byte frames: most common
+        // 512-byte frames: combinators
+        CoroAllocator::prewarm(0, 128);
+        CoroAllocator::prewarm(1, 256);
+        CoroAllocator::prewarm(2, 64);
+
         std::stop_callback wake_on_stop{st, [this] { wake(); }};
         while (!st.stop_requested())
         {

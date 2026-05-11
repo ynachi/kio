@@ -53,6 +53,10 @@ struct task_promise_base
     };
 
     final_awaiter final_suspend() noexcept { return {}; }
+
+    void* operator new(const std::size_t size) noexcept { return CoroAllocator::allocate(size); }
+
+    void operator delete(void* ptr, const std::size_t size) noexcept { CoroAllocator::deallocate(ptr, size); }
 };
 
 template <typename T>
