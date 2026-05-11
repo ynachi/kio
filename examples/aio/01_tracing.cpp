@@ -48,12 +48,14 @@ int main()
     IoContext ctx;
     std::stop_source ss;
 
-    // Keep the entire io_uring lifecycle on one thread: construct the task,
-    // first-resume it, and run the reactor from the same owner thread.
-    auto task = tracer_smoke_test(ctx, ss);
-    task.handle_.resume();  // initial_suspend = suspend_always, so we kick it once
+    {
+        // Keep the entire io_uring lifecycle on one thread: construct the task,
+        // first-resume it, and run the reactor from the same owner thread.
+        auto task = tracer_smoke_test(ctx, ss);
+        task.handle_.resume();  // initial_suspend = suspend_always, so we kick it once
 
-    ctx.run(ss.get_token());
+        ctx.run(ss.get_token());
+    }
 
     // Dump everything
     Tracer::flush();

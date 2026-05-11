@@ -25,7 +25,9 @@ enum class TraceEvent : std::uint8_t
     Wake,
     SpawnFast,
     SpawnSlow,
-    SpawnFull
+    SpawnFull,
+    Alloc,
+    Free
 };
 
 struct TraceRecord
@@ -57,6 +59,8 @@ struct TracerImpl
     static void spawn_full(std::source_location = std::source_location::current()) noexcept {}
     static void cancel(Token, std::source_location = std::source_location::current()) noexcept {}
     static void wake(std::source_location = std::source_location::current()) noexcept {}
+    static void alloc(std::size_t, std::source_location = std::source_location::current()) noexcept {}
+    static void free(std::size_t, std::source_location = std::source_location::current()) noexcept {}
     static void flush() noexcept {}
 };
 
@@ -117,6 +121,14 @@ struct TracerImpl<true>
     {
         record(TraceEvent::Wake, {}, 0, "", loc);
     }
+    static void alloc(std::size_t size, std::source_location loc = std::source_location::current()) noexcept
+    {
+        record(TraceEvent::Alloc, {}, static_cast<std::int32_t>(size), "coro", loc);
+    }
+    static void free(std::size_t size, std::source_location loc = std::source_location::current()) noexcept
+    {
+        record(TraceEvent::Free, {}, static_cast<std::int32_t>(size), "coro", loc);
+    }
     static void flush() noexcept
     {
         const std::size_t count = std::min(head, kCapacity);
@@ -151,6 +163,10 @@ struct TracerImpl<true>
                             return "SPAWN_S";
                         case TraceEvent::SpawnFull:
                             return "SPAWN_X";
+                        case TraceEvent::Alloc:
+                            return "ALLOC";
+                        case TraceEvent::Free:
+                            return "FREE";
                     }
                     return "?";
                 }(r.event),

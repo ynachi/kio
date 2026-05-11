@@ -22,6 +22,8 @@
     #define URING_TRACE_SPAWN_FAST() ::URing::Tracer::spawn_fast()
     #define URING_TRACE_SPAWN_SLOW() ::URing::Tracer::spawn_slow()
     #define URING_TRACE_SPAWN_FULL() ::URing::Tracer::spawn_full()
+    #define URING_TRACE_ALLOC(size) ::URing::Tracer::alloc((size))
+    #define URING_TRACE_FREE(size) ::URing::Tracer::free((size))
 #else
     #define URING_TRACE_OP_FIELD
     #define URING_TRACE_OP_RESET(op) ((void)0)
@@ -40,4 +42,6 @@
     #define URING_TRACE_SPAWN_FAST() ((void)0)
     #define URING_TRACE_SPAWN_SLOW() ((void)0)
     #define URING_TRACE_SPAWN_FULL() ((void)0)
+    #define URING_TRACE_ALLOC(size) ((void)0)
+    #define URING_TRACE_FREE(size) ((void)0)
 #endif
