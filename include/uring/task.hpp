@@ -18,111 +18,54 @@ struct Task;
 
 class IoContext;
 
-template <typename T>
-struct task_promise
+static constexpr uint32_t kNoPendingOp = std::numeric_limits<uint32_t>::max();
+
+struct task_promise_base
 {
-    // 1. Use std::optional so T isn't forced to have a default constructor.
-    std::optional<Result<T>> result_;
-
-    uint32_t pending_op_idx_ = UINT32_MAX;
-    IoContext* ctx_ = nullptr;  // Set by the low-level awaitable
-
-    // 2. Coroutine chain management
     std::coroutine_handle<> continuation_ = nullptr;
+    std::exception_ptr exception_ = nullptr;
+    uint32_t pending_op_idx_ = kNoPendingOp;
+    IoContext* ctx_ = nullptr;
     bool detached_ = false;
 
-    Task<T> get_return_object() noexcept;
-
     std::suspend_always initial_suspend() noexcept { return {}; }
+    void unhandled_exception() noexcept { exception_ = std::current_exception(); }
 
-    // 3. The Final Awaiter: This safely handles both Coroutine Chaining
-    // and Deferred Destruction.
     struct final_awaiter
     {
+        task_promise_base* base_;  // set by final_suspend()
         bool await_ready() const noexcept { return false; }
-
-        std::coroutine_handle<> await_suspend(std::coroutine_handle<task_promise> h) noexcept
+        std::coroutine_handle<> await_suspend(std::coroutine_handle<> h) noexcept
         {
-            auto& p = h.promise();
-
-            // If the Task was destroyed early, the memory frame is orphaned.
-            // We safely destroy it here, AFTER the final kernel CQE has arrived.
-            if (p.detached_)
+            if (base_->detached_)
             {
                 h.destroy();
                 return std::noop_coroutine();
             }
-
-            // If another coroutine is co_awaiting this one, resume it now.
-            if (p.continuation_)
-            {
-                return p.continuation_;
-            }
-
+            if (base_->continuation_)
+                return base_->continuation_;
             return std::noop_coroutine();
         }
-
         void await_resume() noexcept {}
     };
 
     final_awaiter final_suspend() noexcept { return {}; }
+};
 
-    void return_value(T val) noexcept
-    {
-        result_ = std::move(val);
-    }
-
-    void unhandled_exception() noexcept { result_ = std::unexpected(MakeErrorCode(EIO)); }
+template <typename T>
+struct task_promise : task_promise_base
+{
+    std::optional<Result<T>> result_;
+    void return_value(T val) noexcept { result_.emplace(std::move(val)); }
+    Task<T> get_return_object() noexcept;
 };
 
 template <>
-struct task_promise<void>
+struct task_promise<void> : task_promise_base
 {
     std::optional<Result<void>> result_;
-
-    uint32_t pending_op_idx_ = UINT32_MAX;
-    IoContext* ctx_ = nullptr;
-
-    std::coroutine_handle<> continuation_ = nullptr;
-    bool detached_ = false;
-
+    void return_void() noexcept { result_.emplace(Result<void>{}); }
     Task<void> get_return_object() noexcept;
-
-    std::suspend_always initial_suspend() noexcept { return {}; }
-
-    struct final_awaiter
-    {
-        bool await_ready() const noexcept { return false; }
-
-        std::coroutine_handle<> await_suspend(std::coroutine_handle<task_promise> h) noexcept
-        {
-            auto& p = h.promise();
-
-            if (p.detached_)
-            {
-                h.destroy();
-                return std::noop_coroutine();
-            }
-
-            if (p.continuation_)
-            {
-                return p.continuation_;
-            }
-
-            return std::noop_coroutine();
-        }
-
-        void await_resume() noexcept {}
-    };
-
-    final_awaiter final_suspend() noexcept { return {}; }
-
-    void return_void() noexcept
-    {
-        result_ = Result<void>{};
-    }
-
-    void unhandled_exception() noexcept { result_ = std::unexpected(MakeErrorCode(EIO)); }
 };
 
 template <typename T>
@@ -158,18 +101,24 @@ struct Task
     Result<T> get() const noexcept
     {
         if (!handle_ || !handle_.done() || !handle_.promise().result_.has_value())
+        {
             return std::unexpected(MakeErrorCode(EAGAIN));
+        }
 
         if constexpr (std::is_void_v<T>)
+        {
             return {};
+        }
         else
+        {
             return handle_.promise().result_.value();
+        }
     }
 
     bool done() const noexcept { return handle_ && handle_.done(); }
 
     // 5. Make the Task itself Awaitable so coroutines can co_await other Tasks.
-    auto operator co_await() const noexcept
+    auto operator co_await() noexcept
     {
         struct Awaiter
         {
@@ -187,13 +136,24 @@ struct Task
             // Extract and return the final T value (or void)
             T await_resume()
             {
-                auto& res = handle_.promise().result_;
+                auto& p = handle_.promise();
 
-                if (!res.has_value() || !res->has_value())  // outer optional, inner expected
-                    throw std::runtime_error("Task failed or was cancelled");
+                // If the code itself crashed (e.g., out of memory), we should
+                // probably still throw because this isn't an "expected" I/O error.
+                if (p.exception_)
+                {
+                    std::rethrow_exception(p.exception_);
+                }
 
-                if constexpr (!std::is_void_v<T>)
-                    return std::move(res->value());
+                if (!p.result_.has_value())
+                {
+                    return std::unexpected(MakeErrorCode(ECANCELED));
+                }
+
+                if constexpr (std::is_void_v<T>)
+                    return {};
+                else
+                    return *p.result_;
             }
         };
 
@@ -207,7 +167,7 @@ private:
         if (!handle_.done())
         {
             auto& p = handle_.promise();
-            if (p.pending_op_idx_ != UINT32_MAX && p.ctx_)
+            if (p.pending_op_idx_ != kNoPendingOp && p.ctx_)
             {
                 // Async I/O is active. Issue the cancel command to the kernel.
                 p.ctx_->request_cancel(p.pending_op_idx_);
@@ -238,7 +198,7 @@ Task<T> task_promise<T>::get_return_object() noexcept
 
 inline Task<void> task_promise<void>::get_return_object() noexcept
 {
-    return Task<void>{std::coroutine_handle<task_promise>::from_promise(*this)};
+    return Task{std::coroutine_handle<task_promise>::from_promise(*this)};
 }
 
 struct DetachedTask

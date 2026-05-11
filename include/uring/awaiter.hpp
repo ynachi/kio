@@ -9,7 +9,9 @@
 
 #include "error.hpp"
 #include "task.hpp"
-#include "tracer.hpp"
+#ifdef URING_ENABLE_TRACING
+    #include "tracer.hpp"
+#endif
 
 namespace URing
 {
@@ -44,7 +46,7 @@ public:
     ~IoAwaiter() = default;
 
     template <typename Promise>
-    void await_suspend(std::coroutine_handle<Promise> h) noexcept
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> h) noexcept
     {
         auto* ring = &ctx_.ring();
         token_ = ctx_.pool().allocate(h);
@@ -68,8 +70,7 @@ public:
                 URING_TRACE_SQE_FULL(token_);
                 ALOG_WARN("failed to get SQE after submit; completing operation with ENOSPC");
                 op->result_code = -ENOSPC;
-                h.resume();
-                return;
+                return h;
             }
         }
         else
@@ -90,6 +91,8 @@ public:
             h.promise().pending_op_idx_ = token_.idx;
             h.promise().ctx_ = &ctx_;
         }
+
+        return std::noop_coroutine();
     }
 
     Result<T> await_resume()
