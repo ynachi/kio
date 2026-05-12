@@ -5,11 +5,12 @@
 #include <limits>
 #include <vector>
 
-#include "trace_config.hpp"
+#ifdef URING_ENABLE_TRACING
+    #include "tracer.hpp"
+#endif
 
 namespace URing
 {
-
 enum class SlotStatus : uint8_t
 {
     free = 0,
@@ -91,25 +92,19 @@ public:
         {
             // Pop the first item off the free list.
             idx = head_free_idx_;
-
             // The slot we are about to use tells us where the *next* free slot is.
-            // We update the head pointer to point to it.
             head_free_idx_ = entries_[idx].next_free_idx;
         }
 
         auto& op = entries_[idx];
         op.handle = h;
-        URING_TRACE_OP_RESET(op);
+        URING_TRACE_OP_RESET(&op);  // ✅ Reference-compatible macro
         op.generation = next_gen_++;
         if (next_gen_ == 0)
             next_gen_ = 1;
 
         op.result_code = 0;
-
-        // This assignment overwrites `next_free_idx` because they share a union.
-        // This is perfectly safe since the slot is no longer in the free list.
-        op.original_ud = 0;
-
+        op.original_ud = 0;  // Overwrites next_free_idx via union
         op.status = SlotStatus::active;
 
         return Token{idx, op.generation};
@@ -121,14 +116,11 @@ public:
 
         // Clean up active state
         op.handle = nullptr;
-        URING_TRACE_OP_RESET(op);
+        URING_TRACE_OP_RESET(&op);  // ✅ Reference-compatible macro
         op.status = SlotStatus::free;
 
-        // Push this slot onto the FRONT of the free list.
-        // 1. Its "next" pointer points to whatever the head currently is.
+        // Push this slot onto the FRONT of the free list
         op.next_free_idx = head_free_idx_;
-
-        // 2. The head pointer is updated to point to this slot.
         head_free_idx_ = token.idx;
     }
 

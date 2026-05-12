@@ -32,8 +32,8 @@ class IoAwaiter
     [[no_unique_address]] MapperFunc mapper_;
 
 public:
-    IoAwaiter(IoContext& ctx, URING_TRACE_OP_PARAM SetupFunc setup, MapperFunc mapper)
-        : ctx_(ctx), URING_TRACE_OP_CTOR_INIT setup_(std::move(setup)), mapper_(std::move(mapper))
+    IoAwaiter(IoContext& ctx URING_TRACE_OP_PARAM, SetupFunc setup, MapperFunc mapper)
+        : ctx_(ctx) URING_TRACE_OP_CTOR_INIT setup_(std::move(setup)), mapper_(std::move(mapper))
     {
     }
 

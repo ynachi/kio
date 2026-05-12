@@ -58,6 +58,6 @@ int main()
     }
 
     // Dump everything
-    Tracer::flush();
+    Tracer::dump();
     return 0;
 }
