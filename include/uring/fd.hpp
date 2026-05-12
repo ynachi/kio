@@ -11,7 +11,7 @@ struct Fd
     int fd = -1;
 
     Fd() = default;
-    explicit Fd(int f) : fd(f) {}
+    explicit Fd(const int f) : fd(f) {}
     ~Fd()
     {
         if (fd >= 0)

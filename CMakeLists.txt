@@ -309,9 +309,9 @@ target_link_libraries(uring PUBLIC
 #----------------------------------------------
 include_directories(${CMAKE_SOURCE_DIR})
 
-if (KIO_BUILD_BITCASK)
-    add_subdirectory(bitcask)
-endif ()
+#if (KIO_BUILD_BITCASK)
+#    add_subdirectory(bitcask)
+#endif ()
 
 if (KIO_BUILD_DEMOS)
     add_subdirectory(examples)

@@ -2,6 +2,7 @@
 
 #include <csignal>
 #include <cstdio>
+#include <print>
 #include <stop_token>
 
 #include "uring/io.hpp"
@@ -18,7 +19,7 @@ Task<void> tracer_smoke_test(IoContext& ctx, std::stop_source& ss)
     auto fd_res = co_await URing::open(ctx, "/dev/null", O_RDONLY);
     if (!fd_res)
     {
-        std::fprintf(stderr, "open failed: %s\n", fd_res.error().message().c_str());
+        std::println(stderr, "open failed: {}", fd_res.error().message());
         ss.request_stop();
         co_return;
     }
@@ -27,11 +28,11 @@ Task<void> tracer_smoke_test(IoContext& ctx, std::stop_source& ss)
     // 2. read (will return 0 bytes — fine, we just want the trace entries)
     std::byte buf[64]{};
     auto read_res = co_await URing::read(ctx, fd, buf);
-    std::fprintf(stdout, "read returned: %d bytes\n", read_res.value_or(-1));
+    std::println(stdout, "read returned: {} bytes", read_res.value_or(-1));
 
     // 3. sleep 50ms — gives us a Submit + Complete pair with a visible timestamp gap
     co_await URing::sleep(ctx, std::chrono::milliseconds(50));
-    std::fprintf(stdout, "sleep done\n");
+    std::println(stdout, "sleep done");
     ss.request_stop();
 }
 

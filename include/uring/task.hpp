@@ -3,7 +3,6 @@
 #include <coroutine>
 #include <exception>
 #include <optional>
-#include <stdexcept>
 #include <type_traits>
 #include <utility>
 
@@ -162,13 +161,37 @@ struct Task
 
                 if (!p.result_.has_value())
                 {
-                    return std::unexpected(MakeErrorCode(ECANCELED));
+                    if constexpr (std::is_constructible_v<T, std::unexpected<std::error_code>>)
+                    {
+                        return T{std::unexpected{MakeErrorCode(ECANCELED)}};
+                    }
+                    else
+                    {
+                        std::terminate();
+                    }
                 }
 
                 if constexpr (std::is_void_v<T>)
-                    return {};
+                {
+                    return;
+                }
                 else
-                    return *p.result_;
+                {
+                    auto result = std::move(*p.result_);
+                    if (!result.has_value())
+                    {
+                        if constexpr (std::is_constructible_v<T, std::unexpected<std::error_code>>)
+                        {
+                            return T{std::unexpected{result.error()}};
+                        }
+                        else
+                        {
+                            std::terminate();
+                        }
+                    }
+
+                    return std::move(result).value();
+                }
             }
         };
 

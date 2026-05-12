@@ -50,7 +50,7 @@ public:
     {
         auto* ring = &ctx_.ring();
         token_ = ctx_.pool().allocate(h);
-        auto op = ctx_.pool().try_get(token_);
+        const auto op = ctx_.pool().try_get(token_);
         URING_TRACE_SET_OP_NAME(op);
 
         // prepare sqe
@@ -89,10 +89,9 @@ public:
     Result<T> await_resume()
     {
         // We just woke up! The event loop populated the result_code.
-        auto& op = ctx_.pool().get(token_.idx);
+        const auto& op = ctx_.pool().get(token_.idx);
         int result = op.result_code;
 
-        // FREE THE SLOT IMMEDIATELY!
         // We have our data, the kernel is done, we don't need the slot anymore.
         ctx_.pool().deallocate(token_);
 

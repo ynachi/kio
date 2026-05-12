@@ -361,7 +361,7 @@ void log_impl(std::source_location loc, std::format_string<Args...> fmt, Args&&.
         detail::format_into(r, L, loc, fmt, std::forward<Args>(args)...);
 
         auto& q = detail::g_slots[slot].q;
-        bool was_empty = q.is_empty();
+        const bool was_empty = q.is_empty();
 
         if (!q.try_push(r))
         {

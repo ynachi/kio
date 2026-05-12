@@ -3,11 +3,8 @@
 #include <cstdint>
 #include <deque>
 #include <limits>
-#include <vector>
 
-#ifdef URING_ENABLE_TRACING
-    #include "tracer.hpp"
-#endif
+#include "tracer.hpp"
 
 namespace URing
 {
@@ -60,7 +57,7 @@ class OpPool
 {
     // Sentinel value indicating the free list is empty
     static constexpr uint32_t END_OF_LIST = std::numeric_limits<uint32_t>::max();
-    // Changed to deque: Appending does NOT invalidate existing references
+
     std::deque<PendingOp> entries_;
     uint32_t head_free_idx_{END_OF_LIST};
     uint32_t next_gen_{1};
@@ -98,13 +95,15 @@ public:
 
         auto& op = entries_[idx];
         op.handle = h;
-        URING_TRACE_OP_RESET(&op);  // ✅ Reference-compatible macro
+        URING_TRACE_OP_RESET(&op);
         op.generation = next_gen_++;
         if (next_gen_ == 0)
+        {
             next_gen_ = 1;
+        }
 
         op.result_code = 0;
-        op.original_ud = 0;  // Overwrites next_free_idx via union
+        op.original_ud = 0;
         op.status = SlotStatus::active;
 
         return Token{idx, op.generation};
@@ -116,7 +115,7 @@ public:
 
         // Clean up active state
         op.handle = nullptr;
-        URING_TRACE_OP_RESET(&op);  // ✅ Reference-compatible macro
+        URING_TRACE_OP_RESET(&op);
         op.status = SlotStatus::free;
 
         // Push this slot onto the FRONT of the free list

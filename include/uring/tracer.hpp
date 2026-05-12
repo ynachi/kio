@@ -1,5 +1,4 @@
 #pragma once
-#include <algorithm>
 #include <chrono>
 #include <coroutine>
 #include <cstdint>
@@ -7,6 +6,7 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace URing
@@ -177,8 +177,8 @@ inline void Tracer::dump(std::string_view filename) noexcept
                 break;
         }
 
-        out << "  {\"ph\":\"X\",\"cat\":\"uring\",\"name\":\"" << ev_name << "\",\"ts\":" << (r.timestamp_ns / 1000.0)
-            << ",\"dur\":1,\"id\":" << r.idx << ",\"args\":{\"size_bytes\":" << r.result << ",\"ctx\":\""
+        out << R"(  {"ph":"X","cat":"uring","name":")" << ev_name << R"(","ts":)" << (r.timestamp_ns / 1000.0)
+            << R"(,"dur":1,"id":)" << r.idx << R"(,"args":{"size_bytes":)" << r.result << R"(,"ctx":")"
             << (r.context ? r.context : "") << "\"}}";
         if (i + 1 < s_global_log.size())
             out << ",";
@@ -193,7 +193,7 @@ inline void Tracer::dump(std::string_view filename) noexcept
 #ifdef URING_ENABLE_TRACING
 
     // Op name tracking (for PendingOp*)
-    #define URING_TRACE_OP_FIELD const char* _trace_op_name = nullptr;
+    #define URING_TRACE_OP_FIELD  const char* _trace_op_name = nullptr;
     #define URING_TRACE_OP_MEMBER URING_TRACE_OP_FIELD
     #define URING_TRACE_OP_RESET(op)            \
         do                                      \
@@ -205,10 +205,10 @@ inline void Tracer::dump(std::string_view filename) noexcept
     #define URING_TRACE_OP_ARG(name) name,
     #define URING_TRACE_OP_PARAM     , const char* name
     #define URING_TRACE_OP_CTOR_INIT , _trace_op_name(name),
-    #define URING_TRACE_SET_OP_NAME(op)             \
-        do                                          \
-        {                                           \
-            if ((op))                               \
+    #define URING_TRACE_SET_OP_NAME(op)                \
+        do                                             \
+        {                                              \
+            if ((op))                                  \
                 (op)->_trace_op_name = _trace_op_name; \
         } while (0)
 
@@ -251,8 +251,8 @@ inline void Tracer::dump(std::string_view filename) noexcept
 
 struct TraceTickScope
 {
-    TraceTickScope() { URing::Tracer::emit(URing::TraceEvent::tick_start); }
-    ~TraceTickScope() { URing::Tracer::emit(URing::TraceEvent::tick_end); }
+    TraceTickScope() { Tracer::emit(TraceEvent::tick_start); }
+    ~TraceTickScope() { Tracer::emit(TraceEvent::tick_end); }
 };
 
 #else
@@ -263,7 +263,7 @@ struct TraceTickScope
     #define URING_TRACE_OP_NAME(op)  nullptr
     #define URING_TRACE_OP_ARG(name)
     #define URING_TRACE_OP_PARAM
-    #define URING_TRACE_OP_CTOR_INIT ,
+    #define URING_TRACE_OP_CTOR_INIT    ,
     #define URING_TRACE_SET_OP_NAME(op) ((void)0)
 
     #define URING_TRACE_ALLOC_HIT(b, s)        ((void)0)
