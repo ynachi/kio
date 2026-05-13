@@ -118,7 +118,7 @@ int main()
     std::signal(SIGTERM, signal_handler);
 
     constexpr uint16_t port = 8080;
-    constexpr int num_threads = 4;
+    constexpr int num_threads = 8;
 
     std::cout << "Starting " << num_threads << " workers...\n";
 

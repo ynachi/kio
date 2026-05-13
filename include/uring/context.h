@@ -90,6 +90,9 @@ public:
 
     void run(const std::stop_token st) noexcept
     {
+        // owner thread should be set on the thread which start the loop
+        owner_thread_ = std::this_thread::get_id();
+        
         // 128-byte frames: 64 preallocated
         // 256-byte frames: most common
         // 512-byte frames: combinators

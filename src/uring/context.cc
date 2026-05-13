@@ -14,7 +14,7 @@
 namespace URing
 {
 IoContext::IoContext(const std::uint32_t entries, const unsigned flags)
-    : op_pool_(entries), spawn_consumer_token_(spawn_queue_), owner_thread_(std::this_thread::get_id())
+    : op_pool_(entries), spawn_consumer_token_(spawn_queue_)
 {
     io_uring_params params{};
 
