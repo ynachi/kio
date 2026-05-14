@@ -40,6 +40,10 @@ struct ContextOptions
 
     // Sleep after 2 seconds of inactivity
     // Liburing auto wakeup the kernel thread so no need to manually do it
+    /// IORING_SETUP_DEFER_TASKRUN is not compatible to SQ_POLL
+    /// Also, when SQ_POLL is enabled, make sure to pin work threads and kernel threads
+    /// and do them on different CPUs, overwhise, the bench reveals that performance
+    /// drops on throughput and latency.
     std::uint32_t sq_thread_idle_ms = 2000;
     // -1 means don't pin to a specific CPU
     int sq_thread_cpu = -1;
