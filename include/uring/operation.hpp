@@ -4,8 +4,6 @@
 #include <deque>
 #include <limits>
 
-#include "tracer.hpp"
-
 namespace URing
 {
 enum class SlotStatus : uint8_t
@@ -18,7 +16,6 @@ enum class SlotStatus : uint8_t
 struct PendingOp
 {
     std::coroutine_handle<> handle = nullptr;
-    URING_TRACE_OP_FIELD
     uint32_t generation = 0;
     int result_code = 0;
     union
@@ -95,7 +92,6 @@ public:
 
         auto& op = entries_[idx];
         op.handle = h;
-        URING_TRACE_OP_RESET(&op);
         op.generation = next_gen_++;
         if (next_gen_ == 0)
         {
@@ -115,7 +111,6 @@ public:
 
         // Clean up active state
         op.handle = nullptr;
-        URING_TRACE_OP_RESET(&op);
         op.status = SlotStatus::free;
 
         // Push this slot onto the FRONT of the free list

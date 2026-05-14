@@ -3,10 +3,6 @@
 #include <cstddef>
 #include <iterator>
 
-#ifdef URING_ENABLE_TRACING
-    #include "tracer.hpp"
-#endif
-
 namespace URing
 {
 class CoroAllocator
@@ -75,17 +71,14 @@ public:
             if (Block* blk = tl_blocks[idx])
             {
                 tl_blocks[idx] = blk->next;
-                URING_TRACE_ALLOC_HIT(idx, size);
                 return blk;
             }
             // Slow path: refill the bucket
             Block* batch = refill_bucket(idx);
             tl_blocks[idx] = batch->next;
-            URING_TRACE_ALLOC_REFILL(idx, size);
             return batch;
         }
         // Fallback for oversized frames
-        URING_TRACE_ALLOC_FALLBACK(kNumBuckets, size);
         return ::operator new(size);
     }
 
@@ -96,10 +89,8 @@ public:
             auto* blk = static_cast<Block*>(ptr);
             blk->next = tl_blocks[idx];
             tl_blocks[idx] = blk;
-            URING_TRACE_DEALLOC_RETURN(idx, size);
             return;
         }
-        URING_TRACE_DEALLOC_FALLBACK(kNumBuckets, size);
         ::operator delete(ptr);
     }
 };

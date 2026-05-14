@@ -25,7 +25,6 @@
 #endif
 #include "logger.hpp"
 #include "operation.hpp"
-#include "tracer.hpp"
 #include "uring/coro_allocator.hpp"
 
 namespace URing
@@ -146,12 +145,10 @@ public:
     {
         if (is_owner_thread())
         {
-            URING_TRACE_SPAWN_FAST();
             std::forward<F>(f)(*this);
             return true;
         }
 
-        URING_TRACE_SPAWN_SLOW();
         ALOG_DEBUG("Using the external dispatch queue");
         std::move_only_function<void(IoContext&)> fn{[factory = std::forward<F>(f)](IoContext& ctx) mutable
                                                      { factory(ctx); }};
@@ -162,7 +159,6 @@ public:
             return true;
         }
 
-        URING_TRACE_SPAWN_FULL();
         ALOG_WARN("failed to enqueue remote spawn");
         return false;
     }

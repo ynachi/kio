@@ -9,8 +9,6 @@
 
 #include <sys/eventfd.h>
 
-#include "uring/tracer.hpp"
-
 namespace URing
 {
 
@@ -130,8 +128,6 @@ void IoContext::request_cancel(const uint32_t op_idx) noexcept
         return;
     }
 
-    URING_TRACE_CANCEL((Token{op_idx, op.generation}));
-
     const auto sqe = io_uring_get_sqe(&ring_);
     if (sqe == nullptr)
     {
@@ -157,7 +153,6 @@ void IoContext::drain_local()
         {
             if (h && !h.done())
             {
-                URING_TRACE_WAKE();
                 h.resume();
             }
         }
@@ -232,8 +227,6 @@ void IoContext::tick() noexcept
             // Stale CQE from recycled index
             continue;
         }
-
-        URING_TRACE_COMPLETE(token, cqe->res, op);
 
         op->result_code = cqe->res;
         ready_queue_.push_back(op->handle);

@@ -9,9 +9,6 @@
 
 #include "error.hpp"
 #include "task.hpp"
-#ifdef URING_ENABLE_TRACING
-    #include "tracer.hpp"
-#endif
 
 namespace URing
 {
@@ -27,13 +24,12 @@ class IoAwaiter
 
     IoContext& ctx_;
     Token token_ = {};
-    URING_TRACE_OP_MEMBER
     [[no_unique_address]] SetupFunc setup_;
     [[no_unique_address]] MapperFunc mapper_;
 
 public:
-    IoAwaiter(IoContext& ctx URING_TRACE_OP_PARAM, SetupFunc setup, MapperFunc mapper)
-        : ctx_(ctx) URING_TRACE_OP_CTOR_INIT setup_(std::move(setup)), mapper_(std::move(mapper))
+    IoAwaiter(IoContext& ctx, SetupFunc setup, MapperFunc mapper)
+        : ctx_(ctx), setup_(std::move(setup)), mapper_(std::move(mapper))
     {
     }
 
@@ -51,14 +47,12 @@ public:
         auto* ring = &ctx_.ring();
         token_ = ctx_.pool().allocate(h);
         const auto op = ctx_.pool().try_get(token_);
-        URING_TRACE_SET_OP_NAME(op);
 
         // prepare sqe
         io_uring_sqe* sqe = io_uring_get_sqe(ring);
         if (sqe == nullptr)
         {
             const int ret = io_uring_submit(ring);
-            URING_TRACE_SQE_SLOW(token_, ret);
             if (ret < 0)
             {
                 ALOG_WARN("io_uring_submit failed while trying to free SQE space: {}", std::strerror(-ret));
@@ -67,22 +61,16 @@ public:
             sqe = io_uring_get_sqe(ring);
             if (sqe == nullptr)
             {
-                URING_TRACE_SQE_FULL(token_);
                 ALOG_WARN("failed to get SQE after submit; completing operation with ENOSPC");
                 op->result_code = -ENOSPC;
                 ctx_.ready_queue_.push_back(h);
                 return std::noop_coroutine();
             }
         }
-        else
-        {
-            URING_TRACE_SQE_FAST(token_);
-        }
 
         setup_(sqe);
         op->original_ud = token_.pack();
         io_uring_sqe_set_data64(sqe, token_.pack());
-        URING_TRACE_SUBMIT(token_);
 
         return std::noop_coroutine();
     }
