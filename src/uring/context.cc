@@ -1,8 +1,6 @@
 #include "uring/context.h"
 
-#include <array>
 #include <cassert>
-#include <cerrno>
 #include <cstring>
 
 #include <unistd.h>
@@ -34,89 +32,8 @@ IoContext::IoContext(const ContextOptions& opts) : op_pool_(opts.entries), spawn
         throw std::runtime_error(std::format("io_uring_queue_init_params failed: {}", std::strerror(-rc)));
     }
 
-    wake_fd_ = eventfd(0, EFD_CLOEXEC);
-    if (wake_fd_ < 0)
-    {
-        io_uring_queue_exit(&ring_);
-        throw std::runtime_error("eventfd failed");
-    }
-    arm_wake_read();
-
     ALOG_INFO("Started IO context with {} entries (SQPOLL: {})", opts.entries,
               (opts.flags & IORING_SETUP_SQPOLL) ? "enabled" : "disabled");
-}
-
-/// Best effort wake, easy to miss
-// TODO: make me more robust with retries
-void IoContext::wake() const noexcept
-{
-    constexpr uint64_t one = 1;
-    const ssize_t n = ::write(wake_fd_, &one, sizeof(one));
-    if (n != sizeof(one) && errno != EINTR)
-    {
-        ALOG_WARN("failed to wake io context with eventfd: {}", std::strerror(errno));
-    }
-}
-
-void IoContext::arm_wake_read() noexcept
-{
-    io_uring_sqe* sqe = nullptr;
-
-    for (int retries = 0; retries < 3; ++retries)
-    {
-        sqe = io_uring_get_sqe(&ring_);
-        if (sqe != nullptr)
-        {
-            break;
-        }
-
-        // SQ is full. Try to flush pending submissions to the kernel.
-        if (const auto ret = io_uring_submit(&ring_); ret < 0)
-        {
-            ALOG_ERROR("io_uring_submit failed in arm_wake_read: {}", std::strerror(-ret));
-            break;
-        }
-    }
-
-    if (sqe == nullptr)
-    {
-        ALOG_WARN("failed to get an SQE for wake read after retries, ring queue is full");
-        wake_read_armed_ = false;
-        return;
-    }
-
-    wake_read_armed_ = true;
-    io_uring_prep_read(sqe, wake_fd_, &wake_value_, sizeof(wake_value_), 0);
-    io_uring_sqe_set_data64(sqe, kWakeTag);
-}
-
-void IoContext::drain_remote() noexcept
-{
-    std::array<std::move_only_function<void(IoContext&)>, kMaxRemoteDrainPerTick> funcs;
-
-    const std::size_t n = spawn_queue_.try_dequeue_bulk(spawn_consumer_token_, funcs.begin(), funcs.size());
-
-    for (std::size_t i = 0; i < n; ++i)
-    {
-        try
-        {
-            funcs[i](*this);
-        }
-        catch (const std::exception& e)
-        {
-            ALOG_ERROR("detached task died with error: {}", e.what());
-        }
-        catch (...)
-        {
-            ALOG_ERROR("detached task died with error");
-            // Fire-and-forget spawn failures cannot be reported to the caller.
-        }
-    }
-
-    if (n == funcs.size())
-    {
-        wake();
-    }
 }
 
 /// Best effort cancellation request
@@ -172,11 +89,6 @@ void IoContext::tick() noexcept
 {
     bool drain_remote_q = false;
 
-    if (!wake_read_armed_)
-    {
-        arm_wake_read();
-    }
-
     // Skip the blocking syscall if CQEs are already waiting in the ring
     if (io_uring_cq_ready(&ring_) > 0)
     {
@@ -208,7 +120,6 @@ void IoContext::tick() noexcept
 
         if (ud == kWakeTag)
         {
-            wake_read_armed_ = false;
             drain_remote_q = true;
 
             if (cqe->res < 0)
@@ -216,7 +127,6 @@ void IoContext::tick() noexcept
                 ALOG_WARN("wake eventfd read failed: {}", std::strerror(-cqe->res));
             }
 
-            arm_wake_read();
             continue;
         }
 
@@ -239,11 +149,6 @@ void IoContext::tick() noexcept
 
     // drain local first, its known as the preferred path
     drain_local();
-
-    if (drain_remote_q)
-    {
-        drain_remote();
-    }
 }
 
 IoContext::~IoContext()
@@ -252,12 +157,6 @@ IoContext::~IoContext()
     {
         io_uring_queue_exit(&ring_);
         ring_.ring_fd = -1;
-    }
-
-    if (wake_fd_ >= 0)
-    {
-        ::close(wake_fd_);
-        wake_fd_ = -1;
     }
 }
 }  // namespace URing

@@ -65,6 +65,8 @@ public:
     static constexpr uint64_t kWakeTag = UINT64_MAX;
 
 private:
+    /// TLS IO context
+    inline static thread_local IoContext* tls_ctx = nullptr;
     //
     // Declare friend structs
     //
@@ -91,23 +93,13 @@ private:
     moodycamel::ConsumerToken spawn_consumer_token_;
 
     io_uring ring_{};
-    int wake_fd_{-1};
     std::thread::id owner_thread_;
     std::stop_token stop_token_;
-
-    uint64_t wake_value_{0};
-    bool wake_read_armed_{false};
 
     void request_cancel(uint32_t op_idx) noexcept;
     void drain_local();
 
     void tick() noexcept;
-
-    void arm_wake_read() noexcept;
-
-    void wake() const noexcept;
-
-    void drain_remote() noexcept;
 
 public:
     explicit IoContext(const ContextOptions& opts = {});
@@ -133,7 +125,11 @@ public:
         CoroAllocator::prewarm(1, 256);
         CoroAllocator::prewarm(2, 64);
 
-        std::stop_callback wake_on_stop{st, [this] { wake(); }};
+        std::stop_callback wake_on_stop{st, [this]
+                                        {
+                                            // TODO: perform post stop signal stuff here
+                                            ALOG_INFO("Io Context stopped");
+                                        }};
         while (!st.stop_requested())
         {
             tick();
@@ -175,6 +171,12 @@ public:
         {
             ALOG_INFO("Warning: Failed to pin to CPU {}: {}", cpu_id, std::generic_category().message(rc));
         }
+    }
+
+    static IoContext* current_io_ctx() noexcept
+    {
+        assert(tls_ctx != nullptr);
+        return tls_ctx;
     }
 };
 }  // namespace URing
