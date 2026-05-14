@@ -70,7 +70,8 @@ public:
                 URING_TRACE_SQE_FULL(token_);
                 ALOG_WARN("failed to get SQE after submit; completing operation with ENOSPC");
                 op->result_code = -ENOSPC;
-                return h;
+                ctx_.ready_queue_.push_back(h);
+                return std::noop_coroutine();
             }
         }
         else

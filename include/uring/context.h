@@ -47,26 +47,41 @@ public:
     static constexpr uint64_t kWakeTag = UINT64_MAX;
 
 private:
+    //
+    // Declare friend structs
+    //
     template <typename T>
     friend struct Task;
 
-    OpPool op_pool_;
-    io_uring ring_{};
-    int wake_fd_{-1};
-    uint64_t wake_value_{0};
-    bool wake_read_armed_{false};
+    template <typename SetupFunc, typename MapperFunc>
+        requires std::invocable<SetupFunc, io_uring_sqe*> && std::invocable<MapperFunc, int32_t>
+    friend class IoAwaiter;
 
+    //
+    // Const xprs
+    //
+    static constexpr size_t kMaxResumesPerTick = 128;
+    static constexpr size_t kMaxRemoteDrainPerTick = kMaxResumesPerTick;
+
+    //
+    //  Pools
+    //
+    OpPool op_pool_;
     std::vector<std::coroutine_handle<>> ready_queue_;
     std::vector<std::coroutine_handle<>> process_queue_;
     moodycamel::ConcurrentQueue<std::move_only_function<void(IoContext&)>> spawn_queue_;
     moodycamel::ConsumerToken spawn_consumer_token_;
 
-    static constexpr size_t kMaxResumesPerTick = 128;
-    static constexpr size_t kMaxRemoteDrainPerTick = kMaxResumesPerTick;
+    io_uring ring_{};
+    int wake_fd_{-1};
     std::thread::id owner_thread_;
     std::stop_token stop_token_;
 
+    uint64_t wake_value_{0};
+    bool wake_read_armed_{false};
+
     void request_cancel(uint32_t op_idx) noexcept;
+    void drain_local();
 
     void tick() noexcept;
 
@@ -74,7 +89,7 @@ private:
 
     void wake() const noexcept;
 
-    void drain_remote_spawns() noexcept;
+    void drain_remote() noexcept;
 
 public:
     explicit IoContext(std::uint32_t entries = 16800, unsigned flags = kUringDefaultFlag);
@@ -92,7 +107,7 @@ public:
     {
         // owner thread should be set on the thread which start the loop
         owner_thread_ = std::this_thread::get_id();
-        
+
         // 128-byte frames: 64 preallocated
         // 256-byte frames: most common
         // 512-byte frames: combinators

@@ -34,6 +34,8 @@ IoContext::IoContext(const std::uint32_t entries, const unsigned flags)
     ALOG_INFO("Started IO context with {} entries", entries);
 }
 
+/// Best effort wake, easy to miss
+// TODO: make me more robust with retries
 void IoContext::wake() const noexcept
 {
     constexpr uint64_t one = 1;
@@ -46,31 +48,37 @@ void IoContext::wake() const noexcept
 
 void IoContext::arm_wake_read() noexcept
 {
-    io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
-    if (!sqe)
+    io_uring_sqe* sqe = nullptr;
+
+    for (int retries = 0; retries < 3; ++retries)
     {
+        sqe = io_uring_get_sqe(&ring_);
+        if (sqe != nullptr)
+        {
+            break;
+        }
+
+        // SQ is full. Try to flush pending submissions to the kernel.
         if (const auto ret = io_uring_submit(&ring_); ret < 0)
         {
-            ALOG_ERROR("io_uring_submit failed with err {}", std::strerror(-ret));
-        }
-        sqe = io_uring_get_sqe(&ring_);
-        if (sqe == nullptr)
-        {
-            ALOG_DEBUG("failed to get a sqe, ring queue is full");
-            // Serious backpressure case. Try again from the next tick.
-            wake_read_armed_ = false;
-            return;
+            ALOG_ERROR("io_uring_submit failed in arm_wake_read: {}", std::strerror(-ret));
+            break;
         }
     }
 
+    if (sqe == nullptr)
+    {
+        ALOG_WARN("failed to get an SQE for wake read after retries, ring queue is full");
+        wake_read_armed_ = false;
+        return;
+    }
+
     wake_read_armed_ = true;
-
     io_uring_prep_read(sqe, wake_fd_, &wake_value_, sizeof(wake_value_), 0);
-
     io_uring_sqe_set_data64(sqe, kWakeTag);
 }
 
-void IoContext::drain_remote_spawns() noexcept
+void IoContext::drain_remote() noexcept
 {
     std::array<std::move_only_function<void(IoContext&)>, kMaxRemoteDrainPerTick> funcs;
 
@@ -99,6 +107,7 @@ void IoContext::drain_remote_spawns() noexcept
     }
 }
 
+/// Best effort cancellation request
 void IoContext::request_cancel(const uint32_t op_idx) noexcept
 {
     auto& op = op_pool_.get(op_idx);
@@ -118,74 +127,11 @@ void IoContext::request_cancel(const uint32_t op_idx) noexcept
 
     // Kernel matches EXACT original user_data, preventing stale/race cancels
     io_uring_prep_cancel64(sqe, op.original_ud, 0);
-    io_uring_sqe_set_data(sqe, nullptr);  // Cancel CQE ignored by reactor
+    io_uring_sqe_set_data(sqe, nullptr);
 }
 
-void IoContext::tick() noexcept
+void IoContext::drain_local()
 {
-    if (!wake_read_armed_)
-    {
-        arm_wake_read();
-    }
-
-    const auto ret = io_uring_submit_and_wait(&ring_, 1);
-    if (ret < 0 && ret != -EINTR)
-    {
-        ALOG_ERROR("failed to submit and wait: {}", std::strerror(-ret));
-    }
-
-    // Batch process CQEs
-    io_uring_cqe* cqe = nullptr;
-    unsigned head = 0;
-    unsigned count = 0;
-    io_uring_for_each_cqe(&ring_, head, cqe)
-    {
-        count++;
-        const auto ud = cqe->user_data;
-        if (ud == 0)
-        {
-            continue;  // cancel, ignore
-        }
-
-        if (ud == kWakeTag)
-        {
-            wake_read_armed_ = false;
-
-            if (cqe->res == sizeof(uint64_t))
-            {
-                drain_remote_spawns();
-            }
-            else if (cqe->res < 0)
-            {
-                ALOG_WARN("wake eventfd read failed: {}", std::strerror(-cqe->res));
-            }
-            else
-            {
-                ALOG_WARN("wake eventfd read returned unexpected size {}", cqe->res);
-            }
-
-            arm_wake_read();
-            continue;
-        }
-
-        const auto token = Token::unpack(ud);
-        const auto op = op_pool_.try_get(token);
-        if (op == nullptr)
-        {
-            continue;  // Stale CQE from recycled index
-        }
-
-        URING_TRACE_COMPLETE(token, cqe->res, op);
-
-        op->result_code = cqe->res;
-        ready_queue_.push_back(op->handle);
-    }
-
-    if (count > 0)
-    {
-        io_uring_cq_advance(&ring_, count);
-    }
-
     // We swap the vector so that if a resuming coroutine immediately submits
     // a task that completes synchronously (or adds to the queue), it goes into
     // the NEXT tick's batch, preventing an infinite loop inside this tick.
@@ -211,6 +157,86 @@ void IoContext::tick() noexcept
         }
     }
     process_queue_.clear();
+}
+
+void IoContext::tick() noexcept
+{
+    bool drain_remote_q = false;
+
+    if (!wake_read_armed_)
+    {
+        arm_wake_read();
+    }
+
+    // Skip the blocking syscall if CQEs are already waiting in the ring
+    if (io_uring_cq_ready(&ring_) > 0)
+    {
+        if (const auto ret = io_uring_submit(&ring_); ret < 0 && ret != -EINTR)
+        {
+            ALOG_ERROR("failed to submit: {}", std::strerror(-ret));
+        }
+    }
+    else
+    {
+        if (const auto ret = io_uring_submit_and_wait(&ring_, 1); ret < 0 && ret != -EINTR)
+        {
+            ALOG_ERROR("failed to submit and wait: {}", std::strerror(-ret));
+        }
+    }
+
+    // Batch process CQEs
+    io_uring_cqe* cqe = nullptr;
+    unsigned head = 0;
+    unsigned count = 0;
+    io_uring_for_each_cqe(&ring_, head, cqe)
+    {
+        count++;
+        const auto ud = cqe->user_data;
+        if (ud == 0)
+        {
+            continue;
+        }
+
+        if (ud == kWakeTag)
+        {
+            wake_read_armed_ = false;
+            drain_remote_q = true;
+
+            if (cqe->res < 0)
+            {
+                ALOG_WARN("wake eventfd read failed: {}", std::strerror(-cqe->res));
+            }
+            
+            arm_wake_read();
+            continue;
+        }
+
+        const auto token = Token::unpack(ud);
+        const auto op = op_pool_.try_get(token);
+        if (op == nullptr)
+        {
+            // Stale CQE from recycled index
+            continue;
+        }
+
+        URING_TRACE_COMPLETE(token, cqe->res, op);
+
+        op->result_code = cqe->res;
+        ready_queue_.push_back(op->handle);
+    }
+
+    if (count > 0)
+    {
+        io_uring_cq_advance(&ring_, count);
+    }
+
+    // drain local first, its known as the preferred path
+    drain_local();
+
+    if (drain_remote_q)
+    {
+        drain_remote();
+    }
 }
 
 IoContext::~IoContext()
