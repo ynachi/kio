@@ -96,8 +96,7 @@ void worker_thread(uint16_t port, int thread_id)
 {
     try
     {
-        // IoContext::pin_to_cpu(thread_id);
-        IoContext ctx{16384};
+        IoContext ctx{};
         server_loop(ctx, port, thread_id);
 
         ctx.run(global_stop_source.get_token());
@@ -112,7 +111,7 @@ void worker_thread(uint16_t port, int thread_id)
 
 int main()
 {
-    URing::ALOG::set_level(ALOG::Level::Debug);
+    URing::ALOG::set_level(ALOG::Level::Info);
     ALOG_DEBUG("Debug logging enabled");
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);

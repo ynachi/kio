@@ -30,6 +30,21 @@
 
 namespace URing
 {
+//
+// Uring options
+//
+struct ContextOptions
+{
+    std::uint32_t entries = 16800;
+    unsigned flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_COOP_TASKRUN;
+
+    // Sleep after 2 seconds of inactivity
+    // Liburing auto wakeup the kernel thread so no need to manually do it
+    std::uint32_t sq_thread_idle_ms = 2000;
+    // -1 means don't pin to a specific CPU
+    int sq_thread_cpu = -1;
+};
+
 template <typename T>
 struct Task;
 class IoContext;
@@ -92,7 +107,7 @@ private:
     void drain_remote() noexcept;
 
 public:
-    explicit IoContext(std::uint32_t entries = 16800, unsigned flags = kUringDefaultFlag);
+    explicit IoContext(const ContextOptions& opts = {});
     IoContext(const IoContext&) = delete;
     IoContext& operator=(const IoContext&) = delete;
     IoContext(IoContext&&) = delete;

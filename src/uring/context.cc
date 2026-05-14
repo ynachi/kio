@@ -13,15 +13,27 @@
 
 namespace URing
 {
-IoContext::IoContext(const std::uint32_t entries, const unsigned flags)
-    : op_pool_(entries), spawn_consumer_token_(spawn_queue_)
+
+IoContext::IoContext(const ContextOptions& opts) : op_pool_(opts.entries), spawn_consumer_token_(spawn_queue_)
 {
     io_uring_params params{};
 
-    params.flags |= flags;
-    if (const int rc = io_uring_queue_init_params(entries, &ring_, &params); rc < 0)
+    params.flags |= opts.flags;
+
+    // Safely configure SQPOLL if requested
+    if (params.flags & IORING_SETUP_SQPOLL)
     {
-        throw std::runtime_error("io_uring_queue_init_params failed");
+        params.sq_thread_idle = opts.sq_thread_idle_ms;
+        if (opts.sq_thread_cpu >= 0)
+        {
+            params.flags |= IORING_SETUP_SQ_AFF;
+            params.sq_thread_cpu = opts.sq_thread_cpu;
+        }
+    }
+
+    if (const int rc = io_uring_queue_init_params(opts.entries, &ring_, &params); rc < 0)
+    {
+        throw std::runtime_error(std::format("io_uring_queue_init_params failed: {}", std::strerror(-rc)));
     }
 
     wake_fd_ = eventfd(0, EFD_CLOEXEC);
@@ -31,7 +43,9 @@ IoContext::IoContext(const std::uint32_t entries, const unsigned flags)
         throw std::runtime_error("eventfd failed");
     }
     arm_wake_read();
-    ALOG_INFO("Started IO context with {} entries", entries);
+
+    ALOG_INFO("Started IO context with {} entries (SQPOLL: {})", opts.entries,
+              (opts.flags & IORING_SETUP_SQPOLL) ? "enabled" : "disabled");
 }
 
 /// Best effort wake, easy to miss
@@ -206,7 +220,7 @@ void IoContext::tick() noexcept
             {
                 ALOG_WARN("wake eventfd read failed: {}", std::strerror(-cqe->res));
             }
-            
+
             arm_wake_read();
             continue;
         }
