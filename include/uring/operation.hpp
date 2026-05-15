@@ -36,7 +36,9 @@ struct PendingOp
     }
 };
 
-// Packs into io_uring's 64-bit user_data exactly.
+// Normal I/O completions use user_data as:
+//   [ 2-bit tag = 00 ][ 30-bit generation ][ 32-bit op index ]
+// The high tag bits are reserved for non-I/O CQEs such as MSG_RING control messages.
 struct Token
 {
     static constexpr std::uint32_t kMaxGeneration = (1u << 30) - 1;

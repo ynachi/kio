@@ -4,6 +4,7 @@
 
 #include "uring/context.h"
 
+#include <atomic>
 #include <chrono>
 #include <csignal>
 #include <iostream>
@@ -19,6 +20,7 @@ using namespace URing;
 
 namespace
 {
+constexpr bool kUseRemoteDispatch = true;
 volatile std::sig_atomic_t g_stop_requested = 0;
 
 void signal_handler(int)
@@ -38,6 +40,30 @@ constexpr std::string_view kHttpResponse =
 
 // Fire-and-forget task to handle a single client connection
 DetachedTask handle_client(Fd client_fd)
+{
+    std::byte buf[1024];
+
+    while (true)
+    {
+        auto read_res = co_await read(client_fd, std::span{buf});
+
+        if (!read_res.has_value() || *read_res == 0)
+        {
+            break;
+        }
+
+        std::span out_buf(reinterpret_cast<const std::byte*>(kHttpResponse.data()), kHttpResponse.size());
+
+        auto write_res = co_await write(client_fd, out_buf);
+
+        if (!write_res.has_value() || *write_res == 0)
+        {
+            break;
+        }
+    }
+}
+
+RemoteTask handle_client_remote(Fd client_fd)
 {
     std::byte buf[1024];
 
@@ -91,6 +117,51 @@ DetachedTask server_loop(uint16_t port, int thread_id, std::stop_token st)
     }
 }
 
+DetachedTask noop_worker_loop()
+{
+    co_return;
+}
+
+RemoteTask dispatching_server_loop(IoContext& ctx, uint16_t port, std::stop_token st,
+                                   std::atomic_size_t& initialized_workers, std::size_t expected_workers)
+{
+    while (initialized_workers.load(std::memory_order_acquire) < expected_workers)
+    {
+        co_await sleep(std::chrono::milliseconds(1));
+    }
+
+    auto listener = TcpListener::Bind(port, "0.0.0.0", 4096);
+    if (!listener)
+    {
+        std::cerr << "[Dispatcher] Failed to bind to port " << port << ": Error " << listener.error().value() << "\n";
+        co_return;
+    }
+
+    std::cout << "[Dispatcher] Listening on http://0.0.0.0:" << port << " and dispatching to " << ctx.worker_count()
+              << " workers.\n";
+
+    Fd server_fd = std::move(*listener);
+    std::size_t next_worker = 1;
+
+    while (!st.stop_requested())
+    {
+        auto client_res = co_await accept(server_fd);
+
+        if (client_res)
+        {
+            const std::size_t worker_count = ctx.worker_count();
+            const std::size_t target_idx = worker_count > 1 ? 1 + ((next_worker++ - 1) % (worker_count - 1)) : 0;
+            IoWorker& target = ctx.worker(target_idx);
+            ctx.dispatch_to(target, [fd = std::move(client_res.value())]() mutable -> RemoteTask
+                            { return handle_client_remote(std::move(fd)); });
+        }
+        else
+        {
+            std::cerr << "Accept failed: " << client_res.error().value() << "\n";
+        }
+    }
+}
+
 int main()
 {
     URing::ALOG::set_level(ALOG::Level::Info);
@@ -110,10 +181,29 @@ int main()
 
     constexpr uint16_t port = 8080;
     constexpr int num_threads = 4;
+    std::atomic_size_t initialized_workers;
 
     std::cout << "Starting " << num_threads << " workers...\n";
 
-    auto app = [st]() -> DetachedTask { return server_loop(port, num_threads, st); };
+    auto app = [&ctx, st, &initialized_workers]() -> DetachedTask
+    {
+        const std::size_t initialized = initialized_workers.fetch_add(1, std::memory_order_acq_rel) + 1;
+
+        if constexpr (kUseRemoteDispatch)
+        {
+            if (initialized == num_threads)
+            {
+                ctx.dispatch_to(ctx.worker(0), [&ctx, st, &initialized_workers]() -> RemoteTask
+                                { return dispatching_server_loop(ctx, port, st, initialized_workers, num_threads); });
+            }
+
+            return noop_worker_loop();
+        }
+        else
+        {
+            return server_loop(port, num_threads, st);
+        }
+    };
 
     (void)ctx.start(app);
 

@@ -40,9 +40,15 @@ struct IoOptions
     int sq_thread_cpu = -1;
 };
 
+// io_uring::user_data is shared by normal I/O completions and control messages.
+// The top two bits are reserved as a tag field:
+//   00: normal OpPool Token, encoded by Token::pack()
+//   01: MSG_RING delivered a RemoteTask handle to the target worker
+//   10: source-side MSG_RING completion for delivery failure handling
+// Normal tokens must keep these bits clear; see Token::kMaxGeneration.
 static constexpr uint64_t kRemoteTagMask = 0xC000000000000000ULL;
-static constexpr uint64_t kRemoteTaskTag = 0x4000000000000000ULL;  // For the target to receive
-static constexpr uint64_t kRemoteSendTag = 0x8000000000000000ULL;  // For the sender to verify delivery
+static constexpr uint64_t kRemoteTaskTag = 0x4000000000000000ULL;
+static constexpr uint64_t kRemoteSendTag = 0x8000000000000000ULL;
 //
 // Forward declaration
 //
@@ -63,15 +69,13 @@ template <typename F>
 concept WorkerInitFn = std::invocable<F> && std::same_as<std::invoke_result_t<F>, DetachedTask>;
 
 template <typename F, typename Worker = IoWorker>
-concept RemoteFactory =
-    // Must be callable with IoWorker&
-    std::invocable<F&&> &&
-    // Must return exactly RemoteTask (no Task<T>, no DetachedTask)
-    std::same_as<std::invoke_result_t<F&&>, RemoteTask> &&
-    // Must be trivially move-constructible: no complex captures
-    std::is_trivially_move_constructible_v<std::remove_reference_t<F>> &&
-    // Must be trivially destructible: no custom cleanup across threads
-    std::is_trivially_destructible_v<std::remove_reference_t<F>>;
+concept RemoteFactory = std::invocable<F&&> &&
+                        // Must return exactly RemoteTask (no Task<T>, no DetachedTask)
+                        std::same_as<std::invoke_result_t<F&&>, RemoteTask> &&
+                        // Must be trivially move-constructible: no complex captures
+                        std::is_trivially_move_constructible_v<std::remove_reference_t<F>> &&
+                        // Must be trivially destructible: no custom cleanup across threads
+                        std::is_trivially_destructible_v<std::remove_reference_t<F>>;
 
 class IoWorker
 {
@@ -100,6 +104,7 @@ private:
     io_uring ring_{};
     std::thread::id owner_thread_;
     IoOptions opts_;
+    size_t id_;
 
     void drain_local();
 
@@ -107,7 +112,7 @@ private:
 
 public:
     static IoWorker* current_io(InternalKey) noexcept { return tl_io; }
-    explicit IoWorker(InternalKey, const IoOptions& opts = {}) : op_pool_(opts.entries), opts_(opts)
+    explicit IoWorker(InternalKey, size_t id, const IoOptions& opts = {}) : op_pool_(opts.entries), opts_(opts), id_(id)
     {
         ready_queue_.reserve(opts.entries);
         process_queue_.reserve(kMaxResumesPerTick);
@@ -126,6 +131,8 @@ public:
     void init(InternalKey, int wq_fd = -1);
     void run(InternalKey, std::stop_token st) noexcept;
     void request_cancel(InternalKey, uint32_t op_idx) noexcept;
+
+    size_t id() const noexcept { return id_; }
 
     io_uring_sqe* get_sqe(InternalKey) noexcept
     {
@@ -183,7 +190,7 @@ public:
         // Allocate workers on main thread. No rings created yet
         for (std::size_t i = 0; i < num_threads_; ++i)
         {
-            contexts_.emplace_back(new IoWorker(key_, opts_));
+            contexts_.emplace_back(new IoWorker(key_, i, opts_));
         }
 
         const auto wq_promise = std::make_shared<std::promise<int>>();
@@ -269,9 +276,13 @@ public:
         io_uring_submit(&current_io->ring(key_));
     }
 
-    bool stop() { return stop_source_.request_stop(); }
+    bool stop() const { return stop_source_.request_stop(); }
 
     std::stop_token stop_token() const noexcept { return stop_source_.get_token(); }
+
+    // TODO: expose a safer scheduling mechanism and remove those methods
+    [[nodiscard]] IoWorker& worker(const std::size_t idx) const { return *contexts_[idx]; }
+    [[nodiscard]] std::size_t worker_count() const noexcept { return contexts_.size(); }
 
     // Join threads (explicitly or via destructor)
     void join()

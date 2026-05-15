@@ -132,7 +132,8 @@ void IoWorker::tick() noexcept
             continue;
         }
 
-        // The target thread receives a ring message
+        // Decode the reserved user_data tag exactly. Loose bit checks are unsafe:
+        // normal Token indexes/generations may set arbitrary non-reserved bits.
         if ((ud & kRemoteTagMask) == kRemoteTaskTag)
         {
             const auto ptr = reinterpret_cast<void*>(ud & ~kRemoteTagMask);
