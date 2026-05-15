@@ -37,13 +37,11 @@ class CoroAllocator
     static Block* refill_bucket(const std::size_t bucket_idx) noexcept
     {
         const std::size_t block_size = kBuckets[bucket_idx];
-        void* memory = ::operator new(block_size * kRefillBatchSize);
-
-        auto* head = static_cast<Block*>(memory);
+        auto* head = static_cast<Block*>(::operator new(block_size));
         auto* current = head;
         for (std::size_t i = 1; i < kRefillBatchSize; ++i)
         {
-            current->next = reinterpret_cast<Block*>(static_cast<char*>(memory) + i * block_size);
+            current->next = static_cast<Block*>(::operator new(block_size));
             current = current->next;
         }
         current->next = nullptr;
@@ -92,6 +90,19 @@ public:
             return;
         }
         ::operator delete(ptr);
+    }
+
+    static void cleanup_thread_cache() noexcept
+    {
+        for (Block*& head : tl_blocks)
+        {
+            while (head != nullptr)
+            {
+                Block* next = head->next;
+                ::operator delete(head);
+                head = next;
+            }
+        }
     }
 };
 

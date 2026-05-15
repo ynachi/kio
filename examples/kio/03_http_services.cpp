@@ -99,7 +99,12 @@ int main()
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 
-    IoContext ctx(4);
+    IoOptions opts;
+    // lets use sqpool
+    opts.flags =
+        IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_COOP_TASKRUN | IORING_SETUP_SQPOLL;
+    opts.sq_thread_cpu = 0;
+    IoContext ctx(4, opts);
 
     auto st = ctx.stop_token();
 

@@ -44,7 +44,7 @@ TEST(OpPoolTest, InitialPreallocationWorks) {
     
     PendingOp* op = pool.try_get(t1);
     ASSERT_NE(op, nullptr);
-    EXPECT_EQ(op->status, SlotStatus::created);
+    EXPECT_EQ(op->status, SlotStatus::active);
     EXPECT_EQ(op->handle, h);
 }
 
@@ -123,7 +123,7 @@ TEST(OpPoolTest, DeallocationCleansState) {
     auto h = std::noop_coroutine();
     
     Token t1 = pool.allocate(h);
-    pool.get(t1.idx).status = SlotStatus::suspended;
+    pool.get(t1.idx).status = SlotStatus::active;
     pool.get(t1.idx).original_ud = 0xDEADBEEF;
     
     pool.deallocate(t1);

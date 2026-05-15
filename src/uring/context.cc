@@ -178,18 +178,24 @@ void IoWorker::run(InternalKey, const std::stop_token st) noexcept
     CoroAllocator::prewarm(1, 256);
     CoroAllocator::prewarm(2, 64);
 
-    std::stop_callback wake_on_stop{st, [this]
-                                    {
-                                        // TODO: perform post stop signal stuff here
-                                        ALOG_INFO("Io Context stopped");
-                                    }};
     while (!st.stop_requested())
     {
         tick();
     }
 
+    if (ring_.ring_fd > 0)
+    {
+        io_uring_queue_exit(&ring_);
+        ring_.ring_fd = -1;
+    }
+
+    ready_queue_.clear();
+    process_queue_.clear();
+    op_pool_.destroy_active_handles();
+
     // reset the tls context
     tl_io = nullptr;
+    CoroAllocator::cleanup_thread_cache();
 }
 
 IoWorker::~IoWorker()

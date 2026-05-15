@@ -136,6 +136,27 @@ public:
     }
 
     [[nodiscard]] PendingOp& get(const uint32_t idx) noexcept { return entries_[idx]; }
+
+    void destroy_active_handles() noexcept
+    {
+        for (auto& op : entries_)
+        {
+            if (op.status == SlotStatus::free)
+            {
+                continue;
+            }
+
+            auto handle = op.handle;
+            op.handle = nullptr;
+            op.status = SlotStatus::free;
+            op.original_ud = 0;
+
+            if (handle)
+            {
+                handle.destroy();
+            }
+        }
+    }
 };
 
 }  // namespace URing
