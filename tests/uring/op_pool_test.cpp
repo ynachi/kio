@@ -18,14 +18,14 @@ TEST(TokenTest, PackUnpack) {
 }
 
 TEST(TokenTest, MaxValues) {
-    Token original{0xFFFFFFFF, 0xFFFFFFFF};
+    Token original{0xFFFFFFFF, Token::kMaxGeneration};
     uint64_t packed = original.pack();
     
-    EXPECT_EQ(packed, 0xFFFFFFFFFFFFFFFF);
+    EXPECT_EQ(packed, 0x3FFFFFFFFFFFFFFF);
     
     Token unpacked = Token::unpack(packed);
     EXPECT_EQ(unpacked.idx, 0xFFFFFFFF);
-    EXPECT_EQ(unpacked.gen, 0xFFFFFFFF);
+    EXPECT_EQ(unpacked.gen, Token::kMaxGeneration);
 }
 
 // ---------------------------------------------------------
@@ -87,6 +87,7 @@ TEST(OpPoolTest, ABAPrevention_StaleGeneration) {
     pool.deallocate(t1);
     
     Token t2 = pool.allocate(h); // index 0, gen 2
+    (void)t2;
     
     // Simulate kernel returning a CQE with the old, stale user_data (t1)
     PendingOp* op = pool.try_get(t1);

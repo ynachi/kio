@@ -40,8 +40,9 @@ struct IoOptions
     int sq_thread_cpu = -1;
 };
 
-static constexpr uint64_t kRemoteTaskTag = 1;  // For the target to receive
-static constexpr uint64_t kRemoteSendTag = 2;  // For the sender to verify delivery
+static constexpr uint64_t kRemoteTagMask = 0xC000000000000000ULL;
+static constexpr uint64_t kRemoteTaskTag = 0x4000000000000000ULL;  // For the target to receive
+static constexpr uint64_t kRemoteSendTag = 0x8000000000000000ULL;  // For the sender to verify delivery
 //
 // Forward declaration
 //
@@ -254,14 +255,14 @@ public:
 
         // Encode the handle for the target thread (Tag = 1)
         const uint64_t encoded_target =
-            (reinterpret_cast<uint64_t>(handle.address()) & ~kRemoteTaskTag) | kRemoteTaskTag;
+            (reinterpret_cast<uint64_t>(handle.address()) & ~kRemoteTagMask) | kRemoteTaskTag;
 
         io_uring_prep_msg_ring(sqe, target_io.ring(key_).ring_fd, 0, encoded_target, 0);
 
         // Encode the handle for the SENDER'S completion queue (Tag = 2)
         // This allows the sender to track if the delivery failed.
         const uint64_t encoded_sender =
-            (reinterpret_cast<uint64_t>(handle.address()) & ~kRemoteSendTag) | kRemoteSendTag;
+            (reinterpret_cast<uint64_t>(handle.address()) & ~kRemoteTagMask) | kRemoteSendTag;
 
         io_uring_sqe_set_data64(sqe, encoded_sender);
 

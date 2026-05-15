@@ -39,14 +39,20 @@ struct PendingOp
 // Packs into io_uring's 64-bit user_data exactly.
 struct Token
 {
+    static constexpr std::uint32_t kMaxGeneration = (1u << 30) - 1;
+
     std::uint32_t idx;
     std::uint32_t gen;
 
-    [[nodiscard]] constexpr std::uint64_t pack() const noexcept { return static_cast<std::uint64_t>(gen) << 32 | idx; }
+    [[nodiscard]] constexpr std::uint64_t pack() const noexcept
+    {
+        return static_cast<std::uint64_t>(gen & kMaxGeneration) << 32 | idx;
+    }
 
     [[nodiscard]] static constexpr Token unpack(const std::uint64_t ud) noexcept
     {
-        return {static_cast<std::uint32_t>(ud & 0xFFFFFFFF), static_cast<std::uint32_t>(ud >> 32)};
+        return {static_cast<std::uint32_t>(ud & 0xFFFFFFFF),
+                static_cast<std::uint32_t>((ud >> 32) & kMaxGeneration)};
     }
 };
 
@@ -93,7 +99,7 @@ public:
         auto& op = entries_[idx];
         op.handle = h;
         op.generation = next_gen_++;
-        if (next_gen_ == 0)
+        if (next_gen_ == 0 || next_gen_ > Token::kMaxGeneration)
         {
             next_gen_ = 1;
         }

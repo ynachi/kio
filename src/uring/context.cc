@@ -133,22 +133,22 @@ void IoWorker::tick() noexcept
         }
 
         // The target thread receives a ring message
-        if (ud & kRemoteTaskTag)
+        if ((ud & kRemoteTagMask) == kRemoteTaskTag)
         {
-            const auto ptr = reinterpret_cast<void*>(ud & ~kRemoteTaskTag);
+            const auto ptr = reinterpret_cast<void*>(ud & ~kRemoteTagMask);
             auto handle = std::coroutine_handle<>::from_address(ptr);
             ready_queue_.push_back(handle);
             continue;
         }
 
         // The SENDER thread receives confirmation of delivery
-        if (ud & kRemoteSendTag)
+        if ((ud & kRemoteTagMask) == kRemoteSendTag)
         {
             // If the kernel failed to deliver (e.g. -EOVERFLOW, -EBADFD)
             if (cqe->res < 0)
             {
                 ALOG_ERROR("msg_ring delivery failed: {}", std::strerror(-cqe->res));
-                const auto ptr = reinterpret_cast<void*>(ud & ~kRemoteSendTag);
+                const auto ptr = reinterpret_cast<void*>(ud & ~kRemoteTagMask);
                 auto handle = std::coroutine_handle<>::from_address(ptr);
                 // Destroy the leaked frame
                 handle.destroy();
