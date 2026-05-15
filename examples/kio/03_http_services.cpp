@@ -177,23 +177,21 @@ int main()
 
     std::cout << "Starting " << num_threads << " workers...\n";
 
-    auto app = [&ctx, st]() -> DetachedTask
-    {
-        if constexpr (kUseRemoteDispatch)
+    (void)ctx.start(
+        [&ctx, st]()
         {
-            if (IoWorker::current_io()->id() == 0)
+            if constexpr (kUseRemoteDispatch)
             {
-                return dispatching_server_loop(ctx, port, st);
+                if (IoWorker::current_io()->id() == 0)
+                {
+                    dispatching_server_loop(ctx, port, st);
+                }
             }
-            return noop_worker_loop();
-        }
-        else
-        {
-            return server_loop(port, num_threads, st);
-        }
-    };
-
-    (void)ctx.start(app);
+            else
+            {
+                server_loop(port, num_threads, st);
+            }
+        });
 
     while (g_stop_requested == 0)
     {

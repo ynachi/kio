@@ -67,7 +67,7 @@ class InternalKey
 };
 
 template <typename F>
-concept WorkerInitFn = std::invocable<F> && std::same_as<std::invoke_result_t<F>, DetachedTask>;
+concept WorkerInitFn = std::invocable<F> && std::same_as<std::invoke_result_t<F>, void>;
 
 template <typename F, typename Worker = IoWorker>
 concept RemoteFactory = std::invocable<F&&> &&
@@ -183,6 +183,7 @@ public:
     explicit IoContext(std::size_t num_threads, const IoOptions& opts = {});
     ~IoContext();
 
+    /// Init fn start in the worker thread and SHOULD not block
     template <WorkerInitFn InitFn>
     [[nodiscard]] bool start(InitFn&& init_fn)
     {
