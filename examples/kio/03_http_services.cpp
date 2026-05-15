@@ -4,7 +4,6 @@
 
 #include "uring/context.h"
 
-#include <atomic>
 #include <chrono>
 #include <csignal>
 #include <iostream>
@@ -122,14 +121,8 @@ DetachedTask noop_worker_loop()
     co_return;
 }
 
-RemoteTask dispatching_server_loop(IoContext& ctx, uint16_t port, std::stop_token st,
-                                   std::atomic_size_t& initialized_workers, std::size_t expected_workers)
+DetachedTask dispatching_server_loop(IoContext& ctx, uint16_t port, std::stop_token st)
 {
-    while (initialized_workers.load(std::memory_order_acquire) < expected_workers)
-    {
-        co_await sleep(std::chrono::milliseconds(1));
-    }
-
     auto listener = TcpListener::Bind(port, "0.0.0.0", 4096);
     if (!listener)
     {
@@ -181,23 +174,17 @@ int main()
 
     constexpr uint16_t port = 8080;
     constexpr int num_threads = 4;
-    std::atomic_size_t initialized_workers;
 
     std::cout << "Starting " << num_threads << " workers...\n";
 
-    auto app = [&ctx, st, &initialized_workers]() -> DetachedTask
+    auto app = [&ctx, st]() -> DetachedTask
     {
-        const std::size_t initialized = initialized_workers.fetch_add(1, std::memory_order_acq_rel) + 1;
-
         if constexpr (kUseRemoteDispatch)
         {
-            if (initialized == num_threads)
+            if (IoWorker::current_io()->id() == 0)
             {
-                ctx.dispatch_to(ctx.worker(0), [&ctx, st, &initialized_workers]() -> RemoteTask
-                                { return dispatching_server_loop(ctx, port, st, initialized_workers, num_threads); });
+                dispatching_server_loop(ctx, port, st);
             }
-
-            return noop_worker_loop();
         }
         else
         {

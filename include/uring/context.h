@@ -4,6 +4,7 @@
 #include <concepts>
 #include <cstdint>
 #include <future>
+#include <latch>
 #include <mutex>
 #include <stop_token>
 #include <system_error>
@@ -111,7 +112,7 @@ private:
     void tick() noexcept;
 
 public:
-    static IoWorker* current_io(InternalKey) noexcept { return tl_io; }
+    static IoWorker* current_io() noexcept { return tl_io; }
     explicit IoWorker(InternalKey, size_t id, const IoOptions& opts = {}) : op_pool_(opts.entries), opts_(opts), id_(id)
     {
         ready_queue_.reserve(opts.entries);
@@ -164,18 +165,22 @@ public:
     }
 };
 
+//=================================================================================================================
+// IO Context
+//=================================================================================================================
 class IoContext
 {
     std::stop_source stop_source_;
     std::size_t num_threads_;
     IoOptions opts_;
     std::atomic<bool> running_{false};
+    std::latch start_latch_;
     InternalKey key_{};
     std::vector<std::unique_ptr<IoWorker>> contexts_;
     std::vector<std::jthread> workers_;
 
 public:
-    explicit IoContext(std::size_t num_threads, IoOptions opts = {});
+    explicit IoContext(std::size_t num_threads, const IoOptions& opts = {});
     ~IoContext();
 
     template <WorkerInitFn InitFn>
@@ -202,6 +207,8 @@ public:
             workers_.emplace_back(
                 [this, i, wq_promise, wq_future, stop_token, init_fn = std::forward<InitFn>(init_fn)]() mutable
                 {
+                    start_latch_.count_down();
+
                     // TODO: make this configurable Skip CPU 0 for pinning, it SHOULD used for SQPOLL
                     IoWorker::pin_to_cpu(static_cast<int>(i + 1));
                     // init worker 0 as the ring owner
@@ -228,6 +235,7 @@ public:
                 });
         }
 
+        start_latch_.wait();
         // TODO: add a start latch. We need to make sure everything is ok before we return should we ?
         return true;
     }
@@ -240,7 +248,7 @@ public:
         RemoteTask task = fn();
         auto handle = task.release();
 
-        auto current_io = IoWorker::current_io(key_);
+        auto current_io = IoWorker::current_io();
 
         // if we are on target thread, do not ring msg
         if (current_io == &target_io)

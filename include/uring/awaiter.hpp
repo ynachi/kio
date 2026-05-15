@@ -42,7 +42,7 @@ public:
     template <typename Promise>
     std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> h) noexcept
     {
-        const auto io = IoWorker::current_io(key_);
+        const auto io = IoWorker::current_io();
         assert(io != nullptr && "IoAwaiter used outside of an IoWorker thread");
         if (io == nullptr)
         {
@@ -83,7 +83,7 @@ public:
 
     Result<T> await_resume()
     {
-        const auto io = IoWorker::current_io(key_);
+        const auto io = IoWorker::current_io();
         assert(io != nullptr && "IoAwaiter resumed outside of an IoWorker thread");
         if (io == nullptr)
         {

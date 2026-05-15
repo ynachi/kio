@@ -227,7 +227,8 @@ IoWorker::~IoWorker()
 //
 // OP Context
 //
-IoContext::IoContext(const std::size_t num_threads, const IoOptions opts) : num_threads_(num_threads), opts_(opts)
+IoContext::IoContext(const std::size_t num_threads, const IoOptions& opts)
+    : num_threads_(num_threads), opts_(opts), start_latch_(num_threads)
 {
     contexts_.reserve(num_threads);
     workers_.reserve(num_threads);
