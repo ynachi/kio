@@ -253,7 +253,7 @@ public:
         // if we are on target thread, do not ring msg
         if (current_io == &target_io)
         {
-            ALOG_WARN("calling dispatch_to on own thread is discouraged, use a detached task instead");
+            ALOG_DEBUG("calling dispatch_to on own thread is discouraged, use a detached task instead");
             target_io.ready_queue(key_).push_back(handle);
             return;
         }

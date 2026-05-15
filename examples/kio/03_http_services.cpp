@@ -183,7 +183,7 @@ int main()
         {
             if (IoWorker::current_io()->id() == 0)
             {
-                dispatching_server_loop(ctx, port, st);
+                return dispatching_server_loop(ctx, port, st);
             }
         }
         else
