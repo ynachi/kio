@@ -14,6 +14,7 @@
 
 #include "logger.hpp"
 #include "operation.hpp"
+#include "task.hpp"
 #include "uring/coro_allocator.hpp"
 
 namespace URing
@@ -39,14 +40,12 @@ struct IoOptions
     int sq_thread_cpu = -1;
 };
 
+static constexpr uint64_t kRemoteTaskTag = 1;  // For the target to receive
+static constexpr uint64_t kRemoteSendTag = 2;  // For the sender to verify delivery
 //
 // Forward declaration
 //
-template <typename T>
-struct Task;
 class IoWorker;
-struct DetachedTask;
-
 class InternalKey
 {
     friend class IoContext;
@@ -62,6 +61,17 @@ class InternalKey
 template <typename F>
 concept WorkerInitFn = std::invocable<F> && std::same_as<std::invoke_result_t<F>, DetachedTask>;
 
+template <typename F, typename Worker = IoWorker>
+concept RemoteFactory =
+    // Must be callable with IoWorker&
+    std::invocable<F&&> &&
+    // Must return exactly RemoteTask (no Task<T>, no DetachedTask)
+    std::same_as<std::invoke_result_t<F&&>, RemoteTask> &&
+    // Must be trivially move-constructible: no complex captures
+    std::is_trivially_move_constructible_v<std::remove_reference_t<F>> &&
+    // Must be trivially destructible: no custom cleanup across threads
+    std::is_trivially_destructible_v<std::remove_reference_t<F>>;
+
 class IoWorker
 {
 public:
@@ -76,7 +86,9 @@ private:
     //
     // Const xprs
     //
+    // Bit-tag for MSG_RING: handles are aligned, so bit 0 is safe for tagging
     static constexpr size_t kMaxResumesPerTick = 128;
+    static constexpr uint8_t kMaxSqeGetRetry = 3;
     //
     //  Pools
     //
@@ -114,6 +126,21 @@ public:
     void run(InternalKey, std::stop_token st) noexcept;
     void request_cancel(InternalKey, uint32_t op_idx) noexcept;
 
+    io_uring_sqe* get_sqe(InternalKey) noexcept
+    {
+        io_uring_sqe* sqe = nullptr;
+
+        for (auto i = 0; i < kMaxSqeGetRetry; ++i)
+        {
+            sqe = io_uring_get_sqe(&ring_);
+            if (sqe != nullptr)
+                break;
+            io_uring_submit(&ring_);
+        }
+        assert(sqe != nullptr && "Sqe null after 3 retries, this is a fatal error");
+        return sqe;
+    }
+
     [[nodiscard]] bool is_owner_thread() const noexcept { return owner_thread_ == std::this_thread::get_id(); }
 
     static void pin_to_cpu(int cpu_id)
@@ -131,12 +158,12 @@ public:
 
 class IoContext
 {
-    std::vector<std::unique_ptr<IoWorker>> contexts_;
     std::stop_source stop_source_;
     std::size_t num_threads_;
     IoOptions opts_;
     std::atomic<bool> running_{false};
     InternalKey key_{};
+    std::vector<std::unique_ptr<IoWorker>> contexts_;
     std::vector<std::jthread> workers_;
 
 public:
@@ -195,6 +222,50 @@ public:
 
         // TODO: add a start latch. We need to make sure everything is ok before we return should we ?
         return true;
+    }
+
+    /// Dispatch to uses more system call to send coroutines handles arround
+    /// It should not be used the default scheduling mechanism
+    template <typename RemoteFactory>
+    void dispatch_to(IoWorker& target_io, RemoteFactory&& fn)
+    {
+        RemoteTask task = fn();
+        auto handle = task.release();
+
+        auto current_io = IoWorker::current_io(key_);
+
+        // if we are on target thread, do not ring msg
+        if (current_io == &target_io)
+        {
+            ALOG_WARN("calling dispatch_to on own thread is discouraged, use a detached task instead");
+            target_io.ready_queue(key_).push_back(handle);
+            return;
+        }
+
+        assert(current_io != nullptr && "dispatch_to called from outside IoWorker::run()");
+
+        io_uring_sqe* sqe = current_io->get_sqe(key_);
+        if (sqe == nullptr)
+        {
+            // can't send, destroy
+            ALOG_ERROR("failed to send coroutine to target worker, destroying it");
+            handle.destroy();
+        }
+
+        // Encode the handle for the target thread (Tag = 1)
+        const uint64_t encoded_target =
+            (reinterpret_cast<uint64_t>(handle.address()) & ~kRemoteTaskTag) | kRemoteTaskTag;
+
+        io_uring_prep_msg_ring(sqe, target_io.ring(key_).ring_fd, 0, encoded_target, 0);
+
+        // Encode the handle for the SENDER'S completion queue (Tag = 2)
+        // This allows the sender to track if the delivery failed.
+        const uint64_t encoded_sender =
+            (reinterpret_cast<uint64_t>(handle.address()) & ~kRemoteSendTag) | kRemoteSendTag;
+
+        io_uring_sqe_set_data64(sqe, encoded_sender);
+
+        io_uring_submit(&current_io->ring(key_));
     }
 
     bool stop() { return stop_source_.request_stop(); }

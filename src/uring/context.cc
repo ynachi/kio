@@ -48,7 +48,7 @@ void IoWorker::init(InternalKey, const int wq_fd)
 }
 
 /// Best effort cancellation request
-void IoWorker::request_cancel(InternalKey, const uint32_t op_idx) noexcept
+void IoWorker::request_cancel(InternalKey key, const uint32_t op_idx) noexcept
 {
     auto& op = op_pool_.get(op_idx);
     if (!op.cancel())
@@ -56,7 +56,7 @@ void IoWorker::request_cancel(InternalKey, const uint32_t op_idx) noexcept
         return;
     }
 
-    const auto sqe = io_uring_get_sqe(&ring_);
+    const auto sqe = get_sqe(key);
     if (sqe == nullptr)
     {
         ALOG_WARN("failed to enqueue cancel operation: SQE queue is full");
@@ -132,13 +132,29 @@ void IoWorker::tick() noexcept
             continue;
         }
 
-        if (ud == kWakeTag)
+        // The target thread receives a ring message
+        if (ud & kRemoteTaskTag)
         {
+            const auto ptr = reinterpret_cast<void*>(ud & ~kRemoteTaskTag);
+            auto handle = std::coroutine_handle<>::from_address(ptr);
+            ready_queue_.push_back(handle);
+            continue;
+        }
+
+        // The SENDER thread receives confirmation of delivery
+        if (ud & kRemoteSendTag)
+        {
+            // If the kernel failed to deliver (e.g. -EOVERFLOW, -EBADFD)
             if (cqe->res < 0)
             {
-                ALOG_WARN("wake eventfd read failed: {}", std::strerror(-cqe->res));
+                ALOG_ERROR("msg_ring delivery failed: {}", std::strerror(-cqe->res));
+                const auto ptr = reinterpret_cast<void*>(ud & ~kRemoteSendTag);
+                auto handle = std::coroutine_handle<>::from_address(ptr);
+                // Destroy the leaked frame
+                handle.destroy();
             }
-
+            // If cqe->res == 0, delivery was successful. We do nothing because
+            // the target thread now owns the pointer.
             continue;
         }
 

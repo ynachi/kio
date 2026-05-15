@@ -6,6 +6,7 @@
 #include <type_traits>
 #include <utility>
 
+#include "coro_allocator.hpp"
 #include "error.hpp"
 #include "logger.hpp"
 
@@ -15,8 +16,6 @@ namespace URing
 // Forward declarations
 template <typename T>
 struct Task;
-
-class IoWorker;
 
 struct task_promise_base
 {
@@ -235,24 +234,50 @@ struct DetachedTask
     struct promise_type
     {
         DetachedTask get_return_object() noexcept { return {}; }
-
-        // Don't suspend initially. Start executing the client handler immediately
-        // until it hits its first co_await (e.g., waiting for data).
         std::suspend_never initial_suspend() noexcept { return {}; }
-
-        // CRITICAL: std::suspend_never tells the C++ compiler to automatically
-        // destroy the coroutine frame the moment the function reaches the end.
         std::suspend_never final_suspend() noexcept { return {}; }
-
         void return_void() noexcept {}
-
         void unhandled_exception() noexcept
         {
+            // TODO: should we use std::terminate here ?
             ALOG_FATAL("detached task died with unhandled exception");
             ALOG::stop();
             std::terminate();
         }
+
+        // Use CoroAllocator for frame allocation
+        void* operator new(const std::size_t sz) { return CoroAllocator::allocate(sz); }
+        void operator delete(void* ptr, const std::size_t sz) { CoroAllocator::deallocate(ptr, sz); }
     };
 };
 
+// for cross thread
+struct RemoteTask
+{
+    struct promise_type
+    {
+        RemoteTask get_return_object() { return {std::coroutine_handle<promise_type>::from_promise(*this)}; }
+        // Suspend immediately so caller can move handle safely
+        std::suspend_always initial_suspend() noexcept { return {}; }
+        // Self-destruct after completion on target thread
+        std::suspend_never final_suspend() noexcept { return {}; }
+        void return_void() noexcept {}
+        void unhandled_exception() noexcept
+        {
+            ALOG_FATAL("RemoteTask unhandled exception");
+            std::terminate();
+        }
+    };
+
+    // Transfer ownership out — caller is now responsible
+    std::coroutine_handle<> release() noexcept { return std::exchange(handle, nullptr); }
+
+    std::coroutine_handle<promise_type> handle;
+
+    // Debug-only guard: catch misuse (forgetting to release)
+    ~RemoteTask() noexcept
+    {
+        assert(handle == nullptr && "RemoteTask destroyed without release() — did you forget to dispatch?");
+    }
+};
 }  // namespace URing
