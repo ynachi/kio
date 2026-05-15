@@ -22,16 +22,12 @@ class IoAwaiter
     // Extract the T from Result<T> so we can type the coroutine handle
     using T = ResultType::value_type;
 
-    IoContext& ctx_;
     Token token_ = {};
     [[no_unique_address]] SetupFunc setup_;
     [[no_unique_address]] MapperFunc mapper_;
 
 public:
-    IoAwaiter(IoContext& ctx, SetupFunc setup, MapperFunc mapper)
-        : ctx_(ctx), setup_(std::move(setup)), mapper_(std::move(mapper))
-    {
-    }
+    IoAwaiter(SetupFunc setup, MapperFunc mapper) : setup_(std::move(setup)), mapper_(std::move(mapper)) {}
 
     bool await_ready() const noexcept { return false; }
 
@@ -44,9 +40,12 @@ public:
     template <typename Promise>
     std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> h) noexcept
     {
-        auto* ring = &ctx_.ring();
-        token_ = ctx_.pool().allocate(h);
-        const auto op = ctx_.pool().try_get(token_);
+        const auto io = IoWorker::tl_io;
+        assert(IoWorker::tl_ctx != nullptr && "IoAwaiter used outside of IoContext::run()");
+
+        auto* ring = &io->ring();
+        token_ = io->pool().allocate(h);
+        const auto op = io->pool().try_get(token_);
 
         // prepare sqe
         io_uring_sqe* sqe = io_uring_get_sqe(ring);
@@ -63,7 +62,7 @@ public:
             {
                 ALOG_WARN("failed to get SQE after submit; completing operation with ENOSPC");
                 op->result_code = -ENOSPC;
-                ctx_.ready_queue_.push_back(h);
+                io->ready_queue_.push_back(h);
                 return std::noop_coroutine();
             }
         }
@@ -77,12 +76,16 @@ public:
 
     Result<T> await_resume()
     {
+        assert(IoWorker::tl_ctx != nullptr && "IoAwaiter used outside of IoContext::run()");
+
+        const auto io = IoWorker::tl_io;
         // We just woke up! The event loop populated the result_code.
-        const auto& op = ctx_.pool().get(token_.idx);
+        // SAFETY: io.run() set the tl_ctx. No IO can be done without setting it anyway.
+        const auto& op = io->pool().get(token_.idx);
         int result = op.result_code;
 
         // We have our data, the kernel is done, we don't need the slot anymore.
-        ctx_.pool().deallocate(token_);
+        io->pool().deallocate(token_);
 
         return mapper_(result);
     }

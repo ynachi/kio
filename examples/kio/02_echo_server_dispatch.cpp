@@ -30,7 +30,7 @@ void signal_handler(int)
     global_stop_source.request_stop();
 }
 
-DetachedTask handle_client(IoContext& ctx, Fd client_fd)
+DetachedTask handle_client(IoWorker& ctx, Fd client_fd)
 {
     std::byte buf[1024];
 
@@ -51,7 +51,7 @@ DetachedTask handle_client(IoContext& ctx, Fd client_fd)
     }
 }
 
-DetachedTask dispatcher_loop(IoContext& dispatcher_ctx, std::vector<IoContext*> workers, uint16_t port)
+DetachedTask dispatcher_loop(IoWorker& dispatcher_ctx, std::vector<IoWorker*> workers, uint16_t port)
 {
     auto listener = TcpListener::Bind(port, "0.0.0.0", 4096);
     if (!listener)
@@ -73,7 +73,7 @@ DetachedTask dispatcher_loop(IoContext& dispatcher_ctx, std::vector<IoContext*> 
         if (client_res)
         {
             const size_t selected_worker = worker_idx % workers.size();
-            IoContext* target_worker = workers[selected_worker];
+            IoWorker* target_worker = workers[selected_worker];
             worker_idx++;
 
             ALOG_DEBUG("Dispatching accepted client to worker {}", selected_worker);
@@ -82,7 +82,7 @@ DetachedTask dispatcher_loop(IoContext& dispatcher_ctx, std::vector<IoContext*> 
             // handler coroutine is constructed and started on the worker ctx.
             try
             {
-                if (!target_worker->spawn([fd = std::move(*client_res)](IoContext& worker_ctx) mutable -> DetachedTask
+                if (!target_worker->spawn([fd = std::move(*client_res)](IoWorker& worker_ctx) mutable -> DetachedTask
                                           { return handle_client(worker_ctx, std::move(fd)); }))
                 {
                     std::cerr << "[Dispatcher] Failed to dispatch client to worker\n";
@@ -105,12 +105,12 @@ DetachedTask dispatcher_loop(IoContext& dispatcher_ctx, std::vector<IoContext*> 
 }
 
 // Construct the IoContext ON the thread that will run it to satisfy SINGLE_ISSUER
-void run_worker(std::promise<IoContext*> init_promise, int id)
+void run_worker(std::promise<IoWorker*> init_promise, int id)
 {
     try
     {
         // 1. Setup ring (Owner is now correctly this worker thread)
-        IoContext ctx{16384};
+        IoWorker ctx{16384};
 
         // 2. Pass the pointer back to the main thread so the dispatcher can use it
         init_promise.set_value(&ctx);
@@ -143,12 +143,12 @@ int main()
     constexpr int num_workers = 4;
 
     std::vector<std::thread> threads;
-    std::vector<IoContext*> worker_ptrs;
+    std::vector<IoWorker*> worker_ptrs;
 
     // Start workers and wait for them to initialize their rings
     for (int i = 0; i < num_workers; ++i)
     {
-        std::promise<IoContext*> p;
+        std::promise<IoWorker*> p;
         auto future = p.get_future();
 
         threads.emplace_back(run_worker, std::move(p), i + 1);
@@ -158,7 +158,7 @@ int main()
     }
 
     // Start the dispatcher on the main thread
-    IoContext dispatcher_ctx{4096};
+    IoWorker dispatcher_ctx{4096};
     dispatcher_loop(dispatcher_ctx, worker_ptrs, 8080);
 
     std::cout << "Starting cross-thread spawn demo...\n";

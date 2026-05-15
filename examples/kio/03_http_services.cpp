@@ -33,7 +33,7 @@ void signal_handler(int)
 }
 
 // Fire-and-forget task to handle a single client connection
-DetachedTask handle_client(IoContext& ctx, Fd client_fd)
+DetachedTask handle_client(IoWorker& ctx, Fd client_fd)
 {
     std::byte buf[1024];
 
@@ -58,7 +58,7 @@ DetachedTask handle_client(IoContext& ctx, Fd client_fd)
 }
 
 // Fire-and-forget task to accept incoming connections
-DetachedTask server_loop(IoContext& ctx, uint16_t port, int thread_id)
+DetachedTask server_loop(IoWorker& ctx, uint16_t port, int thread_id)
 {
     auto listener = TcpListener::Bind(port, "0.0.0.0", 4096);
     if (!listener)
@@ -78,11 +78,7 @@ DetachedTask server_loop(IoContext& ctx, uint16_t port, int thread_id)
 
         if (client_res)
         {
-            if (!ctx.spawn([client_fd = std::move(*client_res)](IoContext& spawn_ctx) mutable -> DetachedTask
-                           { return handle_client(spawn_ctx, std::move(client_fd)); }))
-            {
-                std::cerr << "Failed to spawn client handler\n";
-            }
+            handle_client(spawn_ctx, std::move(client_fd));
         }
         else
         {
@@ -96,7 +92,7 @@ void worker_thread(uint16_t port, int thread_id)
 {
     try
     {
-        IoContext ctx{};
+        IoWorker ctx{};
         server_loop(ctx, port, thread_id);
 
         ctx.run(global_stop_source.get_token());

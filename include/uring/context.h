@@ -3,26 +3,15 @@
 #include <cassert>
 #include <concepts>
 #include <cstdint>
-#include <functional>
+#include <future>
 #include <mutex>
 #include <stop_token>
 #include <system_error>
 #include <thread>
-#include <utility>
 #include <vector>
 
 #include <liburing.h>
 
-#ifdef BLOCK_SIZE
-    #pragma push_macro("BLOCK_SIZE")
-    #undef BLOCK_SIZE
-    #define URING_RESTORE_BLOCK_SIZE_MACRO
-#endif
-#include "libs/concurrentqueue.hpp"
-#ifdef URING_RESTORE_BLOCK_SIZE_MACRO
-    #pragma pop_macro("BLOCK_SIZE")
-    #undef URING_RESTORE_BLOCK_SIZE_MACRO
-#endif
 #include "logger.hpp"
 #include "operation.hpp"
 #include "uring/coro_allocator.hpp"
@@ -32,7 +21,7 @@ namespace URing
 //
 // Uring options
 //
-struct ContextOptions
+struct IoOptions
 {
     std::uint32_t entries = 16800;
     unsigned flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_COOP_TASKRUN;
@@ -50,14 +39,13 @@ struct ContextOptions
 
 template <typename T>
 struct Task;
-class IoContext;
+class IoWorker;
 struct DetachedTask;
 
-template <class F>
-concept RemoteSpawnFn =
-    std::invocable<F&, IoContext&> && std::same_as<std::invoke_result_t<F&, IoContext&>, DetachedTask>;
+template <typename F>
+concept WorkerInitFn = std::invocable<F, IoWorker&> && std::same_as<std::invoke_result_t<F, IoWorker&>, DetachedTask>;
 
-class IoContext
+class IoWorker
 {
 public:
     static constexpr unsigned kUringDefaultFlag =
@@ -66,12 +54,13 @@ public:
 
 private:
     /// TLS IO context
-    inline static thread_local IoContext* tls_ctx = nullptr;
+    inline static thread_local IoWorker* tl_io = nullptr;
     //
     // Declare friend structs
     //
     template <typename T>
     friend struct Task;
+    friend class IoContext;
 
     template <typename SetupFunc, typename MapperFunc>
         requires std::invocable<SetupFunc, io_uring_sqe*> && std::invocable<MapperFunc, int32_t>
@@ -81,83 +70,41 @@ private:
     // Const xprs
     //
     static constexpr size_t kMaxResumesPerTick = 128;
-    static constexpr size_t kMaxRemoteDrainPerTick = kMaxResumesPerTick;
-
     //
     //  Pools
     //
     OpPool op_pool_;
     std::vector<std::coroutine_handle<>> ready_queue_;
     std::vector<std::coroutine_handle<>> process_queue_;
-    moodycamel::ConcurrentQueue<std::move_only_function<void(IoContext&)>> spawn_queue_;
-    moodycamel::ConsumerToken spawn_consumer_token_;
 
     io_uring ring_{};
     std::thread::id owner_thread_;
-    std::stop_token stop_token_;
+    IoOptions opts_;
 
     void request_cancel(uint32_t op_idx) noexcept;
     void drain_local();
 
     void tick() noexcept;
 
-public:
-    explicit IoContext(const ContextOptions& opts = {});
-    IoContext(const IoContext&) = delete;
-    IoContext& operator=(const IoContext&) = delete;
-    IoContext(IoContext&&) = delete;
-    IoContext& operator=(IoContext&&) = delete;
+    explicit IoWorker(const IoOptions& opts = {}) : op_pool_(opts.entries), opts_(opts)
+    {
+        ready_queue_.reserve(opts.entries);
+        process_queue_.reserve(kMaxResumesPerTick);
+    }
+    void init(int wq_fd = -1);
 
-    ~IoContext();
+public:
+    IoWorker(const IoWorker&) = delete;
+    IoWorker& operator=(const IoWorker&) = delete;
+    IoWorker(IoWorker&&) = delete;
+    IoWorker& operator=(IoWorker&&) = delete;
+
+    ~IoWorker();
 
     OpPool& pool() noexcept { return op_pool_; }
     io_uring& ring() noexcept { return ring_; }
 
-    void run(const std::stop_token st) noexcept
-    {
-        // owner thread should be set on the thread which start the loop
-        owner_thread_ = std::this_thread::get_id();
-
-        // 128-byte frames: 64 preallocated
-        // 256-byte frames: most common
-        // 512-byte frames: combinators
-        CoroAllocator::prewarm(0, 128);
-        CoroAllocator::prewarm(1, 256);
-        CoroAllocator::prewarm(2, 64);
-
-        std::stop_callback wake_on_stop{st, [this]
-                                        {
-                                            // TODO: perform post stop signal stuff here
-                                            ALOG_INFO("Io Context stopped");
-                                        }};
-        while (!st.stop_requested())
-        {
-            tick();
-        }
-    }
-
-    template <RemoteSpawnFn F>
-    [[nodiscard]] bool spawn(F&& f)
-    {
-        if (is_owner_thread())
-        {
-            std::forward<F>(f)(*this);
-            return true;
-        }
-
-        ALOG_DEBUG("Using the external dispatch queue");
-        std::move_only_function<void(IoContext&)> fn{[factory = std::forward<F>(f)](IoContext& ctx) mutable
-                                                     { factory(ctx); }};
-
-        if (spawn_queue_.enqueue(std::move(fn)))
-        {
-            wake();
-            return true;
-        }
-
-        ALOG_WARN("failed to enqueue remote spawn");
-        return false;
-    }
+    void run(std::stop_token st) noexcept;
 
     [[nodiscard]] bool is_owner_thread() const noexcept { return owner_thread_ == std::this_thread::get_id(); }
 
@@ -172,11 +119,75 @@ public:
             ALOG_INFO("Warning: Failed to pin to CPU {}: {}", cpu_id, std::generic_category().message(rc));
         }
     }
+};
 
-    static IoContext* current_io_ctx() noexcept
+class IoContext
+{
+    std::vector<std::unique_ptr<IoWorker>> contexts_;
+    std::vector<std::jthread> workers_;
+    std::stop_source stop_source_;
+    std::size_t num_threads_;
+    IoOptions opts_;
+    std::atomic<bool> running_{true};
+
+public:
+    explicit IoContext(std::size_t num_threads, IoOptions opts = {});
+
+    template <WorkerInitFn InitFn>
+    [[nodiscard]] bool start(InitFn&& init_fn)
     {
-        assert(tls_ctx != nullptr);
-        return tls_ctx;
+        if (!running_.load(std::memory_order_acquire))
+        {
+            ALOG_INFO("IoContext is already running");
+            return false;
+        }
+
+        // Allocate workers on main thread. No rings created yet
+        for (std::size_t i = 0; i < num_threads_; ++i)
+        {
+            contexts_.emplace_back(new IoWorker(opts_));
+        }
+
+        const auto wq_promise = std::make_shared<std::promise<int>>();
+        std::shared_future wq_future = wq_promise->get_future();
+
+        for (std::size_t i = 0; i < num_threads_; ++i)
+        {
+            workers_.emplace_back(
+                [this, i, wq_promise, wq_future, init_fn = std::forward<InitFn>(init_fn)]() mutable
+                {
+                    // TODO: make this configurable Skip CPU 0 for pinning, it SHOULD used for SQPOLL
+                    IoWorker::pin_to_cpu(static_cast<int>(i + 1));
+                    // init worker 0 as the ring owner
+                    if (i == 0)
+                    {
+                        contexts_[i]->init(-1);
+                        // share the ring fd to the others
+                        wq_promise->set_value(contexts_[i]->ring().ring_fd);
+                    }
+                    else
+                    {
+                        // Threads 1..N: Wait for Thread 0 to finish initialization
+                        const int owner_fd = wq_future.get();
+
+                        // Initialize secondary rings attached to Thread 0's WQ
+                        contexts_[i]->init(owner_fd);
+                    }
+
+                    // Start the user-defined root task
+                    init_fn(*contexts_[i]);
+
+                    contexts_[i]->run(stop_source_.get_token());
+                });
+        }
+
+        // TODO: add a start latch. We need to make sure everything is ok before we return should we ?
+        return true;
     }
+
+    void stop() const { (void)stop_source_.request_stop(); }
+
+    // Join threads (explicitly or via destructor)
+    void join() { workers_.clear(); }
 };
 }  // namespace URing

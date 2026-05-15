@@ -16,7 +16,7 @@ namespace URing
 template <typename T>
 struct Task;
 
-class IoContext;
+class IoWorker;
 
 struct task_promise_base
 {
