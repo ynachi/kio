@@ -19,7 +19,7 @@ using namespace URing;
 
 namespace
 {
-constexpr bool kUseRemoteDispatch = true;
+constexpr bool kUseRemoteDispatch = false;
 volatile std::sig_atomic_t g_stop_requested = 0;
 
 void signal_handler(int)
@@ -162,23 +162,27 @@ int main()
 
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
+    size_t num_threads = 4;
+    if constexpr (kUseRemoteDispatch)
+    {
+        // add one more for benh fairness
+        num_threads += 1;
+    }
 
     IoOptions opts;
     // // lets use sqpool
     // opts.flags = IORING_SETUP_SQPOLL | IORING_SETUP_SINGLE_ISSUER;
     // opts.sq_thread_idle_ms = 2000;
     // opts.sq_thread_cpu = 0;
-    IoContext ctx(4, opts);
+    IoContext ctx(num_threads, opts);
+    constexpr uint16_t port = 8080;
 
     auto st = ctx.stop_token();
-
-    constexpr uint16_t port = 8080;
-    constexpr int num_threads = 4;
 
     std::cout << "Starting " << num_threads << " workers...\n";
 
     (void)ctx.start(
-        [&ctx, st]()
+        [&ctx, st, num_threads]
         {
             if constexpr (kUseRemoteDispatch)
             {
