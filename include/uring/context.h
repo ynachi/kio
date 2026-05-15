@@ -60,7 +60,7 @@ class InternalKey
 };
 
 template <typename F>
-concept WorkerInitFn = std::invocable<F, IoWorker&> && std::same_as<std::invoke_result_t<F, IoWorker&>, DetachedTask>;
+concept WorkerInitFn = std::invocable<F> && std::same_as<std::invoke_result_t<F>, DetachedTask>;
 
 class IoWorker
 {
@@ -186,7 +186,8 @@ public:
                     }
 
                     // Start the user-defined root task
-                    init_fn(*contexts_[i]);
+                    // All Io on this method uses the tls context
+                    init_fn();
 
                     contexts_[i]->run(key_, stop_token);
                 });

@@ -100,10 +100,10 @@ int main()
     std::signal(SIGTERM, signal_handler);
 
     IoOptions opts;
-    // lets use sqpool
-    opts.flags =
-        IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_COOP_TASKRUN | IORING_SETUP_SQPOLL;
-    opts.sq_thread_cpu = 0;
+    // // lets use sqpool
+    // opts.flags = IORING_SETUP_SQPOLL | IORING_SETUP_SINGLE_ISSUER;
+    // opts.sq_thread_idle_ms = 2000;
+    // opts.sq_thread_cpu = 0;
     IoContext ctx(4, opts);
 
     auto st = ctx.stop_token();
@@ -113,7 +113,7 @@ int main()
 
     std::cout << "Starting " << num_threads << " workers...\n";
 
-    auto app = [st](IoWorker&) -> DetachedTask { return server_loop(port, num_threads, st); };
+    auto app = [st]() -> DetachedTask { return server_loop(port, num_threads, st); };
 
     (void)ctx.start(app);
 
