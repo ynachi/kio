@@ -23,6 +23,8 @@ class IoAwaiter
     using T = ResultType::value_type;
 
     Token token_ = {};
+    // for friend access
+    InternalKey key_{};
     [[no_unique_address]] SetupFunc setup_;
     [[no_unique_address]] MapperFunc mapper_;
 
@@ -40,12 +42,12 @@ public:
     template <typename Promise>
     std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> h) noexcept
     {
-        const auto io = IoWorker::tl_io;
+        const auto io = IoWorker::current_io(key_);
         assert(IoWorker::tl_ctx != nullptr && "IoAwaiter used outside of IoContext::run()");
 
-        auto* ring = &io->ring();
-        token_ = io->pool().allocate(h);
-        const auto op = io->pool().try_get(token_);
+        auto* ring = &io->ring(key_);
+        token_ = io->pool(key_).allocate(h);
+        const auto op = io->pool(key_).try_get(token_);
 
         // prepare sqe
         io_uring_sqe* sqe = io_uring_get_sqe(ring);
@@ -62,7 +64,7 @@ public:
             {
                 ALOG_WARN("failed to get SQE after submit; completing operation with ENOSPC");
                 op->result_code = -ENOSPC;
-                io->ready_queue_.push_back(h);
+                io->ready_queue(key_).push_back(h);
                 return std::noop_coroutine();
             }
         }
@@ -78,14 +80,14 @@ public:
     {
         assert(IoWorker::tl_ctx != nullptr && "IoAwaiter used outside of IoContext::run()");
 
-        const auto io = IoWorker::tl_io;
+        const auto io = IoWorker::current_io(key_);
         // We just woke up! The event loop populated the result_code.
         // SAFETY: io.run() set the tl_ctx. No IO can be done without setting it anyway.
-        const auto& op = io->pool().get(token_.idx);
+        const auto& op = io->pool(key_).get(token_.idx);
         int result = op.result_code;
 
         // We have our data, the kernel is done, we don't need the slot anymore.
-        io->pool().deallocate(token_);
+        io->pool(key_).deallocate(token_);
 
         return mapper_(result);
     }

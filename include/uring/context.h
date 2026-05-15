@@ -37,10 +37,25 @@ struct IoOptions
     int sq_thread_cpu = -1;
 };
 
+//
+// Forward declaration
+//
 template <typename T>
 struct Task;
 class IoWorker;
 struct DetachedTask;
+
+class InternalKey
+{
+    friend class IoContext;
+    template <typename T>
+    friend struct Task;
+    template <typename SetupFunc, typename MapperFunc>
+        requires std::invocable<SetupFunc, io_uring_sqe*> && std::invocable<MapperFunc, int32_t>
+    friend class IoAwaiter;
+
+    InternalKey() = default;
+};
 
 template <typename F>
 concept WorkerInitFn = std::invocable<F, IoWorker&> && std::same_as<std::invoke_result_t<F, IoWorker&>, DetachedTask>;
@@ -58,13 +73,13 @@ private:
     //
     // Declare friend structs
     //
-    template <typename T>
-    friend struct Task;
-    friend class IoContext;
-
-    template <typename SetupFunc, typename MapperFunc>
-        requires std::invocable<SetupFunc, io_uring_sqe*> && std::invocable<MapperFunc, int32_t>
-    friend class IoAwaiter;
+    // template <typename T>
+    // friend struct Task;
+    // friend class IoContext;
+    //
+    // template <typename SetupFunc, typename MapperFunc>
+    //     requires std::invocable<SetupFunc, io_uring_sqe*> && std::invocable<MapperFunc, int32_t>
+    // friend class IoAwaiter;
 
     //
     // Const xprs
@@ -81,19 +96,17 @@ private:
     std::thread::id owner_thread_;
     IoOptions opts_;
 
-    void request_cancel(uint32_t op_idx) noexcept;
     void drain_local();
 
     void tick() noexcept;
 
-    explicit IoWorker(const IoOptions& opts = {}) : op_pool_(opts.entries), opts_(opts)
+public:
+    static IoWorker* current_io(InternalKey) noexcept { return tl_io; }
+    explicit IoWorker(InternalKey, const IoOptions& opts = {}) : op_pool_(opts.entries), opts_(opts)
     {
         ready_queue_.reserve(opts.entries);
         process_queue_.reserve(kMaxResumesPerTick);
     }
-    void init(int wq_fd = -1);
-
-public:
     IoWorker(const IoWorker&) = delete;
     IoWorker& operator=(const IoWorker&) = delete;
     IoWorker(IoWorker&&) = delete;
@@ -101,10 +114,13 @@ public:
 
     ~IoWorker();
 
-    OpPool& pool() noexcept { return op_pool_; }
-    io_uring& ring() noexcept { return ring_; }
+    OpPool& pool(InternalKey) noexcept { return op_pool_; }
+    io_uring& ring(InternalKey) noexcept { return ring_; }
+    std::vector<std::coroutine_handle<>>& ready_queue(InternalKey) noexcept { return ready_queue_; }
 
-    void run(std::stop_token st) noexcept;
+    void init(InternalKey, int wq_fd = -1);
+    void run(InternalKey, std::stop_token st) noexcept;
+    void request_cancel(InternalKey, uint32_t op_idx) noexcept;
 
     [[nodiscard]] bool is_owner_thread() const noexcept { return owner_thread_ == std::this_thread::get_id(); }
 
@@ -129,6 +145,7 @@ class IoContext
     std::size_t num_threads_;
     IoOptions opts_;
     std::atomic<bool> running_{true};
+    InternalKey key_{};
 
 public:
     explicit IoContext(std::size_t num_threads, IoOptions opts = {});
@@ -145,7 +162,7 @@ public:
         // Allocate workers on main thread. No rings created yet
         for (std::size_t i = 0; i < num_threads_; ++i)
         {
-            contexts_.emplace_back(new IoWorker(opts_));
+            contexts_.emplace_back(new IoWorker(key_, opts_));
         }
 
         const auto wq_promise = std::make_shared<std::promise<int>>();
@@ -161,9 +178,9 @@ public:
                     // init worker 0 as the ring owner
                     if (i == 0)
                     {
-                        contexts_[i]->init(-1);
+                        contexts_[i]->init(key_, -1);
                         // share the ring fd to the others
-                        wq_promise->set_value(contexts_[i]->ring().ring_fd);
+                        wq_promise->set_value(contexts_[i]->ring(key_).ring_fd);
                     }
                     else
                     {
@@ -171,13 +188,13 @@ public:
                         const int owner_fd = wq_future.get();
 
                         // Initialize secondary rings attached to Thread 0's WQ
-                        contexts_[i]->init(owner_fd);
+                        contexts_[i]->init(key_, owner_fd);
                     }
 
                     // Start the user-defined root task
                     init_fn(*contexts_[i]);
 
-                    contexts_[i]->run(stop_source_.get_token());
+                    contexts_[i]->run(key_, stop_source_.get_token());
                 });
         }
 
@@ -185,7 +202,9 @@ public:
         return true;
     }
 
-    void stop() const { (void)stop_source_.request_stop(); }
+    bool stop() const { return stop_source_.request_stop(); }
+
+    std::stop_token stop_token() const noexcept { return stop_source_.get_token(); }
 
     // Join threads (explicitly or via destructor)
     void join() { workers_.clear(); }

@@ -1,8 +1,5 @@
 #include "uring/context.h"
 
-#include "cmake-build-debug/_deps/abseil-cpp-src/absl/strings/internal/str_format/extension.h"
-#include "cmake-build-trace/_deps/abseil-cpp-src/absl/strings/str_format.h"
-
 #include <cassert>
 #include <cstring>
 #include <future>
@@ -14,7 +11,7 @@
 namespace URing
 {
 
-void IoWorker::init(const int wq_fd)
+void IoWorker::init(InternalKey, const int wq_fd)
 {
     io_uring_params params{};
 
@@ -48,7 +45,7 @@ void IoWorker::init(const int wq_fd)
 }
 
 /// Best effort cancellation request
-void IoWorker::request_cancel(const uint32_t op_idx) noexcept
+void IoWorker::request_cancel(InternalKey, const uint32_t op_idx) noexcept
 {
     auto& op = op_pool_.get(op_idx);
     if (!op.cancel())
@@ -160,7 +157,7 @@ void IoWorker::tick() noexcept
     drain_local();
 }
 
-void IoWorker::run(const std::stop_token st) noexcept
+void IoWorker::run(InternalKey, const std::stop_token st) noexcept
 {
     // set the context
     tl_io = this;
@@ -209,42 +206,6 @@ IoContext::IoContext(const std::size_t num_threads, const IoOptions opts) : num_
     if (num_threads == 0)
     {
         throw std::runtime_error("io context started with 0 thread");
-    }
-
-    // Allocate workers on main thread. No rings created yet
-    for (std::size_t i = 0; i < num_threads; ++i)
-    {
-        contexts_.emplace_back(new IoWorker(opts));
-    }
-
-    const auto wq_promise = std::make_shared<std::promise<int>>();
-    std::shared_future wq_future = wq_promise->get_future();
-
-    for (std::size_t i = 0; i < num_threads; ++i)
-    {
-        workers_.emplace_back(
-            [this, i, wq_promise, wq_future]()
-            {
-                // TODO: make this configurable Skip CPU 0 for pinning, it SHOULD used for SQPOLL
-                IoWorker::pin_to_cpu(static_cast<int>(i + 1));
-                // init worker 0 as the ring owner
-                if (i == 0)
-                {
-                    contexts_[i]->init(-1);
-                    // share the ring fd to the others
-                    wq_promise->set_value(contexts_[i]->ring().ring_fd);
-                }
-                else
-                {
-                    // Threads 1..N: Wait for Thread 0 to finish initialization
-                    const int owner_fd = wq_future.get();
-
-                    // Initialize secondary rings attached to Thread 0's WQ
-                    contexts_[i]->init(owner_fd);
-                }
-
-                contexts_[i]->run(stop_source_.get_token());
-            });
     }
 }
 }  // namespace URing
