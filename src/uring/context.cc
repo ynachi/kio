@@ -40,6 +40,9 @@ void IoWorker::init(InternalKey, const int wq_fd)
         throw std::runtime_error(std::format("io_uring_queue_init_params failed: {}", std::strerror(-rc)));
     }
 
+    // set the current io
+    tl_io = this;
+
     ALOG_INFO("Started IO context with {} entries (SQPOLL: {})", opts_.entries,
               (opts_.flags & IORING_SETUP_SQPOLL) ? "enabled" : "disabled");
 }
@@ -105,9 +108,12 @@ void IoWorker::tick() noexcept
     }
     else
     {
-        // TODO: we need to use the timeout version else, the main loop could hardly be stopped by the stop token in
-        // some cases
-        if (const auto ret = io_uring_submit_and_wait(&ring_, 1); ret < 0 && ret != -EINTR)
+        io_uring_cqe* waited_cqe = nullptr;
+        __kernel_timespec timeout{.tv_sec = opts_.tick_timeout_ms / 1000,
+                                  .tv_nsec = (opts_.tick_timeout_ms % 1000) * 1'000'000};
+
+        if (const auto ret = io_uring_submit_and_wait_timeout(&ring_, &waited_cqe, 1, &timeout, nullptr);
+            ret < 0 && ret != -EINTR && ret != -ETIME)
         {
             ALOG_ERROR("failed to submit and wait: {}", std::strerror(-ret));
         }
@@ -159,7 +165,7 @@ void IoWorker::tick() noexcept
 
 void IoWorker::run(InternalKey, const std::stop_token st) noexcept
 {
-    // set the context
+    // set the current io
     tl_io = this;
 
     // owner thread should be set on the thread which start the loop
@@ -207,5 +213,11 @@ IoContext::IoContext(const std::size_t num_threads, const IoOptions opts) : num_
     {
         throw std::runtime_error("io context started with 0 thread");
     }
+}
+
+IoContext::~IoContext()
+{
+    stop();
+    join();
 }
 }  // namespace URing

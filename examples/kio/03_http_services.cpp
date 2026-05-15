@@ -4,6 +4,7 @@
 
 #include "uring/context.h"
 
+#include <chrono>
 #include <csignal>
 #include <iostream>
 #include <string_view>
@@ -15,6 +16,16 @@
 #include "uring/tcp_listener.hpp"
 
 using namespace URing;
+
+namespace
+{
+volatile std::sig_atomic_t g_stop_requested = 0;
+
+void signal_handler(int)
+{
+    g_stop_requested = 1;
+}
+}  // namespace
 
 // A static, valid HTTP/1.1 response with keep-alive
 constexpr std::string_view kHttpResponse =
@@ -85,21 +96,29 @@ int main()
     URing::ALOG::set_level(ALOG::Level::Info);
     ALOG_DEBUG("Debug logging enabled");
 
+    std::signal(SIGINT, signal_handler);
+    std::signal(SIGTERM, signal_handler);
+
     IoContext ctx(4);
 
     auto st = ctx.stop_token();
-
-    // std::signal(SIGINT, ctx.stop());
-    // std::signal(SIGTERM, signal_handler);
 
     constexpr uint16_t port = 8080;
     constexpr int num_threads = 4;
 
     std::cout << "Starting " << num_threads << " workers...\n";
 
-    auto app = [port, num_threads, st](IoWorker& io) -> DetachedTask { server_loop(port, num_threads, st); };
+    auto app = [st](IoWorker&) -> DetachedTask { return server_loop(port, num_threads, st); };
 
     (void)ctx.start(app);
+
+    while (g_stop_requested == 0)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+
+    ctx.stop();
+    ctx.join();
 
     std::cout << "All workers terminated. Goodbye!\n";
     return 0;

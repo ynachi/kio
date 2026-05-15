@@ -26,6 +26,8 @@ struct IoOptions
     std::uint32_t entries = 16800;
     unsigned flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_COOP_TASKRUN;
 
+    std::uint32_t tick_timeout_ms = 10;
+
     // Sleep after 2 seconds of inactivity
     // Liburing auto wakeup the kernel thread so no need to manually do it
     /// IORING_SETUP_DEFER_TASKRUN is not compatible to SQ_POLL
@@ -70,16 +72,6 @@ public:
 private:
     /// TLS IO context
     inline static thread_local IoWorker* tl_io = nullptr;
-    //
-    // Declare friend structs
-    //
-    // template <typename T>
-    // friend struct Task;
-    // friend class IoContext;
-    //
-    // template <typename SetupFunc, typename MapperFunc>
-    //     requires std::invocable<SetupFunc, io_uring_sqe*> && std::invocable<MapperFunc, int32_t>
-    // friend class IoAwaiter;
 
     //
     // Const xprs
@@ -140,20 +132,21 @@ public:
 class IoContext
 {
     std::vector<std::unique_ptr<IoWorker>> contexts_;
-    std::vector<std::jthread> workers_;
     std::stop_source stop_source_;
     std::size_t num_threads_;
     IoOptions opts_;
-    std::atomic<bool> running_{true};
+    std::atomic<bool> running_{false};
     InternalKey key_{};
+    std::vector<std::jthread> workers_;
 
 public:
     explicit IoContext(std::size_t num_threads, IoOptions opts = {});
+    ~IoContext();
 
     template <WorkerInitFn InitFn>
     [[nodiscard]] bool start(InitFn&& init_fn)
     {
-        if (!running_.load(std::memory_order_acquire))
+        if (running_.exchange(true, std::memory_order_acq_rel))
         {
             ALOG_INFO("IoContext is already running");
             return false;
@@ -167,11 +160,12 @@ public:
 
         const auto wq_promise = std::make_shared<std::promise<int>>();
         std::shared_future wq_future = wq_promise->get_future();
+        const auto stop_token = stop_source_.get_token();
 
         for (std::size_t i = 0; i < num_threads_; ++i)
         {
             workers_.emplace_back(
-                [this, i, wq_promise, wq_future, init_fn = std::forward<InitFn>(init_fn)]() mutable
+                [this, i, wq_promise, wq_future, stop_token, init_fn = std::forward<InitFn>(init_fn)]() mutable
                 {
                     // TODO: make this configurable Skip CPU 0 for pinning, it SHOULD used for SQPOLL
                     IoWorker::pin_to_cpu(static_cast<int>(i + 1));
@@ -194,7 +188,7 @@ public:
                     // Start the user-defined root task
                     init_fn(*contexts_[i]);
 
-                    contexts_[i]->run(key_, stop_source_.get_token());
+                    contexts_[i]->run(key_, stop_token);
                 });
         }
 
@@ -202,11 +196,15 @@ public:
         return true;
     }
 
-    bool stop() const { return stop_source_.request_stop(); }
+    bool stop() { return stop_source_.request_stop(); }
 
     std::stop_token stop_token() const noexcept { return stop_source_.get_token(); }
 
     // Join threads (explicitly or via destructor)
-    void join() { workers_.clear(); }
+    void join()
+    {
+        workers_.clear();
+        running_.store(false, std::memory_order_release);
+    }
 };
 }  // namespace URing

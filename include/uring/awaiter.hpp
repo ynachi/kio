@@ -43,7 +43,12 @@ public:
     std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> h) noexcept
     {
         const auto io = IoWorker::current_io(key_);
-        assert(IoWorker::tl_ctx != nullptr && "IoAwaiter used outside of IoContext::run()");
+        assert(io != nullptr && "IoAwaiter used outside of an IoWorker thread");
+        if (io == nullptr)
+        {
+            ALOG_FATAL("IoAwaiter used outside of an IoWorker thread");
+            std::terminate();
+        }
 
         auto* ring = &io->ring(key_);
         token_ = io->pool(key_).allocate(h);
@@ -78,11 +83,15 @@ public:
 
     Result<T> await_resume()
     {
-        assert(IoWorker::tl_ctx != nullptr && "IoAwaiter used outside of IoContext::run()");
-
         const auto io = IoWorker::current_io(key_);
+        assert(io != nullptr && "IoAwaiter resumed outside of an IoWorker thread");
+        if (io == nullptr)
+        {
+            ALOG_FATAL("IoAwaiter resumed outside of an IoWorker thread");
+            std::terminate();
+        }
         // We just woke up! The event loop populated the result_code.
-        // SAFETY: io.run() set the tl_ctx. No IO can be done without setting it anyway.
+        // SAFETY: io.run() set the thread-local worker. No IO can be done without setting it anyway.
         const auto& op = io->pool(key_).get(token_.idx);
         int result = op.result_code;
 
