@@ -185,6 +185,7 @@ int main()
             {
                 return dispatching_server_loop(ctx, port, st);
             }
+            return noop_worker_loop();
         }
         else
         {
