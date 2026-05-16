@@ -177,7 +177,7 @@ struct ThreadRegGuard
 
 inline uint32_t get_thread_slot()
 {
-    static thread_local ThreadRegGuard guard;
+    thread_local ThreadRegGuard guard;
     return guard.slot_idx;
 }
 

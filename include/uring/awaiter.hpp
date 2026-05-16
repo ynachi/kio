@@ -8,7 +8,6 @@
 #include <liburing.h>
 
 #include "error.hpp"
-#include "task.hpp"
 
 namespace URing
 {
@@ -43,35 +42,21 @@ public:
     std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> h) noexcept
     {
         const auto io = IoWorker::current_io();
+        // skip runtime check as io cannot be nil if io context is normally started
+        // if not started, nothing could work anyway.
         assert(io != nullptr && "IoAwaiter used outside of an IoWorker thread");
-        if (io == nullptr)
-        {
-            ALOG_FATAL("IoAwaiter used outside of an IoWorker thread");
-            std::terminate();
-        }
 
-        auto* ring = &io->ring(key_);
         token_ = io->pool(key_).allocate(h);
         const auto op = io->pool(key_).try_get(token_);
 
         // prepare sqe
-        io_uring_sqe* sqe = io_uring_get_sqe(ring);
+        io_uring_sqe* sqe = io->get_sqe(key_);
         if (sqe == nullptr)
         {
-            const int ret = io_uring_submit(ring);
-            if (ret < 0)
-            {
-                ALOG_WARN("io_uring_submit failed while trying to free SQE space: {}", std::strerror(-ret));
-            }
-
-            sqe = io_uring_get_sqe(ring);
-            if (sqe == nullptr)
-            {
-                ALOG_WARN("failed to get SQE after submit; completing operation with ENOSPC");
-                op->result_code = -ENOSPC;
-                io->ready_queue(key_).push_back(h);
-                return std::noop_coroutine();
-            }
+            ALOG_WARN("failed to get SQE after submit; completing operation with ENOSPC");
+            op->result_code = -ENOSPC;
+            io->ready_queue(key_).push_back(h);
+            return std::noop_coroutine();
         }
 
         setup_(sqe);
@@ -84,12 +69,10 @@ public:
     Result<T> await_resume()
     {
         const auto io = IoWorker::current_io();
+        // skip runtime check as io cannot be nil if io context is normally started
+        // if not started, nothing could work anyway.
         assert(io != nullptr && "IoAwaiter resumed outside of an IoWorker thread");
-        if (io == nullptr)
-        {
-            ALOG_FATAL("IoAwaiter resumed outside of an IoWorker thread");
-            std::terminate();
-        }
+
         // We just woke up! The event loop populated the result_code.
         // SAFETY: io.run() set the thread-local worker. No IO can be done without setting it anyway.
         const auto& op = io->pool(key_).get(token_.idx);
