@@ -3,33 +3,22 @@
 #include <cassert>
 #include <concepts>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <future>
 #include <latch>
+#include <memory>
 #include <stop_token>
 #include <system_error>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <liburing.h>
-#ifdef BLOCK_SIZE
-    #pragma push_macro("BLOCK_SIZE")
-    #undef BLOCK_SIZE
-    #define URING_RESTORE_BLOCK_SIZE_MACRO
-#endif
-#include "libs/concurrentqueue.hpp"
-#ifdef URING_RESTORE_BLOCK_SIZE_MACRO
-    #pragma pop_macro("BLOCK_SIZE")
-    #undef URING_RESTORE_BLOCK_SIZE_MACRO
-#endif
-
-#if defined(__SANITIZE_THREAD__)
-extern "C" void __tsan_acquire(void* addr);
-extern "C" void __tsan_release(void* addr);
-#endif
 
 #include "logger.hpp"
 #include "operation.hpp"
+#include "spsc_queue.hpp"
 #include "task.hpp"
 
 namespace URing
@@ -84,10 +73,22 @@ template <typename F>
 concept WorkerInitFn = std::invocable<F> && std::same_as<std::invoke_result_t<F>, void>;
 
 // Factory callable shipped to a target worker via spawn_on().
-// Called ON the target thread — the coroutine frame is born there.
+// Called ON the target thread - the coroutine frame is born there.
 // Must return DetachedTask (fire-and-forget).
 template <typename F>
 concept SpawnFactory = std::invocable<F> && std::same_as<std::invoke_result_t<F>, DetachedTask>;
+
+using RemoteTask = std::move_only_function<void()>;
+using RemoteTaskQueue = SpscQueue<RemoteTask, 256>;
+
+enum class WorkerState : std::uint8_t
+{
+    created,
+    initialized,
+    running,
+    stopping,
+    stopped,
+};
 
 class IoWorker
 {
@@ -105,6 +106,7 @@ private:
     //
     // Bit-tag for MSG_RING: handles are aligned, so bit 0 is safe for tagging
     static constexpr size_t kMaxResumesPerTick = 128;
+    static constexpr size_t kMaxRemoteTasksPerTick = 1024;
     static constexpr uint8_t kMaxSqeGetRetry = 3;
     //
     //  Pools
@@ -117,9 +119,16 @@ private:
     std::thread::id owner_thread_;
     IoOptions opts_;
     size_t id_;
-    moodycamel::ConcurrentQueue<std::move_only_function<void()>> task_queue_;
+    std::vector<RemoteTaskQueue*> inbound_lanes_;
+    std::atomic<bool> remote_wake_pending_{false};
+    std::atomic<std::size_t> remote_submitters_{0};
+    std::atomic<WorkerState> state_{WorkerState::created};
 
     void drain_local();
+
+    std::size_t drain_remote_tasks() noexcept;
+
+    [[nodiscard]] bool remote_tasks_empty() const noexcept;
 
     void tick() noexcept;
 
@@ -137,19 +146,7 @@ public:
 
     ~IoWorker();
 
-    void enqueue_task(std::move_only_function<void()> task)
-    {
-#if defined(__SANITIZE_THREAD__)
-        __tsan_release(&task_queue_);
-#endif
-        task_queue_.enqueue(std::move(task));
-    }
-
-    // Exposed for IoWorker::tick to drain the queue
-    moodycamel::ConcurrentQueue<std::move_only_function<void()>>& task_queue(InternalKey) noexcept
-    {
-        return task_queue_;
-    }
+    void set_inbound_lanes(InternalKey, std::vector<RemoteTaskQueue*> lanes) { inbound_lanes_ = std::move(lanes); }
 
     OpPool& pool(InternalKey) noexcept { return op_pool_; }
     io_uring& ring(InternalKey) noexcept { return ring_; }
@@ -161,6 +158,41 @@ public:
     void cancel_all(InternalKey) noexcept;
 
     size_t id() const noexcept { return id_; }
+
+    [[nodiscard]] bool try_begin_remote_submit() noexcept
+    {
+        const auto accepts_remote_tasks = [](const WorkerState state) noexcept
+        { return state == WorkerState::initialized || state == WorkerState::running; };
+
+        if (!accepts_remote_tasks(state_.load(std::memory_order_seq_cst)))
+        {
+            return false;
+        }
+
+        remote_submitters_.fetch_add(1, std::memory_order_seq_cst);
+        if (accepts_remote_tasks(state_.load(std::memory_order_seq_cst)))
+        {
+            return true;
+        }
+
+        remote_submitters_.fetch_sub(1, std::memory_order_seq_cst);
+        return false;
+    }
+
+    void finish_remote_submit() noexcept
+    {
+        remote_submitters_.fetch_sub(1, std::memory_order_seq_cst);
+    }
+
+    [[nodiscard]] bool remote_submits_idle() const noexcept
+    {
+        return remote_submitters_.load(std::memory_order_seq_cst) == 0;
+    }
+
+    [[nodiscard]] bool mark_remote_wakeup_pending() noexcept
+    {
+        return !remote_wake_pending_.exchange(true, std::memory_order_acq_rel);
+    }
 
     io_uring_sqe* get_sqe(InternalKey) noexcept
     {
@@ -205,6 +237,48 @@ class IoContext
     InternalKey key_{};
     std::vector<std::unique_ptr<IoWorker>> contexts_;
     std::vector<std::jthread> workers_;
+    std::vector<std::unique_ptr<RemoteTaskQueue>> remote_lanes_;
+
+    [[nodiscard]] RemoteTaskQueue* remote_lane(const std::size_t source, const std::size_t target) const noexcept
+    {
+        if (source == target || source >= num_threads_ || target >= num_threads_)
+        {
+            return nullptr;
+        }
+
+        return remote_lanes_[source * num_threads_ + target].get();
+    }
+
+    void init_remote_lanes()
+    {
+        remote_lanes_.clear();
+        remote_lanes_.resize(num_threads_ * num_threads_);
+
+        for (std::size_t source = 0; source < num_threads_; ++source)
+        {
+            for (std::size_t target = 0; target < num_threads_; ++target)
+            {
+                if (source != target)
+                {
+                    remote_lanes_[source * num_threads_ + target] = std::make_unique<RemoteTaskQueue>();
+                }
+            }
+        }
+
+        for (std::size_t target = 0; target < num_threads_; ++target)
+        {
+            std::vector<RemoteTaskQueue*> inbound;
+            inbound.reserve(num_threads_ > 0 ? num_threads_ - 1 : 0);
+            for (std::size_t source = 0; source < num_threads_; ++source)
+            {
+                if (auto* lane = remote_lane(source, target); lane != nullptr)
+                {
+                    inbound.push_back(lane);
+                }
+            }
+            contexts_[target]->set_inbound_lanes(key_, std::move(inbound));
+        }
+    }
 
 public:
     explicit IoContext(std::size_t num_threads, const IoOptions& opts = {});
@@ -225,6 +299,7 @@ public:
         {
             contexts_.emplace_back(new IoWorker(key_, i, opts_));
         }
+        init_remote_lanes();
 
         const auto wq_promise = std::make_shared<std::promise<int>>();
         std::shared_future wq_future = wq_promise->get_future();
@@ -235,8 +310,6 @@ public:
             workers_.emplace_back(
                 [this, i, wq_promise, wq_future, stop_token, init_fn = std::forward<InitFn>(init_fn)]() mutable
                 {
-                    start_latch_.count_down();
-
                     // TODO: make this configurable Skip CPU 0 for pinning, it SHOULD used for SQPOLL
                     IoWorker::pin_to_cpu(static_cast<int>(i + 1));
                     // init worker 0 as the ring owner
@@ -255,6 +328,9 @@ public:
                         contexts_[i]->init(key_, owner_fd);
                     }
 
+                    start_latch_.count_down();
+                    start_latch_.wait();
+
                     // Start the user-defined root task
                     // All Io on this method uses the tls context
                     init_fn();
@@ -270,38 +346,76 @@ public:
 
     // Spawn a fire-and-forget DetachedTask on a specific worker.
     //
-    // The factory is called on the TARGET thread — the coroutine frame is born
+    // The factory is called on the TARGET thread - the coroutine frame is born
     // there. No frame crosses a thread boundary; TSAN-clean by construction.
     //
     // If called from the target thread itself the factory runs inline with no
-    // syscall. Otherwise, the callable is enqueued to the target worker's concurrent queue,
-    // and a MSG_RING wakeup signal is sent to the target worker.
+    // syscall. Otherwise, the callable is enqueued to the target worker's
+    // source->target SPSC lane, and MSG_RING is used only as a wakeup signal.
     template <SpawnFactory F>
-    void spawn_on(IoWorker& target_io, F&& fn)
+    bool spawn_on(IoWorker& target_io, F&& fn)
     {
         auto* current_io = IoWorker::current_io();
 
         if (current_io == &target_io)
         {
             std::forward<F>(fn)();
-            return;
+            return true;
         }
 
         assert(current_io != nullptr && "spawn_on called from outside IoWorker::run()");
+        if (current_io == nullptr)
+        {
+            ALOG_ERROR("spawn_on: called from outside IoWorker::run()");
+            return false;
+        }
 
-        target_io.enqueue_task(std::move_only_function<void()>(std::forward<F>(fn)));
+        if (!target_io.try_begin_remote_submit())
+        {
+            ALOG_WARN("spawn_on: target worker {} is not accepting remote tasks", target_io.id());
+            return false;
+        }
+
+        struct RemoteSubmitGuard
+        {
+            IoWorker& target;
+            ~RemoteSubmitGuard() { target.finish_remote_submit(); }
+        } submit_guard{target_io};
+
+        RemoteTaskQueue* lane = remote_lane(current_io->id(), target_io.id());
+        if (lane == nullptr)
+        {
+            ALOG_ERROR("spawn_on: no remote lane from worker {} to worker {}", current_io->id(), target_io.id());
+            return false;
+        }
+
+        if (!lane->enqueue(RemoteTask(std::forward<F>(fn))))
+        {
+            ALOG_ERROR("spawn_on: failed to enqueue remote task");
+            return false;
+        }
+
+        if (!target_io.mark_remote_wakeup_pending())
+        {
+            return true;
+        }
 
         io_uring_sqe* sqe = current_io->get_sqe(key_);
         if (sqe == nullptr)
         {
-            ALOG_ERROR("spawn_on: failed to get SQE, dropping wakeup");
-            return;
+            ALOG_ERROR("spawn_on: failed to get SQE, delaying wakeup until target tick timeout");
+            return true;
         }
 
         io_uring_prep_msg_ring(sqe, target_io.ring(key_).ring_fd, 0, kRemoteWakeupTag, 0);
         io_uring_sqe_set_data64(sqe, kRemoteSenderTag);
 
-        io_uring_submit(&current_io->ring(key_));
+        if (const auto ret = io_uring_submit(&current_io->ring(key_)); ret < 0 && ret != -EINTR)
+        {
+            ALOG_ERROR("spawn_on: failed to submit wakeup: {}", std::strerror(-ret));
+        }
+
+        return true;
     }
 
     bool stop() const { return stop_source_.request_stop(); }

@@ -42,6 +42,7 @@ void IoWorker::init(InternalKey, const int wq_fd)
 
     // set the current io
     tl_io = this;
+    state_.store(WorkerState::initialized, std::memory_order_release);
 
     ALOG_INFO("Started IO context with {} entries (SQPOLL: {})", opts_.entries,
               (opts_.flags & IORING_SETUP_SQPOLL) ? "enabled" : "disabled");
@@ -106,8 +107,67 @@ void IoWorker::drain_local()
     process_queue_.clear();
 }
 
+std::size_t IoWorker::drain_remote_tasks() noexcept
+{
+    remote_wake_pending_.store(false, std::memory_order_release);
+
+    std::size_t total = 0;
+    for (auto* lane : inbound_lanes_)
+    {
+        if (lane == nullptr)
+        {
+            continue;
+        }
+
+        total += lane->drain_batch(
+            kMaxRemoteTasksPerTick - total,
+            [](RemoteTask task) noexcept
+            {
+                try
+                {
+                    task();
+                }
+                catch (const std::exception& e)
+                {
+                    ALOG_ERROR("remote task died with error: {}", e.what());
+                }
+                catch (...)
+                {
+                    ALOG_ERROR("remote task died with unknown error");
+                }
+            });
+
+        if (total >= kMaxRemoteTasksPerTick)
+        {
+            break;
+        }
+    }
+
+    return total;
+}
+
+bool IoWorker::remote_tasks_empty() const noexcept
+{
+    if (!remote_submits_idle())
+    {
+        return false;
+    }
+
+    for (const auto* lane : inbound_lanes_)
+    {
+        if (lane != nullptr && !lane->consumer_empty())
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 void IoWorker::tick() noexcept
 {
+    (void)drain_remote_tasks();
+
     // Skip the blocking syscall if CQEs are already waiting in the ring
     if (io_uring_cq_ready(&ring_) > 0)
     {
@@ -141,7 +201,7 @@ void IoWorker::tick() noexcept
 
         if ((ud & kRemoteTagMask) == kRemoteWakeupTag)
         {
-            // MSG_RING wakeup signal, tasks are in the concurrent queue
+            // MSG_RING wakeup signal, tasks are in the remote SPSC lanes.
             continue;
         }
 
@@ -160,7 +220,7 @@ void IoWorker::tick() noexcept
         const auto op = op_pool_.try_get(token);
         if (op == nullptr)
         {
-            // Stale CQE from a recycled slot — ignore.
+            // Stale CQE from a recycled slot - ignore.
             continue;
         }
 
@@ -173,15 +233,7 @@ void IoWorker::tick() noexcept
         io_uring_cq_advance(&ring_, count);
     }
 
-    // Drain task queue
-#if defined(__SANITIZE_THREAD__)
-    __tsan_acquire(&task_queue_);
-#endif
-    std::move_only_function<void()> task;
-    while (task_queue_.try_dequeue(task))
-    {
-        task();
-    }
+    (void)drain_remote_tasks();
 
     drain_local();
 }
@@ -193,6 +245,7 @@ void IoWorker::run(InternalKey key, const std::stop_token st) noexcept
 
     // owner thread should be set on the thread which start the loop
     owner_thread_ = std::this_thread::get_id();
+    state_.store(WorkerState::running, std::memory_order_release);
 
     // 128-byte frames: 64 preallocated
     // 256-byte frames: most common
@@ -207,13 +260,14 @@ void IoWorker::run(InternalKey key, const std::stop_token st) noexcept
     }
 
     ALOG_INFO("Worker {} quiescing...", id_);
+    state_.store(WorkerState::stopping, std::memory_order_release);
 
     // Shutdown phase 1: Cancel all active IOs
     cancel_all(key);
 
     // Shutdown phase 2: Wait for all IOs to complete or cancel
-    // We also drain the task queue to ensure no tasks are leaked
-    while (!op_pool_.empty())
+    // We also drain remote lanes to ensure no queued tasks are leaked.
+    while (!op_pool_.empty() || !remote_tasks_empty())
     {
         tick();
     }
@@ -230,6 +284,7 @@ void IoWorker::run(InternalKey key, const std::stop_token st) noexcept
 
     // reset the tls context
     tl_io = nullptr;
+    state_.store(WorkerState::stopped, std::memory_order_release);
     CoroAllocator::cleanup_thread_cache();
 }
 
@@ -240,6 +295,7 @@ IoWorker::~IoWorker()
         io_uring_queue_exit(&ring_);
         ring_.ring_fd = -1;
     }
+    state_.store(WorkerState::stopped, std::memory_order_release);
 }
 
 //

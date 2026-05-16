@@ -303,6 +303,7 @@ target_link_libraries(uring PUBLIC
         OpenSSL::SSL
         OpenSSL::Crypto
 )
+kio_add_sanitizers(uring)
 
 #-----------------------------------------------
 # Includes
