@@ -60,6 +60,10 @@ template <typename T>
 struct task_promise : task_promise_base
 {
     std::optional<Result<T>> result_;
+
+    // Task<T> always stores and exposes Result<T>. Prefer Task<T>, not
+    // Task<Result<T>>: returning Result<T> here is flattened into the task's
+    // own result channel instead of nesting Result<Result<T>>.
     void return_value(T val) noexcept { result_.emplace(std::move(val)); }
     void return_value(Result<T> val) noexcept { result_.emplace(std::move(val)); }
     void return_value(std::unexpected<std::error_code> err) noexcept { result_.emplace(std::move(err)); }
@@ -70,11 +74,25 @@ template <>
 struct task_promise<void> : task_promise_base
 {
     std::optional<Result<void>> result_;
+
+    // A Task<void> still completes with Result<void>. Use `co_return {};` or
+    // `co_return Result<void>{};` for success, and `co_return std::unexpected(...)`
+    // for failure. Plain `co_return;` is intentionally not supported because the
+    // promise needs return_value() for the error channel.
     void return_value(Result<void> val) noexcept { result_.emplace(std::move(val)); }
     void return_value(std::unexpected<std::error_code> err) noexcept { result_.emplace(std::move(err)); }
     Task<void> get_return_object() noexcept;
 };
 
+// Lazy coroutine task.
+//
+// Contract:
+//   Task<T>::get()      -> Result<T>
+//   co_await Task<T>    -> Result<T>
+//
+// The task itself owns the error channel. Prefer Task<T> and return errors with
+// `co_return std::unexpected(error);`. Avoid Task<Result<T>> unless you
+// intentionally want a nested Result<Result<T>> payload.
 template <typename T>
 struct Task
 {
@@ -104,7 +122,8 @@ struct Task
             safe_destroy();
     }
 
-    // Non-blocking check for manual polling systems.
+    // Non-blocking check for manual polling systems. Returns EAGAIN until the
+    // coroutine has completed and then returns the stored Result<T>.
     Result<T> get() const noexcept
     {
         if (!handle_ || !handle_.done() || !handle_.promise().result_.has_value())
@@ -124,7 +143,13 @@ struct Task
 
     bool done() const noexcept { return handle_ && handle_.done(); }
 
-    // Make the Task itself awaitable so coroutines can co_await other Tasks.
+    // Awaiting a Task<T> returns Result<T>, matching get(). This keeps errors
+    // explicit at every composition point:
+    //
+    //   auto value = co_await child();
+    //   if (!value) co_return std::unexpected(value.error());
+    //
+    // Avoid Task<Result<T>>; Task<T> already carries Result<T>.
     auto operator co_await() noexcept
     {
         struct Awaiter

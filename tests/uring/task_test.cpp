@@ -47,7 +47,7 @@ Task<void> void_error_task()
 
 Task<void> void_value_task()
 {
-    co_return Result<void>{};
+    co_return {};
 }
 
 void run_to_completion(auto& task)

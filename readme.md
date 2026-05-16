@@ -138,7 +138,14 @@ ctx.Notify();  // Wake if blocked in io_uring_wait
 
 ### Task<T>
 
-The coroutine return type. They are lazy, they don't start until awaited.
+The coroutine return type. Tasks are lazy: they do not start until awaited.
+
+`Task<T>` always completes with `Result<T>`. This means both `.get()` and
+`co_await` return `Result<T>`, not raw `T`.
+
+Do not use `Task<Result<T>>` for normal error handling. It is discouraged
+because `Task<T>` already has a result channel; nesting creates
+`Result<Result<T>>` semantics and makes propagation harder to reason about.
 
 ```cpp
 Task<int> ComputeAsync(IoContext& ctx)
@@ -149,14 +156,34 @@ Task<int> ComputeAsync(IoContext& ctx)
 
 Task<> Caller(IoContext& ctx)
 {
-    int result = co_await ComputeAsync(ctx);
-    // result == 42
+    auto result = co_await ComputeAsync(ctx);
+    if (!result)
+    {
+        co_return std::unexpected(result.error());
+    }
+
+    int value = *result;
+    // value == 42
 }
 ```
 
+For `Task<void>`, return success explicitly through the result channel:
+
+```cpp
+Task<void> FlushAsync(IoContext& ctx)
+{
+    // ...
+    co_return {};
+}
+```
+
+Use `co_return std::unexpected(error);` to return failure from any `Task<T>`.
+
 ### Result<T>
 
-Error handling via `std::expected<T, std::error_code>`.
+Error handling via `std::expected<T, std::error_code>`. I/O awaiters and
+`Task<T>` both use `Result<T>`, so errors are propagated explicitly instead of
+terminating the process for recoverable failures.
 
 ```cpp
 Task<> Example(IoContext& ctx, int fd)
@@ -167,10 +194,11 @@ Task<> Example(IoContext& ctx, int fd)
     {
         // Handle error
         std::cerr << "Read failed: " << result.error().message() << "\n";
-        co_return;
+        co_return std::unexpected(result.error());
     }
     
     size_t bytes_read = *result;
+    co_return {};
 }
 ```
 
@@ -572,4 +600,3 @@ target_compile_definitions(myapp PRIVATE AIO_STATS=1)
 │   └───────────────────────────────────────────────┘                 │
 └─────────────────────────────────────────────────────────────────────┘
 ```
-
