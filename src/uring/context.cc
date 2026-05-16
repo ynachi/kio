@@ -133,31 +133,9 @@ void IoWorker::tick() noexcept
             continue;
         }
 
-        if ((ud & kRemoteTagMask) == kRemoteSendTag)
+        if ((ud & kRemoteTagMask) == kRemoteWakeupTag)
         {
-            // Sender-side confirmation CQE from spawn_on MSG_RING.
-            // Delivery failure is handled on the receiver side via kRemoteSpawnTag.
-            // Nothing to do here.
-            continue;
-        }
-
-        if ((ud & kRemoteTagMask) == kRemoteSpawnTag)
-        {
-            auto* callable = reinterpret_cast<std::move_only_function<void()>*>(ud & ~kRemoteTagMask);
-
-            if (cqe->res < 0)
-            {
-                // MSG_RING delivery failed (e.g. target ring full).
-                // Delete the callable; no coroutine frame was ever created.
-                ALOG_ERROR("spawn_on: msg_ring delivery failed: {}", std::strerror(-cqe->res));
-                delete callable;
-            }
-            else
-            {
-                // Invoke factory on THIS thread — frame born here.
-                (*callable)();
-                delete callable;
-            }
+            // MSG_RING wakeup signal, tasks are in the concurrent queue
             continue;
         }
 
@@ -177,6 +155,16 @@ void IoWorker::tick() noexcept
     if (count > 0)
     {
         io_uring_cq_advance(&ring_, count);
+    }
+
+    // Drain task queue
+#if defined(__SANITIZE_THREAD__)
+    __tsan_acquire(&task_queue_);
+#endif
+    std::move_only_function<void()> task;
+    while (task_queue_.try_dequeue(task))
+    {
+        task();
     }
 
     drain_local();

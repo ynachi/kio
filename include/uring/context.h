@@ -13,6 +13,21 @@
 #include <vector>
 
 #include <liburing.h>
+#ifdef BLOCK_SIZE
+    #pragma push_macro("BLOCK_SIZE")
+    #undef BLOCK_SIZE
+    #define URING_RESTORE_BLOCK_SIZE_MACRO
+#endif
+#include "libs/concurrentqueue.hpp"
+#ifdef URING_RESTORE_BLOCK_SIZE_MACRO
+    #pragma pop_macro("BLOCK_SIZE")
+    #undef URING_RESTORE_BLOCK_SIZE_MACRO
+#endif
+
+#if defined(__SANITIZE_THREAD__)
+extern "C" void __tsan_acquire(void* addr);
+extern "C" void __tsan_release(void* addr);
+#endif
 
 #include "logger.hpp"
 #include "operation.hpp"
@@ -45,12 +60,10 @@ struct IoOptions
 // io_uring::user_data is shared by normal I/O completions and control messages.
 // The top two bits are reserved as a tag field:
 //   00: normal OpPool Token, encoded by Token::pack()
-//   01: MSG_RING delivered a std::move_only_function* to the target worker (receiver CQE)
-//   10: source-side MSG_RING completion (sender CQE, no action needed)
+//   01: MSG_RING delivered a wakeup signal
 // Normal tokens must keep these bits clear; see Token::kMaxGeneration.
 static constexpr uint64_t kRemoteTagMask = 0xC000000000000000ULL;
-static constexpr uint64_t kRemoteSpawnTag = 0x4000000000000000ULL;
-static constexpr uint64_t kRemoteSendTag = 0x8000000000000000ULL;
+static constexpr uint64_t kRemoteWakeupTag = 0x4000000000000000ULL;
 //
 // Forward declaration
 //
@@ -104,6 +117,7 @@ private:
     std::thread::id owner_thread_;
     IoOptions opts_;
     size_t id_;
+    moodycamel::ConcurrentQueue<std::move_only_function<void()>> task_queue_;
 
     void drain_local();
 
@@ -122,6 +136,20 @@ public:
     IoWorker& operator=(IoWorker&&) = delete;
 
     ~IoWorker();
+
+    void enqueue_task(std::move_only_function<void()> task)
+    {
+    #if defined(__SANITIZE_THREAD__)
+        __tsan_release(&task_queue_);
+    #endif
+        task_queue_.enqueue(std::move(task));
+    }
+
+    // Exposed for IoWorker::tick to drain the queue
+    moodycamel::ConcurrentQueue<std::move_only_function<void()>>& task_queue(InternalKey) noexcept
+    {
+        return task_queue_;
+    }
 
     OpPool& pool(InternalKey) noexcept { return op_pool_; }
     io_uring& ring(InternalKey) noexcept { return ring_; }
@@ -245,8 +273,8 @@ public:
     // there. No frame crosses a thread boundary; TSAN-clean by construction.
     //
     // If called from the target thread itself the factory runs inline with no
-    // syscall. Otherwise, an envelope is heap-allocated, shipped via MSG_RING,
-    // and deleted by the receiver after invoking the factory.
+    // syscall. Otherwise, the callable is enqueued to the target worker's concurrent queue,
+    // and a MSG_RING wakeup signal is sent to the target worker.
     template <SpawnFactory F>
     void spawn_on(IoWorker& target_io, F&& fn)
     {
@@ -260,20 +288,18 @@ public:
 
         assert(current_io != nullptr && "spawn_on called from outside IoWorker::run()");
 
-        auto* callable = new std::move_only_function<void()>(std::forward<F>(fn));
+        target_io.enqueue_task(std::move_only_function<void()>(std::forward<F>(fn)));
 
         io_uring_sqe* sqe = current_io->get_sqe(key_);
         if (sqe == nullptr)
         {
-            ALOG_ERROR("spawn_on: failed to get SQE, dropping spawn");
-            delete callable;
+            ALOG_ERROR("spawn_on: failed to get SQE, dropping wakeup");
             return;
         }
 
-        const uint64_t encoded = (reinterpret_cast<uint64_t>(callable) & ~kRemoteTagMask) | kRemoteSpawnTag;
-
-        io_uring_prep_msg_ring(sqe, target_io.ring(key_).ring_fd, 0, encoded, 0);
-        io_uring_sqe_set_data64(sqe, kRemoteSendTag);
+        io_uring_prep_msg_ring(sqe, target_io.ring(key_).ring_fd, 0, kRemoteWakeupTag, 0);
+        // Sender-side completion is ignored via 0 user_data
+        io_uring_sqe_set_data64(sqe, 0);
 
         io_uring_submit(&current_io->ring(key_));
     }

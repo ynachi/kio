@@ -90,22 +90,27 @@ function(kio_add_demo target_name source_file)
     message(STATUS "Enabled Demo: ${target_name} [${ARG_TAGS}]")
 endfunction()
 
-function(kio_add_sanitizers target_name)
-    if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-        message(STATUS "🔍 ThreadSanitizer enabled on target ${target_name}")
+set(KIO_SANITIZER "thread" CACHE STRING "Sanitizer to use (address, thread, undefined, none)")
 
-        # Check if we're using moodycamel
+function(kio_add_sanitizers target_name)
+    if (KIO_SANITIZER STREQUAL "none")
+        return()
+    endif()
+
+    if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+        message(STATUS "🔍 ${KIO_SANITIZER} Sanitizer enabled on target ${target_name}")
+
         target_compile_options(${target_name}
                 PRIVATE
-                -fsanitize=thread
+                -fsanitize=${KIO_SANITIZER}
                 -g -O1
                 -fno-omit-frame-pointer
         )
-        target_link_options(${target_name} PRIVATE -fsanitize=thread)
+        target_link_options(${target_name} PRIVATE -fsanitize=${KIO_SANITIZER})
 
-
-        # But also enable general thread sanitizer flag for other code
-        target_compile_definitions(${target_name} PUBLIC __SANITIZE_THREAD__=1)
+        if (KIO_SANITIZER STREQUAL "thread")
+            target_compile_definitions(${target_name} PUBLIC __SANITIZE_THREAD__=1)
+        endif()
     endif ()
 endfunction()
 
