@@ -61,9 +61,11 @@ struct IoOptions
 // The top two bits are reserved as a tag field:
 //   00: normal OpPool Token, encoded by Token::pack()
 //   01: MSG_RING delivered a wakeup signal
+//   10: source-side MSG_RING completion (sender-side)
 // Normal tokens must keep these bits clear; see Token::kMaxGeneration.
 static constexpr uint64_t kRemoteTagMask = 0xC000000000000000ULL;
 static constexpr uint64_t kRemoteWakeupTag = 0x4000000000000000ULL;
+static constexpr uint64_t kRemoteSenderTag = 0x8000000000000000ULL;
 //
 // Forward declaration
 //
@@ -298,8 +300,7 @@ public:
         }
 
         io_uring_prep_msg_ring(sqe, target_io.ring(key_).ring_fd, 0, kRemoteWakeupTag, 0);
-        // Sender-side completion is ignored via 0 user_data
-        io_uring_sqe_set_data64(sqe, 0);
+        io_uring_sqe_set_data64(sqe, kRemoteSenderTag);
 
         io_uring_submit(&current_io->ring(key_));
     }

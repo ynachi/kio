@@ -128,14 +128,20 @@ void IoWorker::tick() noexcept
     {
         count++;
         const auto ud = cqe->user_data;
-        if (ud == 0)
-        {
-            continue;
-        }
 
         if ((ud & kRemoteTagMask) == kRemoteWakeupTag)
         {
             // MSG_RING wakeup signal, tasks are in the concurrent queue
+            continue;
+        }
+
+        if (ud == kRemoteSenderTag)
+        {
+            // Sender-side completion of MSG_RING.
+            if (cqe->res < 0)
+            {
+                ALOG_ERROR("spawn_on: msg_ring delivery failed: {}", std::strerror(-cqe->res));
+            }
             continue;
         }
 
