@@ -6,7 +6,6 @@
 #include <functional>
 #include <future>
 #include <latch>
-#include <mutex>
 #include <stop_token>
 #include <system_error>
 #include <thread>
@@ -32,7 +31,6 @@ extern "C" void __tsan_release(void* addr);
 #include "logger.hpp"
 #include "operation.hpp"
 #include "task.hpp"
-#include "uring/coro_allocator.hpp"
 
 namespace URing
 {
@@ -141,9 +139,9 @@ public:
 
     void enqueue_task(std::move_only_function<void()> task)
     {
-    #if defined(__SANITIZE_THREAD__)
+#if defined(__SANITIZE_THREAD__)
         __tsan_release(&task_queue_);
-    #endif
+#endif
         task_queue_.enqueue(std::move(task));
     }
 
@@ -160,6 +158,7 @@ public:
     void init(InternalKey, int wq_fd = -1);
     void run(InternalKey, std::stop_token st) noexcept;
     void request_cancel(InternalKey, uint32_t op_idx) noexcept;
+    void cancel_all(InternalKey) noexcept;
 
     size_t id() const noexcept { return id_; }
 

@@ -68,6 +68,16 @@ void IoWorker::request_cancel(InternalKey key, const uint32_t op_idx) noexcept
     io_uring_sqe_set_data(sqe, nullptr);
 }
 
+void IoWorker::cancel_all(InternalKey key) noexcept
+{
+    const size_t count = op_pool_.entries_count();
+    ALOG_INFO("Worker {} cancelling up to {} active operations", id_, op_pool_.active_count());
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        request_cancel(key, i);
+    }
+}
+
 void IoWorker::drain_local()
 {
     // We swap the vector so that if a resuming coroutine immediately submits
@@ -176,7 +186,7 @@ void IoWorker::tick() noexcept
     drain_local();
 }
 
-void IoWorker::run(InternalKey, const std::stop_token st) noexcept
+void IoWorker::run(InternalKey key, const std::stop_token st) noexcept
 {
     // set the current io
     tl_io = this;
@@ -192,6 +202,18 @@ void IoWorker::run(InternalKey, const std::stop_token st) noexcept
     CoroAllocator::prewarm(2, 64);
 
     while (!st.stop_requested())
+    {
+        tick();
+    }
+
+    ALOG_INFO("Worker {} quiescing...", id_);
+
+    // Shutdown phase 1: Cancel all active IOs
+    cancel_all(key);
+
+    // Shutdown phase 2: Wait for all IOs to complete or cancel
+    // We also drain the task queue to ensure no tasks are leaked
+    while (!op_pool_.empty())
     {
         tick();
     }
@@ -238,6 +260,8 @@ IoContext::IoContext(const std::size_t num_threads, const IoOptions& opts)
 IoContext::~IoContext()
 {
     stop();
-    join();
+    // Explicitly join workers before deleting contexts_
+    workers_.clear();
+    contexts_.clear();
 }
 }  // namespace URing
