@@ -108,46 +108,44 @@ void IoWorker::drain_local()
 
 std::size_t IoWorker::drain_remote_tasks() noexcept
 {
-    std::size_t total = 0;
-    for (auto* lane : inbound_lanes_)
-    {
-        if (lane == nullptr)
+    const std::size_t total = spawn_queue_.drain(
+        [](MpscNode* raw) noexcept
         {
-            continue;
-        }
+            auto* node = static_cast<SpawnNode*>(raw);
+            try
+            {
+                node->task();
+            }
+            catch (const std::exception& e)
+            {
+                ALOG_ERROR("remote task died with error: {}", e.what());
+            }
+            catch (...)
+            {
+                ALOG_ERROR("remote task died with unknown error");
+            }
+            delete node;
+        },
+        kMaxRemoteTasksPerTick);
 
-        total += lane->drain_batch(kMaxRemoteTasksPerTick - total,
-                                   [](RemoteTask task) noexcept
-                                   {
-                                       try
-                                       {
-                                           task();
-                                       }
-                                       catch (const std::exception& e)
-                                       {
-                                           ALOG_ERROR("remote task died with error: {}", e.what());
-                                       }
-                                       catch (...)
-                                       {
-                                           ALOG_ERROR("remote task died with unknown error");
-                                       }
-                                   });
-
-        if (total >= kMaxRemoteTasksPerTick)
-        {
-            break;
-        }
-    }
-
+    pending_remote_drain_ = total >= kMaxRemoteTasksPerTick;
     return total;
 }
 
 void IoWorker::tick() noexcept
 {
+    bool skip_wait = false;
+    if (pending_remote_drain_)
+    {
+        const auto counts = drain_remote_tasks();
+        ALOG_DEBUG("drained {} pending remote tasks on this tick", counts);
+        skip_wait = counts > 0;
+    }
+
     bool drain_remote = false;
 
     // Skip the blocking syscall if CQEs are already waiting in the ring
-    if (io_uring_cq_ready(&ring_) > 0)
+    if (skip_wait || io_uring_cq_ready(&ring_) > 0)
     {
         if (const auto ret = io_uring_submit(&ring_); ret < 0 && ret != -EINTR)
         {
@@ -180,7 +178,7 @@ void IoWorker::tick() noexcept
         if ((ud & kRemoteTagMask) == kRemoteWakeupTag)
         {
             drain_remote = true;
-            // MSG_RING wakeup signal, tasks are in the remote SPSC lanes.
+            // MSG_RING wakeup signal, tasks are in the target MPSC queue.
             continue;
         }
 
@@ -217,6 +215,12 @@ void IoWorker::tick() noexcept
         auto counts = drain_remote_tasks();
         ALOG_DEBUG("drained {} remote tasks on this tick", counts);
     }
+    else if (!skip_wait && count == 0)
+    {
+        // If a wake SQE could not be submitted, queued remote work is still
+        // picked up after the periodic timeout.
+        (void)drain_remote_tasks();
+    }
 
     drain_local();
 }
@@ -246,17 +250,11 @@ void IoWorker::run(InternalKey key, const std::stop_token st) noexcept
     // Shutdown phase 1: Cancel all active IOs
     cancel_all(key);
 
-    // Shutdown phase 2: Wait for all IOs to complete or cancel
-    // We also drain remote lanes to ensure no queued tasks are leaked.
+    // Shutdown phase 2: Wait for all IOs to complete or cancel.
+    // Remaining remote spawn nodes are discarded when the worker is destroyed.
     while (!op_pool_.empty())
     {
         tick();
-    }
-
-    if (ring_.ring_fd > 0)
-    {
-        io_uring_queue_exit(&ring_);
-        ring_.ring_fd = -1;
     }
 
     ready_queue_.clear();
@@ -270,6 +268,12 @@ void IoWorker::run(InternalKey key, const std::stop_token st) noexcept
 
 IoWorker::~IoWorker()
 {
+    (void)spawn_queue_.drain(
+        [](MpscNode* raw) noexcept
+        {
+            delete static_cast<SpawnNode*>(raw);
+        });
+
     if (ring_.ring_fd > 0)
     {
         io_uring_queue_exit(&ring_);
@@ -294,9 +298,9 @@ IoContext::IoContext(const std::size_t num_threads, const IoOptions& opts)
 
 IoContext::~IoContext()
 {
-    if (auto stopped = stop(); !stopped)
+    if (running_.load(std::memory_order_acquire))
     {
-        ALOG_ERROR("failed to stop io context");
+        (void)stop();
     }
     // Explicitly join workers before deleting contexts_
     workers_.clear();

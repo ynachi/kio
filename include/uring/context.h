@@ -8,6 +8,7 @@
 #include <future>
 #include <latch>
 #include <memory>
+#include <new>
 #include <stop_token>
 #include <system_error>
 #include <thread>
@@ -17,8 +18,8 @@
 #include <liburing.h>
 
 #include "logger.hpp"
+#include "mpsc_queue.hpp"
 #include "operation.hpp"
-#include "spsc_queue.hpp"
 #include "task.hpp"
 
 namespace URing
@@ -79,7 +80,15 @@ template <typename F>
 concept SpawnFactory = std::invocable<F> && std::same_as<std::invoke_result_t<F>, DetachedTask>;
 
 using RemoteTask = std::move_only_function<void()>;
-using RemoteTaskQueue = SpscQueue<RemoteTask>;
+
+struct SpawnNode : MpscNode
+{
+    explicit SpawnNode(RemoteTask task_) : task(std::move(task_)) {}
+
+    RemoteTask task;
+};
+
+using RemoteTaskQueue = MpscQueue;
 
 class IoWorker
 {
@@ -110,13 +119,12 @@ private:
     std::thread::id owner_thread_;
     IoOptions opts_;
     size_t id_;
-    std::vector<RemoteTaskQueue*> inbound_lanes_;
+    RemoteTaskQueue spawn_queue_;
+    bool pending_remote_drain_{false};
 
     void drain_local();
 
     std::size_t drain_remote_tasks() noexcept;
-
-    [[nodiscard]] bool remote_tasks_empty() const noexcept;
 
     void tick() noexcept;
 
@@ -134,11 +142,10 @@ public:
 
     ~IoWorker();
 
-    void set_inbound_lanes(InternalKey, std::vector<RemoteTaskQueue*> lanes) { inbound_lanes_ = std::move(lanes); }
-
     OpPool& pool(InternalKey) noexcept { return op_pool_; }
     io_uring& ring(InternalKey) noexcept { return ring_; }
     std::vector<std::coroutine_handle<>>& ready_queue(InternalKey) noexcept { return ready_queue_; }
+    RemoteTaskQueue& spawn_queue(InternalKey) noexcept { return spawn_queue_; }
 
     void init(InternalKey, int wq_fd = -1);
     void run(InternalKey, std::stop_token st) noexcept;
@@ -190,48 +197,6 @@ class IoContext
     InternalKey key_{};
     std::vector<std::unique_ptr<IoWorker>> contexts_;
     std::vector<std::jthread> workers_;
-    std::vector<std::unique_ptr<RemoteTaskQueue>> remote_lanes_;
-
-    [[nodiscard]] RemoteTaskQueue* remote_lane(const std::size_t source, const std::size_t target) const noexcept
-    {
-        if (source == target || source >= num_threads_ || target >= num_threads_)
-        {
-            return nullptr;
-        }
-
-        return remote_lanes_[source * num_threads_ + target].get();
-    }
-
-    void init_remote_lanes()
-    {
-        remote_lanes_.clear();
-        remote_lanes_.resize(num_threads_ * num_threads_);
-
-        for (std::size_t source = 0; source < num_threads_; ++source)
-        {
-            for (std::size_t target = 0; target < num_threads_; ++target)
-            {
-                if (source != target)
-                {
-                    remote_lanes_[source * num_threads_ + target] = std::make_unique<RemoteTaskQueue>();
-                }
-            }
-        }
-
-        for (std::size_t target = 0; target < num_threads_; ++target)
-        {
-            std::vector<RemoteTaskQueue*> inbound;
-            inbound.reserve(num_threads_ > 0 ? num_threads_ - 1 : 0);
-            for (std::size_t source = 0; source < num_threads_; ++source)
-            {
-                if (auto* lane = remote_lane(source, target); lane != nullptr)
-                {
-                    inbound.push_back(lane);
-                }
-            }
-            contexts_[target]->set_inbound_lanes(key_, std::move(inbound));
-        }
-    }
 
 public:
     explicit IoContext(std::size_t num_threads, const IoOptions& opts = {});
@@ -252,7 +217,6 @@ public:
         {
             contexts_.emplace_back(new IoWorker(key_, i, opts_));
         }
-        init_remote_lanes();
 
         const auto wq_promise = std::make_shared<std::promise<int>>();
         std::shared_future wq_future = wq_promise->get_future();
@@ -301,7 +265,7 @@ public:
     //
     // If called from the target thread itself the factory runs inline with no
     // syscall. Otherwise, the callable is enqueued to the target worker's
-    // source->target SPSC lane, and MSG_RING is used only as a wakeup signal.
+    // inbound MPSC queue, and MSG_RING is used only as a wakeup signal.
     template <SpawnFactory F>
     bool spawn_on(IoWorker& target_io, F&& fn)
     {
@@ -314,19 +278,26 @@ public:
         }
 
         assert(current_io != nullptr && "spawn_on called from outside IoWorker::run()");
-
-        RemoteTaskQueue* lane = remote_lane(current_io->id(), target_io.id());
-        if (lane == nullptr)
+        if (current_io == nullptr)
         {
-            ALOG_ERROR("spawn_on: no remote lane from worker {} to worker {}", current_io->id(), target_io.id());
+            ALOG_ERROR("spawn_on: called from outside IoWorker::run()");
             return false;
         }
 
-        if (!lane->enqueue(RemoteTask(std::forward<F>(fn))))
+        if (stop_source_.stop_requested())
         {
-            ALOG_ERROR("spawn_on: failed to enqueue remote task");
+            ALOG_WARN("spawn_on: context is stopping");
             return false;
         }
+
+        auto* node = new (std::nothrow) SpawnNode(RemoteTask(std::forward<F>(fn)));
+        if (node == nullptr)
+        {
+            ALOG_ERROR("spawn_on: failed to allocate remote task");
+            return false;
+        }
+
+        target_io.spawn_queue(key_).push(node);
 
         io_uring_sqe* sqe = current_io->get_sqe(key_);
         if (sqe == nullptr)
@@ -358,6 +329,7 @@ public:
     void join()
     {
         workers_.clear();
+        contexts_.clear();
         running_.store(false, std::memory_order_release);
     }
 };
