@@ -44,7 +44,9 @@ struct task_promise_base
         {
             auto& p = h.promise();
             if (p.continuation_)
+            {
                 return p.continuation_;
+            }
             return std::noop_coroutine();
         }
         void await_resume() noexcept {}
@@ -107,7 +109,9 @@ struct Task
         if (this != &o)
         {
             if (handle_)
+            {
                 safe_destroy();
+            }
             handle_ = std::exchange(o.handle_, nullptr);
         }
         return *this;
@@ -119,7 +123,9 @@ struct Task
     ~Task() noexcept
     {
         if (handle_)
+        {
             safe_destroy();
+        }
     }
 
     // Non-blocking check for manual polling systems. Returns EAGAIN until the

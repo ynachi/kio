@@ -79,16 +79,7 @@ template <typename F>
 concept SpawnFactory = std::invocable<F> && std::same_as<std::invoke_result_t<F>, DetachedTask>;
 
 using RemoteTask = std::move_only_function<void()>;
-using RemoteTaskQueue = SpscQueue<RemoteTask, 256>;
-
-enum class WorkerState : std::uint8_t
-{
-    created,
-    initialized,
-    running,
-    stopping,
-    stopped,
-};
+using RemoteTaskQueue = SpscQueue<RemoteTask>;
 
 class IoWorker
 {
@@ -120,9 +111,6 @@ private:
     IoOptions opts_;
     size_t id_;
     std::vector<RemoteTaskQueue*> inbound_lanes_;
-    std::atomic<bool> remote_wake_pending_{false};
-    std::atomic<std::size_t> remote_submitters_{0};
-    std::atomic<WorkerState> state_{WorkerState::created};
 
     void drain_local();
 
@@ -158,41 +146,6 @@ public:
     void cancel_all(InternalKey) noexcept;
 
     size_t id() const noexcept { return id_; }
-
-    [[nodiscard]] bool try_begin_remote_submit() noexcept
-    {
-        const auto accepts_remote_tasks = [](const WorkerState state) noexcept
-        { return state == WorkerState::initialized || state == WorkerState::running; };
-
-        if (!accepts_remote_tasks(state_.load(std::memory_order_seq_cst)))
-        {
-            return false;
-        }
-
-        remote_submitters_.fetch_add(1, std::memory_order_seq_cst);
-        if (accepts_remote_tasks(state_.load(std::memory_order_seq_cst)))
-        {
-            return true;
-        }
-
-        remote_submitters_.fetch_sub(1, std::memory_order_seq_cst);
-        return false;
-    }
-
-    void finish_remote_submit() noexcept
-    {
-        remote_submitters_.fetch_sub(1, std::memory_order_seq_cst);
-    }
-
-    [[nodiscard]] bool remote_submits_idle() const noexcept
-    {
-        return remote_submitters_.load(std::memory_order_seq_cst) == 0;
-    }
-
-    [[nodiscard]] bool mark_remote_wakeup_pending() noexcept
-    {
-        return !remote_wake_pending_.exchange(true, std::memory_order_acq_rel);
-    }
 
     io_uring_sqe* get_sqe(InternalKey) noexcept
     {
@@ -310,8 +263,7 @@ public:
             workers_.emplace_back(
                 [this, i, wq_promise, wq_future, stop_token, init_fn = std::forward<InitFn>(init_fn)]() mutable
                 {
-                    // TODO: make this configurable Skip CPU 0 for pinning, it SHOULD used for SQPOLL
-                    IoWorker::pin_to_cpu(static_cast<int>(i + 1));
+                    IoWorker::pin_to_cpu(static_cast<int>(i));
                     // init worker 0 as the ring owner
                     if (i == 0)
                     {
@@ -339,8 +291,6 @@ public:
                 });
         }
 
-        start_latch_.wait();
-        // TODO: add a start latch. We need to make sure everything is ok before we return should we ?
         return true;
     }
 
@@ -364,23 +314,6 @@ public:
         }
 
         assert(current_io != nullptr && "spawn_on called from outside IoWorker::run()");
-        if (current_io == nullptr)
-        {
-            ALOG_ERROR("spawn_on: called from outside IoWorker::run()");
-            return false;
-        }
-
-        if (!target_io.try_begin_remote_submit())
-        {
-            ALOG_WARN("spawn_on: target worker {} is not accepting remote tasks", target_io.id());
-            return false;
-        }
-
-        struct RemoteSubmitGuard
-        {
-            IoWorker& target;
-            ~RemoteSubmitGuard() { target.finish_remote_submit(); }
-        } submit_guard{target_io};
 
         RemoteTaskQueue* lane = remote_lane(current_io->id(), target_io.id());
         if (lane == nullptr)
@@ -393,11 +326,6 @@ public:
         {
             ALOG_ERROR("spawn_on: failed to enqueue remote task");
             return false;
-        }
-
-        if (!target_io.mark_remote_wakeup_pending())
-        {
-            return true;
         }
 
         io_uring_sqe* sqe = current_io->get_sqe(key_);
