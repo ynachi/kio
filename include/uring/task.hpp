@@ -61,6 +61,8 @@ struct task_promise : task_promise_base
 {
     std::optional<Result<T>> result_;
     void return_value(T val) noexcept { result_.emplace(std::move(val)); }
+    void return_value(Result<T> val) noexcept { result_.emplace(std::move(val)); }
+    void return_value(std::unexpected<std::error_code> err) noexcept { result_.emplace(std::move(err)); }
     Task<T> get_return_object() noexcept;
 };
 
@@ -68,7 +70,8 @@ template <>
 struct task_promise<void> : task_promise_base
 {
     std::optional<Result<void>> result_;
-    void return_void() noexcept { result_.emplace(Result<void>{}); }
+    void return_value(Result<void> val) noexcept { result_.emplace(std::move(val)); }
+    void return_value(std::unexpected<std::error_code> err) noexcept { result_.emplace(std::move(err)); }
     Task<void> get_return_object() noexcept;
 };
 
@@ -78,7 +81,7 @@ struct Task
     using promise_type = task_promise<T>;
     std::coroutine_handle<promise_type> handle_;
 
-    Task(std::coroutine_handle<promise_type> h) noexcept : handle_(h) {}
+    explicit Task(std::coroutine_handle<promise_type> h) noexcept : handle_(h) {}
     Task(Task&& o) noexcept : handle_(std::exchange(o.handle_, nullptr)) {}
 
     Task& operator=(Task&& o) noexcept
@@ -111,7 +114,7 @@ struct Task
 
         if constexpr (std::is_void_v<T>)
         {
-            return {};
+            return handle_.promise().result_.value();
         }
         else
         {
@@ -137,8 +140,8 @@ struct Task
                 return handle_;
             }
 
-            // Extract and return the final T value (or void)
-            T await_resume()
+            // Extract and return the final Result<T>.
+            Result<T> await_resume()
             {
                 auto& p = handle_.promise();
 
@@ -150,36 +153,16 @@ struct Task
 
                 if (!p.result_.has_value())
                 {
-                    if constexpr (std::is_constructible_v<T, std::unexpected<std::error_code>>)
-                    {
-                        return T{std::unexpected{MakeErrorCode(ECANCELED)}};
-                    }
-                    else
-                    {
-                        std::terminate();
-                    }
+                    return std::unexpected{MakeErrorCode(ECANCELED)};
                 }
 
                 if constexpr (std::is_void_v<T>)
                 {
-                    return;
+                    return std::move(*p.result_);
                 }
                 else
                 {
-                    auto result = std::move(*p.result_);
-                    if (!result.has_value())
-                    {
-                        if constexpr (std::is_constructible_v<T, std::unexpected<std::error_code>>)
-                        {
-                            return T{std::unexpected{result.error()}};
-                        }
-                        else
-                        {
-                            std::terminate();
-                        }
-                    }
-
-                    return std::move(result).value();
+                    return std::move(*p.result_);
                 }
             }
         };

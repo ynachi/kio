@@ -6,6 +6,11 @@ kio_add_test(op_pool_tests uring/op_pool_test.cpp
         LIBS uring GTest::gtest GTest::gtest_main
 )
 
+kio_add_test(task_tests uring/task_test.cpp
+        TAGS uring unit
+        LIBS uring GTest::gtest GTest::gtest_main
+)
+
 kio_add_test(spsc_queue_tests uring/spsc_queue_test.cpp
         TAGS uring unit queue
         LIBS GTest::gtest GTest::gtest_main

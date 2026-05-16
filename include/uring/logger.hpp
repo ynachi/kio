@@ -1,4 +1,3 @@
-
 #pragma once
 
 #include <array>
@@ -7,9 +6,12 @@
 #include <cstdint>
 #include <cstring>
 #include <format>
+#include <mutex>
 #include <new>
+#include <optional>
 #include <source_location>
 #include <thread>
+#include <utility>
 
 #include <unistd.h>
 
@@ -32,9 +34,9 @@ enum class Level : uint8_t
     Disabled = 5
 };
 
-// Global configuration
-inline std::atomic g_level{Level::Info};
-inline std::atomic g_colors{true};
+// Global configuration — FIXED: explicit template args
+inline std::atomic<Level> g_level{Level::Info};
+inline std::atomic<bool> g_colors{true};
 
 constexpr Level kBuildMinLevel = static_cast<Level>(LOG_BUILD_LEVEL);
 
@@ -122,9 +124,10 @@ struct SPSC
         return true;
     }
 
-    bool is_empty() const noexcept
+    // FIXED: acquire on both for consistent snapshot
+    [[nodiscard]] bool is_empty() const noexcept
     {
-        return head.load(std::memory_order_acquire) == tail.load(std::memory_order_relaxed);
+        return head.load(std::memory_order_acquire) == tail.load(std::memory_order_acquire);
     }
 };
 
@@ -140,7 +143,7 @@ inline std::atomic<uint32_t> g_next_slot{0};
 
 // Replaced eventfd with atomic epoch for futex wait
 inline std::atomic<uint32_t> g_epoch{0};
-inline std::atomic g_running{false};
+inline std::atomic<bool> g_running{false};  // FIXED: explicit template arg
 inline std::jthread g_thread;
 inline std::atomic<uint64_t> g_dropped{0};
 
@@ -177,23 +180,22 @@ struct ThreadRegGuard
 
 inline uint32_t get_thread_slot()
 {
-    thread_local ThreadRegGuard guard;
+    static thread_local ThreadRegGuard guard;
     return guard.slot_idx;
 }
 
-inline bool drain_all(int out_fd)
+inline void drain_all(int out_fd)
 {
-    bool any_work = false;
     constexpr size_t kMaxBatch = 16;
     Record batch[kMaxBatch];
     iovec iovs[kMaxBatch];
 
     for (auto& slot : g_slots)
     {
-        if (!slot.active.load(std::memory_order_acquire) && slot.q.is_empty())
-        {
+        // FIXED: Always drain if queue has data, regardless of active flag
+        // A deregistering thread may have pending logs; skip only if truly empty
+        if (slot.q.is_empty())
             continue;
-        }
 
         size_t count = 0;
         while (count < kMaxBatch && slot.q.try_pop(batch[count]))
@@ -201,15 +203,19 @@ inline bool drain_all(int out_fd)
             iovs[count].iov_base = batch[count].msg;
             iovs[count].iov_len = batch[count].len;
             ++count;
-            any_work = true;
         }
 
         if (count > 0)
         {
-            ::writev(out_fd, iovs, count);
+            // FIXED: Handle writev errors
+            const ssize_t written = ::writev(out_fd, iovs, count);
+            if (written < 0)
+            {
+                // Increment drop counter for failed writes
+                g_dropped.fetch_add(count, std::memory_order_relaxed);
+            }
         }
     }
-    return any_work;
 }
 
 inline void logger_loop(int out_fd)
@@ -224,12 +230,9 @@ inline void logger_loop(int out_fd)
             return;
         }
 
-        bool did_work = drain_all(out_fd);
+        drain_all(out_fd);
 
-        if (!did_work)
-        {
-            g_epoch.wait(captured_epoch, std::memory_order_relaxed);
-        }
+        g_epoch.wait(captured_epoch, std::memory_order_relaxed);
     }
 }
 
@@ -248,7 +251,7 @@ inline void format_into(Record& r, Level lvl, std::source_location loc, std::for
 
     char* p = r.msg;
     constexpr size_t kMax = kMsgMax;
-    char* end = r.msg + kMax - 2;
+    char* end = r.msg + kMax - 2;  // Reserve space for \n and optional reset
 
     std::format_to_n_result<char*> res{};
 
@@ -274,6 +277,18 @@ inline void format_into(Record& r, Level lvl, std::source_location loc, std::for
         p = res.out;
     }
 
+    // FIXED: Add truncation marker if output was cut off
+    if (res.size > static_cast<size_t>(end - r.msg))
+    {
+        constexpr const char* trunc = " [TRUNCATED]";
+        const size_t trunc_len = std::strlen(trunc);
+        if (p + trunc_len < end)
+        {
+            std::memcpy(p, trunc, trunc_len);
+            p += trunc_len;
+        }
+    }
+
     if (colors && p < end)
     {
         res = std::format_to_n(p, end - p, "{}", kReset);
@@ -282,6 +297,7 @@ inline void format_into(Record& r, Level lvl, std::source_location loc, std::for
 
     if (p < end)
         *p++ = '\n';
+
     r.len = static_cast<uint16_t>(p - r.msg);
 }
 
@@ -291,12 +307,15 @@ inline void format_into(Record& r, Level lvl, std::source_location loc, std::for
 
 inline void start(int out_fd = STDERR_FILENO)
 {
-    // Atomically transition from false -> true.
-    // If already true (expected becomes true), we just return.
-    if (bool expected = false; !detail::g_running.compare_exchange_strong(expected, true))
-        return;
-
-    detail::g_thread = std::jthread([out_fd] { detail::logger_loop(out_fd); });
+    // FIXED: Use call_once for lazy init to avoid race
+    static std::once_flag init_flag;
+    std::call_once(init_flag,
+                   [out_fd]
+                   {
+                       if (bool expected = false; !detail::g_running.compare_exchange_strong(expected, true))
+                           return;
+                       detail::g_thread = std::jthread([out_fd] { detail::logger_loop(out_fd); });
+                   });
 }
 
 inline void stop()
@@ -342,6 +361,7 @@ void log_impl(std::source_location loc, std::format_string<Args...> fmt, Args&&.
     if constexpr (kBuildMinLevel <= L)
     {
         // Lazy initialization: Start on first log if not running
+        // FIXED: start() now uses call_once internally
         if (__builtin_expect(!detail::g_running.load(std::memory_order_relaxed), 0))
         {
             start();
@@ -351,9 +371,19 @@ void log_impl(std::source_location loc, std::format_string<Args...> fmt, Args&&.
             return;
 
         uint32_t slot = detail::get_thread_slot();
+
+        // FIXED: Fallback to stderr for Fatal/Error when slot exhausted
         if (slot == UINT32_MAX)
         {
             detail::g_dropped.fetch_add(1, std::memory_order_relaxed);
+            if constexpr (L >= Level::Error)
+            {
+                // Synchronous fallback for critical logs
+                char fallback[kMsgMax];
+                detail::format_into(*reinterpret_cast<detail::Record*>(fallback), L, loc, fmt,
+                                    std::forward<Args>(args)...);
+                ::write(STDERR_FILENO, fallback, reinterpret_cast<detail::Record*>(fallback)->len);
+            }
             return;
         }
 
@@ -366,6 +396,11 @@ void log_impl(std::source_location loc, std::format_string<Args...> fmt, Args&&.
         if (!q.try_push(r))
         {
             detail::g_dropped.fetch_add(1, std::memory_order_relaxed);
+            // Optional: fallback to stderr for Fatal
+            if constexpr (L == Level::Fatal)
+            {
+                ::write(STDERR_FILENO, r.msg, r.len);
+            }
             return;
         }
 
