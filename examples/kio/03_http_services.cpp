@@ -62,7 +62,7 @@ DetachedTask handle_client(Fd client_fd)
     }
 }
 
-RemoteTask handle_client_remote(Fd client_fd)
+DetachedTask handle_client_remote(Fd client_fd)
 {
     std::byte buf[1024];
 
@@ -145,8 +145,8 @@ DetachedTask dispatching_server_loop(IoContext& ctx, uint16_t port, std::stop_to
             const std::size_t worker_count = ctx.worker_count();
             const std::size_t target_idx = worker_count > 1 ? 1 + ((next_worker++ - 1) % (worker_count - 1)) : 0;
             IoWorker& target = ctx.worker(target_idx);
-            ctx.dispatch_to(target, [fd = std::move(client_res.value())]() mutable -> RemoteTask
-                            { return handle_client_remote(std::move(fd)); });
+            ctx.spawn_on(target, [fd = std::move(client_res.value())]() mutable -> DetachedTask
+                         { return handle_client(std::move(fd)); });
         }
         else
         {

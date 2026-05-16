@@ -3,6 +3,7 @@
 #include <cassert>
 #include <concepts>
 #include <cstdint>
+#include <functional>
 #include <future>
 #include <latch>
 #include <mutex>
@@ -44,11 +45,11 @@ struct IoOptions
 // io_uring::user_data is shared by normal I/O completions and control messages.
 // The top two bits are reserved as a tag field:
 //   00: normal OpPool Token, encoded by Token::pack()
-//   01: MSG_RING delivered a RemoteTask handle to the target worker
-//   10: source-side MSG_RING completion for delivery failure handling
+//   01: MSG_RING delivered a std::move_only_function* to the target worker (receiver CQE)
+//   10: source-side MSG_RING completion (sender CQE, no action needed)
 // Normal tokens must keep these bits clear; see Token::kMaxGeneration.
 static constexpr uint64_t kRemoteTagMask = 0xC000000000000000ULL;
-static constexpr uint64_t kRemoteTaskTag = 0x4000000000000000ULL;
+static constexpr uint64_t kRemoteSpawnTag = 0x4000000000000000ULL;
 static constexpr uint64_t kRemoteSendTag = 0x8000000000000000ULL;
 //
 // Forward declaration
@@ -69,14 +70,11 @@ class InternalKey
 template <typename F>
 concept WorkerInitFn = std::invocable<F> && std::same_as<std::invoke_result_t<F>, void>;
 
-template <typename F, typename Worker = IoWorker>
-concept RemoteFactory = std::invocable<F&&> &&
-                        // Must return exactly RemoteTask (no Task<T>, no DetachedTask)
-                        std::same_as<std::invoke_result_t<F&&>, RemoteTask> &&
-                        // Must be trivially move-constructible: no complex captures
-                        std::is_trivially_move_constructible_v<std::remove_reference_t<F>> &&
-                        // Must be trivially destructible: no custom cleanup across threads
-                        std::is_trivially_destructible_v<std::remove_reference_t<F>>;
+// Factory callable shipped to a target worker via spawn_on().
+// Called ON the target thread — the coroutine frame is born there.
+// Must return DetachedTask (fire-and-forget).
+template <typename F>
+concept SpawnFactory = std::invocable<F> && std::same_as<std::invoke_result_t<F>, DetachedTask>;
 
 class IoWorker
 {
@@ -241,46 +239,41 @@ public:
         return true;
     }
 
-    /// Dispatch to uses more system call to send coroutines handles arround
-    /// It should not be used the default scheduling mechanism
-    template <typename RemoteFactory>
-    void dispatch_to(IoWorker& target_io, RemoteFactory&& fn)
+    // Spawn a fire-and-forget DetachedTask on a specific worker.
+    //
+    // The factory is called on the TARGET thread — the coroutine frame is born
+    // there. No frame crosses a thread boundary; TSAN-clean by construction.
+    //
+    // If called from the target thread itself the factory runs inline with no
+    // syscall. Otherwise, an envelope is heap-allocated, shipped via MSG_RING,
+    // and deleted by the receiver after invoking the factory.
+    template <SpawnFactory F>
+    void spawn_on(IoWorker& target_io, F&& fn)
     {
-        RemoteTask task = fn();
-        auto handle = task.release();
+        auto* current_io = IoWorker::current_io();
 
-        auto current_io = IoWorker::current_io();
-
-        // if we are on target thread, do not ring msg
         if (current_io == &target_io)
         {
-            ALOG_DEBUG("calling dispatch_to on own thread is discouraged, use a detached task instead");
-            target_io.ready_queue(key_).push_back(handle);
+            std::forward<F>(fn)();
             return;
         }
 
-        assert(current_io != nullptr && "dispatch_to called from outside IoWorker::run()");
+        assert(current_io != nullptr && "spawn_on called from outside IoWorker::run()");
+
+        auto* callable = new std::move_only_function<void()>(std::forward<F>(fn));
 
         io_uring_sqe* sqe = current_io->get_sqe(key_);
         if (sqe == nullptr)
         {
-            // can't send, destroy
-            ALOG_ERROR("failed to send coroutine to target worker, destroying it");
-            handle.destroy();
+            ALOG_ERROR("spawn_on: failed to get SQE, dropping spawn");
+            delete callable;
+            return;
         }
 
-        // Encode the handle for the target thread (Tag = 1)
-        const uint64_t encoded_target =
-            (reinterpret_cast<uint64_t>(handle.address()) & ~kRemoteTagMask) | kRemoteTaskTag;
+        const uint64_t encoded = (reinterpret_cast<uint64_t>(callable) & ~kRemoteTagMask) | kRemoteSpawnTag;
 
-        io_uring_prep_msg_ring(sqe, target_io.ring(key_).ring_fd, 0, encoded_target, 0);
-
-        // Encode the handle for the SENDER'S completion queue (Tag = 2)
-        // This allows the sender to track if the delivery failed.
-        const uint64_t encoded_sender =
-            (reinterpret_cast<uint64_t>(handle.address()) & ~kRemoteTagMask) | kRemoteSendTag;
-
-        io_uring_sqe_set_data64(sqe, encoded_sender);
+        io_uring_prep_msg_ring(sqe, target_io.ring(key_).ring_fd, 0, encoded, 0);
+        io_uring_sqe_set_data64(sqe, kRemoteSendTag);
 
         io_uring_submit(&current_io->ring(key_));
     }

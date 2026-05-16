@@ -123,6 +123,7 @@ void IoWorker::tick() noexcept
     io_uring_cqe* cqe = nullptr;
     unsigned head = 0;
     unsigned count = 0;
+
     io_uring_for_each_cqe(&ring_, head, cqe)
     {
         count++;
@@ -132,38 +133,40 @@ void IoWorker::tick() noexcept
             continue;
         }
 
-        // Decode the reserved user_data tag exactly. Loose bit checks are unsafe:
-        // normal Token indexes/generations may set arbitrary non-reserved bits.
-        if ((ud & kRemoteTagMask) == kRemoteTaskTag)
-        {
-            const auto ptr = reinterpret_cast<void*>(ud & ~kRemoteTagMask);
-            auto handle = std::coroutine_handle<>::from_address(ptr);
-            ready_queue_.push_back(handle);
-            continue;
-        }
-
-        // The SENDER thread receives confirmation of delivery
         if ((ud & kRemoteTagMask) == kRemoteSendTag)
         {
-            // If the kernel failed to deliver (e.g. -EOVERFLOW, -EBADFD)
-            if (cqe->res < 0)
-            {
-                ALOG_ERROR("msg_ring delivery failed: {}", std::strerror(-cqe->res));
-                const auto ptr = reinterpret_cast<void*>(ud & ~kRemoteTagMask);
-                auto handle = std::coroutine_handle<>::from_address(ptr);
-                // Destroy the leaked frame
-                handle.destroy();
-            }
-            // If cqe->res == 0, delivery was successful. We do nothing because
-            // the target thread now owns the pointer.
+            // Sender-side confirmation CQE from spawn_on MSG_RING.
+            // Delivery failure is handled on the receiver side via kRemoteSpawnTag.
+            // Nothing to do here.
             continue;
         }
 
+        if ((ud & kRemoteTagMask) == kRemoteSpawnTag)
+        {
+            auto* callable = reinterpret_cast<std::move_only_function<void()>*>(ud & ~kRemoteTagMask);
+
+            if (cqe->res < 0)
+            {
+                // MSG_RING delivery failed (e.g. target ring full).
+                // Delete the callable; no coroutine frame was ever created.
+                ALOG_ERROR("spawn_on: msg_ring delivery failed: {}", std::strerror(-cqe->res));
+                delete callable;
+            }
+            else
+            {
+                // Invoke factory on THIS thread — frame born here.
+                (*callable)();
+                delete callable;
+            }
+            continue;
+        }
+
+        // Normal I/O completion.
         const auto token = Token::unpack(ud);
         const auto op = op_pool_.try_get(token);
         if (op == nullptr)
         {
-            // Stale CQE from recycled index
+            // Stale CQE from a recycled slot — ignore.
             continue;
         }
 
@@ -176,7 +179,6 @@ void IoWorker::tick() noexcept
         io_uring_cq_advance(&ring_, count);
     }
 
-    // drain local first, its known as the preferred path
     drain_local();
 }
 
