@@ -12,7 +12,7 @@
 namespace URing
 {
 /// @brief Accepts a new connection and populates the client's SocketAddress
-inline auto accept(Fd& server_fd, SocketAddress& client_addr, const int flags = 0)
+[[nodiscard]] inline auto accept(Fd& server_fd, SocketAddress& client_addr, const int flags = 0)
 {
     return IoAwaiter(
         [raw_fd = server_fd.fd, &client_addr, flags](io_uring_sqe* sqe)
@@ -32,7 +32,7 @@ inline auto accept(Fd& server_fd, SocketAddress& client_addr, const int flags = 
 
 /// @brief Accepts a new connection without capturing the client's address
 /// Accept default flag is set to SOCK_NONBLOCK | SOCK_CLOEXEC
-inline auto accept(Fd& server_fd, const int flags = SOCK_NONBLOCK | SOCK_CLOEXEC)
+[[nodiscard]] inline auto accept(Fd& server_fd, const int flags = SOCK_NONBLOCK | SOCK_CLOEXEC)
 {
     return IoAwaiter([raw_fd = server_fd.fd, flags](io_uring_sqe* sqe)
                      { io_uring_prep_accept(sqe, raw_fd, nullptr, nullptr, flags); },
@@ -45,7 +45,7 @@ inline auto accept(Fd& server_fd, const int flags = SOCK_NONBLOCK | SOCK_CLOEXEC
 }
 
 /// @brief Connects to a remote SocketAddress
-inline auto connect(Fd& fd, const SocketAddress& addr)
+[[nodiscard]] inline auto connect(Fd& fd, const SocketAddress& addr)
 {
     // CRITICAL SAFETY FEATURE:
     // We capture 'addr' by VALUE inside the lambda. Because the lambda is
@@ -57,13 +57,17 @@ inline auto connect(Fd& fd, const SocketAddress& addr)
 }
 
 /// Unified Read (offset = -1 tells io_uring to use the current file offset)
-inline auto read(Fd& fd, std::span<std::byte> buf, off_t offset = -1)
+///
+/// @warning The buffer pointed to by 'buf' MUST remain valid until the operation completes.
+/// Do NOT pass a span to a temporary container (e.g., read(fd, std::vector<byte>(1024))).
+[[nodiscard]] inline auto read(Fd& fd, std::span<std::byte> buf, off_t offset = -1)
 {
     return IoAwaiter([raw_fd = fd.fd, buf, offset](io_uring_sqe* sqe)
                      { io_uring_prep_read(sqe, raw_fd, buf.data(), buf.size(), offset); }, detail::ResumeInt{});
 }
 
-inline auto readv(Fd& fd, std::span<const iovec> iovecs, off_t offset = -1)
+/// @warning The iovecs and the buffers they point to MUST remain valid until completion.
+[[nodiscard]] inline auto readv(Fd& fd, std::span<const iovec> iovecs, off_t offset = -1)
 {
     return IoAwaiter([raw_fd = fd.fd, iovecs, offset](io_uring_sqe* sqe)
                      { io_uring_prep_readv(sqe, raw_fd, iovecs.data(), static_cast<unsigned>(iovecs.size()), offset); },
@@ -71,13 +75,16 @@ inline auto readv(Fd& fd, std::span<const iovec> iovecs, off_t offset = -1)
 }
 
 // Unified Write
-inline auto write(Fd& fd, std::span<const std::byte> buf, off_t offset = -1)
+///
+/// @warning The buffer pointed to by 'buf' MUST remain valid until the operation completes.
+[[nodiscard]] inline auto write(Fd& fd, std::span<const std::byte> buf, off_t offset = -1)
 {
     return IoAwaiter([raw_fd = fd.fd, buf, offset](io_uring_sqe* sqe)
                      { io_uring_prep_write(sqe, raw_fd, buf.data(), buf.size(), offset); }, detail::ResumeInt{});
 }
 
-inline auto writev(Fd& fd, std::span<const iovec> iovecs, off_t offset = -1)
+/// @warning The iovecs and the buffers they point to MUST remain valid until completion.
+[[nodiscard]] inline auto writev(Fd& fd, std::span<const iovec> iovecs, off_t offset = -1)
 {
     return IoAwaiter(
         [raw_fd = fd.fd, iovecs, offset](io_uring_sqe* sqe)
@@ -86,7 +93,7 @@ inline auto writev(Fd& fd, std::span<const iovec> iovecs, off_t offset = -1)
 }
 
 // File Ops
-inline auto open(std::filesystem::path path, const int flags, const mode_t mode = 0644)
+[[nodiscard]] inline auto open(std::filesystem::path path, const int flags, const mode_t mode = 0644)
 {
     return IoAwaiter([path, flags, mode](io_uring_sqe* sqe)
                      { io_uring_prep_openat(sqe, AT_FDCWD, path.c_str(), flags, mode); },
@@ -98,39 +105,39 @@ inline auto open(std::filesystem::path path, const int flags, const mode_t mode 
                      });
 }
 
-inline auto remove(std::filesystem::path path)
+[[nodiscard]] inline auto remove(std::filesystem::path path)
 {
     return IoAwaiter([path](io_uring_sqe* sqe) { io_uring_prep_unlinkat(sqe, AT_FDCWD, path.c_str(), 0); },
                      detail::ResumeVoid{});
 }
 
-inline auto fsync(Fd& fd, const bool full_sync = false)
+[[nodiscard]] inline auto fsync(Fd& fd, const bool full_sync = false)
 {
     return IoAwaiter([raw_fd = fd.fd, full_sync](io_uring_sqe* sqe)
                      { io_uring_prep_fsync(sqe, raw_fd, full_sync ? 0u : IORING_FSYNC_DATASYNC); },
                      detail::ResumeVoid{});
 }
 
-inline auto fallocate(Fd& fd, const int mode, const off_t offset, const off_t len)
+[[nodiscard]] inline auto fallocate(Fd& fd, const int mode, const off_t offset, const off_t len)
 {
     return IoAwaiter([raw_fd = fd.fd, mode, offset, len](io_uring_sqe* sqe)
                      { io_uring_prep_fallocate(sqe, raw_fd, mode, offset, len); }, detail::ResumeVoid{});
 }
 
-inline auto ftruncate(Fd& fd, const off_t len)
+[[nodiscard]] inline auto ftruncate(Fd& fd, const off_t len)
 {
     return IoAwaiter([raw_fd = fd.fd, len](io_uring_sqe* sqe) { io_uring_prep_ftruncate(sqe, raw_fd, len); },
                      detail::ResumeVoid{});
 }
 
-inline auto poll(Fd& fd, const unsigned poll_mask)
+[[nodiscard]] inline auto poll(Fd& fd, const unsigned poll_mask)
 {
     return IoAwaiter([raw_fd = fd.fd, poll_mask](io_uring_sqe* sqe) { io_uring_prep_poll_add(sqe, raw_fd, poll_mask); },
                      detail::ResumeVoid{});
 }
 
 template <typename Rep, typename Period>
-auto timeout(const std::chrono::duration<Rep, Period> dur)
+[[nodiscard]] auto timeout(const std::chrono::duration<Rep, Period> dur)
 {
     return IoAwaiter(
         [ts = __kernel_timespec{.tv_sec = std::chrono::duration_cast<std::chrono::seconds>(dur).count(),
@@ -146,7 +153,7 @@ auto timeout(const std::chrono::duration<Rep, Period> dur)
 }
 
 template <typename Rep, typename Period>
-auto sleep(const std::chrono::duration<Rep, Period> dur)
+[[nodiscard]] auto sleep(const std::chrono::duration<Rep, Period> dur)
 {
     return timeout(dur);
 }

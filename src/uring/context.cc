@@ -143,8 +143,15 @@ void IoWorker::tick() noexcept
         arm_wake_read();
     }
 
-    // Skip the blocking syscall if CQEs are already waiting in the ring
-    if (io_uring_cq_ready(&ring_) > 0)
+    // Only block if we have no local work to do.
+    // Local work includes:
+    // 1. CQEs already waiting in the ring.
+    // 2. Coroutines ready to resume in our ready_queue_.
+    // 3. Remote tasks pending in the spawn_queue_ (indicated by wakeup_pending_).
+    const bool has_work = io_uring_cq_ready(&ring_) > 0 || !ready_queue_.empty() ||
+                          wakeup_pending_.load(std::memory_order_relaxed);
+
+    if (has_work)
     {
         if (const auto ret = io_uring_submit(&ring_); ret < 0 && ret != -EINTR)
         {
