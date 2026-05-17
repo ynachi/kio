@@ -175,7 +175,6 @@ private:
     MpscQueue spawn_queue_;
     SpawnNodePool remote_pool_;
     std::atomic<bool> wakeup_pending_{false};
-    bool pending_remote_drain_{false};
 
     void drain_local();
     void arm_wake_read() noexcept;
@@ -354,8 +353,8 @@ public:
 
         if (target_io.try_set_wakeup_pending(key_))
         {
-            io_uring_sqe* sqe = current_io ? current_io->get_sqe(key_) : nullptr;
-            if (sqe)
+            assert(current_io != nullptr && "spawn_on called outside of an IoWorker thread");
+            if (io_uring_sqe* sqe = current_io->get_sqe(key_))
             {
                 io_uring_prep_msg_ring(sqe, target_io.ring_fd(), 0, kRemoteWakeupTag, 0);
                 io_uring_sqe_set_data64(sqe, kRemoteSenderTag);

@@ -233,9 +233,9 @@ void IoWorker::tick() noexcept
         io_uring_cq_advance(&ring_, count);
     }
 
-    if (drain_remote_q)
+    const bool had_pending_remote_work = wakeup_pending_.exchange(false, std::memory_order_acq_rel);
+    if (drain_remote_q || had_pending_remote_work)
     {
-        wakeup_pending_.store(false, std::memory_order_release);
         drain_remote_tasks();
     }
 
