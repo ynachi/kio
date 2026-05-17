@@ -40,6 +40,14 @@ void IoWorker::init(InternalKey, const int wq_fd)
         throw std::runtime_error(std::format("io_uring_queue_init_params failed: {}", std::strerror(-rc)));
     }
 
+    wake_fd_ = eventfd(0, EFD_CLOEXEC);
+    if (wake_fd_ < 0)
+    {
+        io_uring_queue_exit(&ring_);
+        throw std::runtime_error("eventfd failed");
+    }
+    arm_wake_read();
+
     // set the current io
     tl_io = this;
 
@@ -48,7 +56,7 @@ void IoWorker::init(InternalKey, const int wq_fd)
 }
 
 /// Best effort cancellation request
-void IoWorker::request_cancel(InternalKey key, const uint32_t op_idx) noexcept
+void IoWorker::request_cancel(const InternalKey key, const uint32_t op_idx) noexcept
 {
     auto& op = op_pool_.get(op_idx);
     if (!op.cancel())
@@ -66,16 +74,6 @@ void IoWorker::request_cancel(InternalKey key, const uint32_t op_idx) noexcept
     // Kernel matches EXACT original user_data, preventing stale/race cancels
     io_uring_prep_cancel64(sqe, op.original_ud, 0);
     io_uring_sqe_set_data(sqe, nullptr);
-}
-
-void IoWorker::cancel_all(InternalKey key) noexcept
-{
-    const size_t count = op_pool_.entries_count();
-    ALOG_INFO("Worker {} cancelling up to {} active operations", id_, op_pool_.active_count());
-    for (uint32_t i = 0; i < count; ++i)
-    {
-        request_cancel(key, i);
-    }
 }
 
 void IoWorker::drain_local()
@@ -128,24 +126,25 @@ std::size_t IoWorker::drain_remote_tasks() noexcept
         },
         kMaxRemoteTasksPerTick);
 
-    pending_remote_drain_ = total >= kMaxRemoteTasksPerTick;
+    if (total == kMaxRemoteTasksPerTick)
+    {
+        wake(key_);
+    }
+
     return total;
 }
 
 void IoWorker::tick() noexcept
 {
-    bool skip_wait = false;
-    if (pending_remote_drain_)
+    bool drain_remote_q = false;
+
+    if (!wake_read_armed_)
     {
-        const auto counts = drain_remote_tasks();
-        ALOG_DEBUG("drained {} pending remote tasks on this tick", counts);
-        skip_wait = counts > 0;
+        arm_wake_read();
     }
 
-    bool drain_remote = false;
-
     // Skip the blocking syscall if CQEs are already waiting in the ring
-    if (skip_wait || io_uring_cq_ready(&ring_) > 0)
+    if (io_uring_cq_ready(&ring_) > 0)
     {
         if (const auto ret = io_uring_submit(&ring_); ret < 0 && ret != -EINTR)
         {
@@ -154,12 +153,7 @@ void IoWorker::tick() noexcept
     }
     else
     {
-        io_uring_cqe* waited_cqe = nullptr;
-        __kernel_timespec timeout{.tv_sec = opts_.tick_timeout_ms / 1000,
-                                  .tv_nsec = (opts_.tick_timeout_ms % 1000) * 1'000'000};
-
-        if (const auto ret = io_uring_submit_and_wait_timeout(&ring_, &waited_cqe, 1, &timeout, nullptr);
-            ret < 0 && ret != -EINTR && ret != -ETIME)
+        if (const auto ret = io_uring_submit_and_wait(&ring_, 1); ret < 0 && ret != -EINTR)
         {
             ALOG_ERROR("failed to submit and wait: {}", std::strerror(-ret));
         }
@@ -174,21 +168,22 @@ void IoWorker::tick() noexcept
     {
         count++;
         const auto ud = cqe->user_data;
-
-        if ((ud & kRemoteTagMask) == kRemoteWakeupTag)
+        if (ud == 0)
         {
-            drain_remote = true;
-            // MSG_RING wakeup signal, tasks are in the target MPSC queue.
             continue;
         }
 
-        if (ud == kRemoteSenderTag)
+        if (ud == kWakeTag)
         {
-            // Sender-side completion of MSG_RING.
+            wake_read_armed_ = false;
+            drain_remote_q = true;
+
             if (cqe->res < 0)
             {
-                ALOG_ERROR("spawn_on: msg_ring delivery failed: {}", std::strerror(-cqe->res));
+                ALOG_WARN("wake eventfd read failed: {}", std::strerror(-cqe->res));
             }
+
+            arm_wake_read();
             continue;
         }
 
@@ -210,26 +205,17 @@ void IoWorker::tick() noexcept
         io_uring_cq_advance(&ring_, count);
     }
 
-    if (drain_remote)
+    if (drain_remote_q)
     {
-        auto counts = drain_remote_tasks();
-        ALOG_DEBUG("drained {} remote tasks on this tick", counts);
-    }
-    else if (!skip_wait && count == 0)
-    {
-        // If a wake SQE could not be submitted, queued remote work is still
-        // picked up after the periodic timeout.
-        (void)drain_remote_tasks();
+        // TODO: use the result
+        drain_remote_tasks();
     }
 
     drain_local();
 }
 
-void IoWorker::run(InternalKey key, const std::stop_token st) noexcept
+void IoWorker::run(InternalKey key, std::stop_token st) noexcept
 {
-    // set the current io
-    tl_io = this;
-
     // owner thread should be set on the thread which start the loop
     owner_thread_ = std::this_thread::get_id();
 
@@ -240,22 +226,13 @@ void IoWorker::run(InternalKey key, const std::stop_token st) noexcept
     CoroAllocator::prewarm(1, 256);
     CoroAllocator::prewarm(2, 64);
 
+    std::stop_callback wake_on_stop{st, [this, key] { wake(key); }};
     while (!st.stop_requested())
     {
         tick();
     }
 
     ALOG_INFO("Worker {} quiescing...", id_);
-
-    // Shutdown phase 1: Cancel all active IOs
-    cancel_all(key);
-
-    // Shutdown phase 2: Wait for all IOs to complete or cancel.
-    // Remaining remote spawn nodes are discarded when the worker is destroyed.
-    while (!op_pool_.empty())
-    {
-        tick();
-    }
 
     ready_queue_.clear();
     process_queue_.clear();
@@ -266,13 +243,68 @@ void IoWorker::run(InternalKey key, const std::stop_token st) noexcept
     CoroAllocator::cleanup_thread_cache();
 }
 
+io_uring_sqe* IoWorker::get_sqe(InternalKey) noexcept
+{
+    io_uring_sqe* sqe = nullptr;
+
+    for (auto i = 0; i < kMaxSqeGetRetry; ++i)
+    {
+        sqe = io_uring_get_sqe(&ring_);
+        if (sqe != nullptr)
+            break;
+        io_uring_submit(&ring_);
+    }
+    assert(sqe != nullptr && "Sqe null after 3 retries, this is a fatal error");
+    return sqe;
+}
+
+/// Best effort wake, easy to miss
+// TODO: make me more robust with retries
+void IoWorker::wake(InternalKey) const noexcept
+{
+    constexpr uint64_t one = 1;
+    const ssize_t n = ::write(wake_fd_, &one, sizeof(one));
+    if (n != sizeof(one) && errno != EINTR)
+    {
+        ALOG_WARN("failed to wake io context with eventfd: {}", std::strerror(errno));
+    }
+}
+
+void IoWorker::arm_wake_read() noexcept
+{
+    io_uring_sqe* sqe = nullptr;
+
+    for (int retries = 0; retries < 3; ++retries)
+    {
+        sqe = io_uring_get_sqe(&ring_);
+        if (sqe != nullptr)
+        {
+            break;
+        }
+
+        // SQ is full. Try to flush pending submissions to the kernel.
+        if (const auto ret = io_uring_submit(&ring_); ret < 0)
+        {
+            ALOG_ERROR("io_uring_submit failed in arm_wake_read: {}", std::strerror(-ret));
+            break;
+        }
+    }
+
+    if (sqe == nullptr)
+    {
+        ALOG_WARN("failed to get an SQE for wake read after retries, ring queue is full");
+        wake_read_armed_ = false;
+        return;
+    }
+
+    wake_read_armed_ = true;
+    io_uring_prep_read(sqe, wake_fd_, &wake_value_, sizeof(wake_value_), 0);
+    io_uring_sqe_set_data64(sqe, kWakeTag);
+}
+
 IoWorker::~IoWorker()
 {
-    (void)spawn_queue_.drain(
-        [](MpscNode* raw) noexcept
-        {
-            delete static_cast<SpawnNode*>(raw);
-        });
+    (void)spawn_queue_.drain([](MpscNode* raw) noexcept { delete static_cast<SpawnNode*>(raw); });
 
     if (ring_.ring_fd > 0)
     {

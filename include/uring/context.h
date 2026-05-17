@@ -66,6 +66,7 @@ class InternalKey
     template <typename SetupFunc, typename MapperFunc>
         requires std::invocable<SetupFunc, io_uring_sqe*> && std::invocable<MapperFunc, int32_t>
     friend class IoAwaiter;
+    friend class IoWorker;
 
     InternalKey() = default;
 };
@@ -87,8 +88,6 @@ struct SpawnNode : MpscNode
 
     RemoteTask task;
 };
-
-using RemoteTaskQueue = MpscQueue;
 
 class IoWorker
 {
@@ -116,13 +115,18 @@ private:
     std::vector<std::coroutine_handle<>> process_queue_;
 
     io_uring ring_{};
+    int wake_fd_{-1};
+    uint64_t wake_value_{0};
+    bool wake_read_armed_{false};
+    InternalKey key_{};
     std::thread::id owner_thread_;
     IoOptions opts_;
     size_t id_;
-    RemoteTaskQueue spawn_queue_;
+    MpscQueue spawn_queue_;
     bool pending_remote_drain_{false};
 
     void drain_local();
+    void arm_wake_read() noexcept;
 
     std::size_t drain_remote_tasks() noexcept;
 
@@ -130,7 +134,8 @@ private:
 
 public:
     static IoWorker* current_io() noexcept { return tl_io; }
-    explicit IoWorker(InternalKey, size_t id, const IoOptions& opts = {}) : op_pool_(opts.entries), opts_(opts), id_(id)
+    explicit IoWorker(InternalKey, const size_t id, const IoOptions& opts = {})
+        : op_pool_(opts.entries), opts_(opts), id_(id)
     {
         ready_queue_.reserve(opts.entries);
         process_queue_.reserve(kMaxResumesPerTick);
@@ -145,29 +150,16 @@ public:
     OpPool& pool(InternalKey) noexcept { return op_pool_; }
     io_uring& ring(InternalKey) noexcept { return ring_; }
     std::vector<std::coroutine_handle<>>& ready_queue(InternalKey) noexcept { return ready_queue_; }
-    RemoteTaskQueue& spawn_queue(InternalKey) noexcept { return spawn_queue_; }
+    MpscQueue& spawn_queue(InternalKey) noexcept { return spawn_queue_; }
 
     void init(InternalKey, int wq_fd = -1);
     void run(InternalKey, std::stop_token st) noexcept;
+    void wake(InternalKey) const noexcept;
     void request_cancel(InternalKey, uint32_t op_idx) noexcept;
-    void cancel_all(InternalKey) noexcept;
 
     size_t id() const noexcept { return id_; }
 
-    io_uring_sqe* get_sqe(InternalKey) noexcept
-    {
-        io_uring_sqe* sqe = nullptr;
-
-        for (auto i = 0; i < kMaxSqeGetRetry; ++i)
-        {
-            sqe = io_uring_get_sqe(&ring_);
-            if (sqe != nullptr)
-                break;
-            io_uring_submit(&ring_);
-        }
-        assert(sqe != nullptr && "Sqe null after 3 retries, this is a fatal error");
-        return sqe;
-    }
+    io_uring_sqe* get_sqe(InternalKey) noexcept;
 
     [[nodiscard]] bool is_owner_thread() const noexcept { return owner_thread_ == std::this_thread::get_id(); }
 
@@ -277,18 +269,9 @@ public:
             return true;
         }
 
+        // current_io cannot be nil on an initialized context and
+        // no io would work on a non-initialized context so we do no runtime check
         assert(current_io != nullptr && "spawn_on called from outside IoWorker::run()");
-        if (current_io == nullptr)
-        {
-            ALOG_ERROR("spawn_on: called from outside IoWorker::run()");
-            return false;
-        }
-
-        if (stop_source_.stop_requested())
-        {
-            ALOG_WARN("spawn_on: context is stopping");
-            return false;
-        }
 
         auto* node = new (std::nothrow) SpawnNode(RemoteTask(std::forward<F>(fn)));
         if (node == nullptr)
@@ -297,22 +280,9 @@ public:
             return false;
         }
 
+        // TODO: maybe make spawn queue return true if push was a success
         target_io.spawn_queue(key_).push(node);
-
-        io_uring_sqe* sqe = current_io->get_sqe(key_);
-        if (sqe == nullptr)
-        {
-            ALOG_ERROR("spawn_on: failed to get SQE, delaying wakeup until target tick timeout");
-            return true;
-        }
-
-        io_uring_prep_msg_ring(sqe, target_io.ring(key_).ring_fd, 0, kRemoteWakeupTag, 0);
-        io_uring_sqe_set_data64(sqe, kRemoteSenderTag);
-
-        if (const auto ret = io_uring_submit(&current_io->ring(key_)); ret < 0 && ret != -EINTR)
-        {
-            ALOG_ERROR("spawn_on: failed to submit wakeup: {}", std::strerror(-ret));
-        }
+        target_io.wake(key_);
 
         return true;
     }
