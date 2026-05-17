@@ -15,8 +15,8 @@ TEST(IoContextRemoteTest, SpawnOnRunsFactoryOnTargetWorker)
     opts.tick_timeout_ms = 1;
 
     IoContext ctx(2, opts);
-    std::atomic<int> ran{0};
-    std::atomic<int> observed_worker{-1};
+    std::atomic ran{0};
+    std::atomic observed_worker{-1};
 
     ASSERT_TRUE(ctx.start(
         [&]
@@ -26,15 +26,15 @@ TEST(IoContextRemoteTest, SpawnOnRunsFactoryOnTargetWorker)
 
             if (current->id() == 0)
             {
-                ASSERT_TRUE(ctx.spawn_on(
-                    ctx.worker(1),
-                    [&]() -> DetachedTask
-                    {
-                        observed_worker.store(static_cast<int>(IoWorker::current_io()->id()), std::memory_order_relaxed);
-                        ran.fetch_add(1, std::memory_order_relaxed);
-                        ctx.stop();
-                        co_return;
-                    }));
+                ASSERT_TRUE(ctx.spawn_on(ctx.worker(1),
+                                         [&]() -> DetachedTask
+                                         {
+                                             observed_worker.store(static_cast<int>(IoWorker::current_io()->id()),
+                                                                   std::memory_order_relaxed);
+                                             ran.fetch_add(1, std::memory_order_relaxed);
+                                             ctx.stop();
+                                             co_return;
+                                         }));
             }
         }));
 
@@ -68,17 +68,17 @@ TEST(IoContextRemoteTest, AllWorkersCanDispatchToAnotherWorker)
             const std::size_t source = current->id();
             const std::size_t target = (source + 1) % kWorkers;
 
-            ASSERT_TRUE(ctx.spawn_on(
-                ctx.worker(target),
-                [&, target]() -> DetachedTask
-                {
-                    observed[target].fetch_add(1, std::memory_order_relaxed);
-                    if (ran.fetch_add(1, std::memory_order_acq_rel) + 1 == static_cast<int>(kWorkers))
-                    {
-                        ctx.stop();
-                    }
-                    co_return;
-                }));
+            ASSERT_TRUE(ctx.spawn_on(ctx.worker(target),
+                                     [&, target]() -> DetachedTask
+                                     {
+                                         observed[target].fetch_add(1, std::memory_order_relaxed);
+                                         if (ran.fetch_add(1, std::memory_order_acq_rel) + 1 ==
+                                             static_cast<int>(kWorkers))
+                                         {
+                                             ctx.stop();
+                                         }
+                                         co_return;
+                                     }));
         }));
 
     ctx.join();

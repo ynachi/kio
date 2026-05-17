@@ -19,7 +19,7 @@ using namespace URing;
 
 namespace
 {
-constexpr bool kUseRemoteDispatch = true;
+constexpr bool kUseRemoteDispatch = false;
 volatile std::sig_atomic_t g_stop_requested = 0;
 
 void signal_handler(int)
@@ -162,7 +162,7 @@ int main()
 
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
-    size_t num_threads = 4;
+    size_t num_threads = 16;
     if constexpr (kUseRemoteDispatch)
     {
         // add one more for benh fairness
