@@ -49,6 +49,9 @@ public:
         token_ = io->pool(key_).allocate(h);
         const auto op = io->pool(key_).try_get(token_);
 
+        // Initialize original_ud immediately so cancellations have a stable target
+        op->original_ud = token_.pack();
+
         // prepare sqe
         io_uring_sqe* sqe = io->get_sqe(key_);
         if (sqe == nullptr)
@@ -60,7 +63,6 @@ public:
         }
 
         setup_(sqe);
-        op->original_ud = token_.pack();
         io_uring_sqe_set_data64(sqe, token_.pack());
 
         return std::noop_coroutine();
@@ -74,9 +76,14 @@ public:
         assert(io != nullptr && "IoAwaiter resumed outside of an IoWorker thread");
 
         // We just woke up! The event loop populated the result_code.
-        // SAFETY: io.run() set the thread-local worker. No IO can be done without setting it anyway.
-        const auto& op = io->pool(key_).get(token_.idx);
-        int result = op.result_code;
+        // We use try_get to ensure the slot hasn't been recycled/cancelled.
+        auto* op = io->pool(key_).try_get(token_);
+        if (op == nullptr)
+        {
+            return std::unexpected(MakeErrorCode(ECANCELED));
+        }
+
+        int result = op->result_code;
 
         // We have our data, the kernel is done, we don't need the slot anymore.
         io->pool(key_).deallocate(token_);
