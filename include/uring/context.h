@@ -84,9 +84,54 @@ using RemoteTask = std::move_only_function<void()>;
 
 struct SpawnNode : MpscNode
 {
-    explicit SpawnNode(RemoteTask task_) : task(std::move(task_)) {}
-
     RemoteTask task;
+    SpawnNode* next_free{nullptr};
+
+    SpawnNode() = default;
+    explicit SpawnNode(RemoteTask task_) : task(std::move(task_)) {}
+};
+
+class SpawnNodePool
+{
+    std::atomic<SpawnNode*> head_{nullptr};
+
+public:
+    SpawnNodePool() = default;
+    ~SpawnNodePool()
+    {
+        auto* curr = head_.load(std::memory_order_acquire);
+        while (curr)
+        {
+            auto* next = curr->next_free;
+            delete curr;
+            curr = next;
+        }
+    }
+
+    void push(SpawnNode* node) noexcept
+    {
+        node->task = nullptr;
+        auto* old_head = head_.load(std::memory_order_relaxed);
+        do
+        {
+            node->next_free = old_head;
+        } while (!head_.compare_exchange_weak(old_head, node, std::memory_order_release, std::memory_order_relaxed));
+    }
+
+    SpawnNode* try_pop() noexcept
+    {
+        auto* old_head = head_.load(std::memory_order_acquire);
+        while (old_head)
+        {
+            if (head_.compare_exchange_weak(old_head, old_head->next_free, std::memory_order_acquire,
+                                            std::memory_order_acquire))
+            {
+                old_head->next_free = nullptr;
+                return old_head;
+            }
+        }
+        return nullptr;
+    }
 };
 
 class IoWorker
@@ -123,6 +168,7 @@ private:
     IoOptions opts_;
     size_t id_;
     MpscQueue spawn_queue_;
+    SpawnNodePool remote_pool_;
     bool pending_remote_drain_{false};
 
     void drain_local();
@@ -151,6 +197,8 @@ public:
     io_uring& ring(InternalKey) noexcept { return ring_; }
     std::vector<std::coroutine_handle<>>& ready_queue(InternalKey) noexcept { return ready_queue_; }
     MpscQueue& spawn_queue(InternalKey) noexcept { return spawn_queue_; }
+    SpawnNode* allocate_remote_node(InternalKey) noexcept { return remote_pool_.try_pop(); }
+    void release_remote_node(InternalKey, SpawnNode* node) noexcept { remote_pool_.push(node); }
 
     void init(InternalKey, int wq_fd = -1);
     void run(InternalKey, std::stop_token st) noexcept;
@@ -273,7 +321,16 @@ public:
         // no io would work on a non-initialized context so we do no runtime check
         assert(current_io != nullptr && "spawn_on called from outside IoWorker::run()");
 
-        auto* node = new (std::nothrow) SpawnNode(RemoteTask(std::forward<F>(fn)));
+        auto* node = target_io.allocate_remote_node(key_);
+        if (node)
+        {
+            node->task = RemoteTask(std::forward<F>(fn));
+        }
+        else
+        {
+            node = new (std::nothrow) SpawnNode(RemoteTask(std::forward<F>(fn)));
+        }
+
         if (node == nullptr)
         {
             ALOG_ERROR("spawn_on: failed to allocate remote task");

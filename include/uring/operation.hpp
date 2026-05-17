@@ -53,8 +53,7 @@ struct Token
 
     [[nodiscard]] static constexpr Token unpack(const std::uint64_t ud) noexcept
     {
-        return {static_cast<std::uint32_t>(ud & 0xFFFFFFFF),
-                static_cast<std::uint32_t>((ud >> 32) & kMaxGeneration)};
+        return {static_cast<std::uint32_t>(ud & 0xFFFFFFFF), static_cast<std::uint32_t>((ud >> 32) & kMaxGeneration)};
     }
 };
 
@@ -144,23 +143,6 @@ public:
     }
 
     [[nodiscard]] PendingOp& get(const uint32_t idx) noexcept { return entries_[idx]; }
-
-    [[nodiscard]] size_t entries_count() const noexcept { return entries_.size(); }
-
-    [[nodiscard]] bool empty() const noexcept { return active_count() == 0; }
-
-    [[nodiscard]] size_t active_count() const noexcept
-    {
-        size_t count = 0;
-        for (const auto& op : entries_)
-        {
-            if (op.status != SlotStatus::free)
-            {
-                count++;
-            }
-        }
-        return count;
-    }
 
     void destroy_active_handles() noexcept
     {

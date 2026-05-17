@@ -107,7 +107,7 @@ void IoWorker::drain_local()
 std::size_t IoWorker::drain_remote_tasks() noexcept
 {
     const std::size_t total = spawn_queue_.drain(
-        [](MpscNode* raw) noexcept
+        [this](MpscNode* raw) noexcept
         {
             auto* node = static_cast<SpawnNode*>(raw);
             try
@@ -122,7 +122,7 @@ std::size_t IoWorker::drain_remote_tasks() noexcept
             {
                 ALOG_ERROR("remote task died with unknown error");
             }
-            delete node;
+            release_remote_node(key_, node);
         },
         kMaxRemoteTasksPerTick);
 
