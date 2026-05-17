@@ -273,41 +273,32 @@ io_uring_sqe* IoWorker::get_sqe(InternalKey) noexcept
     return sqe;
 }
 
-/// Best effort wake, easy to miss
-// TODO: make me more robust with retries
 void IoWorker::wake(InternalKey) const noexcept
 {
     constexpr uint64_t one = 1;
-    const ssize_t n = ::write(wake_fd_, &one, sizeof(one));
-    if (n != sizeof(one) && errno != EINTR)
+    for (;;)
     {
+        const ssize_t n = ::write(wake_fd_, &one, sizeof(one));
+        if (n == sizeof(one))
+        {
+            return;
+        }
+        if (n == -1 && errno == EINTR)
+        {
+            continue;
+        }
         ALOG_WARN("failed to wake io context with eventfd: {}", std::strerror(errno));
+        return;
     }
 }
 
 void IoWorker::arm_wake_read() noexcept
 {
-    io_uring_sqe* sqe = nullptr;
-
-    for (int retries = 0; retries < 3; ++retries)
-    {
-        sqe = io_uring_get_sqe(&ring_);
-        if (sqe != nullptr)
-        {
-            break;
-        }
-
-        // SQ is full. Try to flush pending submissions to the kernel.
-        if (const auto ret = io_uring_submit(&ring_); ret < 0)
-        {
-            ALOG_ERROR("io_uring_submit failed in arm_wake_read: {}", std::strerror(-ret));
-            break;
-        }
-    }
+    io_uring_sqe* sqe = get_sqe(key_);
 
     if (sqe == nullptr)
     {
-        ALOG_WARN("failed to get an SQE for wake read after retries, ring queue is full");
+        ALOG_WARN("failed to get an SQE for wake read, ring queue is full");
         wake_read_armed_ = false;
         return;
     }
