@@ -156,6 +156,11 @@ private:
     //  Pools
     //
     OpPool op_pool_;
+
+    // Dual-vector queue design to avoid recursion and prioritize I/O.
+    // ready_queue_ stores handles to resume in the next drain phase.
+    // process_queue_ is used as a swap buffer during the drain itself.
+    // Total memory overhead: 2 * entries * sizeof(coroutine_handle) ≈ 268KB (default).
     std::vector<std::coroutine_handle<>> ready_queue_;
     std::vector<std::coroutine_handle<>> process_queue_;
 
@@ -349,9 +354,9 @@ public:
 
         if (target_io.try_set_wakeup_pending(key_))
         {
-            if (current_io != nullptr)
+            io_uring_sqe* sqe = current_io ? current_io->get_sqe(key_) : nullptr;
+            if (sqe)
             {
-                auto* sqe = current_io->get_sqe(key_);
                 io_uring_prep_msg_ring(sqe, target_io.ring_fd(), 0, kRemoteWakeupTag, 0);
                 io_uring_sqe_set_data64(sqe, kRemoteSenderTag);
             }
@@ -373,7 +378,7 @@ public:
     [[nodiscard]] std::size_t worker_count() const noexcept { return contexts_.size(); }
 
     // Join threads (explicitly or via destructor)
-    void join()
+    void join() noexcept
     {
         workers_.clear();
         contexts_.clear();

@@ -32,6 +32,10 @@ public:
 
     bool await_ready() const noexcept { return false; }
 
+    // IoAwaiter MUST be pinned in the coroutine frame because it captures
+    // pointers/references to buffers and metadata that the kernel will
+    // access asynchronously. Deleting the move constructor ensures stability
+    // and relies on C++17 mandatory copy elision for RVO from I/O functions.
     IoAwaiter(IoAwaiter&& other) noexcept = delete;
     IoAwaiter& operator=(IoAwaiter&& other) = delete;
     IoAwaiter(const IoAwaiter&) = delete;
@@ -46,21 +50,26 @@ public:
         // if not started, nothing could work anyway.
         assert(io != nullptr && "IoAwaiter used outside of an IoWorker thread");
 
+        // prepare sqe
+        io_uring_sqe* sqe = io->get_sqe(key_);
+        if (sqe == nullptr)
+        {
+            // This path is now extremely rare thanks to tick-level submit and
+            // the on-demand fallback in get_sqe.
+            ALOG_WARN("failed to get SQE after submit; completing operation with ENOSPC");
+            token_ = io->pool(key_).allocate(h);
+            const auto op = io->pool(key_).try_get(token_);
+            op->original_ud = token_.pack();
+            op->result_code = -ENOSPC;
+            io->ready_queue(key_).push_back(h);
+            return std::noop_coroutine();
+        }
+
         token_ = io->pool(key_).allocate(h);
         const auto op = io->pool(key_).try_get(token_);
 
         // Initialize original_ud immediately so cancellations have a stable target
         op->original_ud = token_.pack();
-
-        // prepare sqe
-        io_uring_sqe* sqe = io->get_sqe(key_);
-        if (sqe == nullptr)
-        {
-            ALOG_WARN("failed to get SQE after submit; completing operation with ENOSPC");
-            op->result_code = -ENOSPC;
-            io->ready_queue(key_).push_back(h);
-            return std::noop_coroutine();
-        }
 
         setup_(sqe);
         io_uring_sqe_set_data64(sqe, token_.pack());
@@ -68,7 +77,7 @@ public:
         return std::noop_coroutine();
     }
 
-    Result<T> await_resume()
+    Result<T> await_resume() noexcept
     {
         const auto io = IoWorker::current_io();
         // skip runtime check as io cannot be nil if io context is normally started

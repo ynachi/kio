@@ -95,10 +95,16 @@ void IoWorker::drain_local()
         catch (const std::exception& e)
         {
             ALOG_ERROR("coroutine died with error: {}", e.what());
+#ifndef NDEBUG
+            throw;
+#endif
         }
         catch (...)
         {
             ALOG_ERROR("coroutine died with unknown error");
+#ifndef NDEBUG
+            throw;
+#endif
         }
     }
     process_queue_.clear();
@@ -241,9 +247,12 @@ void IoWorker::run(InternalKey key, std::stop_token st) noexcept
     // owner thread should be set on the thread which start the loop
     owner_thread_ = std::this_thread::get_id();
 
-    // 128-byte frames: 64 preallocated
-    // 256-byte frames: most common
-    // 512-byte frames: combinators
+    // 128-byte frames: Task<void>, small Tasks
+    // 256-byte frames: Most common Tasks
+    // 512-byte frames: Combinators and large frames
+    static_assert(sizeof(Task<void>::promise_type) <= 256, "Task<void> promise exceeds prewarm bucket 1");
+    static_assert(sizeof(DetachedTask::promise_type) <= 128, "DetachedTask promise exceeds prewarm bucket 0");
+
     CoroAllocator::prewarm(0, 128);
     CoroAllocator::prewarm(1, 256);
     CoroAllocator::prewarm(2, 64);
@@ -267,16 +276,13 @@ void IoWorker::run(InternalKey key, std::stop_token st) noexcept
 
 io_uring_sqe* IoWorker::get_sqe(InternalKey) noexcept
 {
-    io_uring_sqe* sqe = nullptr;
-
-    for (auto i = 0; i < kMaxSqeGetRetry; ++i)
+    io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
+    if (sqe == nullptr)
     {
-        sqe = io_uring_get_sqe(&ring_);
-        if (sqe != nullptr)
-            break;
+        // SQ is full. Try one submit to clear space.
         io_uring_submit(&ring_);
+        sqe = io_uring_get_sqe(&ring_);
     }
-    assert(sqe != nullptr && "Sqe null after 3 retries, this is a fatal error");
     return sqe;
 }
 

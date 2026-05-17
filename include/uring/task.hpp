@@ -128,13 +128,13 @@ struct Task
         }
     }
 
-    // Non-blocking check for manual polling systems. Returns EAGAIN until the
+    // Non-blocking check for manual polling systems. Returns EWOULDBLOCK until the
     // coroutine has completed and then returns the stored Result<T>.
     Result<T> get() const noexcept
     {
         if (!handle_ || !handle_.done() || !handle_.promise().result_.has_value())
         {
-            return std::unexpected(MakeErrorCode(EAGAIN));
+            return std::unexpected(MakeErrorCode(EWOULDBLOCK));
         }
 
         if constexpr (std::is_void_v<T>)

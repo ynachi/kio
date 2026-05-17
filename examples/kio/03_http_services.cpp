@@ -157,7 +157,7 @@ DetachedTask dispatching_server_loop(IoContext& ctx, uint16_t port, std::stop_to
 
 int main()
 {
-    URing::ALOG::set_level(ALOG::Level::Info);
+    URing::ALOG::set_level(ALOG::Level::Debug);
     ALOG_DEBUG("Debug logging enabled");
 
     std::signal(SIGINT, signal_handler);

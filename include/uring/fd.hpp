@@ -41,10 +41,10 @@ struct Fd
     Fd& operator=(const Fd&) = delete;
 
     /// @brief Get the raw file descriptor.
-    [[nodiscard]] int Get() const { return fd; }
+    [[nodiscard]] int Get() const noexcept { return fd; }
 
     /// @brief Check if the descriptor is valid.
-    [[nodiscard]] bool IsValid() const { return fd >= 0; }
+    [[nodiscard]] bool IsValid() const noexcept { return fd >= 0; }
 
     /// @brief Release ownership to the caller.
     [[nodiscard]] int Release() noexcept
