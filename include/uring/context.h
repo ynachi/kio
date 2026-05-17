@@ -169,6 +169,7 @@ private:
     size_t id_;
     MpscQueue spawn_queue_;
     SpawnNodePool remote_pool_;
+    std::atomic<bool> wakeup_pending_{false};
     bool pending_remote_drain_{false};
 
     void drain_local();
@@ -200,12 +201,18 @@ public:
     SpawnNode* allocate_remote_node(InternalKey) noexcept { return remote_pool_.try_pop(); }
     void release_remote_node(InternalKey, SpawnNode* node) noexcept { remote_pool_.push(node); }
 
+    [[nodiscard]] bool try_set_wakeup_pending(InternalKey) noexcept
+    {
+        return !wakeup_pending_.exchange(true, std::memory_order_acq_rel);
+    }
+
     void init(InternalKey, int wq_fd = -1);
     void run(InternalKey, std::stop_token st) noexcept;
     void wake(InternalKey) const noexcept;
     void request_cancel(InternalKey, uint32_t op_idx) noexcept;
 
     size_t id() const noexcept { return id_; }
+    int ring_fd() const noexcept { return ring_.ring_fd; }
 
     io_uring_sqe* get_sqe(InternalKey) noexcept;
 
@@ -339,7 +346,20 @@ public:
 
         // TODO: maybe make spawn queue return true if push was a success
         target_io.spawn_queue(key_).push(node);
-        target_io.wake(key_);
+
+        if (target_io.try_set_wakeup_pending(key_))
+        {
+            if (current_io != nullptr)
+            {
+                auto* sqe = current_io->get_sqe(key_);
+                io_uring_prep_msg_ring(sqe, target_io.ring_fd(), 0, kRemoteWakeupTag, 0);
+                io_uring_sqe_set_data64(sqe, kRemoteSenderTag);
+            }
+            else
+            {
+                target_io.wake(key_);
+            }
+        }
 
         return true;
     }

@@ -187,6 +187,21 @@ void IoWorker::tick() noexcept
             continue;
         }
 
+        if (ud == kRemoteWakeupTag)
+        {
+            drain_remote_q = true;
+            continue;
+        }
+
+        if (ud == kRemoteSenderTag)
+        {
+            if (cqe->res < 0)
+            {
+                ALOG_ERROR("MSG_RING send failed: {}", std::strerror(-cqe->res));
+            }
+            continue;
+        }
+
         // Normal I/O completion.
         const auto token = Token::unpack(ud);
         const auto op = op_pool_.try_get(token);
@@ -207,7 +222,7 @@ void IoWorker::tick() noexcept
 
     if (drain_remote_q)
     {
-        // TODO: use the result
+        wakeup_pending_.store(false, std::memory_order_release);
         drain_remote_tasks();
     }
 
