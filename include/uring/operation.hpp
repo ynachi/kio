@@ -16,7 +16,7 @@ enum class SlotStatus : uint8_t
 struct PendingOp
 {
     std::coroutine_handle<> handle = nullptr;
-    uint32_t generation = 0;
+    uint64_t generation = 0;
     int result_code = 0;
     union
     {
@@ -37,23 +37,25 @@ struct PendingOp
 };
 
 // Normal I/O completions use user_data as:
-//   [ 2-bit tag = 00 ][ 30-bit generation ][ 32-bit op index ]
+//   [ 2-bit tag ][ 40-bit generation ][ 22-bit op index ]
 // The high tag bits are reserved for non-I/O CQEs such as MSG_RING control messages.
 struct Token
 {
-    static constexpr std::uint32_t kMaxGeneration = (1u << 30) - 1;
+    static constexpr uint32_t kIndexBits = 22;
+    static constexpr uint64_t kIndexMask = (1ULL << kIndexBits) - 1;
+    static constexpr uint64_t kMaxGeneration = (1ULL << 40) - 1;
 
-    std::uint32_t idx;
-    std::uint32_t gen;
+    uint32_t idx;
+    uint64_t gen;
 
-    [[nodiscard]] constexpr std::uint64_t pack() const noexcept
+    [[nodiscard]] constexpr uint64_t pack() const noexcept
     {
-        return static_cast<std::uint64_t>(gen & kMaxGeneration) << 32 | idx;
+        return ((gen & kMaxGeneration) << kIndexBits) | (idx & kIndexMask);
     }
 
-    [[nodiscard]] static constexpr Token unpack(const std::uint64_t ud) noexcept
+    [[nodiscard]] static constexpr Token unpack(const uint64_t ud) noexcept
     {
-        return {static_cast<std::uint32_t>(ud & 0xFFFFFFFF), static_cast<std::uint32_t>((ud >> 32) & kMaxGeneration)};
+        return {static_cast<uint32_t>(ud & kIndexMask), (ud >> kIndexBits) & kMaxGeneration};
     }
 };
 
@@ -64,7 +66,7 @@ class OpPool
 
     std::deque<PendingOp> entries_;
     uint32_t head_free_idx_{END_OF_LIST};
-    uint32_t next_gen_{1};
+    uint64_t next_gen_{1};
 
 public:
     explicit OpPool(const std::size_t pool_size) noexcept
