@@ -95,7 +95,7 @@ set(KIO_SANITIZER "thread" CACHE STRING "Sanitizer to use (address, thread, unde
 function(kio_add_sanitizers target_name)
     if (KIO_SANITIZER STREQUAL "none")
         return()
-    endif()
+    endif ()
 
     if (CMAKE_BUILD_TYPE STREQUAL "Debug")
         message(STATUS "🔍 ${KIO_SANITIZER} Sanitizer enabled on target ${target_name}")
@@ -110,7 +110,7 @@ function(kio_add_sanitizers target_name)
 
         if (KIO_SANITIZER STREQUAL "thread")
             target_compile_definitions(${target_name} PUBLIC __SANITIZE_THREAD__=1)
-        endif()
+        endif ()
     endif ()
 endfunction()
 
@@ -169,7 +169,7 @@ set(KIO_TEST_FILTER "all" CACHE STRING "List of tags to build (or 'all')")
 option(KIO_BUILD_BITCASK "Build bitcask storage engine" ON)
 option(KIO_BUILD_DEMOS "Build the kio demo executables" ON)
 # pass -DKIO_DEMO_FILTER="core;http" to build specific subsets of demo.
-option(KIO_BUILD_BENCHMARK "Build codes used to benchmark kio against other libs" ON)
+option(KIO_BUILD_BENCHMARK "Build codes used to benchmark kio against other libs" OFF)
 option(ENABLE_CLANG_TIDY "Run clang-tidy during compilation" OFF)
 
 # Enable clang-tidy during build if requested
@@ -306,13 +306,38 @@ target_link_libraries(uring PUBLIC
 kio_add_sanitizers(uring)
 
 #-----------------------------------------------
+# bitcask lib
+#----------------------------------------------
+# Library definition
+if (KIO_BUILD_BITCASK)
+    add_library(bitcask
+            src/bitcask/file.cc
+    )
+
+    # Include directories
+    target_include_directories(bitcask PUBLIC
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+            $<INSTALL_INTERFACE:include>
+    )
+    # Link dependencies
+    target_link_libraries(bitcask
+            PUBLIC
+            kio
+            absl::flat_hash_map
+            absl::flat_hash_set
+            absl::inlined_vector
+            PRIVATE
+            cpp_library
+            crc32c
+    )
+    kio_add_sanitizers(bitcask)
+endif ()
+
+
+#-----------------------------------------------
 # Includes
 #----------------------------------------------
 include_directories(${CMAKE_SOURCE_DIR})
-
-#if (KIO_BUILD_BITCASK)
-#    add_subdirectory(bitcask)
-#endif ()
 
 if (KIO_BUILD_DEMOS)
     add_subdirectory(examples)
