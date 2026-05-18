@@ -311,7 +311,7 @@ kio_add_sanitizers(uring)
 # Library definition
 if (KIO_BUILD_BITCASK)
     add_library(bitcask
-            src/bitcask/file.cc
+            src/bitcask/cache.cc
     )
 
     # Include directories
@@ -322,12 +322,11 @@ if (KIO_BUILD_BITCASK)
     # Link dependencies
     target_link_libraries(bitcask
             PUBLIC
-            kio
+            uring
             absl::flat_hash_map
             absl::flat_hash_set
             absl::inlined_vector
             PRIVATE
-            cpp_library
             crc32c
     )
     kio_add_sanitizers(bitcask)

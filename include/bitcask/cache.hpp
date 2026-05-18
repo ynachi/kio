@@ -139,6 +139,15 @@ public:
     explicit Cache(const std::size_t capacity, std::pmr::memory_resource* mr = std::pmr::get_default_resource())
         : capacity_(capacity), mr_(mr), map_(capacity_, typename PmrMap::hasher(), typename PmrMap::key_equal())
     {
+        if (capacity == 0) {
+            throw std::invalid_argument("Cache capacity must be greater than 0");
+        }
+
+        head_ = allocate_node(Key{}, Value{});
+        tail_ = allocate_node(Key{}, Value{});
+        head_->next = tail_;
+        tail_->prev = head_;
+        hand_ = tail_->prev;
     }
 
     Cache(const Cache&) = delete;
@@ -185,7 +194,7 @@ public:
             evict();
         }
 
-        Node* node = allocate_node(std::move(key), std::move(value));
+        Node* node = allocate_node(key, std::move(value));
         insert_after_head(node);
         map_.insert({std::move(key), node});
     }

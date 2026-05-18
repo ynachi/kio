@@ -23,3 +23,11 @@ kio_add_test(context_remote_tests uring/context_remote_test.cpp
         TAGS uring integration queue
         LIBS uring GTest::gtest GTest::gtest_main
 )
+
+#===============================
+# Bitcask tests
+#================================
+kio_add_test(bitcask_cache_tests bitcask/cache_test.cc
+        TAGS bitcask unit cache
+        LIBS bitcask GTest::gtest GTest::gtest_main
+)
