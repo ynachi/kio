@@ -105,6 +105,14 @@ namespace URing
                      });
 }
 
+/// Close takes ownership of the FD on purpose.
+/// Internally, it release the FD before performing an async close to avoid the Dtor of Fd to make a sync close.
+[[nodiscard]] inline auto close(Fd&& fd)
+{
+    auto raw_fd = fd.Release();
+    return IoAwaiter([raw_fd](io_uring_sqe* sqe) { io_uring_prep_close(sqe, raw_fd); }, detail::ResumeVoid{});
+}
+
 [[nodiscard]] inline auto remove(std::filesystem::path path)
 {
     return IoAwaiter([path](io_uring_sqe* sqe) { io_uring_prep_unlinkat(sqe, AT_FDCWD, path.c_str(), 0); },

@@ -94,15 +94,17 @@ TEST_F(CacheTest, EvictUnvisitedOldest) {
     StrCache cache(3, pmr_.get());
 
     // Insert 3 items: a (oldest) -> b -> c (newest)
-    cache.put("a", 1);
-    cache.put("b", 2);
-    cache.put("c", 3);
+    (void)cache.put("a", 1);
+    (void)cache.put("b", 2);
+    (void)cache.put("c", 3);
 
     // Access "b" to mark visited
     (void)cache.get("b");
 
     // Insert "d": should evict "a" (oldest, unvisited)
-    cache.put("d", 4);
+    auto evicted = cache.put("d", 4);
+    EXPECT_TRUE(evicted.has_value());
+    EXPECT_EQ(*evicted, 1);
 
     EXPECT_FALSE(cache.contains("a"));
     EXPECT_TRUE(cache.contains("b"));
@@ -114,9 +116,9 @@ TEST_F(CacheTest, EvictUnvisitedOldest) {
 TEST_F(CacheTest, SecondChanceThenEvict) {
     StrCache cache(3, pmr_.get());
 
-    cache.put("a", 1);
-    cache.put("b", 2);
-    cache.put("c", 3);
+    (void)cache.put("a", 1);
+    (void)cache.put("b", 2);
+    (void)cache.put("c", 3);
 
     // Mark all as visited
     (void)cache.get("a");
@@ -124,7 +126,8 @@ TEST_F(CacheTest, SecondChanceThenEvict) {
     (void)cache.get("c");
 
     // Insert "d": Sieve scan resets visited flags, then evicts oldest
-    cache.put("d", 4);
+    auto evicted = cache.put("d", 4);
+    EXPECT_EQ(evicted, 1);
 
     // "a" had visited=true, so it got reset to false, then evicted
     EXPECT_FALSE(cache.contains("a"));
@@ -133,7 +136,8 @@ TEST_F(CacheTest, SecondChanceThenEvict) {
     EXPECT_TRUE(cache.contains("d"));
 
     // Insert "e": now "b" is oldest unvisited
-    cache.put("e", 5);
+    evicted = cache.put("e", 5);
+    EXPECT_EQ(evicted, 2);
     EXPECT_FALSE(cache.contains("b"));
 }
 
@@ -225,6 +229,15 @@ struct MoveCounter {
     MoveCounter() = default;
     explicit MoveCounter(int v) : value(v) {}
 
+    MoveCounter(const MoveCounter& other) : value(other.value) {
+        copy_count++;
+    }
+    MoveCounter& operator=(const MoveCounter& other) {
+        value = other.value;
+        copy_count++;
+        return *this;
+    }
+
     MoveCounter(MoveCounter&& other) noexcept : value(other.value) {
         other.moved_from = true;
         move_count++;
@@ -237,34 +250,45 @@ struct MoveCounter {
         return *this;
     }
 
-    // Delete copy to enforce move-only
-    MoveCounter(const MoveCounter&) = delete;
-    MoveCounter& operator=(const MoveCounter&) = delete;
-
     int value = 0;
     bool moved_from = false;
     static inline int move_count = 0;
+    static inline int copy_count = 0;
 
     bool operator==(const MoveCounter& other) const {
         return value == other.value;
     }
 };
 
-TEST_F(CacheTest<std::string, MoveCounter>, ValuesAreMovedNotCopied) {
-    using Cache = Cache<std::string, MoveCounter>;
-    Cache cache(3, pmr_.get());
+class CacheMoveTest : public ::testing::Test {
+protected:
+    void SetUp() override { pmr_ = std::make_unique<TrackingResource>(); }
+    void TearDown() override {
+        EXPECT_EQ(pmr_->net_allocations(), 0);
+    }
+    std::unique_ptr<TrackingResource> pmr_;
+};
+
+TEST_F(CacheMoveTest, ValuesAreMovedNotCopied) {
+    using MoveCache = Cache<std::string, MoveCounter>;
+    MoveCache cache(3, pmr_.get());
 
     MoveCounter::move_count = 0;
+    MoveCounter::copy_count = 0;
 
     cache.put("key1", MoveCounter(100));
     cache.put("key2", MoveCounter(200));
 
-    // Each put should move the value once (into Node)
-    EXPECT_EQ(MoveCounter::move_count, 2);
+    // Each put should move the value into the Node. 
+    // Depending on compiler optimizations, it might be more than 1 move per put,
+    // but should be 0 copies.
+    EXPECT_EQ(MoveCounter::copy_count, 0);
+    EXPECT_GE(MoveCounter::move_count, 2);
 
     auto val = cache.get("key1");
     EXPECT_TRUE(val.has_value());
     EXPECT_EQ(val->value, 100);
+    // get() returns by value, so it WILL copy (or move if compiler optimizes)
 }
 
 // ============================================================================
@@ -272,33 +296,59 @@ TEST_F(CacheTest<std::string, MoveCounter>, ValuesAreMovedNotCopied) {
 // ============================================================================
 
 struct ThrowOnConstruct {
-    explicit ThrowOnConstruct(int) {
-        throw std::runtime_error("construction failed");
+    bool should_throw = false;
+    ThrowOnConstruct() = default;
+    explicit ThrowOnConstruct(bool t) : should_throw(t) {
+        if (should_throw) throw std::runtime_error("construction failed");
+    }
+    ThrowOnConstruct(ThrowOnConstruct&& other) noexcept : should_throw(other.should_throw) {}
+    ThrowOnConstruct& operator=(ThrowOnConstruct&& other) noexcept {
+        should_throw = other.should_throw;
+        return *this;
     }
 };
 
-TEST_F(CacheTest<std::string, ThrowOnConstruct>, PutWithThrowingValueIsSafe) {
-    using Cache = SieveCache<std::string, ThrowOnConstruct>;
-    Cache cache(3, mock_resource_.get());
+class CacheExceptionTest : public ::testing::Test {
+protected:
+    void SetUp() override { pmr_ = std::make_unique<TrackingResource>(); }
+    void TearDown() override {
+        EXPECT_EQ(pmr_->net_allocations(), 0);
+    }
+    std::unique_ptr<TrackingResource> pmr_;
+};
+
+TEST_F(CacheExceptionTest, PutWithThrowingValueIsSafe) {
+    using ExCache = Cache<std::string, ThrowOnConstruct>;
+    ExCache cache(3, pmr_.get());
 
     // Insert one valid item first
-    cache.put("valid", ThrowOnConstruct(0));  // Assume this doesn't throw for test
+    cache.put("valid", ThrowOnConstruct(false));
 
-    // Reset mock counts after successful insert
-    mock_resource_->reset_counts();
+    struct ThrowOnMove {
+        bool should_throw = false;
+        ThrowOnMove() = default;
+        ThrowOnMove(bool t) : should_throw(t) {}
+        ThrowOnMove(const ThrowOnMove&) = default;
+        ThrowOnMove(ThrowOnMove&& other) {
+            if (other.should_throw) throw std::runtime_error("move failed");
+        }
+        ThrowOnMove& operator=(ThrowOnMove&&) = default;
+    };
+    
+    using ThrowCache = Cache<std::string, ThrowOnMove>;
+    ThrowCache tcache(3, pmr_.get());
+    tcache.put("valid", ThrowOnMove(false));
 
-    // Attempt to insert throwing value
-    EXPECT_THROW(
-        cache.put("throwing", ThrowOnConstruct(1)),
-        std::runtime_error
-    );
+    std::size_t allocs_before = pmr_->allocations();
+    std::size_t deallocs_before = pmr_->deallocations();
 
-    // Cache should still be consistent
-    EXPECT_EQ(cache.size(), 1u);
-    EXPECT_TRUE(cache.contains("valid"));
+    EXPECT_THROW(tcache.put("throwing", ThrowOnMove(true)), std::runtime_error);
 
-    // No memory leaks: any allocated node for "throwing" should be cleaned up
-    EXPECT_EQ(mock_resource_->net_allocations(), 0);
+    EXPECT_EQ(tcache.size(), 1u);
+    EXPECT_TRUE(tcache.contains("valid"));
+    
+    // Any partial allocation for "throwing" should have been rolled back
+    EXPECT_EQ(pmr_->allocations() - allocs_before, pmr_->deallocations() - deallocs_before);
 }
 
 // ============================================================================
@@ -306,61 +356,54 @@ TEST_F(CacheTest<std::string, ThrowOnConstruct>, PutWithThrowingValueIsSafe) {
 // ============================================================================
 
 TEST_F(CacheTest, PMRResourceIsUsedForAllocations) {
-    Cache cache(3, mock_resource_.get());
-
-    mock_resource_->reset_counts();
-
+    StrCache cache(3, pmr_.get());
+    
+    // Each put allocates one Node. Total: 2 (sentinels) + 2 (data) = 4
     cache.put("a", 1);
     cache.put("b", 2);
 
-    // Each put allocates one Node
-    EXPECT_GE(mock_resource_->allocations(), 2u);
-    EXPECT_EQ(mock_resource_->net_allocations(), 2);  // 2 nodes alive
+    EXPECT_EQ(pmr_->net_allocations(), 4);
 }
 
 TEST_F(CacheTest, PMRDeallocatesOnEviction) {
-    Cache cache(2, mock_resource_.get());
-
+    StrCache cache(2, pmr_.get());
     cache.put("a", 1);
     cache.put("b", 2);
 
-    mock_resource_->reset_counts();
+    std::size_t allocs_before = pmr_->allocations();
+    std::size_t deallocs_before = pmr_->deallocations();
 
     // Insert "c": evicts "a", deallocating its Node
     cache.put("c", 3);
 
-    EXPECT_EQ(mock_resource_->deallocations(), 1u);  // "a" freed
-    EXPECT_EQ(mock_resource_->net_allocations(), 2);  // Still 2 nodes alive
+    EXPECT_EQ(pmr_->allocations() - allocs_before, 1u);    // "c" allocated
+    EXPECT_EQ(pmr_->deallocations() - deallocs_before, 1u); // "a" freed
 }
 
 TEST_F(CacheTest, PMRDeallocatesOnClear) {
-    Cache cache(3, mock_resource_.get());
-
+    StrCache cache(3, pmr_.get());
     cache.put("a", 1);
     cache.put("b", 2);
     cache.put("c", 3);
 
-    mock_resource_->reset_counts();
+    std::size_t deallocs_before = pmr_->deallocations();
 
     cache.clear();
 
-    EXPECT_EQ(mock_resource_->deallocations(), 3u);  // All 3 nodes freed
-    EXPECT_EQ(mock_resource_->net_allocations(), 0);
+    EXPECT_EQ(pmr_->deallocations() - deallocs_before, 3u);  // All 3 nodes freed
 }
 
 TEST_F(CacheTest, DestructorFreesAllMemory) {
-    std::size_t allocs_before = mock_resource_->allocations();
-
     {
-        Cache cache(5, mock_resource_.get());
+        StrCache cache(5, pmr_.get());
         for (int i = 0; i < 5; ++i) {
             cache.put(std::to_string(i), i);
         }
+        EXPECT_EQ(pmr_->net_allocations(), 7); // 5 nodes + 2 sentinels
     }  // cache destroyed here
 
     // All nodes should be deallocated
-    EXPECT_EQ(mock_resource_->net_allocations(), 0);
-    EXPECT_GE(mock_resource_->deallocations(), 5u);
+    EXPECT_EQ(pmr_->net_allocations(), 0);
 }
 
 // ============================================================================
@@ -368,7 +411,7 @@ TEST_F(CacheTest, DestructorFreesAllMemory) {
 // ============================================================================
 
 TEST_F(CacheTest, RapidPutGetPattern) {
-    Cache cache(10, mock_resource_.get());
+    StrCache cache(10, pmr_.get());
 
     // Simulate workload: 80% reads, 20% writes
     for (int iter = 0; iter < 100; ++iter) {
@@ -386,12 +429,12 @@ TEST_F(CacheTest, RapidPutGetPattern) {
 }
 
 TEST_F(CacheTest, AllItemsVisitedThenEvict) {
-    Cache cache(5, pmr_.get());
+    StrCache cache(5, pmr_.get());
 
     // Fill and mark all visited
     for (int i = 0; i < 5; ++i) {
         cache.put(std::to_string(i), i);
-        cache.get(std::to_string(i));
+        (void)cache.get(std::to_string(i));
     }
 
     // Insert new item: should reset all visited flags, then evict oldest

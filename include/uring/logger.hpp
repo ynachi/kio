@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstring>
 #include <format>
+#include <bit>
 #include <mutex>
 #include <new>
 #include <optional>
@@ -15,6 +16,7 @@
 
 #include <unistd.h>
 
+#include <sys/syscall.h>
 #include <sys/uio.h>
 
 #ifndef LOG_BUILD_LEVEL
@@ -43,7 +45,7 @@ constexpr Level kBuildMinLevel = static_cast<Level>(LOG_BUILD_LEVEL);
 // ---- Parameters ----
 constexpr size_t kMaxThreads = 64;
 constexpr size_t kQueueSize = 1024;  // Must be power of 2
-constexpr size_t kMsgMax = 512;      // Buffer per log line
+constexpr size_t kMsgMax = 1024;     // Buffer per log line
 
 namespace detail
 {
@@ -98,17 +100,19 @@ struct SPSC
     alignas(kCacheLine) std::atomic<uint32_t> tail{0};
     Record buf[kQueueSize]{};
 
-    bool try_push(const Record& r) noexcept
+    enum class PushResult: uint8_t { Success, SuccessWasEmpty, QueueFull };
+
+    PushResult try_push(const Record& r) noexcept
     {
         const uint32_t h = head.load(std::memory_order_relaxed);
         const uint32_t t = tail.load(std::memory_order_acquire);
 
         if ((h - t) >= kQueueSize)
-            return false;
+            return PushResult::QueueFull;
 
         buf[h & Mask] = r;
         head.store(h + 1, std::memory_order_release);
-        return true;
+        return (h == t) ? PushResult::SuccessWasEmpty : PushResult::Success;
     }
 
     bool try_pop(Record& out) noexcept
@@ -139,13 +143,15 @@ struct alignas(kCacheLine) ThreadSlot
 
 // Global State
 inline std::array<ThreadSlot, kMaxThreads> g_slots;
-inline std::atomic<uint32_t> g_next_slot{0};
+inline std::atomic<uint64_t> g_free_slots_mask{~0ULL};
+inline std::atomic<uint32_t> g_max_slot_idx{0};
 
 // Replaced eventfd with atomic epoch for futex wait
 inline std::atomic<uint32_t> g_epoch{0};
-inline std::atomic<bool> g_running{false};  // FIXED: explicit template arg
+inline std::atomic g_running{false};  // FIXED: explicit template arg
 inline std::jthread g_thread;
 inline std::atomic<uint64_t> g_dropped{0};
+inline std::mutex g_lifecycle_mtx;
 
 inline void wake_logger() noexcept
 {
@@ -160,11 +166,26 @@ struct ThreadRegGuard
 
     ThreadRegGuard()
     {
-        uint32_t idx = g_next_slot.fetch_add(1, std::memory_order_relaxed);
+        uint64_t mask = g_free_slots_mask.load(std::memory_order_relaxed);
+        uint32_t idx;
+        do
+        {
+            if (mask == 0)
+                return; // No free slots
+            idx = std::countr_zero(mask);
+        } while (!g_free_slots_mask.compare_exchange_weak(mask, mask & ~(1ULL << idx), std::memory_order_acquire,
+                                                          std::memory_order_relaxed));
+
         if (idx < kMaxThreads)
         {
             slot_idx = idx;
             g_slots[idx].active.store(true, std::memory_order_release);
+            
+            // Update high-water mark
+            uint32_t cur_max = g_max_slot_idx.load(std::memory_order_relaxed);
+            while (idx >= cur_max && !g_max_slot_idx.compare_exchange_weak(cur_max, idx + 1, std::memory_order_relaxed))
+            {
+            }
         }
     }
 
@@ -173,6 +194,11 @@ struct ThreadRegGuard
         if (slot_idx < kMaxThreads)
         {
             g_slots[slot_idx].active.store(false, std::memory_order_release);
+            uint64_t mask = g_free_slots_mask.load(std::memory_order_relaxed);
+            while (!g_free_slots_mask.compare_exchange_weak(mask, mask | (1ULL << slot_idx), std::memory_order_release,
+                                                            std::memory_order_relaxed))
+            {
+            }
             wake_logger();
         }
     }
@@ -190,8 +216,11 @@ inline void drain_all(int out_fd)
     Record batch[kMaxBatch];
     iovec iovs[kMaxBatch];
 
-    for (auto& slot : g_slots)
+    const uint32_t max_idx = g_max_slot_idx.load(std::memory_order_acquire);
+    for (uint32_t i = 0; i < max_idx; ++i)
     {
+        auto& slot = g_slots[i];
+        
         // FIXED: Always drain if queue has data, regardless of active flag
         // A deregistering thread may have pending logs; skip only if truly empty
         if (slot.q.is_empty())
@@ -207,12 +236,33 @@ inline void drain_all(int out_fd)
 
         if (count > 0)
         {
-            // FIXED: Handle writev errors
-            const ssize_t written = ::writev(out_fd, iovs, count);
-            if (written < 0)
+            size_t iov_idx = 0;
+            while (iov_idx < count)
             {
-                // Increment drop counter for failed writes
-                g_dropped.fetch_add(count, std::memory_order_relaxed);
+                const ssize_t written = ::writev(out_fd, iovs + iov_idx, count - iov_idx);
+                if (written < 0)
+                {
+                    if (errno == EINTR)
+                        continue;
+                    g_dropped.fetch_add(count - iov_idx, std::memory_order_relaxed);
+                    break;
+                }
+
+                size_t remaining_written = written;
+                while (iov_idx < count && remaining_written > 0)
+                {
+                    if (remaining_written >= iovs[iov_idx].iov_len)
+                    {
+                        remaining_written -= iovs[iov_idx].iov_len;
+                        iov_idx++;
+                    }
+                    else
+                    {
+                        iovs[iov_idx].iov_base = static_cast<char*>(iovs[iov_idx].iov_base) + remaining_written;
+                        iovs[iov_idx].iov_len -= remaining_written;
+                        break;
+                    }
+                }
             }
         }
     }
@@ -238,7 +288,7 @@ inline void logger_loop(int out_fd)
 
 template <typename... Args>
 inline void format_into(Record& r, Level lvl, std::source_location loc, std::format_string<Args...> fmt,
-                        Args&&... args) noexcept
+                        Args&&... args)
 {
     r.level = static_cast<uint8_t>(lvl);
 
@@ -280,11 +330,10 @@ inline void format_into(Record& r, Level lvl, std::source_location loc, std::for
     // FIXED: Add truncation marker if output was cut off
     if (res.size > static_cast<size_t>(end - r.msg))
     {
-        constexpr const char* trunc = " [TRUNCATED]";
-        const size_t trunc_len = std::strlen(trunc);
-        if (p + trunc_len < end)
+        constexpr auto trunc = " [TRUNCATED]";
+        if (const size_t trunc_len = std::strlen(trunc); p + trunc_len < end)
         {
-            std::memcpy(p, trunc, trunc_len);
+            strcpy(p, trunc);
             p += trunc_len;
         }
     }
@@ -307,20 +356,17 @@ inline void format_into(Record& r, Level lvl, std::source_location loc, std::for
 
 inline void start(int out_fd = STDERR_FILENO)
 {
-    // FIXED: Use call_once for lazy init to avoid race
-    static std::once_flag init_flag;
-    std::call_once(init_flag,
-                   [out_fd]
-                   {
-                       if (bool expected = false; !detail::g_running.compare_exchange_strong(expected, true))
-                           return;
-                       detail::g_thread = std::jthread([out_fd] { detail::logger_loop(out_fd); });
-                   });
+    std::scoped_lock lock(detail::g_lifecycle_mtx);
+    if (detail::g_running.load(std::memory_order_acquire))
+        return;
+    detail::g_running.store(true, std::memory_order_release);
+    detail::g_thread = std::jthread([out_fd] { detail::logger_loop(out_fd); });
 }
 
 inline void stop()
 {
-    if (!detail::g_running.exchange(false))
+    std::scoped_lock lock(detail::g_lifecycle_mtx);
+    if (!detail::g_running.exchange(false, std::memory_order_acq_rel))
         return;
     detail::wake_logger();
     if (detail::g_thread.joinable())
@@ -379,10 +425,9 @@ void log_impl(std::source_location loc, std::format_string<Args...> fmt, Args&&.
             if constexpr (L >= Level::Error)
             {
                 // Synchronous fallback for critical logs
-                char fallback[kMsgMax];
-                detail::format_into(*reinterpret_cast<detail::Record*>(fallback), L, loc, fmt,
-                                    std::forward<Args>(args)...);
-                ::write(STDERR_FILENO, fallback, reinterpret_cast<detail::Record*>(fallback)->len);
+                detail::Record fallback{};
+                detail::format_into(fallback, L, loc, fmt, std::forward<Args>(args)...);
+                ::write(STDERR_FILENO, fallback.msg, fallback.len);
             }
             return;
         }
@@ -391,9 +436,9 @@ void log_impl(std::source_location loc, std::format_string<Args...> fmt, Args&&.
         detail::format_into(r, L, loc, fmt, std::forward<Args>(args)...);
 
         auto& q = detail::g_slots[slot].q;
-        const bool was_empty = q.is_empty();
+        auto res = q.try_push(r);
 
-        if (!q.try_push(r))
+        if (res == detail::SPSC::PushResult::QueueFull)
         {
             detail::g_dropped.fetch_add(1, std::memory_order_relaxed);
             // Optional: fallback to stderr for Fatal
@@ -404,7 +449,7 @@ void log_impl(std::source_location loc, std::format_string<Args...> fmt, Args&&.
             return;
         }
 
-        if (was_empty)
+        if (res == detail::SPSC::PushResult::SuccessWasEmpty)
         {
             detail::wake_logger();
         }

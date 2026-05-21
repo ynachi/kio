@@ -85,7 +85,7 @@ using RemoteTask = std::move_only_function<void()>;
 struct SpawnNode : MpscNode
 {
     RemoteTask task;
-    SpawnNode* next_free{nullptr};
+    std::atomic<SpawnNode*> next_free{nullptr};
 
     SpawnNode() = default;
     explicit SpawnNode(RemoteTask task_) : task(std::move(task_)) {}
@@ -93,16 +93,41 @@ struct SpawnNode : MpscNode
 
 class SpawnNodePool
 {
-    std::atomic<SpawnNode*> head_{nullptr};
+    static_assert(sizeof(std::uintptr_t) == sizeof(std::uint64_t),
+                  "SpawnNodePool tagged pointer requires 64-bit pointers");
+
+    static constexpr std::uintptr_t kPointerBits = 48;
+    static constexpr std::uintptr_t kPointerMask = (std::uintptr_t{1} << kPointerBits) - 1;
+    static constexpr std::uintptr_t kTagIncrement = std::uintptr_t{1} << kPointerBits;
+    static constexpr std::uintptr_t kTagMask = ~kPointerMask;
+
+    std::atomic<std::uintptr_t> head_{0};
+
+    static SpawnNode* unpack_ptr(const std::uintptr_t head) noexcept
+    {
+        return reinterpret_cast<SpawnNode*>(head & kPointerMask);
+    }
+
+    static std::uintptr_t bump_tag(const std::uintptr_t head) noexcept { return (head + kTagIncrement) & kTagMask; }
+
+    static bool can_pack(const SpawnNode* node) noexcept
+    {
+        return (reinterpret_cast<std::uintptr_t>(node) & kTagMask) == 0;
+    }
+
+    static std::uintptr_t pack(SpawnNode* node, const std::uintptr_t tag) noexcept
+    {
+        return (reinterpret_cast<std::uintptr_t>(node) & kPointerMask) | (tag & kTagMask);
+    }
 
 public:
     SpawnNodePool() = default;
     ~SpawnNodePool()
     {
-        auto* curr = head_.load(std::memory_order_acquire);
-        while (curr)
+        const auto* curr = unpack_ptr(head_.load(std::memory_order_acquire));
+        while (curr != nullptr)
         {
-            auto* next = curr->next_free;
+            const auto* next = curr->next_free.load(std::memory_order_relaxed);
             delete curr;
             curr = next;
         }
@@ -111,26 +136,44 @@ public:
     void push(SpawnNode* node) noexcept
     {
         node->task = nullptr;
-        auto* old_head = head_.load(std::memory_order_relaxed);
-        do
+        if (!can_pack(node))
         {
-            node->next_free = old_head;
-        } while (!head_.compare_exchange_weak(old_head, node, std::memory_order_release, std::memory_order_relaxed));
+            ALOG_WARN("SpawnNodePool cannot pack pointer; releasing node without pooling");
+            delete node;
+            return;
+        }
+
+        auto old_head = head_.load(std::memory_order_relaxed);
+        for (;;)
+        {
+            node->next_free.store(unpack_ptr(old_head), std::memory_order_relaxed);
+            if (head_.compare_exchange_weak(old_head, pack(node, bump_tag(old_head)), std::memory_order_release,
+                                            std::memory_order_relaxed))
+            {
+                return;
+            }
+        }
     }
 
     SpawnNode* try_pop() noexcept
     {
-        auto* old_head = head_.load(std::memory_order_acquire);
-        while (old_head)
+        auto old_head = head_.load(std::memory_order_acquire);
+        for (;;)
         {
-            if (head_.compare_exchange_weak(old_head, old_head->next_free, std::memory_order_acquire,
+            auto* node = unpack_ptr(old_head);
+            if (node == nullptr)
+            {
+                return nullptr;
+            }
+
+            auto* next = node->next_free.load(std::memory_order_acquire);
+            if (head_.compare_exchange_weak(old_head, pack(next, bump_tag(old_head)), std::memory_order_acquire,
                                             std::memory_order_acquire))
             {
-                old_head->next_free = nullptr;
-                return old_head;
+                node->next_free.store(nullptr, std::memory_order_relaxed);
+                return node;
             }
         }
-        return nullptr;
     }
 };
 
@@ -180,6 +223,7 @@ private:
     void arm_wake_read() noexcept;
 
     std::size_t drain_remote_tasks() noexcept;
+    void submit_or_wait_for();
 
     void tick() noexcept;
 

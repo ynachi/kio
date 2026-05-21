@@ -98,7 +98,7 @@ class Cache
         head_->next->prev = node;
         head_->next = node;
     }
-    void evict()
+    Value evict()
     {
         assert(!map_.empty() && "evict() called on empty cache");
         Node* candidate = hand_;
@@ -124,6 +124,9 @@ class Cache
         // Advance hand for next eviction BEFORE unlinking
         hand_ = candidate->prev;
 
+        // Move value first for exception safety
+        Value evicted_val = std::move(candidate->value);
+
         // Unlink victim from intrusive doubly-linked list (O(1))
         candidate->prev->next = candidate->next;
         candidate->next->prev = candidate->prev;
@@ -133,6 +136,8 @@ class Cache
 
         // Explicitly destroy + deallocate via PMR
         deallocate_node(candidate);
+
+        return evicted_val;
     }
 
 public:
@@ -176,9 +181,10 @@ public:
         return it->second->value;
     }
 
-    /// @brief Insert or update key-value pair. Evicts if at capacity.
+    /// @brief Insert or update key-value pair.
+    /// @return std::optional<Value>: contains the evicted value if capacity was reached, nullopt otherwise.
     /// @throws May throw on PMR allocation, hash rehash, or Key/Value move/copy
-    void put(Key key, Value value)
+    std::optional<Value> put(Key key, Value value)
     {
         auto it = map_.find(key);
         if (it != map_.end())
@@ -186,17 +192,20 @@ public:
             // Update existing
             it->second->value = std::move(value);
             it->second->visited = true;
-            return;
+            return std::nullopt;
         }
 
+        std::optional<Value> evicted;
         if (map_.size() >= capacity_)
         {
-            evict();
+            evicted = evict();
         }
 
         Node* node = allocate_node(key, std::move(value));
         insert_after_head(node);
         map_.insert({std::move(key), node});
+
+        return evicted;
     }
 
     [[nodiscard]] std::size_t size() const noexcept { return map_.size(); }

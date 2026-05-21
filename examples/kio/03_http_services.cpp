@@ -162,14 +162,14 @@ int main()
 
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
-    size_t num_threads = 16;
+    size_t num_threads = 4;
     if constexpr (kUseRemoteDispatch)
     {
         // add one more for benh fairness
         num_threads += 1;
     }
 
-    IoOptions opts;
+    constexpr IoOptions opts;
     // // lets use sqpool
     // opts.flags = IORING_SETUP_SQPOLL | IORING_SETUP_SINGLE_ISSUER;
     // opts.sq_thread_idle_ms = 2000;

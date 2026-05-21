@@ -140,22 +140,15 @@ std::size_t IoWorker::drain_remote_tasks() noexcept
     return total;
 }
 
-void IoWorker::tick() noexcept
+void IoWorker::submit_or_wait_for()
 {
-    bool drain_remote_q = false;
-
-    if (!wake_read_armed_)
-    {
-        arm_wake_read();
-    }
-
     // Only block if we have no local work to do.
     // Local work includes:
     // 1. CQEs already waiting in the ring.
     // 2. Coroutines ready to resume in our ready_queue_.
     // 3. Remote tasks pending in the spawn_queue_ (indicated by wakeup_pending_).
-    const bool has_work = io_uring_cq_ready(&ring_) > 0 || !ready_queue_.empty() ||
-                          wakeup_pending_.load(std::memory_order_relaxed);
+    const bool has_work =
+        io_uring_cq_ready(&ring_) > 0 || !ready_queue_.empty() || wakeup_pending_.load(std::memory_order_relaxed);
 
     if (has_work)
     {
@@ -171,6 +164,17 @@ void IoWorker::tick() noexcept
             ALOG_ERROR("failed to submit and wait: {}", std::strerror(-ret));
         }
     }
+}
+void IoWorker::tick() noexcept
+{
+    bool drain_remote_q = false;
+
+    if (!wake_read_armed_)
+    {
+        arm_wake_read();
+    }
+
+    submit_or_wait_for();
 
     // Batch process CQEs
     io_uring_cqe* cqe = nullptr;
@@ -233,8 +237,8 @@ void IoWorker::tick() noexcept
         io_uring_cq_advance(&ring_, count);
     }
 
-    const bool had_pending_remote_work = wakeup_pending_.exchange(false, std::memory_order_acq_rel);
-    if (drain_remote_q || had_pending_remote_work)
+    if (const bool had_pending_remote_work = wakeup_pending_.exchange(false, std::memory_order_acq_rel);
+        drain_remote_q || had_pending_remote_work)
     {
         drain_remote_tasks();
     }
@@ -329,6 +333,11 @@ IoWorker::~IoWorker()
     {
         io_uring_queue_exit(&ring_);
         ring_.ring_fd = -1;
+    }
+
+    if (wake_fd_ >= 0) {
+        ::close(wake_fd_);
+        wake_fd_ = -1;
     }
 }
 

@@ -34,22 +34,36 @@ class CoroAllocator
         return kNumBuckets;
     }
 
-    static Block* refill_bucket(const std::size_t bucket_idx) noexcept
+    static Block* refill_bucket(const std::size_t bucket_idx)
     {
         const std::size_t block_size = kBuckets[bucket_idx];
-        auto* head = static_cast<Block*>(::operator new(block_size));
-        auto* current = head;
-        for (std::size_t i = 1; i < kRefillBatchSize; ++i)
+        Block* head = nullptr;
+
+        try
         {
-            current->next = static_cast<Block*>(::operator new(block_size));
-            current = current->next;
+            for (std::size_t i = 0; i < kRefillBatchSize; ++i)
+            {
+                auto* block = static_cast<Block*>(::operator new(block_size));
+                block->next = head;
+                head = block;
+            }
         }
-        current->next = nullptr;
+        catch (...)
+        {
+            while (head != nullptr)
+            {
+                Block* next = head->next;
+                ::operator delete(head);
+                head = next;
+            }
+            throw;
+        }
+
         return head;
     }
 
 public:
-    static void prewarm(const std::size_t bucket_idx, const std::size_t count) noexcept
+    static void prewarm(const std::size_t bucket_idx, const std::size_t count)
     {
         if (bucket_idx >= kNumBuckets)
             return;
@@ -61,7 +75,7 @@ public:
         }
     }
 
-    static void* allocate(const std::size_t size) noexcept
+    static void* allocate(const std::size_t size)
     {
         if (const auto idx = get_bucket_index(size); idx < kNumBuckets)
         {
