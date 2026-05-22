@@ -257,10 +257,6 @@ void IoWorker::run(InternalKey key, std::stop_token st) noexcept
     static_assert(sizeof(Task<void>::promise_type) <= 256, "Task<void> promise exceeds prewarm bucket 1");
     static_assert(sizeof(DetachedTask::promise_type) <= 128, "DetachedTask promise exceeds prewarm bucket 0");
 
-    CoroAllocator::prewarm(0, 128);
-    CoroAllocator::prewarm(1, 256);
-    CoroAllocator::prewarm(2, 64);
-
     std::stop_callback wake_on_stop{st, [this, key] { wake(key); }};
     while (!st.stop_requested())
     {
@@ -275,7 +271,6 @@ void IoWorker::run(InternalKey key, std::stop_token st) noexcept
 
     // reset the tls context
     tl_io = nullptr;
-    CoroAllocator::cleanup_thread_cache();
 }
 
 io_uring_sqe* IoWorker::get_sqe(InternalKey) noexcept

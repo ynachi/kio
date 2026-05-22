@@ -198,14 +198,14 @@ if (KIO_BUILD_TESTS)
     find_package(GTest REQUIRED)
 endif ()
 
-# YLT
-find_package(YLT REQUIRED)
-
 # CRC32C
 find_package(CRC32C REQUIRED)
 
 # Abseil
 find_package(Abseil REQUIRED)
+
+# mimalloc
+find_package(mimalloc REQUIRED)
 
 # openssl, min 3 required
 find_package(OpenSSL 3 REQUIRED)
@@ -298,6 +298,7 @@ target_include_directories(uring PUBLIC
 )
 # Link dependencies
 target_link_libraries(uring PUBLIC
+        mimalloc
         PkgConfig::LibUring
         pthread
         OpenSSL::SSL

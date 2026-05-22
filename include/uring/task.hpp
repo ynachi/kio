@@ -6,7 +6,6 @@
 #include <type_traits>
 #include <utility>
 
-#include "coro_allocator.hpp"
 #include "error.hpp"
 #include "logger.hpp"
 
@@ -53,9 +52,6 @@ struct task_promise_base
     };
 
     final_awaiter final_suspend() noexcept { return {}; }
-
-    void* operator new(std::size_t size) { return CoroAllocator::allocate(size); }  // NOLINT
-    void operator delete(void* ptr, std::size_t size) noexcept { CoroAllocator::deallocate(ptr, size); }
 };
 
 template <typename T>
@@ -254,9 +250,6 @@ struct DetachedTask
             ALOG::stop();
             std::terminate();
         }
-
-        void* operator new(const std::size_t sz) { return CoroAllocator::allocate(sz); }
-        void operator delete(void* ptr, const std::size_t sz) { CoroAllocator::deallocate(ptr, sz); }
     };
 };
 
