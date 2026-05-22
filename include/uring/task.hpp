@@ -3,7 +3,6 @@
 #include <coroutine>
 #include <exception>
 #include <optional>
-#include <type_traits>
 #include <utility>
 
 #include "error.hpp"
@@ -11,6 +10,7 @@
 
 namespace URing
 {
+class IoWorker;
 
 // Forward declarations
 template <typename T>
@@ -18,40 +18,29 @@ struct Task;
 
 struct task_promise_base
 {
-    std::coroutine_handle<> continuation_ = nullptr;
-    std::exception_ptr exception_ = nullptr;
-    bool started_ = false;
+    std::coroutine_handle<> continuation{std::noop_coroutine()};
+    std::exception_ptr exception = nullptr;
 
-    struct initial_awaiter
+    std::suspend_always initial_suspend() noexcept { return {}; }
+
+    void unhandled_exception() noexcept { exception = std::current_exception(); }
+
+    // -----------------------------------------------------------------------
+    // final_suspend — symmetric transfer to continuation
+    // Keeps stack depth O(1) via tail-call optimization.
+    // -----------------------------------------------------------------------
+    struct FinalAwaitable
     {
-        task_promise_base* base_;
-
-        bool await_ready() const noexcept { return false; }
-        void await_suspend(std::coroutine_handle<>) const noexcept {}
-        void await_resume() const noexcept { base_->started_ = true; }
-    };
-
-    initial_awaiter initial_suspend() noexcept { return initial_awaiter{this}; }
-    void unhandled_exception() noexcept { exception_ = std::current_exception(); }
-
-    struct final_awaiter
-    {
-        bool await_ready() const noexcept { return false; }
-
+        bool await_ready() noexcept { return false; }
         template <typename Promise>
         std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> h) noexcept
         {
-            auto& p = h.promise();
-            if (p.continuation_)
-            {
-                return p.continuation_;
-            }
-            return std::noop_coroutine();
+            return h.promise().continuation;
         }
         void await_resume() noexcept {}
     };
 
-    final_awaiter final_suspend() noexcept { return {}; }
+    FinalAwaitable final_suspend() noexcept { return {}; }
 };
 
 template <typename T>
@@ -94,21 +83,21 @@ struct task_promise<void> : task_promise_base
 template <typename T>
 struct Task
 {
-    using promise_type = task_promise<T>;
-    std::coroutine_handle<promise_type> handle_;
+    using Handle = std::coroutine_handle<task_promise<T>>;
+    Handle handle_;
 
-    explicit Task(std::coroutine_handle<promise_type> h) noexcept : handle_(h) {}
-    Task(Task&& o) noexcept : handle_(std::exchange(o.handle_, nullptr)) {}
+    explicit Task(Handle h) noexcept : handle_(h) {}
+    Task(Task&& o) noexcept : handle_(std::exchange(o.handle_, {})) {}
 
     Task& operator=(Task&& o) noexcept
     {
         if (this != &o)
         {
-            if (handle_)
+            if (handle_ && handle_.done())
             {
-                safe_destroy();
+                handle_.destroy();
             }
-            handle_ = std::exchange(o.handle_, nullptr);
+            handle_ = std::exchange(o.handle_, {});
         }
         return *this;
     }
@@ -116,11 +105,13 @@ struct Task
     Task(const Task&) = delete;
     Task& operator=(const Task&) = delete;
 
-    ~Task() noexcept
+    ~Task()
     {
+        // Only destroy if ownership was never transferred to the scheduler
+        // or if the task has already completed.
         if (handle_)
         {
-            safe_destroy();
+            handle_.destroy();
         }
     }
 
@@ -132,18 +123,12 @@ struct Task
         {
             return std::unexpected(MakeErrorCode(EWOULDBLOCK));
         }
-
-        if constexpr (std::is_void_v<T>)
-        {
-            return handle_.promise().result_.value();
-        }
-        else
-        {
-            return handle_.promise().result_.value();
-        }
+        return handle_.promise().result_.value();
     }
 
     bool done() const noexcept { return handle_ && handle_.done(); }
+
+    Handle release() { return std::exchange(handle_, {}); }
 
     // Awaiting a Task<T> returns Result<T>, matching get(). This keeps errors
     // explicit at every composition point:
@@ -156,14 +141,14 @@ struct Task
     {
         struct Awaiter
         {
-            std::coroutine_handle<promise_type> handle_;
+            Handle handle_;
 
             bool await_ready() const noexcept { return handle_.done(); }
 
             // Suspend the caller, store it as the continuation, and run this task.
             std::coroutine_handle<> await_suspend(std::coroutine_handle<> caller) noexcept
             {
-                handle_.promise().continuation_ = caller;
+                handle_.promise().continuation = caller;
                 return handle_;
             }
 
@@ -182,46 +167,11 @@ struct Task
                 {
                     return std::unexpected{MakeErrorCode(ECANCELED)};
                 }
-
-                if constexpr (std::is_void_v<T>)
-                {
-                    return std::move(*p.result_);
-                }
-                else
-                {
-                    return std::move(*p.result_);
-                }
+                return std::move(*p.result_);
             }
         };
 
         return Awaiter{handle_};
-    }
-
-private:
-    void safe_destroy() noexcept
-    {
-        if (handle_ == nullptr)
-        {
-            return;
-        }
-
-        if (handle_.done())
-        {
-            handle_.destroy();
-            return;
-        }
-
-        auto& p = handle_.promise();
-
-        // Destroying a started coroutine before completion leaves reactor queues
-        // or child-task continuations with dangling coroutine handles.
-        if (p.started_)
-        {
-            ALOG_ERROR("destroying a started Task before completion is a bug");
-            std::terminate();
-        }
-
-        handle_.destroy();
     }
 };
 

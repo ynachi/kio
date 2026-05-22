@@ -34,6 +34,9 @@ struct IoOptions
 
     std::uint32_t tick_timeout_ms = 10;
 
+    /// max resume per tick
+    std::size_t batch_max_size = 128;
+
     // Sleep after 2 seconds of inactivity
     // Liburing auto wakeup the kernel thread so no need to manually do it
     /// IORING_SETUP_DEFER_TASKRUN is not compatible to SQ_POLL
@@ -67,6 +70,7 @@ class InternalKey
         requires std::invocable<SetupFunc, io_uring_sqe*> && std::invocable<MapperFunc, int32_t>
     friend class IoAwaiter;
     friend class IoWorker;
+    friend struct TransferTo;
 
     InternalKey() = default;
 };
@@ -82,101 +86,19 @@ concept SpawnFactory = std::invocable<F> && std::same_as<std::invoke_result_t<F>
 
 using RemoteTask = std::move_only_function<void()>;
 
-struct SpawnNode : MpscNode
-{
-    RemoteTask task;
-    std::atomic<SpawnNode*> next_free{nullptr};
-
-    SpawnNode() = default;
-    explicit SpawnNode(RemoteTask task_) : task(std::move(task_)) {}
-};
-
-class SpawnNodePool
-{
-    static_assert(sizeof(std::uintptr_t) == sizeof(std::uint64_t),
-                  "SpawnNodePool tagged pointer requires 64-bit pointers");
-
-    static constexpr std::uintptr_t kPointerBits = 48;
-    static constexpr std::uintptr_t kPointerMask = (std::uintptr_t{1} << kPointerBits) - 1;
-    static constexpr std::uintptr_t kTagIncrement = std::uintptr_t{1} << kPointerBits;
-    static constexpr std::uintptr_t kTagMask = ~kPointerMask;
-
-    std::atomic<std::uintptr_t> head_{0};
-
-    static SpawnNode* unpack_ptr(const std::uintptr_t head) noexcept
-    {
-        return reinterpret_cast<SpawnNode*>(head & kPointerMask);
-    }
-
-    static std::uintptr_t bump_tag(const std::uintptr_t head) noexcept { return (head + kTagIncrement) & kTagMask; }
-
-    static bool can_pack(const SpawnNode* node) noexcept
-    {
-        return (reinterpret_cast<std::uintptr_t>(node) & kTagMask) == 0;
-    }
-
-    static std::uintptr_t pack(SpawnNode* node, const std::uintptr_t tag) noexcept
-    {
-        return (reinterpret_cast<std::uintptr_t>(node) & kPointerMask) | (tag & kTagMask);
-    }
-
-public:
-    SpawnNodePool() = default;
-    ~SpawnNodePool()
-    {
-        const auto* curr = unpack_ptr(head_.load(std::memory_order_acquire));
-        while (curr != nullptr)
-        {
-            const auto* next = curr->next_free.load(std::memory_order_relaxed);
-            delete curr;
-            curr = next;
-        }
-    }
-
-    void push(SpawnNode* node) noexcept
-    {
-        node->task = nullptr;
-        if (!can_pack(node))
-        {
-            ALOG_WARN("SpawnNodePool cannot pack pointer; releasing node without pooling");
-            delete node;
-            return;
-        }
-
-        auto old_head = head_.load(std::memory_order_relaxed);
-        for (;;)
-        {
-            node->next_free.store(unpack_ptr(old_head), std::memory_order_relaxed);
-            if (head_.compare_exchange_weak(old_head, pack(node, bump_tag(old_head)), std::memory_order_release,
-                                            std::memory_order_relaxed))
-            {
-                return;
-            }
-        }
-    }
-
-    SpawnNode* try_pop() noexcept
-    {
-        auto old_head = head_.load(std::memory_order_acquire);
-        for (;;)
-        {
-            auto* node = unpack_ptr(old_head);
-            if (node == nullptr)
-            {
-                return nullptr;
-            }
-
-            auto* next = node->next_free.load(std::memory_order_acquire);
-            if (head_.compare_exchange_weak(old_head, pack(next, bump_tag(old_head)), std::memory_order_acquire,
-                                            std::memory_order_acquire))
-            {
-                node->next_free.store(nullptr, std::memory_order_relaxed);
-                return node;
-            }
-        }
-    }
-};
-
+// ============================================================================
+// io_uring C++20 IoWorker
+//
+// Design decisions:
+//   - Share-nothing: each IoThread owns its ring, queue, and allocator
+//   - TransferTo is the ONLY cross-thread mechanism
+//   - MPSC queue holds raw coroutine_handle<> (8 bytes, no type erasure)
+//   - mimalloc linked globally — no custom operator new needed in Task
+//   - h.resume() is safe because handles are only enqueued while suspended
+//   - Symmetric transfer used inside Task to keep final resume stack-flat
+//   - Exceptions: std::expected is the preferred error management mechanism (except during critical resources
+//   initialization)
+// ============================================================================
 class IoWorker
 {
 public:
@@ -184,83 +106,34 @@ public:
         IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_COOP_TASKRUN;
     static constexpr uint64_t kWakeTag = UINT64_MAX;
 
-private:
-    /// TLS IO context
-    inline static thread_local IoWorker* tl_io = nullptr;
-
-    //
-    // Const xprs
-    //
-    // Bit-tag for MSG_RING: handles are aligned, so bit 0 is safe for tagging
-    static constexpr size_t kMaxResumesPerTick = 128;
-    static constexpr size_t kMaxRemoteTasksPerTick = 1024;
-    static constexpr uint8_t kMaxSqeGetRetry = 3;
-    //
-    //  Pools
-    //
-    OpPool op_pool_;
-
-    // Dual-vector queue design to avoid recursion and prioritize I/O.
-    // ready_queue_ stores handles to resume in the next drain phase.
-    // process_queue_ is used as a swap buffer during the drain itself.
-    // Total memory overhead: 2 * entries * sizeof(coroutine_handle) ≈ 268KB (default).
-    std::vector<std::coroutine_handle<>> ready_queue_;
-    std::vector<std::coroutine_handle<>> process_queue_;
-
-    io_uring ring_{};
-    int wake_fd_{-1};
-    uint64_t wake_value_{0};
-    bool wake_read_armed_{false};
-    InternalKey key_{};
-    std::thread::id owner_thread_;
-    IoOptions opts_;
-    size_t id_;
-    MpscQueue spawn_queue_;
-    SpawnNodePool remote_pool_;
-    std::atomic<bool> wakeup_pending_{false};
-
-    void drain_local();
-    void arm_wake_read() noexcept;
-
-    std::size_t drain_remote_tasks() noexcept;
-    void submit_or_wait_for();
-
-    void tick() noexcept;
-
-public:
     static IoWorker* current_io() noexcept { return tl_io; }
-    explicit IoWorker(InternalKey, const size_t id, const IoOptions& opts = {})
-        : op_pool_(opts.entries), opts_(opts), id_(id)
-    {
-        ready_queue_.reserve(opts.entries);
-        process_queue_.reserve(kMaxResumesPerTick);
-    }
+
+    explicit IoWorker(InternalKey, const size_t id, const IoOptions& opts = {}) : opts_(opts), id_(id) {}
     IoWorker(const IoWorker&) = delete;
     IoWorker& operator=(const IoWorker&) = delete;
     IoWorker(IoWorker&&) = delete;
     IoWorker& operator=(IoWorker&&) = delete;
-
     ~IoWorker();
 
-    OpPool& pool(InternalKey) noexcept { return op_pool_; }
     io_uring& ring(InternalKey) noexcept { return ring_; }
-    std::vector<std::coroutine_handle<>>& ready_queue(InternalKey) noexcept { return ready_queue_; }
-    MpscQueue& spawn_queue(InternalKey) noexcept { return spawn_queue_; }
-    SpawnNode* allocate_remote_node(InternalKey) noexcept { return remote_pool_.try_pop(); }
-    void release_remote_node(InternalKey, SpawnNode* node) noexcept { remote_pool_.push(node); }
-
-    [[nodiscard]] bool try_set_wakeup_pending(InternalKey) noexcept
-    {
-        return !wakeup_pending_.exchange(true, std::memory_order_acq_rel);
-    }
-
-    void init(InternalKey, int wq_fd = -1);
-    void run(InternalKey, std::stop_token st) noexcept;
-    void wake(InternalKey) const noexcept;
-    void request_cancel(InternalKey, uint32_t op_idx) noexcept;
-
     size_t id() const noexcept { return id_; }
     int ring_fd() const noexcept { return ring_.ring_fd; }
+
+    void init(InternalKey, int wq_fd = -1);
+    void run(InternalKey, std::size_t batch_max_size, std::stop_token st) noexcept;
+    void wake(InternalKey) const noexcept;
+    void post(const InternalKey key, const std::coroutine_handle<> h)
+    {
+        queue_.enqueue(h);
+        wake(key);
+    }
+
+    template <typename T>
+    void schedule(Task<T> task)
+    {
+        // release transfers ownership
+        post(key_, task.release());
+    }
 
     io_uring_sqe* get_sqe(InternalKey) noexcept;
 
@@ -277,6 +150,66 @@ public:
             ALOG_INFO("Warning: Failed to pin to CPU {}: {}", cpu_id, std::generic_category().message(rc));
         }
     }
+
+private:
+    static constexpr uint64_t kWakeupSentinel = 0xDEAD'C0DE'DEAD'C0DEULL;
+
+    /// TLS IO context
+    inline static thread_local IoWorker* tl_io = nullptr;
+
+    //
+    // Const xprs
+    //
+    // Bit-tag for MSG_RING: handles are aligned, so bit 0 is safe for tagging
+    static constexpr size_t kMaxResumesPerTick = 128;
+    static constexpr size_t kMaxRemoteTasksPerTick = 1024;
+    static constexpr uint8_t kMaxSqeGetRetry = 3;
+
+    // Dual-vector queue design to avoid recursion and prioritize I/O.
+    // ready_queue_ stores handles to resume in the next drain phase.
+    // process_queue_ is used as a swap buffer during the drain itself.
+    // Total memory overhead: 2 * entries * sizeof(coroutine_handle) ≈ 268KB (default).
+    // std::vector<std::coroutine_handle<>> ready_queue_;
+    // std::vector<std::coroutine_handle<>> process_queue_;
+
+    io_uring ring_{};
+    int wake_fd_{-1};
+    InternalKey key_;
+    uint64_t wake_value_{0};
+    bool wake_read_armed_{false};
+    std::thread::id owner_thread_;
+    IoOptions opts_;
+    size_t id_;
+    MpscQueue<std::coroutine_handle<>> queue_{};
+    std::atomic<bool> wakeup_pending_{false};
+
+    void drain_local();
+    void arm_wake_read() noexcept;
+    void handle_cqe(io_uring_cqe* cqe);
+
+    void submit_or_wait_for();
+
+    // -------------------------------------------------------------------------
+    // tick() — main event loop tick
+    //
+    // INVARIANT: queue_ ONLY contains handles to suspended coroutines.
+    // This is guaranteed by:
+    //   • Task::initial_suspend()  → new tasks start suspended
+    //   • TransferTo::await_suspend() → returns void, framework suspends
+    //   • I/O awaitables           → suspend after arming SQE
+    //   • Task::final_suspend()    → symmetric transfer suspends at completion
+    //
+    // Because of this invariant, h.resume() on a dequeued handle is always
+    // valid: the coroutine frame exists, is suspended, and has single
+    // ownership by this thread at the moment of resume.
+    //
+    // Stack behavior:
+    //   • Symmetric transfer enables tail-call optimization → O(1) stack
+    //     for nested co_await chains.
+    //   • Completion without further awaits unwinds normally → safe.
+    //
+    // --------------------------------------------------------
+    void tick(std::size_t batch_max_size) noexcept;
 };
 
 //=================================================================================================================
@@ -346,67 +279,8 @@ public:
                     // All Io on this method uses the tls context
                     init_fn();
 
-                    contexts_[i]->run(key_, stop_token);
+                    contexts_[i]->run(key_, opts_.batch_max_size, stop_token);
                 });
-        }
-
-        return true;
-    }
-
-    // Spawn a fire-and-forget DetachedTask on a specific worker.
-    //
-    // The factory is called on the TARGET thread - the coroutine frame is born
-    // there. No frame crosses a thread boundary; TSAN-clean by construction.
-    //
-    // If called from the target thread itself the factory runs inline with no
-    // syscall. Otherwise, the callable is enqueued to the target worker's
-    // inbound MPSC queue, and MSG_RING is used only as a wakeup signal.
-    template <SpawnFactory F>
-    bool spawn_on(IoWorker& target_io, F&& fn)
-    {
-        auto* current_io = IoWorker::current_io();
-
-        if (current_io == &target_io)
-        {
-            std::forward<F>(fn)();
-            return true;
-        }
-
-        // current_io cannot be nil on an initialized context and
-        // no io would work on a non-initialized context so we do no runtime check
-        assert(current_io != nullptr && "spawn_on called from outside IoWorker::run()");
-
-        auto* node = target_io.allocate_remote_node(key_);
-        if (node)
-        {
-            node->task = RemoteTask(std::forward<F>(fn));
-        }
-        else
-        {
-            node = new (std::nothrow) SpawnNode(RemoteTask(std::forward<F>(fn)));
-        }
-
-        if (node == nullptr)
-        {
-            ALOG_ERROR("spawn_on: failed to allocate remote task");
-            return false;
-        }
-
-        // TODO: maybe make spawn queue return true if push was a success
-        target_io.spawn_queue(key_).push(node);
-
-        if (target_io.try_set_wakeup_pending(key_))
-        {
-            assert(current_io != nullptr && "spawn_on called outside of an IoWorker thread");
-            if (io_uring_sqe* sqe = current_io->get_sqe(key_))
-            {
-                io_uring_prep_msg_ring(sqe, target_io.ring_fd(), 0, kRemoteWakeupTag, 0);
-                io_uring_sqe_set_data64(sqe, kRemoteSenderTag);
-            }
-            else
-            {
-                target_io.wake(key_);
-            }
         }
 
         return true;
@@ -427,5 +301,34 @@ public:
         contexts_.clear();
         running_.store(false, std::memory_order_release);
     }
+};
+
+// ============================================================================
+// TransferTo — cross-thread execution transfer
+//
+// Usage: co_await TransferTo{target_thread};
+//
+// Mechanism:
+//   1. await_ready() returns false → always suspend
+//   2. await_suspend() posts handle to target queue, returns void → suspension
+//   3. Target thread drains queue, calls h.resume() → execution resumes on target
+//
+// Stack safety: await_suspend does NOT call resume(). It returns immediately,
+// allowing the caller's stack to unwind. Resume happens later from the target's
+// drain loop, which has a flat stack.
+// ============================================================================
+struct TransferTo
+{
+    IoWorker& target;
+
+    bool await_ready() noexcept { return false; }
+
+    void await_suspend(std::coroutine_handle<> h) noexcept
+    {
+        InternalKey k{};
+        target.post(k, h);
+    }
+
+    void await_resume() noexcept {}
 };
 }  // namespace URing

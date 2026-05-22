@@ -55,102 +55,11 @@ void IoWorker::init(InternalKey, const int wq_fd)
               (opts_.flags & IORING_SETUP_SQPOLL) ? "enabled" : "disabled");
 }
 
-/// Best effort cancellation request
-void IoWorker::request_cancel(const InternalKey key, const uint32_t op_idx) noexcept
-{
-    auto& op = op_pool_.get(op_idx);
-    if (!op.cancel())
-    {
-        return;
-    }
-
-    const auto sqe = get_sqe(key);
-    if (sqe == nullptr)
-    {
-        ALOG_WARN("failed to enqueue cancel operation: SQE queue is full");
-        return;
-    }
-
-    // Kernel matches EXACT original user_data, preventing stale/race cancels
-    io_uring_prep_cancel64(sqe, op.original_ud, 0);
-    io_uring_sqe_set_data(sqe, nullptr);
-}
-
-void IoWorker::drain_local()
-{
-    // We swap the vector so that if a resuming coroutine immediately submits
-    // a task that completes synchronously (or adds to the queue), it goes into
-    // the NEXT tick's batch, preventing an infinite loop inside this tick.
-    process_queue_.swap(ready_queue_);
-
-    for (auto h : process_queue_)
-    {
-        try
-        {
-            if (h && !h.done())
-            {
-                h.resume();
-            }
-        }
-        catch (const std::exception& e)
-        {
-            ALOG_ERROR("coroutine died with error: {}", e.what());
-#ifndef NDEBUG
-            throw;
-#endif
-        }
-        catch (...)
-        {
-            ALOG_ERROR("coroutine died with unknown error");
-#ifndef NDEBUG
-            throw;
-#endif
-        }
-    }
-    process_queue_.clear();
-}
-
-std::size_t IoWorker::drain_remote_tasks() noexcept
-{
-    const std::size_t total = spawn_queue_.drain(
-        [this](MpscNode* raw) noexcept
-        {
-            auto* node = static_cast<SpawnNode*>(raw);
-            try
-            {
-                node->task();
-            }
-            catch (const std::exception& e)
-            {
-                ALOG_ERROR("remote task died with error: {}", e.what());
-            }
-            catch (...)
-            {
-                ALOG_ERROR("remote task died with unknown error");
-            }
-            release_remote_node(key_, node);
-        },
-        kMaxRemoteTasksPerTick);
-
-    if (total == kMaxRemoteTasksPerTick)
-    {
-        wake(key_);
-    }
-
-    return total;
-}
-
 void IoWorker::submit_or_wait_for()
 {
     // Only block if we have no local work to do.
-    // Local work includes:
-    // 1. CQEs already waiting in the ring.
-    // 2. Coroutines ready to resume in our ready_queue_.
-    // 3. Remote tasks pending in the spawn_queue_ (indicated by wakeup_pending_).
-    const bool has_work =
-        io_uring_cq_ready(&ring_) > 0 || !ready_queue_.empty() || wakeup_pending_.load(std::memory_order_relaxed);
 
-    if (has_work)
+    if (io_uring_cq_ready(&ring_) > 0 || !queue_.empty())
     {
         if (const auto ret = io_uring_submit(&ring_); ret < 0 && ret != -EINTR)
         {
@@ -165,18 +74,21 @@ void IoWorker::submit_or_wait_for()
         }
     }
 }
-void IoWorker::tick() noexcept
+void IoWorker::tick(const std::size_t batch_max_size) noexcept
 {
-    bool drain_remote_q = false;
+    // Step 1: Drain the ready queue first.
+    queue_.drain(
+        [](const std::coroutine_handle<> h)
+        {
+            // Safe by invariant; transfers to next await point
+            h.resume();
+        },
+        batch_max_size);
 
-    if (!wake_read_armed_)
-    {
-        arm_wake_read();
-    }
-
+    // Step 2: wait for completion if needed
     submit_or_wait_for();
 
-    // Batch process CQEs
+    // 3. Batch process CQEs
     io_uring_cqe* cqe = nullptr;
     unsigned head = 0;
     unsigned count = 0;
@@ -184,90 +96,57 @@ void IoWorker::tick() noexcept
     io_uring_for_each_cqe(&ring_, head, cqe)
     {
         count++;
-        const auto ud = cqe->user_data;
-        if (ud == 0)
-        {
-            continue;
-        }
-
-        if (ud == kWakeTag)
-        {
-            wake_read_armed_ = false;
-            drain_remote_q = true;
-
-            if (cqe->res < 0)
-            {
-                ALOG_WARN("wake eventfd read failed: {}", std::strerror(-cqe->res));
-            }
-
-            arm_wake_read();
-            continue;
-        }
-
-        if (ud == kRemoteWakeupTag)
-        {
-            drain_remote_q = true;
-            continue;
-        }
-
-        if (ud == kRemoteSenderTag)
-        {
-            if (cqe->res < 0)
-            {
-                ALOG_ERROR("MSG_RING send failed: {}", std::strerror(-cqe->res));
-            }
-            continue;
-        }
-
-        // Normal I/O completion.
-        const auto token = Token::unpack(ud);
-        const auto op = op_pool_.try_get(token);
-        if (op == nullptr)
-        {
-            // Stale CQE from a recycled slot - ignore.
-            continue;
-        }
-
-        op->result_code = cqe->res;
-        ready_queue_.push_back(op->handle);
+        handle_cqe(cqe);
     }
 
     if (count > 0)
     {
         io_uring_cq_advance(&ring_, count);
     }
-
-    if (const bool had_pending_remote_work = wakeup_pending_.exchange(false, std::memory_order_acq_rel);
-        drain_remote_q || had_pending_remote_work)
-    {
-        drain_remote_tasks();
-    }
-
-    drain_local();
 }
 
-void IoWorker::run(InternalKey key, std::stop_token st) noexcept
+void IoWorker::handle_cqe(io_uring_cqe* cqe)
+{
+    auto user_data = io_uring_cqe_get_data64(cqe);
+
+    if (user_data == kWakeupSentinel)
+    {
+        arm_wake_read();
+        return;
+    }
+
+    // Reconstruct coroutine handle from user_data.
+    // Safety: user_data was set from h.address() while suspended.
+    // The coroutine frame is guaranteed to outlive the pending I/O
+    // (lifetime contract). from_address() is standard-compliant.
+    auto h = std::coroutine_handle<>::from_address(reinterpret_cast<void*>(user_data));
+
+    // Enqueue rather than direct resume to maintain ordering and
+    // ensure execution happens on the correct thread context.
+    queue_.enqueue(h);
+}
+
+void IoWorker::arm_wake_read() noexcept
+{
+    io_uring_sqe* sqe = get_sqe(key_);
+    io_uring_prep_read(sqe, wake_fd_, &wake_value_, sizeof(wake_value_), 0);
+    io_uring_sqe_set_data64(sqe, kWakeupSentinel);
+    io_uring_submit(&ring_);
+}
+
+void IoWorker::run(InternalKey key, std::size_t batch_max_size, std::stop_token st) noexcept
 {
     // owner thread should be set on the thread which start the loop
     owner_thread_ = std::this_thread::get_id();
 
-    // 128-byte frames: Task<void>, small Tasks
-    // 256-byte frames: Most common Tasks
-    // 512-byte frames: Combinators and large frames
-    static_assert(sizeof(Task<void>::promise_type) <= 256, "Task<void> promise exceeds prewarm bucket 1");
-    static_assert(sizeof(DetachedTask::promise_type) <= 128, "DetachedTask promise exceeds prewarm bucket 0");
-
     std::stop_callback wake_on_stop{st, [this, key] { wake(key); }};
     while (!st.stop_requested())
     {
-        tick();
+        tick(batch_max_size);
     }
 
     ALOG_INFO("Worker {} quiescing...", id_);
-
-    ready_queue_.clear();
-    process_queue_.clear();
-    op_pool_.destroy_active_handles();
+    // TODO: implement cleanup here
 
     // reset the tls context
     tl_io = nullptr;
@@ -304,25 +183,9 @@ void IoWorker::wake(InternalKey) const noexcept
     }
 }
 
-void IoWorker::arm_wake_read() noexcept
-{
-    io_uring_sqe* sqe = get_sqe(key_);
-
-    if (sqe == nullptr)
-    {
-        ALOG_WARN("failed to get an SQE for wake read, ring queue is full");
-        wake_read_armed_ = false;
-        return;
-    }
-
-    wake_read_armed_ = true;
-    io_uring_prep_read(sqe, wake_fd_, &wake_value_, sizeof(wake_value_), 0);
-    io_uring_sqe_set_data64(sqe, kWakeTag);
-}
-
 IoWorker::~IoWorker()
 {
-    (void)spawn_queue_.drain([](MpscNode* raw) noexcept { delete static_cast<SpawnNode*>(raw); });
+    // TODO: cancell all ops on the ring fd
 
     if (ring_.ring_fd > 0)
     {
@@ -330,7 +193,8 @@ IoWorker::~IoWorker()
         ring_.ring_fd = -1;
     }
 
-    if (wake_fd_ >= 0) {
+    if (wake_fd_ >= 0)
+    {
         ::close(wake_fd_);
         wake_fd_ = -1;
     }

@@ -19,7 +19,7 @@ using namespace URing;
 
 namespace
 {
-constexpr bool kUseRemoteDispatch = true;
+constexpr bool kUseRemoteDispatch = false;
 volatile std::sig_atomic_t g_stop_requested = 0;
 
 void signal_handler(int)
@@ -145,8 +145,8 @@ DetachedTask dispatching_server_loop(IoContext& ctx, uint16_t port, std::stop_to
             const std::size_t worker_count = ctx.worker_count();
             const std::size_t target_idx = worker_count > 1 ? 1 + ((next_worker++ - 1) % (worker_count - 1)) : 0;
             IoWorker& target = ctx.worker(target_idx);
-            ctx.spawn_on(target, [fd = std::move(client_res.value())]() mutable -> DetachedTask
-                         { return handle_client(std::move(fd)); });
+            co_await TransferTo(target);
+            handle_client(std::move(client_res.value()));
         }
         else
         {

@@ -21,7 +21,8 @@ class IoAwaiter
     // Extract the T from Result<T> so we can type the coroutine handle
     using T = ResultType::value_type;
 
-    Token token_ = {};
+    int result{0};
+
     // for friend access
     InternalKey key_{};
     [[no_unique_address]] SetupFunc setup_;
@@ -57,22 +58,11 @@ public:
             // This path is now extremely rare thanks to tick-level submit and
             // the on-demand fallback in get_sqe.
             ALOG_WARN("failed to get SQE after submit; completing operation with ENOSPC");
-            token_ = io->pool(key_).allocate(h);
-            const auto op = io->pool(key_).try_get(token_);
-            op->original_ud = token_.pack();
-            op->result_code = -ENOSPC;
-            io->ready_queue(key_).push_back(h);
             return std::noop_coroutine();
         }
 
-        token_ = io->pool(key_).allocate(h);
-        const auto op = io->pool(key_).try_get(token_);
-
-        // Initialize original_ud immediately so cancellations have a stable target
-        op->original_ud = token_.pack();
-
         setup_(sqe);
-        io_uring_sqe_set_data64(sqe, token_.pack());
+        io_uring_sqe_set_data64(sqe, reinterpret_cast<uint64_t>(h.address()));
 
         return std::noop_coroutine();
     }
@@ -83,19 +73,6 @@ public:
         // skip runtime check as io cannot be nil if io context is normally started
         // if not started, nothing could work anyway.
         assert(io != nullptr && "IoAwaiter resumed outside of an IoWorker thread");
-
-        // We just woke up! The event loop populated the result_code.
-        // We use try_get to ensure the slot hasn't been recycled/cancelled.
-        auto* op = io->pool(key_).try_get(token_);
-        if (op == nullptr)
-        {
-            return std::unexpected(MakeErrorCode(ECANCELED));
-        }
-
-        int result = op->result_code;
-
-        // We have our data, the kernel is done, we don't need the slot anymore.
-        io->pool(key_).deallocate(token_);
 
         return mapper_(result);
     }

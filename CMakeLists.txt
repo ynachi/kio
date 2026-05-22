@@ -298,7 +298,7 @@ target_include_directories(uring PUBLIC
 )
 # Link dependencies
 target_link_libraries(uring PUBLIC
-        mimalloc
+        mimalloc-static
         PkgConfig::LibUring
         pthread
         OpenSSL::SSL
