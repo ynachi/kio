@@ -12,9 +12,15 @@
 namespace URing
 {
 
+struct IoOps
+{
+    std::coroutine_handle<> h{std::noop_coroutine()};
+    int32_t res{-1};
+};
+
 template <typename SetupFunc, typename MapperFunc>
     requires std::invocable<SetupFunc, io_uring_sqe*> && std::invocable<MapperFunc, int32_t>
-class IoAwaiter : private IoOperation
+class IoAwaiter
 {
     // Extract the exact Result<T> type returned by the MapperFunc
     using ResultType = std::invoke_result_t<MapperFunc, int32_t>;
@@ -22,6 +28,7 @@ class IoAwaiter : private IoOperation
     using T = ResultType::value_type;
 
     // for friend access
+    IoOps ops_{};
     InternalKey key_{};
     [[no_unique_address]] SetupFunc setup_;
     [[no_unique_address]] MapperFunc mapper_;
@@ -56,21 +63,18 @@ public:
             // This path is now extremely rare thanks to tick-level submit and
             // the on-demand fallback in get_sqe.
             ALOG_WARN("failed to get SQE after submit; completing operation with ENOSPC");
-            res = -ENOSPC;
+            ops_.res = -ENOSPC;
             return h;
         }
 
-        this->h = h;
+        this->ops_.h = h;
         setup_(sqe);
-        io_uring_sqe_set_data64(sqe, reinterpret_cast<uint64_t>(static_cast<IoOperation*>(this)));
+        io_uring_sqe_set_data64(sqe, reinterpret_cast<uint64_t>(&ops_));
 
         return std::noop_coroutine();
     }
 
-    Result<T> await_resume() noexcept
-    {
-        return mapper_(res);
-    }
+    Result<T> await_resume() noexcept { return mapper_(ops_.res); }
 };
 
 // Helper for void-returning operations in io.hpp (e.g., detail::ResumeVoid)

@@ -49,12 +49,6 @@ struct IoOptions
     int sq_thread_cpu = -1;
 };
 
-struct IoOperation
-{
-    std::coroutine_handle<> h{};
-    int32_t res{0};
-};
-
 //
 // Forward declaration
 //
@@ -75,14 +69,6 @@ class InternalKey
 
 template <typename F>
 concept WorkerInitFn = std::invocable<F> && std::same_as<std::invoke_result_t<F>, void>;
-
-// Factory callable shipped to a target worker via spawn_on().
-// Called ON the target thread - the coroutine frame is born there.
-// Must return DetachedTask (fire-and-forget).
-template <typename F>
-concept SpawnFactory = std::invocable<F> && std::same_as<std::invoke_result_t<F>, DetachedTask>;
-
-using RemoteTask = std::move_only_function<void()>;
 
 // ============================================================================
 // io_uring C++20 IoWorker
@@ -164,15 +150,8 @@ private:
     //
     // Bit-tag for MSG_RING: handles are aligned, so bit 0 is safe for tagging
     static constexpr size_t kMaxResumesPerTick = 128;
-    static constexpr size_t kMaxRemoteTasksPerTick = 1024;
+    static constexpr size_t kMaxRemoteTasksPerTick = 128;
     static constexpr uint8_t kMaxSqeGetRetry = 3;
-
-    // Dual-vector queue design to avoid recursion and prioritize I/O.
-    // ready_queue_ stores handles to resume in the next drain phase.
-    // process_queue_ is used as a swap buffer during the drain itself.
-    // Total memory overhead: 2 * entries * sizeof(coroutine_handle) ≈ 268KB (default).
-    // std::vector<std::coroutine_handle<>> ready_queue_;
-    // std::vector<std::coroutine_handle<>> process_queue_;
 
     io_uring ring_{};
     int wake_fd_{-1};
@@ -189,7 +168,6 @@ private:
     std::atomic<bool> wakeup_pending_{false};
 
     void arm_wake_read() noexcept;
-    void handle_cqe(io_uring_cqe* cqe);
 
     void submit_or_wait_for();
 
@@ -259,7 +237,7 @@ public:
             workers_.emplace_back(
                 [this, i, wq_promise, wq_future, stop_token, init_fn = std::forward<InitFn>(init_fn)]() mutable
                 {
-                    IoWorker::pin_to_cpu(static_cast<int>(i));
+                    // IoWorker::pin_to_cpu(static_cast<int>(i));
                     // init worker 0 as the ring owner
                     if (i == 0)
                     {

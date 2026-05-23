@@ -8,6 +8,8 @@
 
 #include <sys/eventfd.h>
 
+#include "uring/awaiter.hpp"
+
 namespace URing
 {
 
@@ -99,7 +101,7 @@ void IoWorker::tick(const std::size_t batch_max_size) noexcept
         }
         else
         {
-            auto* op = reinterpret_cast<IoOperation*>(user_data);
+            auto* op = reinterpret_cast<IoOps*>(user_data);
             op->res = cqe->res;
 
             // PUSH LOCAL: Zero atomic overhead, preserves exact FIFO completion order
@@ -122,25 +124,8 @@ void IoWorker::tick(const std::size_t batch_max_size) noexcept
         {
             h.resume();  // Safe! The kernel ring was advanced in Step 3.
         }
+        current_batch.clear();
     }
-}
-
-void IoWorker::handle_cqe(io_uring_cqe* cqe)
-{
-    auto user_data = io_uring_cqe_get_data64(cqe);
-
-    if (user_data == kWakeupSentinel)
-    {
-        arm_wake_read();
-        return;
-    }
-
-    auto* op = reinterpret_cast<IoOperation*>(user_data);
-    op->res = cqe->res;
-
-    // Enqueue rather than direct resume to maintain ordering and
-    // ensure execution happens on the correct thread context.
-    queue_.enqueue(op->h);
 }
 
 void IoWorker::arm_wake_read() noexcept
