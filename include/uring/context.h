@@ -2,6 +2,7 @@
 #include <atomic>
 #include <cassert>
 #include <concepts>
+#include <coroutine>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -48,15 +49,12 @@ struct IoOptions
     int sq_thread_cpu = -1;
 };
 
-// io_uring::user_data is shared by normal I/O completions and control messages.
-// The top two bits are reserved as a tag field:
-//   00: normal OpPool Token, encoded by Token::pack()
-//   01: MSG_RING delivered a wakeup signal
-//   10: source-side MSG_RING completion (sender-side)
-// Normal tokens must keep these bits clear; see Token::kMaxGeneration.
-static constexpr uint64_t kRemoteTagMask = 0xC000000000000000ULL;
-static constexpr uint64_t kRemoteWakeupTag = 0x4000000000000000ULL;
-static constexpr uint64_t kRemoteSenderTag = 0x8000000000000000ULL;
+struct IoOperation
+{
+    std::coroutine_handle<> h{};
+    int32_t res{0};
+};
+
 //
 // Forward declaration
 //
@@ -108,7 +106,11 @@ public:
 
     static IoWorker* current_io() noexcept { return tl_io; }
 
-    explicit IoWorker(InternalKey, const size_t id, const IoOptions& opts = {}) : opts_(opts), id_(id) {}
+    explicit IoWorker(InternalKey, const size_t id, const IoOptions& opts = {}) : opts_(opts), id_(id)
+    {
+        local_tasks_.reserve(opts_.entries);
+        current_batch.reserve(kMaxResumesPerTick);
+    }
     IoWorker(const IoWorker&) = delete;
     IoWorker& operator=(const IoWorker&) = delete;
     IoWorker(IoWorker&&) = delete;
@@ -180,10 +182,12 @@ private:
     std::thread::id owner_thread_;
     IoOptions opts_;
     size_t id_;
+    std::vector<std::coroutine_handle<>> local_tasks_{};
+    // Swap to protect against coroutines safely queueing more local work
+    std::vector<std::coroutine_handle<>> current_batch{};
     MpscQueue<std::coroutine_handle<>> queue_{};
     std::atomic<bool> wakeup_pending_{false};
 
-    void drain_local();
     void arm_wake_read() noexcept;
     void handle_cqe(io_uring_cqe* cqe);
 

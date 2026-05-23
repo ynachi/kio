@@ -74,21 +74,16 @@ void IoWorker::submit_or_wait_for()
         }
     }
 }
+
 void IoWorker::tick(const std::size_t batch_max_size) noexcept
 {
-    // Step 1: Drain the ready queue first.
-    queue_.drain(
-        [](const std::coroutine_handle<> h)
-        {
-            // Safe by invariant; transfers to next await point
-            h.resume();
-        },
-        batch_max_size);
+    // Step 1: Drain the cross-thread MPSC queue first.
+    queue_.drain([](const std::coroutine_handle<> h) { h.resume(); }, batch_max_size);
 
     // Step 2: wait for completion if needed
     submit_or_wait_for();
 
-    // 3. Batch process CQEs
+    // Step 3: Batch process CQEs into the local queue
     io_uring_cqe* cqe = nullptr;
     unsigned head = 0;
     unsigned count = 0;
@@ -96,12 +91,37 @@ void IoWorker::tick(const std::size_t batch_max_size) noexcept
     io_uring_for_each_cqe(&ring_, head, cqe)
     {
         count++;
-        handle_cqe(cqe);
+        auto user_data = io_uring_cqe_get_data64(cqe);
+
+        if (user_data == kWakeupSentinel)
+        {
+            arm_wake_read();
+        }
+        else
+        {
+            auto* op = reinterpret_cast<IoOperation*>(user_data);
+            op->res = cqe->res;
+
+            // PUSH LOCAL: Zero atomic overhead, preserves exact FIFO completion order
+            local_tasks_.push_back(op->h);
+        }
     }
 
     if (count > 0)
     {
+        // Free all the kernel slots at once
         io_uring_cq_advance(&ring_, count);
+    }
+
+    // Step 4: Execute all I/O completions immediately in this tick
+    if (!local_tasks_.empty())
+    {
+        current_batch.swap(local_tasks_);
+
+        for (auto h : current_batch)
+        {
+            h.resume();  // Safe! The kernel ring was advanced in Step 3.
+        }
     }
 }
 
@@ -115,15 +135,12 @@ void IoWorker::handle_cqe(io_uring_cqe* cqe)
         return;
     }
 
-    // Reconstruct coroutine handle from user_data.
-    // Safety: user_data was set from h.address() while suspended.
-    // The coroutine frame is guaranteed to outlive the pending I/O
-    // (lifetime contract). from_address() is standard-compliant.
-    auto h = std::coroutine_handle<>::from_address(reinterpret_cast<void*>(user_data));
+    auto* op = reinterpret_cast<IoOperation*>(user_data);
+    op->res = cqe->res;
 
     // Enqueue rather than direct resume to maintain ordering and
     // ensure execution happens on the correct thread context.
-    queue_.enqueue(h);
+    queue_.enqueue(op->h);
 }
 
 void IoWorker::arm_wake_read() noexcept

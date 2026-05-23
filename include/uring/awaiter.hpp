@@ -14,14 +14,12 @@ namespace URing
 
 template <typename SetupFunc, typename MapperFunc>
     requires std::invocable<SetupFunc, io_uring_sqe*> && std::invocable<MapperFunc, int32_t>
-class IoAwaiter
+class IoAwaiter : private IoOperation
 {
     // Extract the exact Result<T> type returned by the MapperFunc
     using ResultType = std::invoke_result_t<MapperFunc, int32_t>;
     // Extract the T from Result<T> so we can type the coroutine handle
     using T = ResultType::value_type;
-
-    int result{0};
 
     // for friend access
     InternalKey key_{};
@@ -58,23 +56,20 @@ public:
             // This path is now extremely rare thanks to tick-level submit and
             // the on-demand fallback in get_sqe.
             ALOG_WARN("failed to get SQE after submit; completing operation with ENOSPC");
-            return std::noop_coroutine();
+            res = -ENOSPC;
+            return h;
         }
 
+        this->h = h;
         setup_(sqe);
-        io_uring_sqe_set_data64(sqe, reinterpret_cast<uint64_t>(h.address()));
+        io_uring_sqe_set_data64(sqe, reinterpret_cast<uint64_t>(static_cast<IoOperation*>(this)));
 
         return std::noop_coroutine();
     }
 
     Result<T> await_resume() noexcept
     {
-        const auto io = IoWorker::current_io();
-        // skip runtime check as io cannot be nil if io context is normally started
-        // if not started, nothing could work anyway.
-        assert(io != nullptr && "IoAwaiter resumed outside of an IoWorker thread");
-
-        return mapper_(result);
+        return mapper_(res);
     }
 };
 
