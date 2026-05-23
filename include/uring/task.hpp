@@ -10,12 +10,14 @@
 
 namespace URing
 {
-class IO;
 
 // Forward declarations
 template <typename T>
 struct Task;
 
+// ============================================================================
+// task_promise_base — Shared logic for all URing tasks
+// ============================================================================
 struct task_promise_base
 {
     std::coroutine_handle<> continuation{std::noop_coroutine()};
@@ -55,60 +57,66 @@ struct task_promise_base
     FinalAwaitable final_suspend() noexcept { return {}; }
 };
 
+// ============================================================================
+// task_promise<T> — Specialized for valued tasks
+// ============================================================================
 template <typename T>
 struct task_promise : task_promise_base
 {
-    std::optional<Result<T>> result;
+    std::optional<Result<T>> result_;
 
     // Handle 'co_return value;'
-    void return_value(T val) noexcept { result.emplace(std::move(val)); }
+    void return_value(T val) noexcept { result_.emplace(std::move(val)); }
 
     // Handle 'co_return std::unexpected(err);'
-    void return_value(Result<T> res) noexcept { result.emplace(std::move(res)); }
+    void return_value(std::unexpected<std::error_code> err) noexcept { result_.emplace(std::move(err)); }
 
     // Handle 'co_return Result<T>(...);'
-    void return_value(std::unexpected<std::error_code> err) noexcept { result.emplace(std::move(err)); }
+    void return_value(Result<T> res) noexcept { result_.emplace(std::move(res)); }
 
     Task<T> get_return_object() noexcept;
 };
 
+// ============================================================================
+// task_promise<void> — Specialized for side-effect tasks
+// ============================================================================
 template <>
 struct task_promise<void> : task_promise_base
 {
     std::optional<Result<void>> result_;
 
-    // Handle 'co_return value;'
-    void return_value(Result<void> res) noexcept
-    {
-        if (!res)
-        {
-            ALOG_ERROR("Detached task failed with error: {}", res.error().message());
-        }
-        result_.emplace(std::move(res));
-    }
+    // Handle 'co_return;'
+    void return_void() noexcept { result_.emplace(); }
 
     // Handle 'co_return std::unexpected(err);'
     void return_value(std::unexpected<std::error_code> err) noexcept
     {
-        ALOG_ERROR("Detached task failed with error: {}", err.error().message());
+        // Log dropped errors for detached tasks
+        if (continuation == std::noop_coroutine())
+        {
+            ALOG_ERROR("Detached task failed: {}", err.error().message());
+        }
         result_.emplace(std::move(err));
     }
 
-    // Handle 'co_return Result<T>(...);'
+    // Handle 'co_return Result<void>(...);'
+    void return_value(Result<void> res) noexcept
+    {
+        if (!res && continuation == std::noop_coroutine())
+        {
+            ALOG_ERROR("Detached task failed: {}", res.error().message());
+        }
+        result_.emplace(std::move(res));
+    }
+
     Task<void> get_return_object() noexcept;
 };
 
-// Lazy coroutine task.
-//
-// Contract:
-//   Task<T>::get()      -> Result<T>
-//   co_await Task<T>    -> Result<T>
-//
-// The task itself owns the error channel. Prefer Task<T> and return errors with
-// `co_return std::unexpected(error);`. Avoid Task<Result<T>> unless you
-// intentionally want a nested Result<Result<T>> payload.
+// ============================================================================
+// Task<T> — The Primary Coroutine Type
+// ============================================================================
 template <typename T>
-struct Task
+struct [[nodiscard]] Task
 {
     using promise_type = task_promise<T>;
     using Handle = std::coroutine_handle<promise_type>;
@@ -122,9 +130,7 @@ struct Task
         if (this != &o)
         {
             if (handle_)
-            {
                 handle_.destroy();
-            }
             handle_ = std::exchange(o.handle_, {});
         }
         return *this;
@@ -135,21 +141,19 @@ struct Task
 
     ~Task()
     {
-        // Only destroy if ownership was never transferred to the scheduler
-        // or if the task has already completed.
         if (handle_)
-        {
             handle_.destroy();
-        }
     }
 
-    // Awaiting a Task<T> returns Result<T>, matching get(). This keeps errors
-    // explicit at every composition point:
-    //
-    //   auto value = co_await child();
-    //   if (!value) co_return std::unexpected(value.error());
-    //
-    // Avoid Task<Result<T>>; Task<T> already carries Result<T>.
+    // Transfers ownership of the coroutine frame to the scheduler.
+    // The Task object becomes empty and the frame will self-destruct on completion.
+    Handle release() { return std::exchange(handle_, {}); }
+
+    bool done() const noexcept { return handle_ && handle_.done(); }
+
+    // -----------------------------------------------------------------------
+    // co_await support — Returns Result<T> to the caller.
+    // -----------------------------------------------------------------------
     auto operator co_await() noexcept
     {
         struct Awaiter
@@ -158,28 +162,22 @@ struct Task
 
             bool await_ready() const noexcept { return handle_.done(); }
 
-            // Suspend the caller, store it as the continuation, and run this task.
             std::coroutine_handle<> await_suspend(std::coroutine_handle<> caller) noexcept
             {
                 handle_.promise().continuation = caller;
                 return handle_;
             }
 
-            // Extract and return the final Result<T>.
             Result<T> await_resume()
             {
                 auto& p = handle_.promise();
 
-                // If the coroutine itself threw, rethrow — this is not an expected I/O error.
-                if (p.exception_)
-                {
-                    std::rethrow_exception(p.exception_);
-                }
+                if (p.exception)
+                    std::rethrow_exception(p.exception);
 
                 if (!p.result_.has_value())
-                {
-                    return std::unexpected{MakeErrorCode(ECANCELED)};
-                }
+                    return std::unexpected(MakeErrorCode(ECANCELED));
+
                 return std::move(*p.result_);
             }
         };
