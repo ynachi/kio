@@ -46,27 +46,6 @@ struct IoOptions
     int sq_thread_cpu = -1;
 };
 
-//
-// Forward declaration
-//
-class IoWorker;
-class InternalKey
-{
-    friend class IoContext;
-    template <typename T>
-    friend struct Task;
-    template <typename SetupFunc, typename MapperFunc>
-        requires std::invocable<SetupFunc, io_uring_sqe*> && std::invocable<MapperFunc, int32_t>
-    friend class IoAwaiter;
-    friend class IoWorker;
-    friend struct TransferTo;
-
-    InternalKey() = default;
-};
-
-template <typename F>
-concept WorkerInitFn = std::invocable<F> && std::same_as<std::invoke_result_t<F>, void>;
-
 // ============================================================================
 // io_uring C++20 IoWorker
 //
@@ -80,50 +59,48 @@ concept WorkerInitFn = std::invocable<F> && std::same_as<std::invoke_result_t<F>
 //   - Exceptions: std::expected is the preferred error management mechanism (except during critical resources
 //   initialization)
 // ============================================================================
-class IoWorker
+class IO
 {
 public:
     static constexpr unsigned kUringDefaultFlag =
         IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_COOP_TASKRUN;
     static constexpr uint64_t kWakeTag = UINT64_MAX;
 
-    static IoWorker* current_io() noexcept { return tl_io; }
-
-    explicit IoWorker(InternalKey, const size_t id, const IoOptions& opts = {}) : opts_(opts), id_(id)
+    explicit IO(const size_t id, const IoOptions& opts = {}) : opts_(opts), id_(id)
     {
         local_tasks_.reserve(opts_.entries);
         current_batch.reserve(kMaxResumesPerTick);
     }
-    IoWorker(const IoWorker&) = delete;
-    IoWorker& operator=(const IoWorker&) = delete;
-    IoWorker(IoWorker&&) = delete;
-    IoWorker& operator=(IoWorker&&) = delete;
-    ~IoWorker();
+    IO(const IO&) = delete;
+    IO& operator=(const IO&) = delete;
+    IO(IO&&) = delete;
+    IO& operator=(IO&&) = delete;
+    ~IO();
 
-    io_uring& ring(InternalKey) noexcept { return ring_; }
+    io_uring& ring() noexcept { return ring_; }
     size_t id() const noexcept { return id_; }
     int ring_fd() const noexcept { return ring_.ring_fd; }
+    io_uring_sqe* get_sqe() noexcept;
 
-    void init(InternalKey, int wq_fd = -1);
-    void run(InternalKey, std::size_t batch_max_size, std::stop_token st) noexcept;
-    void wake(InternalKey) const noexcept;
-    void post(const InternalKey key, const std::coroutine_handle<> h)
+    void init(int wq_fd = -1);
+    void run(std::size_t batch_max_size, std::stop_token st) noexcept;
+    void wake() const noexcept;
+
+    // scheule
+    void post(const std::coroutine_handle<> h)
     {
         queue_.enqueue(h);
-        wake(key);
+        wake();
     }
-
     template <typename T>
     void schedule(Task<T> task)
     {
         // release transfers ownership
-        post(key_, task.release());
+        post(task.release());
     }
 
-    io_uring_sqe* get_sqe(InternalKey) noexcept;
-
+    // thread
     [[nodiscard]] bool is_owner_thread() const noexcept { return owner_thread_ == std::this_thread::get_id(); }
-
     static void pin_to_cpu(int cpu_id)
     {
         cpu_set_t cpuset;
@@ -136,11 +113,10 @@ public:
         }
     }
 
+    // IO
+
 private:
     static constexpr uint64_t kWakeupSentinel = 0xDEAD'C0DE'DEAD'C0DEULL;
-
-    /// TLS IO context
-    inline static thread_local IoWorker* tl_io = nullptr;
 
     //
     // Const xprs
@@ -152,7 +128,6 @@ private:
 
     io_uring ring_{};
     int wake_fd_{-1};
-    InternalKey key_;
     uint64_t wake_value_{0};
     bool wake_read_armed_{false};
     std::thread::id owner_thread_;
@@ -191,123 +166,122 @@ private:
     void tick(std::size_t batch_max_size) noexcept;
 };
 
-//=================================================================================================================
-// IO Context
-//=================================================================================================================
-class IoContext
-{
-    std::stop_source stop_source_;
-    std::size_t num_threads_;
-    IoOptions opts_;
-    std::atomic<bool> running_{false};
-    std::latch start_latch_;
-    InternalKey key_{};
-    std::vector<std::unique_ptr<IoWorker>> contexts_;
-    std::vector<std::jthread> workers_;
-
-public:
-    explicit IoContext(std::size_t num_threads, const IoOptions& opts = {});
-    ~IoContext();
-
-    /// Init fn start in the worker thread and SHOULD not block
-    template <WorkerInitFn InitFn>
-    [[nodiscard]] bool start(InitFn&& init_fn)
-    {
-        if (running_.exchange(true, std::memory_order_acq_rel))
-        {
-            ALOG_INFO("IoContext is already running");
-            return false;
-        }
-
-        // Allocate workers on main thread. No rings created yet
-        for (std::size_t i = 0; i < num_threads_; ++i)
-        {
-            contexts_.emplace_back(new IoWorker(key_, i, opts_));
-        }
-
-        const auto wq_promise = std::make_shared<std::promise<int>>();
-        std::shared_future wq_future = wq_promise->get_future();
-        const auto stop_token = stop_source_.get_token();
-
-        for (std::size_t i = 0; i < num_threads_; ++i)
-        {
-            workers_.emplace_back(
-                [this, i, wq_promise, wq_future, stop_token, init_fn = std::forward<InitFn>(init_fn)]() mutable
-                {
-                    // IoWorker::pin_to_cpu(static_cast<int>(i));
-                    // init worker 0 as the ring owner
-                    if (i == 0)
-                    {
-                        contexts_[i]->init(key_, -1);
-                        // share the ring fd to the others
-                        wq_promise->set_value(contexts_[i]->ring(key_).ring_fd);
-                    }
-                    else
-                    {
-                        // Threads 1..N: Wait for Thread 0 to finish initialization
-                        const int owner_fd = wq_future.get();
-
-                        // Initialize secondary rings attached to Thread 0's WQ
-                        contexts_[i]->init(key_, owner_fd);
-                    }
-
-                    start_latch_.count_down();
-                    start_latch_.wait();
-
-                    // Start the user-defined root task
-                    // All Io on this method uses the tls context
-                    init_fn();
-
-                    contexts_[i]->run(key_, opts_.batch_max_size, stop_token);
-                });
-        }
-
-        return true;
-    }
-
-    bool stop() const { return stop_source_.request_stop(); }
-
-    std::stop_token stop_token() const noexcept { return stop_source_.get_token(); }
-
-    // TODO: expose a safer scheduling mechanism and remove those methods
-    [[nodiscard]] IoWorker& worker(const std::size_t idx) const { return *contexts_[idx]; }
-    [[nodiscard]] std::size_t worker_count() const noexcept { return contexts_.size(); }
-
-    // Join threads (explicitly or via destructor)
-    void join() noexcept
-    {
-        workers_.clear();
-        contexts_.clear();
-        running_.store(false, std::memory_order_release);
-    }
-};
-
-// ============================================================================
-// TransferTo — cross-thread execution transfer
+// //=================================================================================================================
+// // IO Context
+// //=================================================================================================================
+// class IoContext
+// {
+//     std::stop_source stop_source_;
+//     std::size_t num_threads_;
+//     IoOptions opts_;
+//     std::atomic<bool> running_{false};
+//     std::latch start_latch_;
+//     std::vector<std::unique_ptr<IO>> contexts_;
+//     std::vector<std::jthread> workers_;
 //
-// Usage: co_await TransferTo{target_thread};
+// public:
+//     explicit IoContext(std::size_t num_threads, const IoOptions& opts = {});
+//     ~IoContext();
 //
-// Mechanism:
-//   1. await_ready() returns false → always suspend
-//   2. await_suspend() posts handle to target queue, returns void → suspension
-//   3. Target thread drains queue, calls h.resume() → execution resumes on target
+//     /// Init fn start in the worker thread and SHOULD not block
+//     template <WorkerInitFn InitFn>
+//     [[nodiscard]] bool start(InitFn&& init_fn)
+//     {
+//         if (running_.exchange(true, std::memory_order_acq_rel))
+//         {
+//             ALOG_INFO("IoContext is already running");
+//             return false;
+//         }
 //
-// Stack safety: await_suspend does NOT call resume(). It returns immediately,
-// allowing the caller's stack to unwind. Resume happens later from the target's
-// drain loop, which has a flat stack.
-// ============================================================================
-struct TransferTo
-{
-    IoWorker& target;
-
-    bool await_ready() noexcept { return false; }
-
-    void await_suspend(std::coroutine_handle<> h) noexcept
-    {
-        InternalKey k{};
-        target.post(k, h);
-    }
-
-    void await_resume() noexcept {}
-};
+//         // Allocate workers on main thread. No rings created yet
+//         for (std::size_t i = 0; i < num_threads_; ++i)
+//         {
+//             contexts_.emplace_back(new IO(key_, i, opts_));
+//         }
+//
+//         const auto wq_promise = std::make_shared<std::promise<int>>();
+//         std::shared_future wq_future = wq_promise->get_future();
+//         const auto stop_token = stop_source_.get_token();
+//
+//         for (std::size_t i = 0; i < num_threads_; ++i)
+//         {
+//             workers_.emplace_back(
+//                 [this, i, wq_promise, wq_future, stop_token, init_fn = std::forward<InitFn>(init_fn)]() mutable
+//                 {
+//                     // IoWorker::pin_to_cpu(static_cast<int>(i));
+//                     // init worker 0 as the ring owner
+//                     if (i == 0)
+//                     {
+//                         contexts_[i]->init(key_, -1);
+//                         // share the ring fd to the others
+//                         wq_promise->set_value(contexts_[i]->ring(key_).ring_fd);
+//                     }
+//                     else
+//                     {
+//                         // Threads 1..N: Wait for Thread 0 to finish initialization
+//                         const int owner_fd = wq_future.get();
+//
+//                         // Initialize secondary rings attached to Thread 0's WQ
+//                         contexts_[i]->init(key_, owner_fd);
+//                     }
+//
+//                     start_latch_.count_down();
+//                     start_latch_.wait();
+//
+//                     // Start the user-defined root task
+//                     // All Io on this method uses the tls context
+//                     init_fn();
+//
+//                     contexts_[i]->run(key_, opts_.batch_max_size, stop_token);
+//                 });
+//         }
+//
+//         return true;
+//     }
+//
+//     bool stop() const { return stop_source_.request_stop(); }
+//
+//     std::stop_token stop_token() const noexcept { return stop_source_.get_token(); }
+//
+//     // TODO: expose a safer scheduling mechanism and remove those methods
+//     [[nodiscard]] IO& worker(const std::size_t idx) const { return *contexts_[idx]; }
+//     [[nodiscard]] std::size_t worker_count() const noexcept { return contexts_.size(); }
+//
+//     // Join threads (explicitly or via destructor)
+//     void join() noexcept
+//     {
+//         workers_.clear();
+//         contexts_.clear();
+//         running_.store(false, std::memory_order_release);
+//     }
+// };
+//
+// // ============================================================================
+// // TransferTo — cross-thread execution transfer
+// //
+// // Usage: co_await TransferTo{target_thread};
+// //
+// // Mechanism:
+// //   1. await_ready() returns false → always suspend
+// //   2. await_suspend() posts handle to target queue, returns void → suspension
+// //   3. Target thread drains queue, calls h.resume() → execution resumes on target
+// //
+// // Stack safety: await_suspend does NOT call resume(). It returns immediately,
+// // allowing the caller's stack to unwind. Resume happens later from the target's
+// // drain loop, which has a flat stack.
+// // ============================================================================
+// struct TransferTo
+// {
+//     IO& target;
+//
+//     bool await_ready() noexcept { return false; }
+//
+//     void await_suspend(std::coroutine_handle<> h) noexcept
+//     {
+//         InternalKey k{};
+//         target.post(k, h);
+//     }
+//
+//     void await_resume() noexcept {}
+// };
 }  // namespace URing

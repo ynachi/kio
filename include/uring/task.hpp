@@ -10,7 +10,7 @@
 
 namespace URing
 {
-class IoWorker;
+class IO;
 
 // Forward declarations
 template <typename T>
@@ -46,14 +46,14 @@ struct task_promise_base
 template <typename T>
 struct task_promise : task_promise_base
 {
-    std::optional<Result<T>> result_;
+    std::optional<Result<T>> result;
 
     // Task<T> always stores and exposes Result<T>. Prefer Task<T>, not
     // Task<Result<T>>: returning Result<T> here is flattened into the task's
     // own result channel instead of nesting Result<Result<T>>.
-    void return_value(T val) noexcept { result_.emplace(std::move(val)); }
-    void return_value(Result<T> val) noexcept { result_.emplace(std::move(val)); }
-    void return_value(std::unexpected<std::error_code> err) noexcept { result_.emplace(std::move(err)); }
+    void return_value(T val) noexcept { result.emplace(std::move(val)); }
+    void return_value(Result<T> res) noexcept { result.emplace(std::move(res)); }
+    void return_value(std::unexpected<std::error_code> err) noexcept { result.emplace(std::move(err)); }
     Task<T> get_return_object() noexcept;
 };
 
@@ -185,22 +185,5 @@ inline Task<void> task_promise<void>::get_return_object() noexcept
 {
     return Task{std::coroutine_handle<task_promise>::from_promise(*this)};
 }
-
-struct DetachedTask
-{
-    struct promise_type
-    {
-        DetachedTask get_return_object() noexcept { return {}; }
-        std::suspend_never initial_suspend() noexcept { return {}; }
-        std::suspend_never final_suspend() noexcept { return {}; }
-        void return_void() noexcept {}
-        void unhandled_exception() noexcept
-        {
-            ALOG_FATAL("detached task died with unhandled exception");
-            ALOG::stop();
-            std::terminate();
-        }
-    };
-};
 
 }  // namespace URing

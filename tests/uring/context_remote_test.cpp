@@ -21,7 +21,7 @@ TEST(IoContextRemoteTest, SpawnOnRunsFactoryOnTargetWorker)
     ASSERT_TRUE(ctx.start(
         [&]
         {
-            auto* current = IoWorker::current_io();
+            auto* current = IO::current_io();
             ASSERT_NE(current, nullptr);
 
             if (current->id() == 0)
@@ -29,7 +29,7 @@ TEST(IoContextRemoteTest, SpawnOnRunsFactoryOnTargetWorker)
                 ASSERT_TRUE(ctx.spawn_on(ctx.worker(1),
                                          [&]() -> DetachedTask
                                          {
-                                             observed_worker.store(static_cast<int>(IoWorker::current_io()->id()),
+                                             observed_worker.store(static_cast<int>(IO::current_io()->id()),
                                                                    std::memory_order_relaxed);
                                              ran.fetch_add(1, std::memory_order_relaxed);
                                              ctx.stop();
@@ -62,7 +62,7 @@ TEST(IoContextRemoteTest, AllWorkersCanDispatchToAnotherWorker)
     ASSERT_TRUE(ctx.start(
         [&]
         {
-            auto* current = IoWorker::current_io();
+            auto* current = IO::current_io();
             ASSERT_NE(current, nullptr);
 
             const std::size_t source = current->id();

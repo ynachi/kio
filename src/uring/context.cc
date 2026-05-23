@@ -13,7 +13,7 @@
 namespace URing
 {
 
-void IoWorker::init(InternalKey, const int wq_fd)
+void IO::init(InternalKey, const int wq_fd)
 {
     io_uring_params params{};
 
@@ -57,7 +57,7 @@ void IoWorker::init(InternalKey, const int wq_fd)
               (opts_.flags & IORING_SETUP_SQPOLL) ? "enabled" : "disabled");
 }
 
-void IoWorker::submit_or_wait_for()
+void IO::submit_or_wait_for()
 {
     // Only block if we have no local work to do.
 
@@ -77,7 +77,7 @@ void IoWorker::submit_or_wait_for()
     }
 }
 
-void IoWorker::tick(const std::size_t batch_max_size) noexcept
+void IO::tick(const std::size_t batch_max_size) noexcept
 {
     // Step 1: Drain the cross-thread MPSC queue first.
     queue_.drain([](const std::coroutine_handle<> h) { h.resume(); }, batch_max_size);
@@ -128,7 +128,7 @@ void IoWorker::tick(const std::size_t batch_max_size) noexcept
     }
 }
 
-void IoWorker::arm_wake_read() noexcept
+void IO::arm_wake_read() noexcept
 {
     io_uring_sqe* sqe = get_sqe(key_);
     io_uring_prep_read(sqe, wake_fd_, &wake_value_, sizeof(wake_value_), 0);
@@ -136,7 +136,7 @@ void IoWorker::arm_wake_read() noexcept
     io_uring_submit(&ring_);
 }
 
-void IoWorker::run(InternalKey key, std::size_t batch_max_size, std::stop_token st) noexcept
+void IO::run(InternalKey key, std::size_t batch_max_size, std::stop_token st) noexcept
 {
     // owner thread should be set on the thread which start the loop
     owner_thread_ = std::this_thread::get_id();
@@ -154,7 +154,7 @@ void IoWorker::run(InternalKey key, std::size_t batch_max_size, std::stop_token 
     tl_io = nullptr;
 }
 
-io_uring_sqe* IoWorker::get_sqe(InternalKey) noexcept
+io_uring_sqe* IO::get_sqe(InternalKey) noexcept
 {
     io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
     if (sqe == nullptr)
@@ -166,7 +166,7 @@ io_uring_sqe* IoWorker::get_sqe(InternalKey) noexcept
     return sqe;
 }
 
-void IoWorker::wake(InternalKey) const noexcept
+void IO::wake(InternalKey) const noexcept
 {
     constexpr uint64_t one = 1;
     for (;;)
@@ -185,7 +185,7 @@ void IoWorker::wake(InternalKey) const noexcept
     }
 }
 
-IoWorker::~IoWorker()
+IO::~IO()
 {
     // TODO: cancell all ops on the ring fd
 

@@ -29,12 +29,15 @@ class IoAwaiter
 
     // for friend access
     IoOps ops_{};
-    InternalKey key_{};
+    IO& io_;
     [[no_unique_address]] SetupFunc setup_;
     [[no_unique_address]] MapperFunc mapper_;
 
 public:
-    IoAwaiter(SetupFunc setup, MapperFunc mapper) : setup_(std::move(setup)), mapper_(std::move(mapper)) {}
+    IoAwaiter(IO& io, SetupFunc setup, MapperFunc mapper)
+        : io_(io), setup_(std::move(setup)), mapper_(std::move(mapper))
+    {
+    }
 
     bool await_ready() const noexcept { return false; }
 
@@ -51,13 +54,8 @@ public:
     template <typename Promise>
     std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> h) noexcept
     {
-        const auto io = IoWorker::current_io();
-        // skip runtime check as io cannot be nil if io context is normally started
-        // if not started, nothing could work anyway.
-        assert(io != nullptr && "IoAwaiter used outside of an IoWorker thread");
-
         // prepare sqe
-        io_uring_sqe* sqe = io->get_sqe(key_);
+        io_uring_sqe* sqe = io_.get_sqe();
         if (sqe == nullptr)
         {
             // This path is now extremely rare thanks to tick-level submit and

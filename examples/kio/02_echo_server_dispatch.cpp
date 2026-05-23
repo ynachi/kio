@@ -72,7 +72,7 @@ DetachedTask dispatcher_loop(IoContext& context, uint16_t port)
         if (client_res)
         {
             const size_t selected_worker = worker_idx % num_workers;
-            IoWorker& target_worker = context.worker(selected_worker);
+            IO& target_worker = context.worker(selected_worker);
             worker_idx++;
 
             ALOG_DEBUG("Dispatching accepted client to worker {}", selected_worker);
@@ -108,7 +108,7 @@ int main()
     (void)context.start(
         [&]()
         {
-            if (IoWorker::current_io()->id() == 0)
+            if (IO::current_io()->id() == 0)
             {
                 dispatcher_loop(context, 8080);
             }

@@ -144,7 +144,7 @@ DetachedTask dispatching_server_loop(IoContext& ctx, uint16_t port, std::stop_to
         {
             const std::size_t worker_count = ctx.worker_count();
             const std::size_t target_idx = worker_count > 1 ? 1 + ((next_worker++ - 1) % (worker_count - 1)) : 0;
-            IoWorker& target = ctx.worker(target_idx);
+            IO& target = ctx.worker(target_idx);
             co_await TransferTo(target);
             handle_client(std::move(client_res.value()));
         }
@@ -186,7 +186,7 @@ int main()
         {
             if constexpr (kUseRemoteDispatch)
             {
-                if (IoWorker::current_io()->id() == 0)
+                if (IO::current_io()->id() == 0)
                 {
                     dispatching_server_loop(ctx, port, st);
                 }
