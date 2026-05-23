@@ -10,7 +10,6 @@
 #include <string_view>
 #include <thread>
 
-#include "uring/io.hpp"
 #include "uring/logger.hpp"
 #include "uring/task.hpp"
 #include "uring/tcp_listener.hpp"
