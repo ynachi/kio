@@ -5,11 +5,9 @@
 #include <coroutine>
 #include <cstdint>
 #include <cstring>
-#include <functional>
 #include <future>
 #include <latch>
 #include <memory>
-#include <new>
 #include <stop_token>
 #include <system_error>
 #include <thread>
@@ -20,7 +18,6 @@
 
 #include "logger.hpp"
 #include "mpsc_queue.hpp"
-#include "operation.hpp"
 #include "task.hpp"
 
 namespace URing
