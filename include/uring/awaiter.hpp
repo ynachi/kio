@@ -1,8 +1,9 @@
 #pragma once
-#include "context.h"
 
 #include <concepts>
-#include <cstring>
+#include <coroutine>
+#include <cstdint>
+#include <type_traits>
 #include <utility>
 
 #include <liburing.h>
@@ -11,6 +12,7 @@
 
 namespace URing
 {
+class IO;
 
 struct IoOps
 {

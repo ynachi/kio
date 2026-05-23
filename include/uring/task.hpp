@@ -26,17 +26,29 @@ struct task_promise_base
     void unhandled_exception() noexcept { exception = std::current_exception(); }
 
     // -----------------------------------------------------------------------
-    // final_suspend — symmetric transfer to continuation
-    // Keeps stack depth O(1) via tail-call optimization.
+    // FinalAwaitable — The "Self-Cleaning" Mechanism
     // -----------------------------------------------------------------------
     struct FinalAwaitable
     {
         bool await_ready() noexcept { return false; }
+
         template <typename Promise>
         std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> h) noexcept
         {
-            return h.promise().continuation;
+            auto cont = h.promise().continuation;
+
+            // If continuation is noop, it means this task was "detached" (scheduled).
+            // We must destroy the frame here to prevent memory leaks.
+            if (cont == std::noop_coroutine())
+            {
+                h.destroy();
+                return std::noop_coroutine();
+            }
+
+            // Otherwise, symmetrically transfer control back to the caller.
+            return cont;
         }
+
         void await_resume() noexcept {}
     };
 
@@ -48,12 +60,15 @@ struct task_promise : task_promise_base
 {
     std::optional<Result<T>> result;
 
-    // Task<T> always stores and exposes Result<T>. Prefer Task<T>, not
-    // Task<Result<T>>: returning Result<T> here is flattened into the task's
-    // own result channel instead of nesting Result<Result<T>>.
+    // Handle 'co_return value;'
     void return_value(T val) noexcept { result.emplace(std::move(val)); }
+
+    // Handle 'co_return std::unexpected(err);'
     void return_value(Result<T> res) noexcept { result.emplace(std::move(res)); }
+
+    // Handle 'co_return Result<T>(...);'
     void return_value(std::unexpected<std::error_code> err) noexcept { result.emplace(std::move(err)); }
+
     Task<T> get_return_object() noexcept;
 };
 
@@ -62,12 +77,13 @@ struct task_promise<void> : task_promise_base
 {
     std::optional<Result<void>> result_;
 
-    // A Task<void> still completes with Result<void>. Use `co_return {};` or
-    // `co_return Result<void>{};` for success, and `co_return std::unexpected(...)`
-    // for failure. Plain `co_return;` is intentionally not supported because the
-    // promise needs return_value() for the error channel.
+    // Handle 'co_return value;'
     void return_value(Result<void> val) noexcept { result_.emplace(std::move(val)); }
+
+    // Handle 'co_return std::unexpected(err);'
     void return_value(std::unexpected<std::error_code> err) noexcept { result_.emplace(std::move(err)); }
+
+    // Handle 'co_return Result<T>(...);'
     Task<void> get_return_object() noexcept;
 };
 
@@ -83,7 +99,8 @@ struct task_promise<void> : task_promise_base
 template <typename T>
 struct Task
 {
-    using Handle = std::coroutine_handle<task_promise<T>>;
+    using promise_type = task_promise<T>;
+    using Handle = std::coroutine_handle<promise_type>;
     Handle handle_;
 
     explicit Task(Handle h) noexcept : handle_(h) {}
@@ -93,7 +110,7 @@ struct Task
     {
         if (this != &o)
         {
-            if (handle_ && handle_.done())
+            if (handle_)
             {
                 handle_.destroy();
             }
@@ -114,21 +131,6 @@ struct Task
             handle_.destroy();
         }
     }
-
-    // Non-blocking check for manual polling systems. Returns EWOULDBLOCK until the
-    // coroutine has completed and then returns the stored Result<T>.
-    Result<T> get() const noexcept
-    {
-        if (!handle_ || !handle_.done() || !handle_.promise().result_.has_value())
-        {
-            return std::unexpected(MakeErrorCode(EWOULDBLOCK));
-        }
-        return handle_.promise().result_.value();
-    }
-
-    bool done() const noexcept { return handle_ && handle_.done(); }
-
-    Handle release() { return std::exchange(handle_, {}); }
 
     // Awaiting a Task<T> returns Result<T>, matching get(). This keeps errors
     // explicit at every composition point:
