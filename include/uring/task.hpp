@@ -78,10 +78,21 @@ struct task_promise<void> : task_promise_base
     std::optional<Result<void>> result_;
 
     // Handle 'co_return value;'
-    void return_value(Result<void> val) noexcept { result_.emplace(std::move(val)); }
+    void return_value(Result<void> res) noexcept
+    {
+        if (!res)
+        {
+            ALOG_ERROR("Detached task failed with error: {}", res.error().message());
+        }
+        result_.emplace(std::move(res));
+    }
 
     // Handle 'co_return std::unexpected(err);'
-    void return_value(std::unexpected<std::error_code> err) noexcept { result_.emplace(std::move(err)); }
+    void return_value(std::unexpected<std::error_code> err) noexcept
+    {
+        ALOG_ERROR("Detached task failed with error: {}", err.error().message());
+        result_.emplace(std::move(err));
+    }
 
     // Handle 'co_return Result<T>(...);'
     Task<void> get_return_object() noexcept;

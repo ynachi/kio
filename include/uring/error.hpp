@@ -81,3 +81,11 @@ inline std::error_code make_error_code(ParseError e)
 }
 
 }  // namespace URing
+
+#define KIO_TRY(expr)                                \
+    ({                                               \
+        auto&& _res = (expr);                        \
+        if (!_res)                                   \
+            co_return std::unexpected(_res.error()); \
+        std::move(*_res);                            \
+    })

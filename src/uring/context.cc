@@ -13,11 +13,12 @@
 namespace URing
 {
 
-void IO::init(InternalKey, const int wq_fd)
+void IO::init(const int wq_fd)
 {
     io_uring_params params{};
 
-    params.flags |= opts_.flags;
+    // disable the ring first
+    params.flags |= opts_.flags |= IORING_SETUP_R_DISABLED;
 
     // attach WQ
     if (wq_fd >= 0)
@@ -49,9 +50,6 @@ void IO::init(InternalKey, const int wq_fd)
         throw std::runtime_error("eventfd failed");
     }
     arm_wake_read();
-
-    // set the current io
-    tl_io = this;
 
     ALOG_INFO("Started IO context with {} entries (SQPOLL: {})", opts_.entries,
               (opts_.flags & IORING_SETUP_SQPOLL) ? "enabled" : "disabled");
@@ -130,18 +128,18 @@ void IO::tick(const std::size_t batch_max_size) noexcept
 
 void IO::arm_wake_read() noexcept
 {
-    io_uring_sqe* sqe = get_sqe(key_);
+    io_uring_sqe* sqe = get_sqe();
     io_uring_prep_read(sqe, wake_fd_, &wake_value_, sizeof(wake_value_), 0);
     io_uring_sqe_set_data64(sqe, kWakeupSentinel);
     io_uring_submit(&ring_);
 }
 
-void IO::run(InternalKey key, std::size_t batch_max_size, std::stop_token st) noexcept
+void IO::run(const std::size_t batch_max_size, std::stop_token st) noexcept
 {
     // owner thread should be set on the thread which start the loop
     owner_thread_ = std::this_thread::get_id();
 
-    std::stop_callback wake_on_stop{st, [this, key] { wake(key); }};
+    std::stop_callback wake_on_stop{st, [this] { wake(); }};
     while (!st.stop_requested())
     {
         tick(batch_max_size);
@@ -149,12 +147,9 @@ void IO::run(InternalKey key, std::size_t batch_max_size, std::stop_token st) no
 
     ALOG_INFO("Worker {} quiescing...", id_);
     // TODO: implement cleanup here
-
-    // reset the tls context
-    tl_io = nullptr;
 }
 
-io_uring_sqe* IO::get_sqe(InternalKey) noexcept
+io_uring_sqe* IO::get_sqe() noexcept
 {
     io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
     if (sqe == nullptr)
@@ -166,7 +161,7 @@ io_uring_sqe* IO::get_sqe(InternalKey) noexcept
     return sqe;
 }
 
-void IO::wake(InternalKey) const noexcept
+void IO::wake() const noexcept
 {
     constexpr uint64_t one = 1;
     for (;;)
@@ -205,26 +200,26 @@ IO::~IO()
 //
 // OP Context
 //
-IoContext::IoContext(const std::size_t num_threads, const IoOptions& opts)
-    : num_threads_(num_threads), opts_(opts), start_latch_(num_threads)
-{
-    contexts_.reserve(num_threads);
-    workers_.reserve(num_threads);
-
-    if (num_threads == 0)
-    {
-        throw std::runtime_error("io context started with 0 thread");
-    }
-}
-
-IoContext::~IoContext()
-{
-    if (running_.load(std::memory_order_acquire))
-    {
-        (void)stop();
-    }
-    // Explicitly join workers before deleting contexts_
-    workers_.clear();
-    contexts_.clear();
-}
+// IoContext::IoContext(const std::size_t num_threads, const IoOptions& opts)
+//     : num_threads_(num_threads), opts_(opts), start_latch_(num_threads)
+// {
+//     contexts_.reserve(num_threads);
+//     workers_.reserve(num_threads);
+//
+//     if (num_threads == 0)
+//     {
+//         throw std::runtime_error("io context started with 0 thread");
+//     }
+// }
+//
+// IoContext::~IoContext()
+// {
+//     if (running_.load(std::memory_order_acquire))
+//     {
+//         (void)stop();
+//     }
+//     // Explicitly join workers before deleting contexts_
+//     workers_.clear();
+//     contexts_.clear();
+// }
 }  // namespace URing

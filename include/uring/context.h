@@ -7,7 +7,6 @@
 #include <cstring>
 #include <filesystem>
 #include <future>
-#include <latch>
 #include <memory>
 #include <stop_token>
 #include <system_error>
@@ -61,6 +60,9 @@ struct IoOptions
 //   - Symmetric transfer used inside Task to keep final resume stack-flat
 //   - Exceptions: std::expected is the preferred error management mechanism (except during critical resources
 //   initialization)
+//   - Explicit orchestration
+//   IO io0();
+//   IO io1(..,io0.ring_fd())
 // ============================================================================
 class IO
 {
@@ -69,10 +71,22 @@ public:
         IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_COOP_TASKRUN;
     static constexpr uint64_t kWakeTag = UINT64_MAX;
 
-    explicit IO(const size_t id, const IoOptions& opts = {}) : opts_(opts), id_(id)
+    explicit IO(const size_t id, std::stop_token st, const int shared_wq_fd = -1, const IoOptions& opts = {})
+        : stop_token_(st), opts_(opts), id_(id)
     {
         local_tasks_.reserve(opts_.entries);
         current_batch.reserve(kMaxResumesPerTick);
+
+        // init
+        init(shared_wq_fd);
+
+        // start loop
+        thread_ = std::jthread(
+            [this]
+            {
+                io_uring_register(ring_.ring_fd, IORING_REGISTER_ENABLE_RINGS, nullptr, 0);
+                this->run(opts_.batch_max_size, stop_token_);
+            });
     }
     IO(const IO&) = delete;
     IO& operator=(const IO&) = delete;
@@ -80,21 +94,6 @@ public:
     IO& operator=(IO&&) = delete;
     ~IO();
 
-    io_uring& ring() noexcept { return ring_; }
-    size_t id() const noexcept { return id_; }
-    int ring_fd() const noexcept { return ring_.ring_fd; }
-    io_uring_sqe* get_sqe() noexcept;
-
-    void init(int wq_fd = -1);
-    void run(std::size_t batch_max_size, std::stop_token st) noexcept;
-    void wake() const noexcept;
-
-    // scheule
-    void post(const std::coroutine_handle<> h)
-    {
-        queue_.enqueue(h);
-        wake();
-    }
     template <typename T>
     void schedule(Task<T> task)
     {
@@ -305,6 +304,8 @@ private:
     int wake_fd_{-1};
     uint64_t wake_value_{0};
     bool wake_read_armed_{false};
+    std::stop_token stop_token_;
+    std::jthread thread_;
     std::thread::id owner_thread_;
     IoOptions opts_;
     size_t id_;
@@ -339,6 +340,29 @@ private:
     //
     // --------------------------------------------------------
     void tick(std::size_t batch_max_size) noexcept;
+
+    io_uring& ring() noexcept { return ring_; }
+    size_t id() const noexcept { return id_; }
+    int ring_fd() const noexcept { return ring_.ring_fd; }
+    io_uring_sqe* get_sqe() noexcept;
+
+    void init(int wq_fd = -1);
+    void run(std::size_t batch_max_size, std::stop_token st) noexcept;
+    void wake() const noexcept;
+
+    // scheule
+    void post(const std::coroutine_handle<> h)
+    {
+        if (is_owner_thread())
+        {
+            local_tasks_.push_back(h);
+        }
+        else
+        {
+            queue_.enqueue(h);
+            wake();
+        }
+    }
 };
 
 // //=================================================================================================================

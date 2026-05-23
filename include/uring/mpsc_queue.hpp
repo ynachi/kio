@@ -1,7 +1,6 @@
 #pragma once
 
 #include <atomic>
-#include <concepts>
 #include <cstddef>
 #include <limits>
 #include <utility>
