@@ -1,7 +1,6 @@
 #pragma once
 #include <atomic>
 #include <cassert>
-#include <concepts>
 #include <coroutine>
 #include <cstdint>
 #include <cstring>
@@ -11,7 +10,6 @@
 #include <stop_token>
 #include <system_error>
 #include <thread>
-#include <utility>
 #include <vector>
 
 #include <liburing.h>
@@ -33,6 +31,8 @@ struct IoOptions
     unsigned flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_COOP_TASKRUN;
 
     std::uint32_t tick_timeout_ms = 10;
+
+    bool pin_io_worker{false};
 
     /// max resume per tick
     std::size_t batch_max_size = 128;
@@ -82,9 +82,13 @@ public:
 
         // start loop
         thread_ = std::jthread(
-            [this]
+            [this, id]
             {
                 io_uring_register(ring_.ring_fd, IORING_REGISTER_ENABLE_RINGS, nullptr, 0);
+                if (opts_.pin_io_worker)
+                {
+                    pin_to_cpu(static_cast<int>(id));
+                }
                 this->run(opts_.batch_max_size, stop_token_);
             });
     }
