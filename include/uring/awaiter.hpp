@@ -9,6 +9,7 @@
 #include <liburing.h>
 
 #include "error.hpp"
+#include "logger.hpp"
 
 namespace URing
 {
@@ -54,28 +55,13 @@ public:
     ~IoAwaiter() = default;
 
     template <typename Promise>
-    std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> h) noexcept
-    {
-        // prepare sqe
-        io_uring_sqe* sqe = io_.get_sqe();
-        if (sqe == nullptr)
-        {
-            // This path is now extremely rare thanks to tick-level submit and
-            // the on-demand fallback in get_sqe.
-            ALOG_WARN("failed to get SQE after submit; completing operation with ENOSPC");
-            ops_.res = -ENOSPC;
-            return h;
-        }
-
-        this->ops_.h = h;
-        setup_(sqe);
-        io_uring_sqe_set_data64(sqe, reinterpret_cast<uint64_t>(&ops_));
-
-        return std::noop_coroutine();
-    }
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> h) noexcept;
 
     Result<T> await_resume() noexcept { return mapper_(ops_.res); }
 };
+
+// Implementation is moved to context.h after IO is fully defined
+
 
 // Helper for void-returning operations in io.hpp (e.g., detail::ResumeVoid)
 namespace detail

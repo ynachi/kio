@@ -124,6 +124,8 @@ public:
         }
     }
 
+    [[nodiscard]] std::uint32_t id() const noexcept { return id_; }
+
     //
     // IO Methods
     //
@@ -371,4 +373,28 @@ struct TransferTo
 
     void await_resume() noexcept {}
 };
+
+// ============================================================================
+// IoAwaiter Implementation
+// This must be defined after IO is fully defined to avoid incomplete type errors.
+// ============================================================================
+template <typename SetupFunc, typename MapperFunc>
+    requires std::invocable<SetupFunc, io_uring_sqe*> && std::invocable<MapperFunc, int32_t>
+template <typename Promise>
+inline std::coroutine_handle<> IoAwaiter<SetupFunc, MapperFunc>::await_suspend(std::coroutine_handle<Promise> h) noexcept
+{
+    io_uring_sqe* sqe = io_.get_sqe();
+    if (sqe == nullptr)
+    {
+        ops_.res = -ENOSPC;
+        return h;
+    }
+
+    this->ops_.h = h;
+    setup_(sqe);
+    io_uring_sqe_set_data64(sqe, reinterpret_cast<uint64_t>(&ops_));
+
+    return std::noop_coroutine();
+}
+
 }  // namespace URing

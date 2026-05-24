@@ -22,6 +22,7 @@ struct task_promise_base
 {
     std::coroutine_handle<> continuation{std::noop_coroutine()};
     std::exception_ptr exception = nullptr;
+    bool detached = false;
 
     std::suspend_always initial_suspend() noexcept { return {}; }
 
@@ -37,18 +38,15 @@ struct task_promise_base
         template <typename Promise>
         std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> h) noexcept
         {
-            auto cont = h.promise().continuation;
-
-            // If continuation is noop, it means this task was "detached" (scheduled).
-            // We must destroy the frame here to prevent memory leaks.
-            if (cont == std::noop_coroutine())
+            // If the task was detached (released), it must self-destruct
+            if (h.promise().detached)
             {
                 h.destroy();
                 return std::noop_coroutine();
             }
 
             // Otherwise, symmetrically transfer control back to the caller.
-            return cont;
+            return h.promise().continuation;
         }
 
         void await_resume() noexcept {}
@@ -85,24 +83,21 @@ struct task_promise<void> : task_promise_base
 {
     std::optional<Result<void>> result_;
 
-    // Handle 'co_return;'
-    void return_void() noexcept { result_.emplace(); }
-
     // Handle 'co_return std::unexpected(err);'
     void return_value(std::unexpected<std::error_code> err) noexcept
     {
         // Log dropped errors for detached tasks
-        if (continuation == std::noop_coroutine())
+        if (detached)
         {
             ALOG_ERROR("Detached task failed: {}", err.error().message());
         }
         result_.emplace(std::move(err));
     }
 
-    // Handle 'co_return Result<void>(...);'
+    // Handle 'co_return Result<void>(...);' or 'co_return {};'
     void return_value(Result<void> res) noexcept
     {
-        if (!res && continuation == std::noop_coroutine())
+        if (!res && detached)
         {
             ALOG_ERROR("Detached task failed: {}", res.error().message());
         }
@@ -147,7 +142,14 @@ struct [[nodiscard]] Task
 
     // Transfers ownership of the coroutine frame to the scheduler.
     // The Task object becomes empty and the frame will self-destruct on completion.
-    Handle release() { return std::exchange(handle_, {}); }
+    Handle release()
+    {
+        if (handle_)
+        {
+            handle_.promise().detached = true;
+        }
+        return std::exchange(handle_, {});
+    }
 
     bool done() const noexcept { return handle_ && handle_.done(); }
 
@@ -187,14 +189,14 @@ struct [[nodiscard]] Task
 };
 
 template <typename T>
-Task<T> task_promise<T>::get_return_object() noexcept
+inline Task<T> task_promise<T>::get_return_object() noexcept
 {
     return Task<T>{std::coroutine_handle<task_promise>::from_promise(*this)};
 }
 
 inline Task<void> task_promise<void>::get_return_object() noexcept
 {
-    return Task{std::coroutine_handle<task_promise>::from_promise(*this)};
+    return Task<void>{std::coroutine_handle<task_promise>::from_promise(*this)};
 }
 
-}  // namespace URing
+} // namespace URing

@@ -6,7 +6,6 @@
 #include <string_view>
 #include <vector>
 
-#include "uring/io.hpp"
 #include "uring/logger.hpp"
 #include "uring/task.hpp"
 #include "uring/tcp_listener.hpp"
@@ -28,34 +27,38 @@ void signal_handler(int)
     global_stop_source.request_stop();
 }
 
-DetachedTask handle_client(Fd client_fd)
+// Handle a single client connection
+Task<void> handle_client(IO& worker, Fd client_fd)
 {
     std::byte buf[1024];
 
     while (true)
     {
-        auto read_res = co_await read(client_fd, std::span{buf});
+        // Use KIO_TRY to automatically handle Result/Error
+        auto read_len = KIO_TRY(co_await worker.read(client_fd, std::span{buf}));
 
-        if (!read_res.has_value() || *read_res == 0)
+        if (read_len == 0)
             break;
 
         std::span<const std::byte> out_buf(reinterpret_cast<const std::byte*>(kHttpResponse.data()),
                                            kHttpResponse.size());
 
-        auto write_res = co_await write(client_fd, out_buf);
+        auto write_len = KIO_TRY(co_await worker.write(client_fd, out_buf));
 
-        if (!write_res.has_value() || *write_res == 0)
+        if (write_len == 0)
             break;
     }
+    co_return {};
 }
 
-DetachedTask dispatcher_loop(IoContext& context, uint16_t port)
+// Accept connections on one worker and dispatch to others
+Task<void> dispatcher_loop(IoContext& context, IO& worker, uint16_t port)
 {
     auto listener = TcpListener::Bind(port, "0.0.0.0", 4096);
     if (!listener)
     {
-        std::cerr << "[Dispatcher] Failed to bind: " << listener.error().value() << "\n";
-        co_return;
+        std::cerr << "[Dispatcher] Failed to bind: " << listener.error().message() << "\n";
+        co_return std::unexpected(listener.error());
     }
 
     const size_t num_workers = context.worker_count();
@@ -67,29 +70,19 @@ DetachedTask dispatcher_loop(IoContext& context, uint16_t port)
 
     while (!global_stop_source.stop_requested())
     {
-        auto client_res = co_await accept(server_fd);
+        // Accept connection on the dispatcher's ring
+        auto client_fd = KIO_TRY(co_await worker.accept(server_fd));
 
-        if (client_res)
-        {
-            const size_t selected_worker = worker_idx % num_workers;
-            IO& target_worker = context.worker(selected_worker);
-            worker_idx++;
+        const size_t selected_worker = worker_idx % num_workers;
+        IO& target_worker = context.worker(selected_worker);
+        worker_idx++;
 
-            ALOG_DEBUG("Dispatching accepted client to worker {}", selected_worker);
+        ALOG_DEBUG("Dispatching accepted client to worker {}", selected_worker);
 
-            // Cross-thread spawn via IoContext
-            context.spawn_on(target_worker, [fd = std::move(*client_res)]() mutable -> DetachedTask
-                             { return handle_client(std::move(fd)); });
-        }
-        else
-        {
-            // If accept failed because of a signal or similar, we might want to continue or break
-            if (client_res.error().value() != EINTR)
-            {
-                std::cerr << "[Dispatcher] Accept failed: " << client_res.error().value() << "\n";
-            }
-        }
+        // Directly schedule the client handler on the target worker's thread
+        target_worker.schedule(handle_client(target_worker, std::move(client_fd)));
     }
+    co_return {};
 }
 
 int main()
@@ -103,16 +96,8 @@ int main()
     constexpr int num_workers = 4;
     IoContext context(num_workers);
 
-    // We start the context. In this example, we'll run the dispatcher on the first worker
-    // by spawning it right after start.
-    (void)context.start(
-        [&]()
-        {
-            if (IO::current_io()->id() == 0)
-            {
-                dispatcher_loop(context, 8080);
-            }
-        });
+    // Schedule the dispatcher loop on the first worker
+    context.worker(0).schedule(dispatcher_loop(context, context.worker(0), 8080));
 
     // Wait for stop signal
     while (!global_stop_source.stop_requested())
@@ -120,8 +105,8 @@ int main()
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
-    context.stop();
     context.join();
 
+    std::cout << "Echo server shutdown complete.\n";
     return 0;
 }

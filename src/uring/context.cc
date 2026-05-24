@@ -18,7 +18,7 @@ void IO::init(const int wq_fd)
     io_uring_params params{};
 
     // disable the ring first
-    params.flags |= opts_.flags |= IORING_SETUP_R_DISABLED;
+    params.flags = opts_.flags | IORING_SETUP_R_DISABLED;
 
     // attach WQ
     if (wq_fd >= 0)

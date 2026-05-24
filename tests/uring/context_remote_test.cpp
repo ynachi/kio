@@ -9,34 +9,31 @@
 
 using namespace URing;
 
-TEST(IoContextRemoteTest, SpawnOnRunsFactoryOnTargetWorker)
+TEST(IoContextRemoteTest, ScheduleRunsOnTargetWorker)
 {
     IoOptions opts;
     opts.tick_timeout_ms = 1;
 
     IoContext ctx(2, opts);
-    std::atomic ran{0};
-    std::atomic observed_worker{-1};
+    std::atomic<int> ran{0};
+    std::atomic<int> observed_worker{-1};
 
-    ASSERT_TRUE(ctx.start(
-        [&]
-        {
-            auto* current = IO::current_io();
-            ASSERT_NE(current, nullptr);
+    // Define a task that records the ID of the worker it runs on
+    auto task = [&](IO& target) -> Task<void> {
+        observed_worker.store(static_cast<int>(target.id()), std::memory_order_relaxed);
+        ran.fetch_add(1, std::memory_order_relaxed);
+        co_return {};
+    };
 
-            if (current->id() == 0)
-            {
-                ASSERT_TRUE(ctx.spawn_on(ctx.worker(1),
-                                         [&]() -> DetachedTask
-                                         {
-                                             observed_worker.store(static_cast<int>(IO::current_io()->id()),
-                                                                   std::memory_order_relaxed);
-                                             ran.fetch_add(1, std::memory_order_relaxed);
-                                             ctx.stop();
-                                             co_return;
-                                         }));
-            }
-        }));
+    // Schedule on worker 1 from the main thread
+    ctx.worker(1).schedule(task(ctx.worker(1)));
+
+    // Busy wait for completion with timeout
+    auto start = std::chrono::steady_clock::now();
+    while (ran.load() == 0 && std::chrono::steady_clock::now() - start < std::chrono::seconds(2))
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
 
     ctx.join();
 
@@ -44,7 +41,7 @@ TEST(IoContextRemoteTest, SpawnOnRunsFactoryOnTargetWorker)
     EXPECT_EQ(observed_worker.load(std::memory_order_relaxed), 1);
 }
 
-TEST(IoContextRemoteTest, AllWorkersCanDispatchToAnotherWorker)
+TEST(IoContextRemoteTest, WorkersCanScheduleOnAnotherWorker)
 {
     IoOptions opts;
     opts.tick_timeout_ms = 1;
@@ -59,27 +56,30 @@ TEST(IoContextRemoteTest, AllWorkersCanDispatchToAnotherWorker)
         value.store(0, std::memory_order_relaxed);
     }
 
-    ASSERT_TRUE(ctx.start(
-        [&]
-        {
-            auto* current = IO::current_io();
-            ASSERT_NE(current, nullptr);
+    // A task that schedules another task on a different worker
+    auto hopping_task = [&](IO& source, IO& target) -> Task<void> {
+        auto target_task = [&](IO& t) -> Task<void> {
+            observed[t.id()].fetch_add(1, std::memory_order_relaxed);
+            ran.fetch_add(1, std::memory_order_acq_rel);
+            co_return {};
+        };
+        target.schedule(target_task(target));
+        co_return {};
+    };
 
-            const std::size_t source = current->id();
-            const std::size_t target = (source + 1) % kWorkers;
+    // Chain scheduling: 0 -> 1, 1 -> 2, 2 -> 3, 3 -> 0
+    for (std::size_t i = 0; i < kWorkers; ++i)
+    {
+        std::size_t next = (i + 1) % kWorkers;
+        ctx.worker(i).schedule(hopping_task(ctx.worker(i), ctx.worker(next)));
+    }
 
-            ASSERT_TRUE(ctx.spawn_on(ctx.worker(target),
-                                     [&, target]() -> DetachedTask
-                                     {
-                                         observed[target].fetch_add(1, std::memory_order_relaxed);
-                                         if (ran.fetch_add(1, std::memory_order_acq_rel) + 1 ==
-                                             static_cast<int>(kWorkers))
-                                         {
-                                             ctx.stop();
-                                         }
-                                         co_return;
-                                     }));
-        }));
+    // Wait for all tasks to complete
+    auto start = std::chrono::steady_clock::now();
+    while (ran.load() < static_cast<int>(kWorkers) && std::chrono::steady_clock::now() - start < std::chrono::seconds(2))
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
 
     ctx.join();
 

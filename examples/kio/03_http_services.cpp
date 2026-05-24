@@ -36,100 +36,67 @@ constexpr std::string_view kHttpResponse =
     "\r\n"
     "Hello, io_uring!";
 
-// Fire-and-forget task to handle a single client connection
-DetachedTask handle_client(Fd client_fd)
+// Handle a single client connection
+static Task<void> handle_client(IO& worker, Fd client_fd)
 {
     std::byte buf[1024];
 
     while (true)
     {
-        auto read_res = co_await read(client_fd, std::span{buf});
+        // Use KIO_TRY to automatically propagate errors
+        auto read_len = KIO_TRY(co_await worker.read(client_fd, std::span{buf}));
 
-        if (!read_res.has_value() || *read_res == 0)
+        if (read_len == 0)
         {
             break;
         }
 
         std::span out_buf(reinterpret_cast<const std::byte*>(kHttpResponse.data()), kHttpResponse.size());
 
-        auto write_res = co_await write(client_fd, out_buf);
+        auto write_len = KIO_TRY(co_await worker.write(client_fd, out_buf));
 
-        if (!write_res.has_value() || *write_res == 0)
+        if (write_len == 0)
         {
             break;
         }
     }
+    co_return {};
 }
 
-DetachedTask handle_client_remote(Fd client_fd)
-{
-    std::byte buf[1024];
-
-    while (true)
-    {
-        auto read_res = co_await read(client_fd, std::span{buf});
-
-        if (!read_res.has_value() || *read_res == 0)
-        {
-            break;
-        }
-
-        std::span out_buf(reinterpret_cast<const std::byte*>(kHttpResponse.data()), kHttpResponse.size());
-
-        auto write_res = co_await write(client_fd, out_buf);
-
-        if (!write_res.has_value() || *write_res == 0)
-        {
-            break;
-        }
-    }
-}
-
-// Fire-and-forget task to accept incoming connections
-DetachedTask server_loop(uint16_t port, int thread_id, std::stop_token st)
+// Accept incoming connections on a single worker
+static Task<void> server_loop(IO& worker, uint16_t port, std::stop_token st)
 {
     auto listener = TcpListener::Bind(port, "0.0.0.0", 4096);
     if (!listener)
     {
-        std::cerr << "[Thread " << thread_id << "] Failed to bind to port " << port << ": Error "
-                  << listener.error().value() << "\n";
-        co_return;
+        std::cerr << "[Worker " << worker.id() << "] Failed to bind: " << listener.error().message() << "\n";
+        co_return std::unexpected(listener.error());
     }
 
-    std::cout << "Listening on http://0.0.0.0:" << port << "\n";
+    std::cout << "[Worker " << worker.id() << "] Listening on http://0.0.0.0:" << port << "\n";
 
     Fd server_fd = std::move(*listener);
 
     while (!st.stop_requested())
     {
-        auto client_res = co_await accept(server_fd);
-
-        if (client_res)
-        {
-            handle_client(std::move(client_res.value()));
-        }
-        else
-        {
-            std::cerr << "Accept failed: " << client_res.error().value() << "\n";
-        }
+        auto client_fd = KIO_TRY(co_await worker.accept(server_fd));
+        // Schedule the client handler on the same worker
+        worker.schedule(handle_client(worker, std::move(client_fd)));
     }
+    co_return {};
 }
 
-DetachedTask noop_worker_loop()
-{
-    co_return;
-}
-
-DetachedTask dispatching_server_loop(IoContext& ctx, uint16_t port, std::stop_token st)
+// Accept connections on one worker and dispatch to others
+static Task<void> dispatching_server_loop(IoContext& ctx, IO& dispatcher, uint16_t port, std::stop_token st)
 {
     auto listener = TcpListener::Bind(port, "0.0.0.0", 4096);
     if (!listener)
     {
-        std::cerr << "[Dispatcher] Failed to bind to port " << port << ": Error " << listener.error().value() << "\n";
-        co_return;
+        std::cerr << "[Dispatcher] Failed to bind: " << listener.error().message() << "\n";
+        co_return std::unexpected(listener.error());
     }
 
-    std::cout << "[Dispatcher] Listening on http://0.0.0.0:" << port << " and dispatching to " << ctx.worker_count()
+    std::cout << "[Dispatcher] Listening on http://0.0.0.0:" << port << " and dispatching to " << ctx.worker_count() - 1
               << " workers.\n";
 
     Fd server_fd = std::move(*listener);
@@ -137,73 +104,74 @@ DetachedTask dispatching_server_loop(IoContext& ctx, uint16_t port, std::stop_to
 
     while (!st.stop_requested())
     {
-        auto client_res = co_await accept(server_fd);
+        auto client_fd = KIO_TRY(co_await dispatcher.accept(server_fd));
 
-        if (client_res)
-        {
-            const std::size_t worker_count = ctx.worker_count();
-            const std::size_t target_idx = worker_count > 1 ? 1 + ((next_worker++ - 1) % (worker_count - 1)) : 0;
-            IO& target = ctx.worker(target_idx);
-            co_await TransferTo(target);
-            handle_client(std::move(client_res.value()));
-        }
-        else
-        {
-            std::cerr << "Accept failed: " << client_res.error().value() << "\n";
-        }
+        const std::size_t worker_count = ctx.worker_count();
+        // Dispatch to workers 1..N (round-robin)
+        const std::size_t target_idx = worker_count > 1 ? 1 + ((next_worker++ - 1) % (worker_count - 1)) : 0;
+
+        IO& target = ctx.worker(target_idx);
+
+        // Option 1: Direct scheduling on target worker (Thread-safe)
+        target.schedule(handle_client(target, std::move(client_fd)));
+
+        /*
+        // Option 2: Using TransferTo (Demonstration)
+        // This requires a helper task because we can't hop the main dispatcher loop
+        auto dispatch_task = [](IO& t, Fd fd) -> Task<void> {
+            co_await TransferTo{t};
+            co_await handle_client(t, std::move(fd));
+            co_return {};
+        };
+        dispatcher.schedule(dispatch_task(target, std::move(client_fd)));
+        */
     }
+    co_return {};
 }
 
 int main()
 {
     URing::ALOG::set_level(ALOG::Level::Debug);
-    ALOG_DEBUG("Debug logging enabled");
 
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
+
     size_t num_threads = 4;
     if constexpr (kUseRemoteDispatch)
     {
-        // add one more for benh fairness
-        num_threads += 1;
+        num_threads += 1;  // 1 dispatcher + 4 workers
     }
 
-    constexpr IoOptions opts;
-    // // lets use sqpool
-    // opts.flags = IORING_SETUP_SQPOLL | IORING_SETUP_SINGLE_ISSUER;
-    // opts.sq_thread_idle_ms = 2000;
-    // opts.sq_thread_cpu = 0;
+    // New decentralized architecture: workers start themselves in the constructor
+    IoOptions opts;
     IoContext ctx(num_threads, opts);
     constexpr uint16_t port = 8080;
 
     auto st = ctx.stop_token();
 
-    std::cout << "Starting " << num_threads << " workers...\n";
-
-    (void)ctx.start(
-        [&ctx, st, num_threads]
+    if constexpr (kUseRemoteDispatch)
+    {
+        // Start dispatcher on worker 0
+        ctx.worker(0).schedule(dispatching_server_loop(ctx, ctx.worker(0), port, st));
+    }
+    else
+    {
+        // Parallel accept on all workers (SO_REUSEPORT)
+        for (std::size_t i = 0; i < num_threads; ++i)
         {
-            if constexpr (kUseRemoteDispatch)
-            {
-                if (IO::current_io()->id() == 0)
-                {
-                    dispatching_server_loop(ctx, port, st);
-                }
-            }
-            else
-            {
-                server_loop(port, num_threads, st);
-            }
-        });
+            ctx.worker(i).schedule(server_loop(ctx.worker(i), port, st));
+        }
+    }
+
+    std::cout << "HTTP Server running. Press Ctrl+C to stop.\n";
 
     while (g_stop_requested == 0)
     {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
 
-    ctx.stop();
     ctx.join();
 
-    std::cout << "All workers terminated. Goodbye!\n";
+    std::cout << "Server shutdown complete. Goodbye!\n";
     return 0;
 }
