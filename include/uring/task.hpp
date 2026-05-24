@@ -25,6 +25,9 @@ struct task_promise_base
 
     // intrusive queue hook
     std::atomic<task_promise_base*> next{nullptr};
+#ifndef NDEBUG
+    std::atomic<bool> is_enqueued{false};
+#endif
 
     std::suspend_always initial_suspend() noexcept { return {}; }
 
@@ -40,8 +43,38 @@ struct task_promise_base
         template <typename Promise>
         std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> h) noexcept
         {
-            // just return the continuation, which could be noopcoroutine
-            return h.promise().continuation;
+            auto cont = h.promise().continuation;
+
+            // If continuation is noop, it means this task was "detached" (scheduled).
+            if (cont == std::noop_coroutine())
+            {
+                // CRITICAL MEMORY SAFETY: Catch and report unhandled exceptions
+                // in detached tasks before destroying the coroutine frame.
+                if (h.promise().exception)
+                {
+                    try
+                    {
+                        std::rethrow_exception(h.promise().exception);
+                    }
+                    catch (const std::exception& e)
+                    {
+                        ALOG_FATAL("Detached task terminated with unhandled exception: {}", e.what());
+                    }
+                    catch (...)
+                    {
+                        ALOG_FATAL("Detached task terminated with unknown unhandled exception!");
+                    }
+
+                    // Emulate standard thread lifecycle behavior for unhandled exceptions
+                    std::terminate();
+                }
+
+                h.destroy();
+                return std::noop_coroutine();
+            }
+
+            // Otherwise, symmetrically transfer control back to the caller.
+            return cont;
         }
 
         void await_resume() noexcept {}
@@ -86,6 +119,41 @@ struct task_promise<void> : task_promise_base
 
     Task<void> get_return_object() noexcept;
 };
+
+namespace detail
+{
+template <typename T>
+struct TaskAwaiter
+{
+    using Handle = std::coroutine_handle<task_promise<T>>;
+    Handle handle_;
+
+    bool await_ready() const noexcept { return handle_.done(); }
+
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<> caller) noexcept
+    {
+        handle_.promise().continuation = caller;
+        return handle_;
+    }
+
+    Result<T> await_resume()
+    {
+        auto& p = handle_.promise();
+
+        if (p.exception)
+        {
+            std::rethrow_exception(p.exception);
+        }
+
+        if (!p.result_.has_value())
+        {
+            return std::unexpected(MakeErrorCode(ECANCELED));
+        }
+
+        return std::move(*p.result_);
+    }
+};
+}  // namespace detail
 
 // ============================================================================
 // Task<T> — The Primary Coroutine Type
@@ -133,40 +201,7 @@ struct [[nodiscard]] Task
     // -----------------------------------------------------------------------
     // co_await support — Returns Result<T> to the caller.
     // -----------------------------------------------------------------------
-    auto operator co_await() noexcept
-    {
-        struct Awaiter
-        {
-            Handle handle_;
-
-            bool await_ready() const noexcept { return handle_.done(); }
-
-            std::coroutine_handle<> await_suspend(std::coroutine_handle<> caller) noexcept
-            {
-                handle_.promise().continuation = caller;
-                return handle_;
-            }
-
-            Result<T> await_resume()
-            {
-                auto& p = handle_.promise();
-
-                if (p.exception)
-                {
-                    std::rethrow_exception(p.exception);
-                }
-
-                if (!p.result_.has_value())
-                {
-                    return std::unexpected(MakeErrorCode(ECANCELED));
-                }
-
-                return std::move(*p.result_);
-            }
-        };
-
-        return Awaiter{handle_};
-    }
+    auto operator co_await() noexcept { return detail::TaskAwaiter{handle_}; }
 };
 
 template <typename T>

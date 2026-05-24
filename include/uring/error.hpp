@@ -82,10 +82,13 @@ inline std::error_code make_error_code(ParseError e)
 
 }  // namespace URing
 
-#define KIO_TRY(expr)                                   \
-    ({                                                  \
-        auto&& _res_val = (expr);                       \
-        if (!_res_val.has_value())                      \
-            co_return std::unexpected(_res_val.error()); \
-        std::move(_res_val.value());                    \
-    })
+#define URING_TRY(expr)                                                         \
+    []<typename T>(T&& res) -> decltype(auto)                                   \
+    {                                                                           \
+        if (!res)                                                               \
+        {                                                                       \
+            auto log_and_forward = [&]() -> T { return std::forward<T>(res); }; \
+            /* The parent coroutine must handle the unrolling context */        \
+        }                                                                       \
+        return std::forward<T>(res);                                            \
+    }(expr)
