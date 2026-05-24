@@ -23,6 +23,9 @@ struct task_promise_base
     std::coroutine_handle<> continuation{std::noop_coroutine()};
     std::exception_ptr exception = nullptr;
 
+    // intrusive queue hook
+    std::atomic<task_promise_base*> next{nullptr};
+
     std::suspend_always initial_suspend() noexcept { return {}; }
 
     void unhandled_exception() noexcept { exception = std::current_exception(); }

@@ -68,22 +68,33 @@ void IO::submit_or_wait_for()
     }
     else
     {
-        if (const auto ret = io_uring_submit_and_wait(&ring_, 1); ret < 0 && ret != -EINTR)
+        // Mark as sleeping BEFORE entering the syscall
+        is_sleeping_.store(true, std::memory_order_seq_cst);
+
+        // Double-check the queue to prevent a race condition where an item
+        // was enqueued right before we set is_sleeping_ to true
+        if (queue_.empty())
         {
-            ALOG_ERROR("failed to submit and wait: {}", std::strerror(-ret));
+            if (const auto ret = io_uring_submit_and_wait(&ring_, 1); ret < 0 && ret != -EINTR)
+            {
+                ALOG_ERROR("failed to submit and wait: {}", std::strerror(-ret));
+            }
         }
+
+        // Mark as awake
+        is_sleeping_.store(false, std::memory_order_relaxed);
     }
 }
 
 void IO::tick(const std::size_t batch_max_size) noexcept
 {
-    // Step 1: Drain the cross-thread MPSC queue first.
+    // Drain the cross-thread MPSC queue first.
     queue_.drain([](const std::coroutine_handle<> h) { h.resume(); }, batch_max_size);
 
-    // Step 2: wait for completion if needed
+    // wait for completion if needed
     submit_or_wait_for();
 
-    // Step 3: Batch process CQEs into the local queue
+    // Batch process CQEs into the local queue
     io_uring_cqe* cqe = nullptr;
     unsigned head = 0;
     unsigned count = 0;
@@ -102,7 +113,6 @@ void IO::tick(const std::size_t batch_max_size) noexcept
             auto* op = reinterpret_cast<IoOps*>(user_data);
             op->res = cqe->res;
 
-            // PUSH LOCAL: Zero atomic overhead, preserves exact FIFO completion order
             local_tasks_.push_back(op->h);
         }
     }
@@ -113,14 +123,14 @@ void IO::tick(const std::size_t batch_max_size) noexcept
         io_uring_cq_advance(&ring_, count);
     }
 
-    // Step 4: Execute all I/O completions immediately in this tick
+    // Execute all I/O completions immediately in this tick
     if (!local_tasks_.empty())
     {
         current_batch.swap(local_tasks_);
 
         for (auto h : current_batch)
         {
-            h.resume();  // Safe! The kernel ring was advanced in Step 3.
+            h.resume();
         }
         current_batch.clear();
     }
@@ -136,9 +146,6 @@ void IO::arm_wake_read() noexcept
 
 void IO::run(const std::size_t batch_max_size, std::stop_token st) noexcept
 {
-    // owner thread should be set on the thread which start the loop
-    owner_thread_ = std::this_thread::get_id();
-
     std::stop_callback wake_on_stop{st, [this] { wake(); }};
     while (!st.stop_requested())
     {
@@ -163,11 +170,17 @@ io_uring_sqe* IO::get_sqe() noexcept
 
 void IO::wake() const noexcept
 {
+    // Only write to the eventfd if the thread is actually parked in the kernel
+    if (!is_sleeping_.load(std::memory_order_seq_cst))
+    {
+        return;
+    }
+
     constexpr uint64_t one = 1;
     for (;;)
     {
         const ssize_t n = ::write(wake_fd_, &one, sizeof(one));
-        if (n == sizeof(one))
+        if (n == sizeof(one) || (n == -1 && errno == EAGAIN))
         {
             return;
         }
@@ -182,7 +195,7 @@ void IO::wake() const noexcept
 
 IO::~IO()
 {
-    // TODO: cancell all ops on the ring fd
+    // TODO: cancel all ops on the ring fd
     join();
 
     if (ring_.ring_fd > 0)
@@ -197,30 +210,4 @@ IO::~IO()
         wake_fd_ = -1;
     }
 }
-
-//
-// OP Context
-//
-// IoContext::IoContext(const std::size_t num_threads, const IoOptions& opts)
-//     : num_threads_(num_threads), opts_(opts), start_latch_(num_threads)
-// {
-//     contexts_.reserve(num_threads);
-//     workers_.reserve(num_threads);
-//
-//     if (num_threads == 0)
-//     {
-//         throw std::runtime_error("io context started with 0 thread");
-//     }
-// }
-//
-// IoContext::~IoContext()
-// {
-//     if (running_.load(std::memory_order_acquire))
-//     {
-//         (void)stop();
-//     }
-//     // Explicitly join workers before deleting contexts_
-//     workers_.clear();
-//     contexts_.clear();
-// }
 }  // namespace URing

@@ -6,6 +6,7 @@
 #include <cstring>
 #include <filesystem>
 #include <future>
+#include <initializer_list>
 #include <memory>
 #include <stop_token>
 #include <system_error>
@@ -33,6 +34,9 @@ struct IoOptions
     std::uint32_t tick_timeout_ms = 10;
 
     bool pin_io_worker{false};
+
+    // list of cpus
+    std::initializer_list<int> worker_cpu_affinity{};
 
     /// max resume per tick
     std::size_t batch_max_size = 128;
@@ -94,9 +98,9 @@ public:
                 {
                     throw std::runtime_error(std::format("io_uring_register failed: {}", std::strerror(-ret)));
                 }
-                if (opts_.pin_io_worker)
+                if (!empty(opts_.worker_cpu_affinity) && id < opts_.worker_cpu_affinity.size())
                 {
-                    pin_to_cpu(static_cast<int>(id));
+                    pin_to_cpu(opts_.worker_cpu_affinity.begin()[id]);
                 }
                 this->run(opts_.batch_max_size, stop_token_);
             });
@@ -107,6 +111,7 @@ public:
     IO& operator=(IO&&) = delete;
     ~IO();
 
+    /// Background task or post job to an io in another thread
     template <typename T>
     void schedule(Task<T> task)
     {
@@ -122,17 +127,16 @@ public:
         }
     }
 
-    [[nodiscard]] bool is_owner_thread() const noexcept { return owner_thread_ == std::this_thread::get_id(); }
-
-    static void pin_to_cpu(int cpu_id)
+    static void pin_to_cpu(int physical_core_id)
     {
         cpu_set_t cpuset;
         CPU_ZERO(&cpuset);
-        CPU_SET(cpu_id % static_cast<int>(std::thread::hardware_concurrency()), &cpuset);
+        CPU_SET(physical_core_id, &cpuset);
 
         if (const int rc = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset); rc != 0)
         {
-            ALOG_INFO("Warning: Failed to pin to CPU {}: {}", cpu_id, std::generic_category().message(rc));
+            ALOG_INFO("Warning: Failed to pin to physical CPU {}: {}", physical_core_id,
+                      std::generic_category().message(rc));
         }
     }
 
@@ -271,10 +275,11 @@ public:
         return timeout(dur);
     }
 
+    /// addr MUST outlive the connect method
     [[nodiscard]] auto connect(Fd& fd, const SocketAddress& addr)
     {
         return IoAwaiter(
-            *this, [raw_fd = fd.fd, addr](io_uring_sqe* sqe) mutable
+            *this, [raw_fd = fd.fd, &addr](io_uring_sqe* sqe) mutable
             { io_uring_prep_connect(sqe, raw_fd, addr.Get(), addr.addrlen); }, detail::ResumeVoid{});
     }
 
@@ -293,9 +298,9 @@ private:
     io_uring ring_{};
     int wake_fd_{-1};
     uint64_t wake_value_{0};
+    alignas(64) std::atomic<bool> is_sleeping_{false};
     std::stop_token stop_token_;
     std::jthread thread_;
-    std::thread::id owner_thread_;
     IoOptions opts_;
     size_t id_;
     std::vector<std::coroutine_handle<>> local_tasks_{};
@@ -314,15 +319,8 @@ private:
 
     void post(const std::coroutine_handle<> h)
     {
-        if (is_owner_thread())
-        {
-            local_tasks_.push_back(h);
-        }
-        else
-        {
-            queue_.enqueue(h);
-            wake();
-        }
+        queue_.enqueue(h);
+        wake();
     }
 };
 
@@ -410,7 +408,8 @@ std::coroutine_handle<> IoAwaiter<SetupFunc, MapperFunc>::await_suspend(std::cor
     io_uring_sqe* sqe = io_.get_sqe();
     if (sqe == nullptr)
     {
-        ops_.res = -ENOSPC;
+        ALOG_WARN("SQ ring full; returning EAGAIN to apply backpressure");
+        ops_.res = -EAGAIN;
         return h;
     }
 
