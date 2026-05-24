@@ -107,7 +107,8 @@ public:
     template <typename T>
     void schedule(Task<T> task)
     {
-        post(task.release());
+        auto wrapper = detail::run_detached(std::move(task));
+        post(wrapper.release());
     }
 
     void join() noexcept
