@@ -59,7 +59,7 @@ void IO::submit_or_wait_for()
 {
     // Only block if we have no local work to do.
 
-    if (io_uring_cq_ready(&ring_) > 0 || !queue_.empty() || !local_tasks_.empty())
+    if (io_uring_cq_ready(&ring_) > 0 || !local_tasks_.empty() || !queue_.empty())
     {
         if (const auto ret = io_uring_submit(&ring_); ret < 0 && ret != -EINTR)
         {
@@ -68,12 +68,11 @@ void IO::submit_or_wait_for()
     }
     else
     {
-        // Mark as sleeping BEFORE entering the syscall
+        // Thundering herd mitigation from our earlier optimizations
         is_sleeping_.store(true, std::memory_order_seq_cst);
 
-        // Double-check the queue to prevent a race condition where an item
-        // was enqueued right before we set is_sleeping_ to true
-        if (queue_.empty())
+        // Double check all three sources of work before sleeping
+        if (io_uring_cq_ready(&ring_) == 0 && local_tasks_.empty() && queue_.empty())
         {
             if (const auto ret = io_uring_submit_and_wait(&ring_, 1); ret < 0 && ret != -EINTR)
             {
@@ -81,7 +80,6 @@ void IO::submit_or_wait_for()
             }
         }
 
-        // Mark as awake
         is_sleeping_.store(false, std::memory_order_relaxed);
     }
 }
@@ -89,7 +87,13 @@ void IO::submit_or_wait_for()
 void IO::tick(const std::size_t batch_max_size) noexcept
 {
     // Drain the cross-thread MPSC queue first.
-    queue_.drain([](const std::coroutine_handle<> h) { h.resume(); }, batch_max_size);
+    queue_.drain(
+        [this](task_promise_base* node)
+        {
+            // We retrieve the safe handle to resume later.
+            local_tasks_.push_back(node->self_handle);
+        },
+        batch_max_size);
 
     // wait for completion if needed
     submit_or_wait_for();

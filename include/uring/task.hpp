@@ -29,6 +29,9 @@ struct task_promise_base
     std::atomic<bool> is_enqueued{false};
 #endif
 
+    // The type-erased handle used by the event loop to resume this frame
+    std::coroutine_handle<> self_handle{nullptr};
+
     std::suspend_always initial_suspend() noexcept { return {}; }
 
     void unhandled_exception() noexcept { exception = std::current_exception(); }
@@ -214,57 +217,5 @@ inline Task<void> task_promise<void>::get_return_object() noexcept
 {
     return Task{std::coroutine_handle<task_promise>::from_promise(*this)};
 }
-
-namespace detail
-{
-struct FireAndForget
-{
-    struct promise_type
-    {
-        FireAndForget get_return_object() noexcept
-        {
-            return FireAndForget{std::coroutine_handle<promise_type>::from_promise(*this)};
-        }
-
-        std::suspend_always initial_suspend() noexcept { return {}; }
-        std::suspend_never final_suspend() noexcept { return {}; }
-
-        void return_void() noexcept {}
-
-        void unhandled_exception() noexcept
-        {
-            // TODO: log the current exception
-            std::terminate();
-        }
-    };
-
-    std::coroutine_handle<promise_type> h{};
-
-    explicit FireAndForget(std::coroutine_handle<promise_type> handle) : h(handle) {}
-
-    FireAndForget(FireAndForget&& other) noexcept : h(std::exchange(other.h, {})) {}
-
-    ~FireAndForget()
-    {
-        if (h)
-        {
-            h.destroy();
-        }
-    }
-
-    std::coroutine_handle<> release() noexcept { return std::exchange(h, {}); }
-};
-
-template <typename T>
-FireAndForget run_detached(Task<T> task)
-{
-    auto result = co_await std::move(task);
-    if (!result)
-    {
-        ALOG_ERROR("Scheduled task failed: {}", result.error().message());
-    }
-}
-
-}  // namespace detail
 
 }  // namespace URing

@@ -61,6 +61,25 @@ public:
         return nullptr;
     }
 
+    template <typename Fn>
+    std::size_t drain(Fn&& fn, const std::size_t max_count = std::numeric_limits<std::size_t>::max())
+    {
+        std::size_t count = 0;
+        while (count < max_count)
+        {
+            task_promise_base* node = dequeue();
+            if (node == nullptr)
+            {
+                break;
+            }
+            fn(node);
+            ++count;
+        }
+        return count;
+    }
+
+    bool empty() const noexcept{ return head_.load(std::memory_order_acquire) == tail_; }
+
 private:
     alignas(64) std::atomic<task_promise_base*> head_;
     alignas(64) task_promise_base* tail_;

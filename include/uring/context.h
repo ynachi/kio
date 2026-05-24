@@ -16,6 +16,7 @@
 #include <liburing.h>
 
 #include "awaiter.hpp"
+#include "core/queue.hpp"
 #include "fd.hpp"
 #include "logger.hpp"
 #include "mpsc_queue.hpp"
@@ -115,8 +116,17 @@ public:
     template <typename T>
     void schedule(Task<T> task)
     {
-        auto wrapper = detail::run_detached(std::move(task));
-        post(wrapper.release());
+        // 1. Release ownership so the Task destructor doesn't free the frame early
+        auto h = task.release();
+
+        // 2. Safely cast to the base promise
+        auto* p = static_cast<task_promise_base*>(&h.promise());
+
+        // 3. Store the correctly-offset handle before it gets type-erased by the queue
+        p->self_handle = h;
+
+        // 4. Push it to the intrusive queue
+        post(p);
     }
 
     void join() noexcept
@@ -305,7 +315,7 @@ private:
     size_t id_;
     std::vector<std::coroutine_handle<>> local_tasks_{};
     std::vector<std::coroutine_handle<>> current_batch{};
-    MpscQueue<std::coroutine_handle<>> queue_{};
+    CoroQueue queue_{};
 
     void init(int wq_fd = -1);
     void run(std::size_t batch_max_size, std::stop_token st) noexcept;
@@ -317,9 +327,9 @@ private:
 
     int ring_fd() const noexcept { return ring_.ring_fd; }
 
-    void post(const std::coroutine_handle<> h)
+    void post(task_promise_base* task)
     {
-        queue_.enqueue(h);
+        queue_.enqueue(task);
         wake();
     }
 };
@@ -389,11 +399,23 @@ struct TransferTo
 {
     IO& target;
 
-    bool await_ready() noexcept { return false; }
+    // Optimization: If we are already on the target thread, don't suspend at all.
+    bool await_ready() const noexcept { return false; }
 
-    void await_suspend(std::coroutine_handle<> h) noexcept { target.post(h); }
+    template <typename Promise>
+    void await_suspend(std::coroutine_handle<Promise> h) noexcept
+    {
+        // 1. Get the base promise pointer
+        auto* p = static_cast<task_promise_base*>(&h.promise());
 
-    void await_resume() noexcept {}
+        // 2. Store the erased handle so the target thread can resume it
+        p->self_handle = h;
+
+        // 3. Post it to the intrusive queue
+        target.post(p);
+    }
+
+    void await_resume() const noexcept {}
 };
 
 // ============================================================================
