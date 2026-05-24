@@ -90,7 +90,10 @@ public:
         thread_ = std::jthread(
             [this, id]
             {
-                io_uring_register(ring_.ring_fd, IORING_REGISTER_ENABLE_RINGS, nullptr, 0);
+                if (const int ret = io_uring_register(ring_.ring_fd, IORING_REGISTER_ENABLE_RINGS, nullptr, 0); ret < 0)
+                {
+                    throw std::runtime_error(std::format("io_uring_register failed: {}", std::strerror(-ret)));
+                }
                 if (opts_.pin_io_worker)
                 {
                     pin_to_cpu(static_cast<int>(id));
@@ -355,7 +358,19 @@ public:
 
     ~IoContext() = default;
 
-    bool stop() { return stop_source_.request_stop(); }
+    bool stop()
+    {
+        // TODO: we need to do the following
+        // io_uring_prep_cancel(..., IORING_ASYNC_CANCEL_ANY);
+        // submit_and_wait_for_completions();
+        // resume tasks with ECANCELED;
+        // destroy remaining scheduled handles;
+        if (stop_source_.stop_possible())
+        {
+            return stop_source_.request_stop();
+        }
+        return false;
+    }
 
     std::stop_token stop_token() const noexcept { return stop_source_.get_token(); }
 
