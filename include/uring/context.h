@@ -393,7 +393,7 @@ public:
 };
 
 // ============================================================================
-// TransferTo — cross-thread execution transfer
+// TransferTo — coroutine context swith (hop to another thread)
 // ============================================================================
 struct TransferTo
 {
