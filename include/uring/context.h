@@ -110,6 +110,14 @@ public:
         post(task.release());
     }
 
+    void join() noexcept
+    {
+        if (thread_.joinable())
+        {
+            thread_.join();
+        }
+    }
+
     [[nodiscard]] bool is_owner_thread() const noexcept { return owner_thread_ == std::this_thread::get_id(); }
 
     static void pin_to_cpu(int cpu_id)
@@ -381,7 +389,7 @@ struct TransferTo
 template <typename SetupFunc, typename MapperFunc>
     requires std::invocable<SetupFunc, io_uring_sqe*> && std::invocable<MapperFunc, int32_t>
 template <typename Promise>
-inline std::coroutine_handle<> IoAwaiter<SetupFunc, MapperFunc>::await_suspend(std::coroutine_handle<Promise> h) noexcept
+std::coroutine_handle<> IoAwaiter<SetupFunc, MapperFunc>::await_suspend(std::coroutine_handle<Promise> h) noexcept
 {
     io_uring_sqe* sqe = io_.get_sqe();
     if (sqe == nullptr)

@@ -59,7 +59,7 @@ void IO::submit_or_wait_for()
 {
     // Only block if we have no local work to do.
 
-    if (io_uring_cq_ready(&ring_) > 0 || !queue_.empty())
+    if (io_uring_cq_ready(&ring_) > 0 || !queue_.empty() || !local_tasks_.empty())
     {
         if (const auto ret = io_uring_submit(&ring_); ret < 0 && ret != -EINTR)
         {
@@ -183,6 +183,7 @@ void IO::wake() const noexcept
 IO::~IO()
 {
     // TODO: cancell all ops on the ring fd
+    join();
 
     if (ring_.ring_fd > 0)
     {

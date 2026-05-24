@@ -18,7 +18,7 @@ using namespace URing;
 
 namespace
 {
-constexpr bool kUseRemoteDispatch = true;
+constexpr bool kUseRemoteDispatch = false;
 volatile std::sig_atomic_t g_stop_requested = 0;
 
 void signal_handler(int)
@@ -43,19 +43,26 @@ static Task<void> handle_client(IO& worker, Fd client_fd)
 
     while (true)
     {
-        // Use KIO_TRY to automatically propagate errors
-        auto read_len = KIO_TRY(co_await worker.read(client_fd, std::span{buf}));
+        auto read_res = co_await worker.read(client_fd, std::span{buf});
+        if (!read_res)
+        {
+            co_return std::unexpected(read_res.error());
+        }
 
-        if (read_len == 0)
+        if (*read_res == 0)
         {
             break;
         }
 
         std::span out_buf(reinterpret_cast<const std::byte*>(kHttpResponse.data()), kHttpResponse.size());
 
-        auto write_len = KIO_TRY(co_await worker.write(client_fd, out_buf));
+        auto write_res = co_await worker.write(client_fd, out_buf);
+        if (!write_res)
+        {
+            co_return std::unexpected(write_res.error());
+        }
 
-        if (write_len == 0)
+        if (*write_res == 0)
         {
             break;
         }
@@ -79,9 +86,14 @@ static Task<void> server_loop(IO& worker, uint16_t port, std::stop_token st)
 
     while (!st.stop_requested())
     {
-        auto client_fd = KIO_TRY(co_await worker.accept(server_fd));
+        auto client_res = co_await worker.accept(server_fd);
+        if (!client_res)
+        {
+            co_return std::unexpected(client_res.error());
+        }
+
         // Schedule the client handler on the same worker
-        worker.schedule(handle_client(worker, std::move(client_fd)));
+        worker.schedule(handle_client(worker, std::move(*client_res)));
     }
     co_return {};
 }
@@ -104,7 +116,11 @@ static Task<void> dispatching_server_loop(IoContext& ctx, IO& dispatcher, uint16
 
     while (!st.stop_requested())
     {
-        auto client_fd = KIO_TRY(co_await dispatcher.accept(server_fd));
+        auto client_res = co_await dispatcher.accept(server_fd);
+        if (!client_res)
+        {
+            co_return std::unexpected(client_res.error());
+        }
 
         const std::size_t worker_count = ctx.worker_count();
         // Dispatch to workers 1..N (round-robin)
@@ -113,7 +129,7 @@ static Task<void> dispatching_server_loop(IoContext& ctx, IO& dispatcher, uint16
         IO& target = ctx.worker(target_idx);
 
         // Option 1: Direct scheduling on target worker (Thread-safe)
-        target.schedule(handle_client(target, std::move(client_fd)));
+        target.schedule(handle_client(target, std::move(*client_res)));
 
         /*
         // Option 2: Using TransferTo (Demonstration)

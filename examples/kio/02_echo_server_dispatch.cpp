@@ -34,18 +34,25 @@ Task<void> handle_client(IO& worker, Fd client_fd)
 
     while (true)
     {
-        // Use KIO_TRY to automatically handle Result/Error
-        auto read_len = KIO_TRY(co_await worker.read(client_fd, std::span{buf}));
+        auto read_res = co_await worker.read(client_fd, std::span{buf});
+        if (!read_res)
+        {
+            co_return std::unexpected(read_res.error());
+        }
 
-        if (read_len == 0)
+        if (*read_res == 0)
             break;
 
         std::span<const std::byte> out_buf(reinterpret_cast<const std::byte*>(kHttpResponse.data()),
                                            kHttpResponse.size());
 
-        auto write_len = KIO_TRY(co_await worker.write(client_fd, out_buf));
+        auto write_res = co_await worker.write(client_fd, out_buf);
+        if (!write_res)
+        {
+            co_return std::unexpected(write_res.error());
+        }
 
-        if (write_len == 0)
+        if (*write_res == 0)
             break;
     }
     co_return {};
@@ -71,7 +78,11 @@ Task<void> dispatcher_loop(IoContext& context, IO& worker, uint16_t port)
     while (!global_stop_source.stop_requested())
     {
         // Accept connection on the dispatcher's ring
-        auto client_fd = KIO_TRY(co_await worker.accept(server_fd));
+        auto client_res = co_await worker.accept(server_fd);
+        if (!client_res)
+        {
+            co_return std::unexpected(client_res.error());
+        }
 
         const size_t selected_worker = worker_idx % num_workers;
         IO& target_worker = context.worker(selected_worker);
@@ -80,7 +91,7 @@ Task<void> dispatcher_loop(IoContext& context, IO& worker, uint16_t port)
         ALOG_DEBUG("Dispatching accepted client to worker {}", selected_worker);
 
         // Directly schedule the client handler on the target worker's thread
-        target_worker.schedule(handle_client(target_worker, std::move(client_fd)));
+        target_worker.schedule(handle_client(target_worker, std::move(*client_res)));
     }
     co_return {};
 }
