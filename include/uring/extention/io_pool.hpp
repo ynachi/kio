@@ -50,7 +50,7 @@ public:
         }
     }
 
-    ~IoContext() = default;
+    ~IoContext() { join(); }
 
     bool stop() const
     {
@@ -75,6 +75,16 @@ public:
     void join() noexcept
     {
         (void)stop();
+
+        for (auto& thread : threads_)
+        {
+            if (thread.joinable())
+            {
+                thread.join();
+            }
+        }
+
+        threads_.clear();
         workers_.clear();
     }
 };

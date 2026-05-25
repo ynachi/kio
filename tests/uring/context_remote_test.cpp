@@ -1,4 +1,5 @@
 #include "../../include/uring/core/io.h"
+#include "../../include/uring/extention/io_pool.hpp"
 
 #include <array>
 #include <atomic>
@@ -8,6 +9,24 @@
 #include <gtest/gtest.h>
 
 using namespace URing;
+
+namespace
+{
+template <std::size_t N>
+Task<void> record_worker(IO& target, std::array<std::atomic<int>, N>& observed, std::atomic<int>& ran)
+{
+    observed[target.id()].fetch_add(1, std::memory_order_relaxed);
+    ran.fetch_add(1, std::memory_order_acq_rel);
+    co_return {};
+}
+
+template <std::size_t N>
+Task<void> schedule_record_on(IO& target, std::array<std::atomic<int>, N>& observed, std::atomic<int>& ran)
+{
+    target.schedule(record_worker(target, observed, ran));
+    co_return {};
+}
+}  // namespace
 
 TEST(IoContextRemoteTest, ScheduleRunsOnTargetWorker)
 {
@@ -56,22 +75,11 @@ TEST(IoContextRemoteTest, WorkersCanScheduleOnAnotherWorker)
         value.store(0, std::memory_order_relaxed);
     }
 
-    // A task that schedules another task on a different worker
-    auto hopping_task = [&](IO& source, IO& target) -> Task<void> {
-        auto target_task = [&](IO& t) -> Task<void> {
-            observed[t.id()].fetch_add(1, std::memory_order_relaxed);
-            ran.fetch_add(1, std::memory_order_acq_rel);
-            co_return {};
-        };
-        target.schedule(target_task(target));
-        co_return {};
-    };
-
     // Chain scheduling: 0 -> 1, 1 -> 2, 2 -> 3, 3 -> 0
     for (std::size_t i = 0; i < kWorkers; ++i)
     {
         std::size_t next = (i + 1) % kWorkers;
-        ctx.worker(i).schedule(hopping_task(ctx.worker(i), ctx.worker(next)));
+        ctx.worker(i).schedule(schedule_record_on(ctx.worker(next), observed, ran));
     }
 
     // Wait for all tasks to complete
