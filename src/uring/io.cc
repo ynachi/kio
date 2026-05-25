@@ -13,6 +13,58 @@
 namespace URing
 {
 
+IO::IO(const size_t id, const IO* leader, const IoOptions& opts) : opts_(opts), id_(id)
+{
+    local_tasks_.reserve(opts_.entries);
+    current_batch.reserve(kMaxResumesPerTick);
+
+    // init
+    int leader_fd = -1;
+    if (leader != nullptr)
+    {
+        leader_fd = leader->ring_fd();
+    }
+    init(leader_fd);
+
+    // start loop
+    thread_ = std::jthread(
+        [this, id]
+        {
+            activate();
+            if (!empty(opts_.worker_cpu_affinity) && id < opts_.worker_cpu_affinity.size())
+            {
+                pin_to_cpu(opts_.worker_cpu_affinity.begin()[id]);
+            }
+            this->run_blocking(opts_.batch_max_size, stop_token_);
+        });
+}
+
+IO::IO(IO&& other) noexcept
+    : is_activated_(other.is_activated_),
+      is_running_(other.is_running_),
+      is_sleeping_(other.is_sleeping_.load(std::memory_order_relaxed)),
+      opts_(other.opts_),
+      id_(other.id_)
+{
+    // Safety check, we SHOULD not move a running IO.
+    if (is_running_ || !other.queue_.empty() || !other.local_tasks_.empty())
+    {
+        ALOG_FATAL("FATAL: IO move failed. IO must be inert (not running and empty) to move.");
+        std::terminate();
+    }
+
+    // Transfer Ring
+    ring_ = other.ring_;
+    std::memset(&other.ring_, 0, sizeof(io_uring));
+    other.ring_.ring_fd = -1;
+
+    // Transfer FDs
+    wake_fd_ = std::exchange(other.wake_fd_, -1);
+
+    // Transfer state
+    wake_value_ = other.wake_value_;
+}
+
 void IO::init(const int wq_fd)
 {
     io_uring_params params{};
@@ -49,10 +101,27 @@ void IO::init(const int wq_fd)
         io_uring_queue_exit(&ring_);
         throw std::runtime_error("eventfd failed");
     }
-    arm_wake_read();
 
-    ALOG_INFO("Started IO context with {} entries (SQPOLL: {})", opts_.entries,
+    ALOG_INFO("Initialized IO context with {} entries (SQPOLL: {})", opts_.entries,
               (opts_.flags & IORING_SETUP_SQPOLL) ? "enabled" : "disabled");
+}
+
+void IO::activate()
+{
+    if (is_activated_)
+    {
+        ALOG_DEBUG("IO is already activated, this is a noop");
+        return;
+    }
+
+    if (const int ret = io_uring_register(ring_.ring_fd, IORING_REGISTER_ENABLE_RINGS, nullptr, 0); ret < 0)
+    {
+        throw std::runtime_error(std::format("io_uring_register failed: {}", std::strerror(-ret)));
+    }
+
+    // we need to submit a first read, and this is a good place
+    arm_wake_read();
+    is_activated_ = true;
 }
 
 void IO::submit_or_wait_for()
@@ -84,7 +153,7 @@ void IO::submit_or_wait_for()
     }
 }
 
-void IO::tick(const std::size_t batch_max_size) noexcept
+void IO::tick() noexcept
 {
     // Drain the cross-thread MPSC queue first.
     queue_.drain(
@@ -93,7 +162,7 @@ void IO::tick(const std::size_t batch_max_size) noexcept
             // We retrieve the safe handle to resume later.
             local_tasks_.push_back(node->self_handle);
         },
-        batch_max_size);
+        opts_.batch_max_size);
 
     // wait for completion if needed
     submit_or_wait_for();
@@ -148,13 +217,21 @@ void IO::arm_wake_read() noexcept
     io_uring_submit(&ring_);
 }
 
-void IO::run(const std::size_t batch_max_size, std::stop_token st) noexcept
+void IO::run_blocking(std::stop_token st) noexcept
 {
+    is_running_ = true;
+
+    pin_to_cpu();
+
+    activate();
+
     std::stop_callback wake_on_stop{st, [this] { wake(); }};
     while (!st.stop_requested())
     {
-        tick(batch_max_size);
+        tick();
     }
+
+    is_running_ = false;
 
     ALOG_INFO("Worker {} quiescing...", id_);
     // TODO: implement cleanup here
@@ -197,11 +274,29 @@ void IO::wake() const noexcept
     }
 }
 
+void IO::pin_to_cpu() const
+{
+    // TODO: use modulo to map when id_ >= opts_.worker_cpu_affinity.size()
+    if (empty(opts_.worker_cpu_affinity) || id_ >= opts_.worker_cpu_affinity.size())
+    {
+        return;
+    }
+
+    int physical_core_id = opts_.worker_cpu_affinity.begin()[id_];
+
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(physical_core_id, &cpuset);
+
+    if (const int rc = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset); rc != 0)
+    {
+        ALOG_INFO("Warning: Failed to pin to physical CPU {}: {}", physical_core_id,
+                  std::generic_category().message(rc));
+    }
+}
+
 IO::~IO()
 {
-    // TODO: cancel all ops on the ring fd
-    join();
-
     if (ring_.ring_fd > 0)
     {
         io_uring_queue_exit(&ring_);

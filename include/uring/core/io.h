@@ -33,9 +33,7 @@ struct IoOptions
 
     std::uint32_t tick_timeout_ms = 10;
 
-    bool pin_io_worker{false};
-
-    // list of cpus
+    // list of cpus, if empty, no pinning
     std::initializer_list<int> worker_cpu_affinity{};
 
     /// max resume per tick
@@ -83,78 +81,44 @@ public:
 
     /// We use a shared IoUring async backend, when master is null, IO is standalone or the master of a group
     /// of IOs.
-    explicit IO(const size_t id, std::stop_token st, const IO* leader = nullptr, const IoOptions& opts = {})
-        : stop_token_(st), opts_(opts), id_(id)
-    {
-        local_tasks_.reserve(opts_.entries);
-        current_batch.reserve(kMaxResumesPerTick);
-
-        // init
-        int leader_fd = -1;
-        if (leader != nullptr)
-        {
-            leader_fd = leader->ring_fd();
-        }
-        init(leader_fd);
-
-        // start loop
-        thread_ = std::jthread(
-            [this, id]
-            {
-                if (const int ret = io_uring_register(ring_.ring_fd, IORING_REGISTER_ENABLE_RINGS, nullptr, 0); ret < 0)
-                {
-                    throw std::runtime_error(std::format("io_uring_register failed: {}", std::strerror(-ret)));
-                }
-                if (!empty(opts_.worker_cpu_affinity) && id < opts_.worker_cpu_affinity.size())
-                {
-                    pin_to_cpu(opts_.worker_cpu_affinity.begin()[id]);
-                }
-                this->run(opts_.batch_max_size, stop_token_);
-            });
-    }
+    explicit IO(size_t id, const IO* leader = nullptr, const IoOptions& opts = {});
+    /// IO object can be moved but with some limitations. Before it start doing some actual io (before run*()),
+    /// its is safe to move it. Because, in this state, it's an inert object. So it gives you more flexibilities
+    /// on the object and object pools construction. But, it SHOULD not be moved after it started doing IO.
+    /// If you need to do it for some reason, use a std::unique_ptr<IO>. Moving the direct object while IO is active
+    /// will terminate the program.
+    IO(IO&& other) noexcept;
     IO(const IO&) = delete;
     IO& operator=(const IO&) = delete;
-    IO(IO&&) = delete;
     IO& operator=(IO&&) = delete;
     ~IO();
+
+    /// Run an event loop.
+    /// Shutdown is coordinated externally, by the caller's provided stop token
+    void run_blocking(std::stop_token st) noexcept;
+
+    /// Run until done, no loop
+    void run_once() noexcept
+    {
+        pin_to_cpu();
+        activate();
+        tick();
+    }
 
     /// Background task or post job to an io in another thread
     template <typename T>
     void schedule(Task<T> task)
     {
-        // 1. Release ownership so the Task destructor doesn't free the frame early
         auto h = task.release();
 
-        // 2. Safely cast to the base promise
         auto* p = static_cast<detail::TaskPromiseBase*>(&h.promise());
 
-        // 3. Store the correctly-offset handle before it gets type-erased by the queue
         p->self_handle = h;
 
-        // 4. Push it to the intrusive queue
         post(p);
     }
 
-    void join() noexcept
-    {
-        if (thread_.joinable())
-        {
-            thread_.join();
-        }
-    }
-
-    static void pin_to_cpu(int physical_core_id)
-    {
-        cpu_set_t cpuset;
-        CPU_ZERO(&cpuset);
-        CPU_SET(physical_core_id, &cpuset);
-
-        if (const int rc = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset); rc != 0)
-        {
-            ALOG_INFO("Warning: Failed to pin to physical CPU {}: {}", physical_core_id,
-                      std::generic_category().message(rc));
-        }
-    }
+    void pin_to_cpu() const;
 
     [[nodiscard]] std::uint32_t id() const noexcept { return id_; }
 
@@ -314,18 +278,22 @@ private:
     io_uring ring_{};
     int wake_fd_{-1};
     uint64_t wake_value_{0};
+    bool is_activated_{false};
+    bool is_running_{false};
+    // cross-thread needs to check this, this is why it is an atomic
     alignas(64) std::atomic<bool> is_sleeping_{false};
-    std::stop_token stop_token_;
-    std::jthread thread_;
     IoOptions opts_;
+    /// This is not a typical id, it is use for CPU pining too
     size_t id_;
     std::vector<std::coroutine_handle<>> local_tasks_{};
     std::vector<std::coroutine_handle<>> current_batch{};
     detail::CoroQueue queue_{};
 
+    /// Creates the Ring in an uninitialized way
     void init(int wq_fd = -1);
-    void run(std::size_t batch_max_size, std::stop_token st) noexcept;
-    void tick(std::size_t batch_max_size) noexcept;
+    /// Activate a disabled ring, MUST be called after init()
+    void activate();
+    void tick() noexcept;
     void submit_or_wait_for();
     void arm_wake_read() noexcept;
     void wake() const noexcept;
@@ -341,7 +309,7 @@ private:
 };
 
 // ============================================================================
-// TransferTo — coroutine context swith (hop to another thread)
+// TransferTo — coroutine context with (hop to another thread)
 // ============================================================================
 struct TransferTo
 {
@@ -353,13 +321,13 @@ struct TransferTo
     template <typename Promise>
     void await_suspend(std::coroutine_handle<Promise> h) noexcept
     {
-        // 1. Get the base promise pointer
+        // Get the base promise pointer
         auto* p = static_cast<detail::TaskPromiseBase*>(&h.promise());
 
-        // 2. Store the erased handle so the target thread can resume it
+        // Store the erased handle so the target thread can resume it
         p->self_handle = h;
 
-        // 3. Post it to the intrusive queue
+        // Post it to the intrusive queue
         target.post(p);
     }
 
