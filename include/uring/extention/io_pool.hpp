@@ -1,5 +1,5 @@
 #pragma once
-#include "uring/core/io_worker.h"
+#include "uring/core/io.h"
 
 namespace URing
 {
@@ -23,13 +23,13 @@ public:
         workers_.reserve(num_threads);
 
         // Leader (Worker 0)
-        workers_.emplace_back(std::make_unique<IO>(0, stop_source_.get_token(), -1, opts_));
-        const int leader_fd = workers_[0]->ring_fd();
+        workers_.emplace_back(std::make_unique<IO>(0, stop_source_.get_token(), nullptr, opts_));
+        const IO* leader = workers_[0].get();
 
         // Followers
         for (std::size_t i = 1; i < num_threads; ++i)
         {
-            workers_.emplace_back(std::make_unique<IO>(i, stop_source_.get_token(), leader_fd, opts_));
+            workers_.emplace_back(std::make_unique<IO>(i, stop_source_.get_token(), leader, opts_));
         }
     }
 

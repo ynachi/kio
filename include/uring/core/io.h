@@ -81,14 +81,21 @@ public:
         IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_COOP_TASKRUN;
     static constexpr uint64_t kWakeTag = UINT64_MAX;
 
-    explicit IO(const size_t id, std::stop_token st, const int shared_wq_fd = -1, const IoOptions& opts = {})
+    /// We use a shared IoUring async backend, when master is null, IO is standalone or the master of a group
+    /// of IOs.
+    explicit IO(const size_t id, std::stop_token st, const IO* leader = nullptr, const IoOptions& opts = {})
         : stop_token_(st), opts_(opts), id_(id)
     {
         local_tasks_.reserve(opts_.entries);
         current_batch.reserve(kMaxResumesPerTick);
 
         // init
-        init(shared_wq_fd);
+        int leader_fd = -1;
+        if (leader != nullptr)
+        {
+            leader_fd = leader->ring_fd();
+        }
+        init(leader_fd);
 
         // start loop
         thread_ = std::jthread(

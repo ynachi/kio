@@ -284,7 +284,7 @@ endif ()
 #----------------------------------------------
 # Library definition
 add_library(uring
-        src/uring/io_worker.cc
+        src/uring/io.cc
         src/uring/net.cc
         src/uring/tcp_listener.cc
         #        src/kio/net.cpp
