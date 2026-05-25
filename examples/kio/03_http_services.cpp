@@ -17,7 +17,7 @@ using namespace URing;
 
 namespace
 {
-constexpr bool kUseRemoteDispatch = false;
+constexpr bool kUseRemoteDispatch = true;
 volatile std::sig_atomic_t g_stop_requested = 0;
 
 void signal_handler(int)

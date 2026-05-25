@@ -1,602 +1,158 @@
-# AIO - Modern C++ Async I/O Library
+# URing: High-Performance C++20 io_uring Framework
 
-A high-performance, coroutine-based asynchronous I/O library for Linux built on `io_uring`.
-Tests and demo are built with TSAN enabled and are currently free from any issue.
+URing is a low-latency, "thread-per-core" asynchronous I/O framework for Linux. It provides a type-safe C++20 coroutine
+interface over `io_uring`, designed for maximum throughput and predictable latency in systems programming.
 
-## Features
+## Architectural Philosophy
 
-- **C++20 Coroutines** - Natural async/await syntax with zero-overhead abstractions
-- **io_uring Backend** - Leverages Linux's most efficient async I/O interface
-- **Single-Threaded Per-Core** - Thread-per-core architecture for predictable performance
-- **Zero-Copy I/O** - Efficient `splice`/`sendfile` support via pipe pools
-- **Lazy Timeout Management** - O(1) per-operation overhead, optimized for the common case
-- **Structured Concurrency** - `TaskGroup` for safe concurrent task management
-- **Blocking Pool** - Offload blocking operations without stalling the event loop
-- **Built-in Observability** - Optional statistics and async logging
+Unlike high-level "managed" runtimes, URing follows a **Resource-Provider** model:
+
+1. **Inert Initialization**: `IO` contexts are initialized in a "disabled" state. This allows you to perform heavy
+   setup (FD allocation, memory reservation, shared backend attachment) on a main thread before moving the context to a
+   dedicated worker.
+2. **Explicit Ownership**: Leverages `IORING_SETUP_SINGLE_ISSUER`. The thread that calls `run_blocking()` becomes the
+   registered owner, ensuring zero-mutex submission paths.
+3. **Shared Backend (WQ Attachment)**: Enables a "Leader-Follower" model where multiple rings share a single async
+   worker pool, reducing kernel-thread sprawl and context-switching overhead.
+4. **Stable Memory Architecture**: Designed for stack-friendly usage with strict move-semantics that prevent
+   invalidating coroutine references.
+
+## Key Features
+
+- **C++20 Coroutines**: Native `Task<T>` and `IoAwaiter` implementation with symmetric transfer for flat stack frames.
+- **Zero-Allocation Hot Path**: MPSC intrusive queues and optimized SQE management.
+- **Shared Async Workers**: Attach multiple rings to a single leader's kernel worker pool.
+- **Direct I/O & Buffering**: Unified support for file and network descriptors via `Fd` RAII wrappers.
+- **Observability**: Built-in async logging and performance counters.
 
 ## Requirements
 
-- Linux kernel 5.11+ (for full io_uring feature support)
-- GCC 14+ or Clang 15+ (C++20 coroutine support and c++23 features)
-- liburing 2.5+
-- OpenSSL 3.2+ (for TLS support)
+- **OS**: Linux Kernel 5.11+ (6.0+ recommended for best performance)
+- **Compiler**: GCC 14+ or Clang 18+ (C++23 support required)
+- **Library**: `liburing` 2.5+
 
 ## Quick Start
 
-### Hello World, TCP Echo Server
+### 1. Basic Setup (Standalone)
 
 ```cpp
-#include <aio/aio.hpp>
+#include "uring/core/io.h"
+#include <iostream>
 
-using namespace aio;
-using namespace std::chrono_literals;
+using namespace URing;
 
-Task<> HandleClient(IoContext& ctx, net::Socket client)
-{
-    std::array<std::byte, 4096> buf{};
-    
-    while (true)
-    {
-        // Read with 30 second timeout
-        auto result = co_await AsyncRecv(ctx, client, buf).WithTimeout(30s);
-        
-        if (!result || *result == 0)
-            break;  // Error or client disconnected
-        
-        // Echo back
-        co_await AsyncSend(ctx, client, std::span{buf.data(), *result});
+Task<void> HelloWorld(IO& io) {
+    auto open_res = co_await io.open("test.txt", O_RDONLY);
+    if (!open_res) {
+        std::cerr << "Failed to open file\n";
+        co_return {};
     }
-}
 
-Task<> Server(IoContext& ctx, uint16_t port)
-{
-    auto listener = net::TcpListener::BindV4(port);
-    if (!listener)
-        throw std::runtime_error("Failed to bind");
+    Fd file = std::move(*open_res);
+    std::byte buffer[1024];
+    auto read_res = co_await io.read(file, buffer);
     
-    TaskGroup tasks;
-    
-    while (true)
-    {
-        auto accepted = co_await AsyncAccept(ctx, *listener);
-        if (!accepted)
-            continue;
-        
-        tasks.Spawn(HandleClient(ctx, net::Socket(accepted->fd)));
-    }
+    std::cout << "Read " << *read_res << " bytes\n";
+    co_return {};
 }
 
-int main()
-{
-    IoContext ctx;
-    ctx.RunUntilDone(Server(ctx, 8080));
-    return 0;
-}
-```
-
-### Multi-Core Server
-
-```cpp
-#include <aio/aio.hpp>
-
-int main()
-{
-    const size_t num_cores = std::thread::hardware_concurrency();
-    std::vector<aio::Worker> workers;
+int main() {
+    IO io(0); // Create inert IO context
     
     std::stop_source stop;
+    io.schedule(HelloWorld(io));
     
-    for (size_t i = 0; i < num_cores; ++i)
-    {
-        workers.emplace_back(i);
-        workers.back().Start(
-            [st = stop.get_token()](aio::IoContext& ctx)
-            {
-                ctx.RunUntilDone(Server(ctx, 8080, st));
-            },
-            i  // Pin to CPU core
-        );
-    }
-    
-    // Wait for signal
-    aio::IoContext main_ctx;
-    aio::SignalSet signals{SIGINT, SIGTERM};
-    main_ctx.RunUntilDone([&]() -> aio::Task<> {
-        co_await aio::AsyncWaitSignal(main_ctx, signals);
-        stop.request_stop();
-    }());
-    
-    for (auto& w : workers)
-        w.Join();
+    // run_blocking activates the ring and takes ownership
+    io.run_blocking(stop.get_token());
     
     return 0;
 }
 ```
 
-## Core Concepts
-
-### IoContext
-
-The event loop. Each thread should have exactly one `IoContext`.
+### 2. Multi-Threaded Shared Backend (Leader/Follower)
 
 ```cpp
-IoContext ctx(1024);  // 1024 SQ entries
+#include "uring/extention/io_pool.hpp"
 
-// Run until stopped
-ctx.Run();
+void StartNetworkSystem() {
+    IoOptions opts;
+    opts.entries = 4096;
+    opts.worker_cpu_affinity = {0, 1, 2, 3}; // Pin to physical cores
 
-// Run until a specific task completes
-ctx.RunUntilDone(MyTask(ctx));
+    // IoContext manages Leader/Follower initialization automatically
+    IoContext pool(4, opts); 
 
-// Run with periodic tick callback
-ctx.Run([&] { ProcessMetrics(); });
-
-// Stop the loop (thread-safe)
-ctx.Stop();
-ctx.Notify();  // Wake if blocked in io_uring_wait
-```
-
-### Task<T>
-
-The coroutine return type. Tasks are lazy: they do not start until awaited.
-
-`Task<T>` always completes with `Result<T>`. This means both `.get()` and
-`co_await` return `Result<T>`, not raw `T`.
-
-Do not use `Task<Result<T>>` for normal error handling. It is discouraged
-because `Task<T>` already has a result channel; nesting creates
-`Result<Result<T>>` semantics and makes propagation harder to reason about.
-
-```cpp
-Task<int> ComputeAsync(IoContext& ctx)
-{
-    co_await AsyncSleep(ctx, 100ms);
-    co_return 42;
-}
-
-Task<> Caller(IoContext& ctx)
-{
-    auto result = co_await ComputeAsync(ctx);
-    if (!result)
-    {
-        co_return std::unexpected(result.error());
-    }
-
-    int value = *result;
-    // value == 42
-}
-```
-
-For `Task<void>`, return success explicitly through the result channel:
-
-```cpp
-Task<void> FlushAsync(IoContext& ctx)
-{
-    // ...
-    co_return {};
-}
-```
-
-Use `co_return std::unexpected(error);` to return failure from any `Task<T>`.
-
-### Result<T>
-
-Error handling via `std::expected<T, std::error_code>`. I/O awaiters and
-`Task<T>` both use `Result<T>`, so errors are propagated explicitly instead of
-terminating the process for recoverable failures.
-
-```cpp
-Task<> Example(IoContext& ctx, int fd)
-{
-    auto result = co_await AsyncRead(ctx, fd, buffer);
+    // Schedule work on specific workers
+    pool.worker(0).schedule(MyServerTask(pool.worker(0)));
     
-    if (!result)
-    {
-        // Handle error
-        std::cerr << "Read failed: " << result.error().message() << "\n";
-        co_return std::unexpected(result.error());
-    }
-    
-    size_t bytes_read = *result;
-    co_return {};
+    // Join or stop via stop_source
+    pool.join();
 }
 ```
 
-## Async Operations
+## Lifecycle & State Machine
 
-### File I/O
+An `IO` object exists in three states:
 
-```cpp
-// Open
-auto fd = co_await AsyncOpen(ctx, "/path/to/file", O_RDONLY);
+| State         | Transition             | Action                                                |
+|:--------------|:-----------------------|:------------------------------------------------------|
+| **Inert**     | Constructor / `init()` | `io_uring` created but disabled. **Move is allowed.** |
+| **Activated** | `activate()`           | Ring enabled, `eventfd` armed. **Move is forbidden.** |
+| **Running**   | `run_blocking()`       | Loop entering `tick()`. Thread ownership registered.  |
 
-// Read/Write
-auto n = co_await AsyncRead(ctx, fd, buffer, offset);
-auto n = co_await AsyncWrite(ctx, fd, data, offset);
+> **Warning**: Moving an `IO` object while it is in the **Running** state will trigger `std::terminate()`. This protects
+> suspended coroutines from holding dangling references to the `IO` context.
 
-// Vectored I/O
-auto n = co_await AsyncReadv(ctx, fd, iovecs, offset);
-auto n = co_await AsyncWritev(ctx, fd, iovecs, offset);
+## API Reference
 
-// Close
-co_await AsyncClose(ctx, fd);
+### Core I/O Operations
 
-// File operations
-co_await AsyncFsync(ctx, fd);
-co_await AsyncFallocate(ctx, fd, mode, offset, len);
-co_await AsyncFtruncate(ctx, fd, length);
-co_await AsyncUnlink(ctx, "/path/to/file");
-co_await AsyncRename(ctx, "/old/path", "/new/path");
-co_await AsyncMkdir(ctx, "/path/to/dir", 0755);
-```
+All operations are available as methods on the `IO` instance:
 
-### Network I/O
+- `accept(Fd& server_fd, ...)`
+- `connect(Fd& fd, const SocketAddress& addr)`
+- `read(Fd& fd, std::span<std::byte> buf, off_t offset)`
+- `write(Fd& fd, std::span<const std::byte> buf, off_t offset)`
+- `open(std::filesystem::path, flags, mode)`
+- `close(Fd&& fd)`
+- `timeout(std::chrono::duration)`
 
-```cpp
-// TCP Server
-auto listener = net::TcpListener::BindV4(8080);
-auto accepted = co_await AsyncAccept(ctx, *listener);
-net::Socket client(accepted->fd);
+### Performance Tuning
 
-// TCP Client
-net::Socket sock(socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0));
-auto addr = net::SocketAddress::V4(8080, "127.0.0.1");
-co_await AsyncConnect(ctx, sock, addr);
+Configure `IoOptions` before initialization:
 
-// Send/Recv
-auto n = co_await AsyncSend(ctx, sock, data);
-auto n = co_await AsyncRecv(ctx, sock, buffer);
+- `entries`: Submission Queue size.
+- `sq_thread_idle_ms`: Kernel thread sleep time (for `SQPOLL`).
+- `worker_cpu_affinity`: List of CPU cores for thread pinning.
+- `batch_max_size`: Max completions processed per tick.
 
-// With flags
-auto n = co_await AsyncSend(ctx, sock, data, MSG_NOSIGNAL);
-auto n = co_await AsyncRecv(ctx, sock, buffer, MSG_WAITALL);
+## Build System
 
-// Sendmsg/Recvmsg (for advanced use cases)
-co_await AsyncSendmsg(ctx, sock, &msg, flags);
-co_await AsyncRecvmsg(ctx, sock, &msg, flags);
-```
-
-### Zero-Copy File Transfer
-
-```cpp
-// Send file to socket efficiently using splice
-co_await AsyncSendfile(ctx, socket, file_fd, offset, count);
-```
-
-### Timeouts
-
-```cpp
-// Per-operation timeout
-auto result = co_await AsyncRecv(ctx, sock, buf).WithTimeout(5s);
-
-if (!result && result.error() == std::errc::timed_out)
-{
-    // Handle timeout
-}
-
-// Sleep
-co_await AsyncSleep(ctx, 100ms);
-```
-
-### Polling
-
-```cpp
-// Wait for readability
-auto events = co_await AsyncPoll(ctx, fd, POLLIN);
-
-// Wait for writability
-auto events = co_await AsyncPoll(ctx, fd, POLLOUT);
-```
-
-## Structured Concurrency
-
-### TaskGroup
-
-Manages a collection of concurrent tasks with automatic lifetime management.
-
-```cpp
-Task<> ProcessConnections(IoContext& ctx)
-{
-    TaskGroup tasks;
-    
-    // Spawn concurrent tasks
-    tasks.Spawn(HandleClient(ctx, client1));
-    tasks.Spawn(HandleClient(ctx, client2));
-    tasks.Spawn(HandleClient(ctx, client3));
-    
-    // Or spawn multiple at once
-    tasks.SpawnAll(
-        Task1(ctx),
-        Task2(ctx),
-        Task3(ctx)
-    );
-    
-    // Wait for all to complete
-    co_await tasks.JoinAll(ctx);
-    
-    // Or with timeout
-    bool completed = co_await tasks.JoinAllTimeout(ctx, 30s);
-}
-```
-
-### Notifier
-
-Cross-thread notification primitive.
-
-```cpp
-Notifier notifier;
-
-// Waiting side (coroutine)
-Task<> Waiter(IoContext& ctx)
-{
-    co_await notifier.Wait(ctx);
-    // Signaled!
-}
-
-// Signaling side (any thread)
-notifier.Signal();
-```
-
-## Blocking Operations
-
-Use `BlockingPool` to offload blocking operations without stalling the event loop.
-
-```cpp
-BlockingPool pool(4);  // 4 worker threads
-
-Task<> Example(IoContext& ctx)
-{
-    // Offload CPU-intensive work
-    auto result = co_await Offload(ctx, pool, [] {
-        return ExpensiveComputation();
-    });
-    
-    // Offload blocking syscalls
-    auto dns_result = co_await Offload(ctx, pool, [] {
-        return getaddrinfo(...);
-    });
-}
-```
-
-### Async DNS Resolution
-
-```cpp
-// Synchronous (blocking - use only at startup)
-auto addr = net::Resolve("example.com", 443);
-
-// Asynchronous (non-blocking)
-auto addr = co_await net::ResolveAsync(ctx, pool, "example.com", 443);
-```
-
-## Signal Handling
-
-```cpp
-SignalSet signals{SIGINT, SIGTERM};
-
-Task<> WaitForShutdown(IoContext& ctx)
-{
-    auto sig = co_await AsyncWaitSignal(ctx, signals);
-    std::cout << "Received signal: " << *sig << "\n";
-}
-```
-
-## Worker Threads
-
-Convenience wrapper for running IoContext on dedicated threads.
-
-```cpp
-Worker worker;
-
-// Low-level: full control
-worker.Start([](IoContext& ctx) {
-    ctx.Run();
-}, 0);  // Pin to CPU 0
-
-// Run a task to completion
-worker.RunTask([](IoContext& ctx) -> Task<> {
-    co_await MyServerTask(ctx);
-}, 0);
-
-// Run with tick callback
-worker.RunLoop([&] { UpdateStats(); }, 0);
-
-// Stop and wait
-worker.RequestStop();
-worker.Join();
-```
-
-## Logging
-
-Built-in async logger with minimal overhead.
-
-```cpp
-#include <aio/logger.hpp>
-
-// Configure
-aio::alog::g_level = aio::alog::Level::Info;
-aio::alog::g_colors = true;
-
-// Log
-ALOG_DEBUG("Debug message: {}", value);
-ALOG_INFO("Connection from {}:{}", ip, port);
-ALOG_WARN("High latency: {}ms", latency);
-ALOG_ERROR("Failed to open file: {}", path);
-ALOG_FATAL("Unrecoverable error");
-
-// Check dropped messages (if queue overflows)
-uint64_t dropped = aio::alog::dropped_count();
-```
-
-Compile-time filtering:
-
-```cpp
-// In CMakeLists.txt or compile flags
-add_definitions(-DLOG_BUILD_LEVEL=1)  // 0=Debug, 1=Info, 2=Warn, 3=Error
-```
-
-## Statistics
-
-Optional performance counters (compile with `-DAIO_STATS=1`).
-
-```cpp
-#define AIO_STATS 1
-#include <aio/aio.hpp>
-
-IoContext ctx;
-// ... run workload ...
-
-auto stats = ctx.Stats().GetSnapshot();
-std::cout << "Submitted: " << stats.ops_submitted << "\n";
-std::cout << "Completed: " << stats.ops_completed << "\n";
-std::cout << "Errors: " << stats.ops_errors << "\n";
-std::cout << "Timeouts: " << stats.timeouts << "\n";
-std::cout << "Max inflight: " << stats.ops_max_inflight << "\n";
-std::cout << "Loop iterations: " << stats.loop_iterations << "\n";
-```
-
-## IoBuffer
-
-High-performance ring buffer for protocol parsing.
-
-```cpp
-IoBuffer buf(4096);
-
-// Read into buffer
-auto writable = buf.WritableBytesSpan();
-auto n = co_await AsyncRecv(ctx, sock, writable);
-buf.Commit(*n);
-
-// Process data
-auto readable = buf.ReadableSpan();
-size_t consumed = ParseProtocol(readable);
-buf.Consume(consumed);
-
-// Build response
-buf.Append("HTTP/1.1 200 OK\r\n");
-buf.Append("Content-Length: 5\r\n\r\n");
-buf.Append("Hello");
-buf.Commit();
-
-// Send
-co_await AsyncSend(ctx, sock, buf.ReadableBytesSpan());
-```
-
-## Socket Options
-
-```cpp
-net::Socket sock(fd);
-
-sock.SetNonBlocking();
-sock.SetReuseAddr();
-sock.SetReusePort();
-sock.SetNodelay();
-sock.SetSendBuffer(65536);
-sock.SetRecvBuffer(65536);
-```
-
-## Performance Tips
-
-### 1. Use Thread-Per-Core
-
-Each `IoContext` is single-threaded. Scale by running one per CPU core.
-
-```cpp
-for (size_t i = 0; i < num_cores; ++i)
-{
-    workers.emplace_back(i);
-    workers.back().Start(WorkerFunc, i);  // Pin to core i
-}
-```
-
-### 2. Batch Operations
-
-Use vectored I/O when possible:
-
-```cpp
-// Instead of multiple sends
-co_await AsyncSend(ctx, sock, header);
-co_await AsyncSend(ctx, sock, body);
-
-// Use writev
-std::array<iovec, 2> iov = {{{header.data(), header.size()}, {body.data(), body.size()}}};
-co_await AsyncWritev(ctx, sock, iov);
-```
-
-### 3. Avoid Unnecessary Timeouts
-
-Timeouts have overhead. For connection-level idle detection, consider a periodic scan instead of per-operation timeouts.
-Per operation timeout is expensive as it requires 2X io uring submit system calls.
-
-### 4. Use Zero-Copy for Large Transfers
-
-```cpp
-// For serving files
-co_await AsyncSendfile(ctx, socket, file_fd, 0, file_size);
-```
-
-### 5. Pre-size Buffers
-
-```cpp
-IoBuffer buf;
-buf.Reserve(expected_max_size);  // Avoid reallocations
-```
-
-## Building
-
-Look at [build](./docs/build.md) docs.
-
-### CMake
+### CMake Integration
 
 ```cmake
-cmake_minimum_required(VERSION 3.28)
-project(myapp)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(LibUring REQUIRED liburing)
 
-set(CMAKE_CXX_STANDARD 23)
-
-add_executable(myapp main.cpp)
-target_link_libraries(myapp kio)
-
-# Optional: Enable stats
-target_compile_definitions(myapp PRIVATE AIO_STATS=1)
+add_executable(my_app main.cpp)
+target_link_libraries(my_app PRIVATE uring)
 ```
 
+### Building from Source
 
-## Architecture
-
+```bash
+cmake --preset dev
+cmake --build build -j$(nproc)
+cd build && make check
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         Application Layer                           │
-│   ┌─────────────┐  ┌─────────────┐  ┌─────────────┐                 │
-│   │  Coroutine  │  │  Coroutine  │  │  Coroutine  │  ...            │
-│   │   Task<T>   │  │   Task<T>   │  │   Task<T>   │                 │
-│   └──────┬──────┘  └──────┬──────┘  └──────┬──────┘                 │
-│          │                │                │                        │
-│          └────────────────┼────────────────┘                        │
-│                           │ co_await                                │
-├───────────────────────────┼─────────────────────────────────────────┤
-│                     kio I/O Layer                                   │
-│   ┌───────────────────────┴───────────────────────┐                 │
-│   │              Async Operations                 │                 │
-│   │  AsyncRead, AsyncWrite, AsyncRecv, AsyncSend  │                 │
-│   │  AsyncAccept, AsyncConnect, AsyncClose, ...   │                 │
-│   └───────────────────────┬───────────────────────┘                 │
-│                           │                                         │
-│   ┌───────────────────────┴───────────────────────┐                 │
-│   │               IoContext                       │                 │
-│   │  - Owns io_uring ring                         │                 │
-│   │  - Tracks pending operations                  │                 │
-│   │  - Manages completion queue                   │                 │
-│   │  - Resumes coroutines on completion           │                 │
-│   └───────────────────────┬───────────────────────┘                 │
-├───────────────────────────┼─────────────────────────────────────────┤
-│                     Linux Kernel                                    │
-│   ┌───────────────────────┴───────────────────────┐                 │
-│   │               io_uring                        │                 │
-│   │  ┌─────────────┐       ┌─────────────┐        │                 │
-│   │  │ Submission  │       │ Completion  │        │                 │
-│   │  │   Queue     │  ───► │   Queue     │        │                 │
-│   │  │   (SQ)      │       │   (CQ)      │        │                 │
-│   │  └─────────────┘       └─────────────┘        │                 │
-│   └───────────────────────────────────────────────┘                 │
-└─────────────────────────────────────────────────────────────────────┘
+
+## Contributing
+
+URing is built for high-performance networking and storage. Tests and demos are verified with **TSAN** and **ASAN** to
+ensure memory safety and race-free operation.
+
+---
+**Author**: ynachi  
+**License**: MIT
+
 ```
