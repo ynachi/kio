@@ -3,11 +3,19 @@
 #include <coroutine>
 #include <exception>
 
+#include "uring/error.hpp"
 #include "uring/logger.hpp"
+
+namespace URing
+{
+// Forward declarations
+template <typename T>
+struct Task;
+
+}  // namespace URing
 
 namespace URing::detail
 {
-
 // -----------------------------------------------------------------------
 // FinalAwaitable — The "Self-Cleaning" Mechanism
 // -----------------------------------------------------------------------
@@ -77,5 +85,42 @@ struct TaskPromiseBase
     void unhandled_exception() noexcept { exception = std::current_exception(); }
 
     FinalAwaitable final_suspend() noexcept { return {}; }
+};
+
+// ============================================================================
+// task_promise<T> — Specialized for valued tasks
+// ============================================================================
+template <typename T>
+struct TaskPromise : TaskPromiseBase
+{
+    std::optional<Result<T>> result_;
+
+    // Handle 'co_return value;'
+    void return_value(T val) noexcept { result_.emplace(std::move(val)); }
+
+    // Handle 'co_return std::unexpected(err);'
+    void return_value(std::unexpected<std::error_code> err) noexcept { result_.emplace(std::move(err)); }
+
+    // Handle 'co_return Result<T>(...);'
+    void return_value(Result<T> res) noexcept { result_.emplace(std::move(res)); }
+
+    Task<T> get_return_object() noexcept;
+};
+
+// ============================================================================
+// task_promise<void> — Specialized for side-effect tasks
+// ============================================================================
+template <>
+struct TaskPromise<void> : TaskPromiseBase
+{
+    std::optional<Result<void>> result_;
+
+    // Handle 'co_return std::unexpected(err);'
+    void return_value(std::unexpected<std::error_code> err) noexcept { result_.emplace(std::move(err)); }
+
+    // Handle 'co_return Result<void>(...);' or 'co_return {};'
+    void return_value(Result<void> res) noexcept { result_.emplace(std::move(res)); }
+
+    Task<void> get_return_object() noexcept;
 };
 }  // namespace URing::detail

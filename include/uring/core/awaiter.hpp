@@ -8,8 +8,7 @@
 
 #include <liburing.h>
 
-#include "../error.hpp"
-#include "../logger.hpp"
+#include "uring/error.hpp"
 
 namespace URing
 {
@@ -61,7 +60,6 @@ public:
 };
 
 // Implementation is moved to context.h after IO is fully defined
-
 
 // Helper for void-returning operations in io.hpp (e.g., detail::ResumeVoid)
 namespace detail
