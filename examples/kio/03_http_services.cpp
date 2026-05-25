@@ -2,8 +2,6 @@
 // curl -v --http1.1 -H 'Connection: close' http://127.0.0.1:8080/
 //  printf 'GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n' | nc 127.0.0.1 8080
 
-#include "../../include/uring/core/io_worker.h"
-
 #include <chrono>
 #include <csignal>
 #include <iostream>
@@ -11,6 +9,7 @@
 #include <thread>
 
 #include "../../include/uring/core/task.hpp"
+#include "uring/extention/io_pool.hpp"
 #include "uring/logger.hpp"
 #include "uring/tcp_listener.hpp"
 
