@@ -15,12 +15,11 @@
 
 #include <liburing.h>
 
-#include "awaiter.hpp"
-#include "core/queue.hpp"
-#include "fd.hpp"
-#include "logger.hpp"
-#include "mpsc_queue.hpp"
-#include "task.hpp"
+#include "detail/queue.hpp"
+#include "uring/core/awaiter.hpp"
+#include "uring/core/task.hpp"
+#include "uring/fd.hpp"
+#include "uring/logger.hpp"
 
 namespace URing
 {
@@ -120,7 +119,7 @@ public:
         auto h = task.release();
 
         // 2. Safely cast to the base promise
-        auto* p = static_cast<task_promise_base*>(&h.promise());
+        auto* p = static_cast<detail::TaskPromiseBase*>(&h.promise());
 
         // 3. Store the correctly-offset handle before it gets type-erased by the queue
         p->self_handle = h;
@@ -315,7 +314,7 @@ private:
     size_t id_;
     std::vector<std::coroutine_handle<>> local_tasks_{};
     std::vector<std::coroutine_handle<>> current_batch{};
-    CoroQueue queue_{};
+    detail::CoroQueue queue_{};
 
     void init(int wq_fd = -1);
     void run(std::size_t batch_max_size, std::stop_token st) noexcept;
@@ -327,7 +326,7 @@ private:
 
     int ring_fd() const noexcept { return ring_.ring_fd; }
 
-    void post(task_promise_base* task)
+    void post(detail::TaskPromiseBase* task)
     {
         queue_.enqueue(task);
         wake();
@@ -406,7 +405,7 @@ struct TransferTo
     void await_suspend(std::coroutine_handle<Promise> h) noexcept
     {
         // 1. Get the base promise pointer
-        auto* p = static_cast<task_promise_base*>(&h.promise());
+        auto* p = static_cast<detail::TaskPromiseBase*>(&h.promise());
 
         // 2. Store the erased handle so the target thread can resume it
         p->self_handle = h;

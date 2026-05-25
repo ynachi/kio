@@ -1,9 +1,9 @@
 #pragma once
 #include <atomic>
 
-#include "uring/task.hpp"
+#include "uring/core/task.hpp"
 
-namespace URing
+namespace URing::detail
 {
 /// MPSC intrusive queue for coroutines
 class CoroQueue
@@ -16,17 +16,17 @@ public:
         tail_ = &stub_;
     }
 
-    void enqueue(task_promise_base* node)
+    void enqueue(TaskPromiseBase* node)
     {
         node->next.store(nullptr, std::memory_order_relaxed);
-        task_promise_base* prev = head_.exchange(node, std::memory_order_acq_rel);
+        TaskPromiseBase* prev = head_.exchange(node, std::memory_order_acq_rel);
         prev->next.store(node, std::memory_order_release);
     }
 
-    task_promise_base* dequeue()
+    TaskPromiseBase* dequeue()
     {
-        task_promise_base* tail = tail_;
-        task_promise_base* next = tail->next.load(std::memory_order_acquire);
+        TaskPromiseBase* tail = tail_;
+        TaskPromiseBase* next = tail->next.load(std::memory_order_acquire);
 
         if (tail == &stub_)
         {
@@ -45,7 +45,7 @@ public:
             return tail;
         }
 
-        task_promise_base* head = head_.load(std::memory_order_acquire);
+        TaskPromiseBase* head = head_.load(std::memory_order_acquire);
         if (tail != head)
         {
             return nullptr;
@@ -67,7 +67,7 @@ public:
         std::size_t count = 0;
         while (count < max_count)
         {
-            task_promise_base* node = dequeue();
+            TaskPromiseBase* node = dequeue();
             if (node == nullptr)
             {
                 break;
@@ -78,13 +78,13 @@ public:
         return count;
     }
 
-    bool empty() const noexcept{ return head_.load(std::memory_order_acquire) == tail_; }
+    bool empty() const noexcept { return head_.load(std::memory_order_acquire) == tail_; }
 
 private:
-    alignas(64) std::atomic<task_promise_base*> head_;
-    alignas(64) task_promise_base* tail_;
+    alignas(64) std::atomic<TaskPromiseBase*> head_;
+    alignas(64) TaskPromiseBase* tail_;
     // Dummy node to prevent empty-queue race conditions
-    task_promise_base stub_{};
+    TaskPromiseBase stub_{};
 };
 
-}  // namespace URing
+}  // namespace URing::detail

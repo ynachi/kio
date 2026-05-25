@@ -1,4 +1,4 @@
-#include "uring/context.h"
+#include "uring/core/io_worker.h"
 
 #include <cassert>
 #include <cstring>
@@ -8,7 +8,7 @@
 
 #include <sys/eventfd.h>
 
-#include "uring/awaiter.hpp"
+#include "uring/core/awaiter.hpp"
 
 namespace URing
 {
@@ -88,7 +88,7 @@ void IO::tick(const std::size_t batch_max_size) noexcept
 {
     // Drain the cross-thread MPSC queue first.
     queue_.drain(
-        [this](task_promise_base* node)
+        [this](detail::TaskPromiseBase* node)
         {
             // We retrieve the safe handle to resume later.
             local_tasks_.push_back(node->self_handle);
