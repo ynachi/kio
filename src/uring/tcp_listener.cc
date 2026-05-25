@@ -7,7 +7,7 @@ namespace URing
 Result<Fd> TcpListener::Bind(const SocketAddress& addr, int backlog)
 {
     // Create the raw socket
-    int raw_fd = ::socket(addr.addr.ss_family, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    const int raw_fd = ::socket(addr.addr.ss_family, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (raw_fd < 0)
     {
         return ErrorFromErrno(errno);
@@ -37,14 +37,13 @@ Result<Fd> TcpListener::Bind(const SocketAddress& addr, int backlog)
         return ErrorFromErrno(errno);
     }
 
-    return sock;  // RVO triggers here
+    return sock;
 }
 
 Result<Fd> TcpListener::Bind(const uint16_t port, const char* ip, const int backlog)
 {
     SocketAddress addr;
 
-    // Simple but highly effective IP version detection
     if (ip != nullptr && std::string_view(ip).find(':') != std::string_view::npos)
     {
         addr = SocketAddress::V6(port, ip);

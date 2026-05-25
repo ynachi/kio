@@ -4,8 +4,8 @@
 #include <memory>
 
 #include "fdcache.hpp"
+#include "uring/core/task.hpp"
 #include "uring/fd.hpp"
-#include "uring/task.hpp"
 
 namespace bitcask
 {
@@ -36,9 +36,7 @@ class SegmentManager
     std::atomic<uint64_t> next_offset{0};
     FdCache ro_fd_cache_;
 
-    public:
+public:
     URing::Task<uint64_t> append(std::span<const std::byte> key, std::span<const std::byte> value);
-    Task<void>
-
 };
-}
+}  // namespace bitcask

@@ -81,7 +81,7 @@ SocketAddress SocketAddress::V6(const uint16_t port, const char* ip)
     return std::nullopt;
 }
 
-Result<SocketAddress> ResolveIp(std::string_view host, const uint16_t port)
+Result<SocketAddress> ResolveIp(const std::string_view host, const uint16_t port)
 {
     addrinfo hints{}, *res = nullptr;
     hints.ai_family = AF_UNSPEC;

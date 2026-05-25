@@ -2,21 +2,19 @@
 
 #include <array>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <format>
-#include <bit>
 #include <mutex>
 #include <new>
-#include <optional>
 #include <source_location>
 #include <thread>
 #include <utility>
 
 #include <unistd.h>
 
-#include <sys/syscall.h>
 #include <sys/uio.h>
 
 #ifndef LOG_BUILD_LEVEL
@@ -100,7 +98,12 @@ struct SPSC
     alignas(kCacheLine) std::atomic<uint32_t> tail{0};
     Record buf[kQueueSize]{};
 
-    enum class PushResult: uint8_t { Success, SuccessWasEmpty, QueueFull };
+    enum class PushResult : uint8_t
+    {
+        Success,
+        SuccessWasEmpty,
+        QueueFull
+    };
 
     PushResult try_push(const Record& r) noexcept
     {
@@ -171,7 +174,7 @@ struct ThreadRegGuard
         do
         {
             if (mask == 0)
-                return; // No free slots
+                return;  // No free slots
             idx = std::countr_zero(mask);
         } while (!g_free_slots_mask.compare_exchange_weak(mask, mask & ~(1ULL << idx), std::memory_order_acquire,
                                                           std::memory_order_relaxed));
@@ -180,7 +183,7 @@ struct ThreadRegGuard
         {
             slot_idx = idx;
             g_slots[idx].active.store(true, std::memory_order_release);
-            
+
             // Update high-water mark
             uint32_t cur_max = g_max_slot_idx.load(std::memory_order_relaxed);
             while (idx >= cur_max && !g_max_slot_idx.compare_exchange_weak(cur_max, idx + 1, std::memory_order_relaxed))
@@ -206,7 +209,7 @@ struct ThreadRegGuard
 
 inline uint32_t get_thread_slot()
 {
-    static thread_local ThreadRegGuard guard;
+    thread_local ThreadRegGuard guard;
     return guard.slot_idx;
 }
 
@@ -220,7 +223,7 @@ inline void drain_all(int out_fd)
     for (uint32_t i = 0; i < max_idx; ++i)
     {
         auto& slot = g_slots[i];
-        
+
         // FIXED: Always drain if queue has data, regardless of active flag
         // A deregistering thread may have pending logs; skip only if truly empty
         if (slot.q.is_empty())
@@ -287,8 +290,7 @@ inline void logger_loop(int out_fd)
 }
 
 template <typename... Args>
-inline void format_into(Record& r, Level lvl, std::source_location loc, std::format_string<Args...> fmt,
-                        Args&&... args)
+void format_into(Record& r, Level lvl, std::source_location loc, std::format_string<Args...> fmt, Args&&... args)
 {
     r.level = static_cast<uint8_t>(lvl);
 

@@ -45,8 +45,7 @@ public:
             return tail;
         }
 
-        TaskPromiseBase* head = head_.load(std::memory_order_acquire);
-        if (tail != head)
+        if (const TaskPromiseBase* head = head_.load(std::memory_order_acquire); tail != head)
         {
             return nullptr;
         }

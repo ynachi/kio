@@ -7,19 +7,19 @@ template <typename T>
 struct TaskAwaiter
 {
     using Handle = std::coroutine_handle<TaskPromise<T>>;
-    Handle handle_;
+    Handle handle;
 
-    bool await_ready() const noexcept { return handle_.done(); }
+    bool await_ready() const noexcept { return handle.done(); }
 
     std::coroutine_handle<> await_suspend(std::coroutine_handle<> caller) noexcept
     {
-        handle_.promise().continuation = caller;
-        return handle_;
+        handle.promise().continuation = caller;
+        return handle;
     }
 
     Result<T> await_resume()
     {
-        auto& p = handle_.promise();
+        auto& p = handle.promise();
 
         if (p.exception)
         {
