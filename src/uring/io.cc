@@ -25,18 +25,6 @@ IO::IO(const size_t id, const IO* leader, const IoOptions& opts) : opts_(opts), 
         leader_fd = leader->ring_fd();
     }
     init(leader_fd);
-
-    // start loop
-    thread_ = std::jthread(
-        [this, id]
-        {
-            activate();
-            if (!empty(opts_.worker_cpu_affinity) && id < opts_.worker_cpu_affinity.size())
-            {
-                pin_to_cpu(opts_.worker_cpu_affinity.begin()[id]);
-            }
-            this->run_blocking(opts_.batch_max_size, stop_token_);
-        });
 }
 
 IO::IO(IO&& other) noexcept
