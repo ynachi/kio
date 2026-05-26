@@ -137,7 +137,7 @@ public:
             [](const int32_t res) -> Result<Fd>
             {
                 if (res < 0)
-                    return std::unexpected(MakeErrorCode(res));
+                    return std::unexpected(make_error_code(res));
                 return Fd{res};
             });
     }
@@ -150,7 +150,7 @@ public:
             [](const int32_t res) -> Result<Fd>
             {
                 if (res < 0)
-                    return std::unexpected(MakeErrorCode(res));
+                    return std::unexpected(make_error_code(res));
                 return Fd{res};
             });
     }
@@ -185,7 +185,7 @@ public:
             [](const int32_t res) -> Result<Fd>
             {
                 if (res < 0)
-                    return std::unexpected(MakeErrorCode(res));
+                    return std::unexpected(make_error_code(res));
                 return Fd{res};
             });
     }
@@ -245,7 +245,7 @@ public:
             {
                 if (res == -ETIME || res == 0)
                     return {};
-                return std::unexpected(MakeErrorCode(res));
+                return std::unexpected(make_error_code(res));
             });
     }
 
@@ -269,6 +269,13 @@ public:
             *this, [raw_fd = fd.fd, iovecs, offset](io_uring_sqe* sqe)
             { io_uring_prep_readv(sqe, raw_fd, iovecs.data(), static_cast<unsigned>(iovecs.size()), offset); },
             detail::ResumeInt{});
+    }
+
+    [[nodiscard]] auto rename(std::filesystem::path from, std::filesystem::path to)
+    {
+        return IoAwaiter(
+            *this, [from = std::move(from), to = std::move(to)](io_uring_sqe* sqe)
+            { io_uring_prep_renameat(sqe, AT_FDCWD, from.c_str(), AT_FDCWD, to.c_str(), 0); }, detail::ResumeVoid{});
     }
 
 private:

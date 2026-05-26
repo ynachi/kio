@@ -15,7 +15,7 @@ Task<int> value_task()
 
 Task<int> error_task()
 {
-    co_return std::unexpected(MakeErrorCode(EINVAL));
+    co_return std::unexpected(make_error_code(EINVAL));
 }
 
 Task<int> await_value_task()
@@ -42,7 +42,7 @@ Task<int> await_error_task()
 
 Task<void> void_error_task()
 {
-    co_return std::unexpected(MakeErrorCode(EINVAL));
+    co_return std::unexpected(make_error_code(EINVAL));
 }
 
 Task<void> void_value_task()

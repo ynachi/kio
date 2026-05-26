@@ -26,12 +26,12 @@ struct TaskAwaiter
             std::rethrow_exception(p.exception);
         }
 
-        if (!p.result_.has_value())
+        if (!p.result.has_value())
         {
-            return std::unexpected(MakeErrorCode(ECANCELED));
+            return std::unexpected(make_error_code(ECANCELED));
         }
 
-        return std::move(*p.result_);
+        return std::move(*p.result);
     }
 };
 }  // namespace URing::detail

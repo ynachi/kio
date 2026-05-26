@@ -70,7 +70,7 @@ struct ResumeVoid
     {
         if (res < 0)
         {
-            return std::unexpected(MakeErrorCode(res));
+            return std::unexpected(make_error_code(res));
         }
 
         return {};
@@ -83,7 +83,7 @@ struct ResumeInt
     {
         if (res < 0)
         {
-            return std::unexpected(MakeErrorCode(res));
+            return std::unexpected(make_error_code(res));
         }
         return res;
     }

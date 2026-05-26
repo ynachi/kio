@@ -30,7 +30,7 @@ struct BasicOption
     [[nodiscard]] Result<void> Apply(const int fd) const noexcept
     {
         if (::setsockopt(fd, Level, Name, &value, sizeof(value)) < 0)
-            return ErrorFromErrno(errno);
+            return error_from_errno(errno);
         return {};
     }
 };
@@ -74,10 +74,10 @@ struct NonBlocking
     {
         int flags = ::fcntl(fd, F_GETFL, 0);
         if (flags == -1)
-            return ErrorFromErrno(errno);
+            return error_from_errno(errno);
         flags = enable ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK);
         if (::fcntl(fd, F_SETFL, flags) == -1)
-            return ErrorFromErrno(errno);
+            return error_from_errno(errno);
         return {};
     }
 };

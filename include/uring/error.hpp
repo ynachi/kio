@@ -15,12 +15,17 @@ namespace URing
 template <typename T = void>
 using Result = std::expected<T, std::error_code>;
 
-inline std::unexpected<std::error_code> ErrorFromErrno(const int err) noexcept
+inline std::unexpected<std::error_code> error_from_errno(const int err) noexcept
 {
     return std::unexpected(std::error_code(err, std::system_category()));
 }
 
-inline std::error_code MakeErrorCode(const int err) noexcept
+inline std::unexpected<std::error_code> error_from_errc(std::errc err) noexcept
+{
+    return std::unexpected(std::make_error_code(err));
+}
+
+inline std::error_code make_error_code(const int err) noexcept
 {
     return std::error_code{err > 0 ? err : -err, std::system_category()};
 }
@@ -68,7 +73,7 @@ public:
 };
 
 // Singleton instance of the category
-inline const std::error_category& GetParseErrorCategory()
+inline const std::error_category& get_parse_error_category()
 {
     static ParseErrorCategory instance;
     return instance;
@@ -77,18 +82,31 @@ inline const std::error_category& GetParseErrorCategory()
 // Overload make_error_code for ADL
 inline std::error_code make_error_code(ParseError e)
 {
-    return {static_cast<int>(e), GetParseErrorCategory()};
+    return {static_cast<int>(e), get_parse_error_category()};
 }
 
 }  // namespace URing
 
-#define URING_TRY(expr)                                                         \
-    []<typename T>(T&& res) -> decltype(auto)                                   \
-    {                                                                           \
-        if (!res)                                                               \
-        {                                                                       \
-            auto log_and_forward = [&]() -> T { return std::forward<T>(res); }; \
-            /* The parent coroutine must handle the unrolling context */        \
-        }                                                                       \
-        return std::forward<T>(res);                                            \
-    }(expr)
+namespace URing::uring_try_internal
+{
+template <typename Exp>
+auto unwrap(Exp&& exp)
+{
+    using ValueT = typename std::decay_t<Exp>::value_type;
+
+    if constexpr (!std::is_void_v<ValueT>)
+    {
+        return std::move(*std::forward<Exp>(exp));
+    }
+}
+}  // namespace URing::uring_try_internal
+
+#define URING_TRY(expr)                                         \
+    ({                                                          \
+        auto __uring_try_res = (expr);                          \
+        if (!__uring_try_res) [[unlikely]]                      \
+        {                                                       \
+            co_return std::unexpected(__uring_try_res.error()); \
+        }                                                       \
+        ::URing::uring_try_internal::unwrap(__uring_try_res);   \
+    })
