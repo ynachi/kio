@@ -1,21 +1,30 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <bit>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <format>
 #include <mutex>
-#include <new>
 #include <source_location>
+#include <span>
+#include <string_view>
 #include <thread>
 #include <utility>
 
 #include <unistd.h>
 
 #include <sys/uio.h>
+
+#if defined(__linux__)
+    #include <sys/syscall.h>
+#endif
 
 #ifndef LOG_BUILD_LEVEL
     #define LOG_BUILD_LEVEL 0
@@ -24,376 +33,531 @@
 namespace URing::ALOG
 {
 
-enum class Level : uint8_t
+enum class Level : std::uint8_t
 {
     Debug = 0,
     Info = 1,
     Warn = 2,
     Error = 3,
     Fatal = 4,
-    Disabled = 5
+    Disabled = 5,
 };
 
-// Global configuration — FIXED: explicit template args
+inline constexpr Level kBuildMinLevel = static_cast<Level>(LOG_BUILD_LEVEL);
+
 inline std::atomic<Level> g_level{Level::Info};
 inline std::atomic<bool> g_colors{true};
-
-constexpr Level kBuildMinLevel = static_cast<Level>(LOG_BUILD_LEVEL);
-
-// ---- Parameters ----
-constexpr size_t kMaxThreads = 64;
-constexpr size_t kQueueSize = 1024;  // Must be power of 2
-constexpr size_t kMsgMax = 1024;     // Buffer per log line
 
 namespace detail
 {
 
-#ifdef __cpp_lib_hardware_interference_size
-constexpr size_t kCacheLine = std::hardware_destructive_interference_size;
-#else
-constexpr size_t kCacheLine = 64;
-#endif
+constexpr std::size_t kMaxThreads = 64;
+constexpr std::size_t kQueueSize = 1024;
+constexpr std::size_t kMessageBytes = 1024;
+constexpr std::size_t kWriteBatch = 16;
 
-struct LevelConfig
+static_assert(std::has_single_bit(kQueueSize), "logger queue size must be a power of two");
+
+inline constexpr std::size_t kCacheLine = 64;
+
+struct LevelInfo
 {
-    const char* label;
-    const char* color;
+    std::string_view label;
+    std::string_view color;
 };
 
-constexpr LevelConfig kCfg[] = {
-    {"DBG", "\033[36m"  },
-    {"INF", "\033[32m"  },
-    {"WRN", "\033[33m"  },
-    {"ERR", "\033[31m"  },
-    {"FTL", "\033[1;31m"}
+inline constexpr std::array kLevelInfo{
+    LevelInfo{"DBG", "\033[36m"  },
+    LevelInfo{"INF", "\033[32m"  },
+    LevelInfo{"WRN", "\033[33m"  },
+    LevelInfo{"ERR", "\033[31m"  },
+    LevelInfo{"FTL", "\033[1;31m"},
 };
-constexpr auto kReset = "\033[0m";
 
-inline const char* basename(const char* path)
+inline constexpr std::string_view kColorReset = "\033[0m";
+inline constexpr std::string_view kTruncated = " [truncated]";
+
+[[nodiscard]] constexpr auto level_index(Level level) noexcept -> std::size_t
 {
-    const char* slash = std::strrchr(path, '/');
-    return slash ? slash + 1 : path;
+    return static_cast<std::size_t>(level);
 }
 
-// Cached thread ID
-inline uint32_t get_tid()
+[[nodiscard]] inline auto basename(const char* path) noexcept -> const char*
 {
-    thread_local auto tid = static_cast<uint32_t>(::syscall(SYS_gettid));
+    const char* slash = std::strrchr(path, '/');
+    return slash == nullptr ? path : slash + 1;
+}
+
+[[nodiscard]] inline auto thread_id() noexcept -> std::uint64_t
+{
+#if defined(__linux__)
+    thread_local const auto tid = static_cast<std::uint64_t>(::syscall(SYS_gettid));
     return tid;
+#else
+    static std::atomic<std::uint64_t> next_id{1};
+    thread_local const std::uint64_t tid = next_id.fetch_add(1, std::memory_order_relaxed);
+    return tid;
+#endif
 }
 
 struct Record
 {
-    uint16_t len;
-    uint8_t level;
-    char msg[kMsgMax];
+    std::uint16_t size = 0;
+    std::array<char, kMessageBytes> bytes{};
 };
 
-struct SPSC
+class BoundedSpscQueue
 {
-    static constexpr size_t Mask = kQueueSize - 1;
-    static_assert((kQueueSize & (kQueueSize - 1)) == 0, "Queue size not pow2");
-
-    alignas(kCacheLine) std::atomic<uint32_t> head{0};
-    alignas(kCacheLine) std::atomic<uint32_t> tail{0};
-    Record buf[kQueueSize]{};
-
-    enum class PushResult : uint8_t
+public:
+    struct Reservation
     {
-        Success,
-        SuccessWasEmpty,
-        QueueFull
+        Record* record = nullptr;
+        std::uint32_t head = 0;
+        bool was_empty = false;
     };
 
-    PushResult try_push(const Record& r) noexcept
+    [[nodiscard]] auto try_reserve() noexcept -> Reservation
     {
-        const uint32_t h = head.load(std::memory_order_relaxed);
-        const uint32_t t = tail.load(std::memory_order_acquire);
+        const auto head = head_.load(std::memory_order_relaxed);
+        const auto tail = tail_.load(std::memory_order_acquire);
 
-        if ((h - t) >= kQueueSize)
-            return PushResult::QueueFull;
+        if (head - tail >= kQueueSize)
+        {
+            return {};
+        }
 
-        buf[h & Mask] = r;
-        head.store(h + 1, std::memory_order_release);
-        return (h == t) ? PushResult::SuccessWasEmpty : PushResult::Success;
+        return {
+            .record = &records_[head & kMask],
+            .head = head,
+            .was_empty = head == tail,
+        };
     }
 
-    bool try_pop(Record& out) noexcept
+    void commit(Reservation reservation) noexcept { head_.store(reservation.head + 1, std::memory_order_release); }
+
+    [[nodiscard]] auto try_pop(Record& out) noexcept -> bool
     {
-        const uint32_t t = tail.load(std::memory_order_relaxed);
-        const uint32_t h = head.load(std::memory_order_acquire);
+        const auto tail = tail_.load(std::memory_order_relaxed);
+        const auto head = head_.load(std::memory_order_acquire);
 
-        if (t == h)
+        if (tail == head)
+        {
             return false;
+        }
 
-        out = buf[t & Mask];
-        tail.store(t + 1, std::memory_order_release);
+        out = records_[tail & kMask];
+        tail_.store(tail + 1, std::memory_order_release);
         return true;
     }
 
-    // FIXED: acquire on both for consistent snapshot
-    [[nodiscard]] bool is_empty() const noexcept
+    [[nodiscard]] auto empty() const noexcept -> bool
     {
-        return head.load(std::memory_order_acquire) == tail.load(std::memory_order_acquire);
+        return head_.load(std::memory_order_acquire) == tail_.load(std::memory_order_acquire);
     }
+
+private:
+    static constexpr std::uint32_t kMask = static_cast<std::uint32_t>(kQueueSize - 1);
+
+    alignas(kCacheLine) std::atomic<std::uint32_t> head_{0};
+    alignas(kCacheLine) std::atomic<std::uint32_t> tail_{0};
+    std::array<Record, kQueueSize> records_{};
 };
 
 struct alignas(kCacheLine) ThreadSlot
 {
-    std::atomic<bool> active{false};
-    SPSC q;
+    BoundedSpscQueue queue;
 };
 
-// Global State
-inline std::array<ThreadSlot, kMaxThreads> g_slots;
-inline std::atomic<uint64_t> g_free_slots_mask{~0ULL};
-inline std::atomic<uint32_t> g_max_slot_idx{0};
+inline std::array<ThreadSlot, kMaxThreads> g_slots{};
+inline std::atomic<std::uint64_t> g_free_slots{~std::uint64_t{0}};
+inline std::atomic<std::uint32_t> g_slot_count{0};
 
-// Replaced eventfd with atomic epoch for futex wait
-inline std::atomic<uint32_t> g_epoch{0};
-inline std::atomic g_running{false};  // FIXED: explicit template arg
-inline std::jthread g_thread;
-inline std::atomic<uint64_t> g_dropped{0};
-inline std::mutex g_lifecycle_mtx;
+inline std::atomic<bool> g_running{false};
+inline std::atomic<std::uint32_t> g_wake_epoch{0};
+inline std::atomic<std::uint64_t> g_dropped{0};
+inline std::atomic<int> g_output_fd{STDERR_FILENO};
+inline std::jthread g_worker;
+inline std::mutex g_lifecycle_mutex;
 
-inline void wake_logger() noexcept
+inline void wake_worker() noexcept
 {
-    g_epoch.fetch_add(1, std::memory_order_release);
-    g_epoch.notify_one();
+    g_wake_epoch.fetch_add(1, std::memory_order_release);
+    g_wake_epoch.notify_one();
 }
 
-// RAII helper to handle thread destruction
-struct ThreadRegGuard
+class ThreadRegistration
 {
-    uint32_t slot_idx = UINT32_MAX;
-
-    ThreadRegGuard()
+public:
+    ThreadRegistration() noexcept
     {
-        uint64_t mask = g_free_slots_mask.load(std::memory_order_relaxed);
-        uint32_t idx;
-        do
+        auto free_slots = g_free_slots.load(std::memory_order_relaxed);
+        while (free_slots != 0)
         {
-            if (mask == 0)
-                return;  // No free slots
-            idx = std::countr_zero(mask);
-        } while (!g_free_slots_mask.compare_exchange_weak(mask, mask & ~(1ULL << idx), std::memory_order_acquire,
-                                                          std::memory_order_relaxed));
+            const auto index = static_cast<std::uint32_t>(std::countr_zero(free_slots));
+            const auto claimed = free_slots & ~(std::uint64_t{1} << index);
 
-        if (idx < kMaxThreads)
-        {
-            slot_idx = idx;
-            g_slots[idx].active.store(true, std::memory_order_release);
-
-            // Update high-water mark
-            uint32_t cur_max = g_max_slot_idx.load(std::memory_order_relaxed);
-            while (idx >= cur_max && !g_max_slot_idx.compare_exchange_weak(cur_max, idx + 1, std::memory_order_relaxed))
+            if (g_free_slots.compare_exchange_weak(free_slots, claimed, std::memory_order_acquire,
+                                                   std::memory_order_relaxed))
             {
+                slot_ = index;
+                publish_slot_count(index + 1);
+                return;
             }
         }
     }
 
-    ~ThreadRegGuard()
+    ThreadRegistration(const ThreadRegistration&) = delete;
+    auto operator=(const ThreadRegistration&) -> ThreadRegistration& = delete;
+
+    ~ThreadRegistration()
     {
-        if (slot_idx < kMaxThreads)
+        if (!valid())
         {
-            g_slots[slot_idx].active.store(false, std::memory_order_release);
-            uint64_t mask = g_free_slots_mask.load(std::memory_order_relaxed);
-            while (!g_free_slots_mask.compare_exchange_weak(mask, mask | (1ULL << slot_idx), std::memory_order_release,
-                                                            std::memory_order_relaxed))
-            {
-            }
-            wake_logger();
-        }
-    }
-};
-
-inline uint32_t get_thread_slot()
-{
-    thread_local ThreadRegGuard guard;
-    return guard.slot_idx;
-}
-
-inline void drain_all(int out_fd)
-{
-    constexpr size_t kMaxBatch = 16;
-    Record batch[kMaxBatch];
-    iovec iovs[kMaxBatch];
-
-    const uint32_t max_idx = g_max_slot_idx.load(std::memory_order_acquire);
-    for (uint32_t i = 0; i < max_idx; ++i)
-    {
-        auto& slot = g_slots[i];
-
-        // FIXED: Always drain if queue has data, regardless of active flag
-        // A deregistering thread may have pending logs; skip only if truly empty
-        if (slot.q.is_empty())
-            continue;
-
-        size_t count = 0;
-        while (count < kMaxBatch && slot.q.try_pop(batch[count]))
-        {
-            iovs[count].iov_base = batch[count].msg;
-            iovs[count].iov_len = batch[count].len;
-            ++count;
-        }
-
-        if (count > 0)
-        {
-            size_t iov_idx = 0;
-            while (iov_idx < count)
-            {
-                const ssize_t written = ::writev(out_fd, iovs + iov_idx, count - iov_idx);
-                if (written < 0)
-                {
-                    if (errno == EINTR)
-                        continue;
-                    g_dropped.fetch_add(count - iov_idx, std::memory_order_relaxed);
-                    break;
-                }
-
-                size_t remaining_written = written;
-                while (iov_idx < count && remaining_written > 0)
-                {
-                    if (remaining_written >= iovs[iov_idx].iov_len)
-                    {
-                        remaining_written -= iovs[iov_idx].iov_len;
-                        iov_idx++;
-                    }
-                    else
-                    {
-                        iovs[iov_idx].iov_base = static_cast<char*>(iovs[iov_idx].iov_base) + remaining_written;
-                        iovs[iov_idx].iov_len -= remaining_written;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-}
-
-inline void logger_loop(int out_fd)
-{
-    while (true)
-    {
-        const uint32_t captured_epoch = g_epoch.load(std::memory_order_acquire);
-        if (!g_running.load(std::memory_order_acquire))
-        {
-            // One last drain before exit
-            drain_all(out_fd);
             return;
         }
 
-        drain_all(out_fd);
-
-        g_epoch.wait(captured_epoch, std::memory_order_relaxed);
-    }
-}
-
-template <typename... Args>
-void format_into(Record& r, Level lvl, std::source_location loc, std::format_string<Args...> fmt, Args&&... args)
-{
-    r.level = static_cast<uint8_t>(lvl);
-
-    const bool colors = g_colors.load(std::memory_order_relaxed);
-    const auto& cfg = kCfg[static_cast<int>(lvl)];
-    const uint32_t tid = get_tid();
-
-    const auto now = std::chrono::system_clock::now();
-    const auto ms = std::chrono::floor<std::chrono::milliseconds>(now);
-
-    char* p = r.msg;
-    constexpr size_t kMax = kMsgMax;
-    char* end = r.msg + kMax - 2;  // Reserve space for \n and optional reset
-
-    std::format_to_n_result<char*> res{};
-
-    const auto time_since_epoch = ms.time_since_epoch();
-    auto secs = std::chrono::duration_cast<std::chrono::seconds>(time_since_epoch);
-    auto millis = time_since_epoch.count() % 1000;
-
-    if (colors)
-    {
-        res = std::format_to_n(p, end - p, "{}[{}] [{:%T}.{:03}] [{}] {}:{} | ", cfg.color, cfg.label, secs, millis,
-                               tid, basename(loc.file_name()), loc.line());
-    }
-    else
-    {
-        res = std::format_to_n(p, end - p, "[{}] [{:%T}.{:03}] [{}] {}:{} | ", cfg.label, secs, millis, tid,
-                               basename(loc.file_name()), loc.line());
-    }
-    p = res.out;
-
-    if (p < end)
-    {
-        res = std::format_to_n(p, end - p, fmt, std::forward<Args>(args)...);
-        p = res.out;
-    }
-
-    // FIXED: Add truncation marker if output was cut off
-    if (res.size > static_cast<size_t>(end - r.msg))
-    {
-        constexpr auto trunc = " [TRUNCATED]";
-        if (const size_t trunc_len = std::strlen(trunc); p + trunc_len < end)
+        auto free_slots = g_free_slots.load(std::memory_order_relaxed);
+        const auto bit = std::uint64_t{1} << slot_;
+        while (!g_free_slots.compare_exchange_weak(free_slots, free_slots | bit, std::memory_order_release,
+                                                   std::memory_order_relaxed))
         {
-            strcpy(p, trunc);
-            p += trunc_len;
+        }
+        wake_worker();
+    }
+
+    [[nodiscard]] auto valid() const noexcept -> bool { return slot_ < kMaxThreads; }
+    [[nodiscard]] auto slot() const noexcept -> std::uint32_t { return slot_; }
+
+private:
+    static void publish_slot_count(std::uint32_t count) noexcept
+    {
+        auto current = g_slot_count.load(std::memory_order_relaxed);
+        while (current < count && !g_slot_count.compare_exchange_weak(current, count, std::memory_order_relaxed,
+                                                                      std::memory_order_relaxed))
+        {
         }
     }
 
-    if (colors && p < end)
+    std::uint32_t slot_ = UINT32_MAX;
+};
+
+[[nodiscard]] inline auto current_slot() noexcept -> std::uint32_t
+{
+    thread_local ThreadRegistration registration;
+    return registration.slot();
+}
+
+class FixedBuffer
+{
+public:
+    explicit FixedBuffer(Record& record, std::size_t reserved_tail) noexcept
+        : record_(record),
+          cursor_(record.bytes.data()),
+          end_(record.bytes.data() + record.bytes.size()),
+          soft_end_(end_ - reserved_tail)
     {
-        res = std::format_to_n(p, end - p, "{}", kReset);
-        p = res.out;
     }
 
-    if (p < end)
-        *p++ = '\n';
+    void append(std::string_view text) noexcept
+    {
+        const auto writable = remaining();
+        const auto copied = std::min(writable, text.size());
+        std::memcpy(cursor_, text.data(), copied);
+        cursor_ += copied;
+        truncated_ = truncated_ || copied != text.size();
+    }
 
-    r.len = static_cast<uint16_t>(p - r.msg);
+    template <typename... Args>
+    void format(std::format_string<Args...> fmt, Args&&... args)
+    {
+        const auto writable = remaining();
+        const auto result = std::format_to_n(cursor_, writable, fmt, std::forward<Args>(args)...);
+        cursor_ = result.out;
+        truncated_ = truncated_ || result.size > writable;
+    }
+
+    void finish(bool colors) noexcept
+    {
+        if (truncated_)
+        {
+            append_tail(kTruncated);
+        }
+        if (colors)
+        {
+            append_tail(kColorReset);
+        }
+        append_tail("\n");
+
+        record_.size = static_cast<std::uint16_t>(cursor_ - record_.bytes.data());
+    }
+
+private:
+    [[nodiscard]] auto remaining() const noexcept -> std::size_t
+    {
+        return static_cast<std::size_t>(soft_end_ - cursor_);
+    }
+
+    void append_tail(std::string_view text) noexcept
+    {
+        const auto writable = static_cast<std::size_t>(end_ - cursor_);
+        const auto copied = std::min(writable, text.size());
+        std::memcpy(cursor_, text.data(), copied);
+        cursor_ += copied;
+    }
+
+    Record& record_;
+    char* cursor_;
+    char* end_;
+    char* soft_end_;
+    bool truncated_ = false;
+};
+
+struct Timestamp
+{
+    int hour = 0;
+    int minute = 0;
+    int second = 0;
+    int millisecond = 0;
+};
+
+[[nodiscard]] inline auto timestamp_now() noexcept -> Timestamp
+{
+    const auto now = std::chrono::system_clock::now();
+    const auto since_epoch = now.time_since_epoch();
+    const auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(since_epoch);
+    const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(since_epoch);
+
+    std::time_t raw_time = std::chrono::system_clock::to_time_t(now);
+    std::tm local_time{};
+    localtime_r(&raw_time, &local_time);
+
+    return {
+        .hour = local_time.tm_hour,
+        .minute = local_time.tm_min,
+        .second = local_time.tm_sec,
+        .millisecond = static_cast<int>((millis - seconds).count()),
+    };
 }
+
+template <Level L>
+void append_prefix(FixedBuffer& out, std::source_location loc, bool colors)
+{
+    constexpr auto info = kLevelInfo[level_index(L)];
+    const auto ts = timestamp_now();
+
+    if (colors)
+    {
+        out.append(info.color);
+    }
+
+    out.format("[{}] [{:02}:{:02}:{:02}.{:03}] [{}] {}:{} | ", info.label, ts.hour, ts.minute, ts.second,
+               ts.millisecond, thread_id(), basename(loc.file_name()), loc.line());
+}
+
+template <Level L, typename... Args>
+void format_record(Record& record, std::source_location loc, std::format_string<Args...> fmt, Args&&... args)
+{
+    const bool colors = g_colors.load(std::memory_order_relaxed);
+    constexpr auto reserved_tail = kTruncated.size() + kColorReset.size() + 1;
+
+    FixedBuffer out{record, reserved_tail};
+    append_prefix<L>(out, loc, colors);
+    out.format(fmt, std::forward<Args>(args)...);
+    out.finish(colors);
+}
+
+template <Level L>
+void format_failure_record(Record& record, std::source_location loc) noexcept
+{
+    const bool colors = g_colors.load(std::memory_order_relaxed);
+    constexpr auto reserved_tail = kColorReset.size() + 1;
+    constexpr auto info = kLevelInfo[level_index(L)];
+
+    FixedBuffer out{record, reserved_tail};
+    if (colors)
+    {
+        out.append(info.color);
+    }
+    out.append("[");
+    out.append(info.label);
+    out.append("] logger format failure at ");
+    out.append(basename(loc.file_name()));
+    out.append(":");
+
+    char line[32]{};
+    const int written = std::snprintf(line, sizeof(line), "%u", loc.line());
+    if (written > 0)
+    {
+        out.append(std::string_view{line, static_cast<std::size_t>(written)});
+    }
+
+    out.finish(colors);
+}
+
+inline void write_all(int fd, std::string_view bytes) noexcept
+{
+    while (!bytes.empty())
+    {
+        const auto written = ::write(fd, bytes.data(), bytes.size());
+        if (written > 0)
+        {
+            bytes.remove_prefix(static_cast<std::size_t>(written));
+            continue;
+        }
+        if (written == -1 && errno == EINTR)
+        {
+            continue;
+        }
+        return;
+    }
+}
+
+inline void write_batch(int fd, std::span<Record> batch) noexcept
+{
+    std::array<iovec, kWriteBatch> iovecs{};
+    for (std::size_t i = 0; i < batch.size(); ++i)
+    {
+        iovecs[i].iov_base = batch[i].bytes.data();
+        iovecs[i].iov_len = batch[i].size;
+    }
+
+    std::size_t next = 0;
+    while (next < batch.size())
+    {
+        const auto written = ::writev(fd, iovecs.data() + next, static_cast<int>(batch.size() - next));
+        if (written == -1 && errno == EINTR)
+        {
+            continue;
+        }
+        if (written <= 0)
+        {
+            g_dropped.fetch_add(batch.size() - next, std::memory_order_relaxed);
+            return;
+        }
+
+        auto remaining = static_cast<std::size_t>(written);
+        while (next < batch.size() && remaining >= iovecs[next].iov_len)
+        {
+            remaining -= iovecs[next].iov_len;
+            ++next;
+        }
+        if (next < batch.size() && remaining > 0)
+        {
+            iovecs[next].iov_base = static_cast<char*>(iovecs[next].iov_base) + remaining;
+            iovecs[next].iov_len -= remaining;
+        }
+    }
+}
+
+inline void drain_once(int fd) noexcept
+{
+    std::array<Record, kWriteBatch> batch{};
+    const auto slot_count = g_slot_count.load(std::memory_order_acquire);
+
+    for (std::uint32_t slot = 0; slot < slot_count; ++slot)
+    {
+        std::size_t count = 0;
+        while (count < batch.size() && g_slots[slot].queue.try_pop(batch[count]))
+        {
+            ++count;
+        }
+
+        if (count != 0)
+        {
+            write_batch(fd, std::span{batch.data(), count});
+        }
+    }
+}
+
+[[nodiscard]] inline auto all_queues_empty() noexcept -> bool
+{
+    const auto slot_count = g_slot_count.load(std::memory_order_acquire);
+    for (std::uint32_t slot = 0; slot < slot_count; ++slot)
+    {
+        if (!g_slots[slot].queue.empty())
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+inline void logger_main(int fd, std::stop_token stop_token) noexcept
+{
+    while (!stop_token.stop_requested())
+    {
+        const auto observed_epoch = g_wake_epoch.load(std::memory_order_acquire);
+        drain_once(fd);
+
+        if (!all_queues_empty())
+        {
+            continue;
+        }
+
+        g_wake_epoch.wait(observed_epoch, std::memory_order_relaxed);
+    }
+
+    while (!all_queues_empty())
+    {
+        drain_once(fd);
+    }
+}
+
+[[nodiscard]] inline auto try_start(int fd) noexcept -> bool;
 
 }  // namespace detail
 
-// ---- Lifecycle ----
-
 inline void start(int out_fd = STDERR_FILENO)
 {
-    std::scoped_lock lock(detail::g_lifecycle_mtx);
+    std::scoped_lock lock{detail::g_lifecycle_mutex};
     if (detail::g_running.load(std::memory_order_acquire))
+    {
         return;
+    }
+
+    detail::g_output_fd.store(out_fd, std::memory_order_relaxed);
+    detail::g_worker = std::jthread{
+        [out_fd](std::stop_token stop_token) noexcept
+        {
+            detail::logger_main(out_fd, stop_token);
+            detail::g_running.store(false, std::memory_order_release);
+        },
+    };
     detail::g_running.store(true, std::memory_order_release);
-    detail::g_thread = std::jthread([out_fd] { detail::logger_loop(out_fd); });
 }
 
 inline void stop()
 {
-    std::scoped_lock lock(detail::g_lifecycle_mtx);
+    std::scoped_lock lock{detail::g_lifecycle_mutex};
     if (!detail::g_running.exchange(false, std::memory_order_acq_rel))
+    {
         return;
-    detail::wake_logger();
-    if (detail::g_thread.joinable())
-        detail::g_thread.join();
+    }
+
+    detail::g_worker.request_stop();
+    detail::wake_worker();
+    if (detail::g_worker.joinable())
+    {
+        detail::g_worker.join();
+    }
 }
 
-// Automatic cleanup on program exit
-inline struct AutoStopper
+inline struct AutoStop
 {
-    ~AutoStopper() { stop(); }
-} g_auto_stopper;
+    ~AutoStop() { stop(); }
+} g_auto_stop;
 
-inline uint64_t dropped_count()
+inline auto dropped_count() noexcept -> std::uint64_t
 {
     return detail::g_dropped.load(std::memory_order_relaxed);
 }
-
-// ---- API ----
 
 inline void set_level(Level level) noexcept
 {
     g_level.store(level, std::memory_order_relaxed);
 }
 
-inline Level level() noexcept
+[[nodiscard]] inline auto level() noexcept -> Level
 {
     return g_level.load(std::memory_order_relaxed);
 }
@@ -403,69 +567,179 @@ inline void set_colors(bool enabled) noexcept
     g_colors.store(enabled, std::memory_order_relaxed);
 }
 
-template <Level L, typename... Args>
-void log_impl(std::source_location loc, std::format_string<Args...> fmt, Args&&... args)
+[[nodiscard]] inline auto colors() noexcept -> bool
+{
+    return g_colors.load(std::memory_order_relaxed);
+}
+
+template <Level L>
+[[nodiscard]] inline auto should_log() noexcept -> bool
 {
     if constexpr (kBuildMinLevel <= L)
     {
-        // Lazy initialization: Start on first log if not running
-        // FIXED: start() now uses call_once internally
-        if (__builtin_expect(!detail::g_running.load(std::memory_order_relaxed), 0))
+        return g_level.load(std::memory_order_relaxed) <= L;
+    }
+    else
+    {
+        return false;
+    }
+}
+
+namespace detail
+{
+
+[[nodiscard]] inline auto try_start(int fd) noexcept -> bool
+{
+    try
+    {
+        start(fd);
+        return true;
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+}  // namespace detail
+
+template <Level L, typename... Args>
+void log_impl(std::source_location loc, std::format_string<Args...> fmt, Args&&... args) noexcept
+{
+    static_assert(kBuildMinLevel <= L, "log_impl called for a build-disabled level");
+
+    if (!detail::g_running.load(std::memory_order_acquire))
+    {
+        const auto fd = detail::g_output_fd.load(std::memory_order_relaxed);
+        if (!detail::try_start(fd))
         {
-            start();
-        }
-
-        if (g_level.load(std::memory_order_relaxed) > L)
-            return;
-
-        uint32_t slot = detail::get_thread_slot();
-
-        // FIXED: Fallback to stderr for Fatal/Error when slot exhausted
-        if (slot == UINT32_MAX)
-        {
-            detail::g_dropped.fetch_add(1, std::memory_order_relaxed);
-            if constexpr (L >= Level::Error)
+            detail::Record fallback{};
+            try
             {
-                // Synchronous fallback for critical logs
-                detail::Record fallback{};
-                detail::format_into(fallback, L, loc, fmt, std::forward<Args>(args)...);
-                ::write(STDERR_FILENO, fallback.msg, fallback.len);
+                detail::format_record<L>(fallback, loc, fmt, std::forward<Args>(args)...);
             }
-            return;
-        }
-
-        detail::Record r{};
-        detail::format_into(r, L, loc, fmt, std::forward<Args>(args)...);
-
-        auto& q = detail::g_slots[slot].q;
-        auto res = q.try_push(r);
-
-        if (res == detail::SPSC::PushResult::QueueFull)
-        {
-            detail::g_dropped.fetch_add(1, std::memory_order_relaxed);
-            // Optional: fallback to stderr for Fatal
-            if constexpr (L == Level::Fatal)
+            catch (...)
             {
-                ::write(STDERR_FILENO, r.msg, r.len);
+                detail::format_failure_record<L>(fallback, loc);
             }
+            detail::write_all(fd, {fallback.bytes.data(), fallback.size});
             return;
         }
+    }
 
-        if (res == detail::SPSC::PushResult::SuccessWasEmpty)
+    const auto slot = detail::current_slot();
+    const auto fd = detail::g_output_fd.load(std::memory_order_relaxed);
+
+    if (slot >= detail::kMaxThreads)
+    {
+        detail::g_dropped.fetch_add(1, std::memory_order_relaxed);
+        if constexpr (L >= Level::Error)
         {
-            detail::wake_logger();
+            detail::Record fallback{};
+            try
+            {
+                detail::format_record<L>(fallback, loc, fmt, std::forward<Args>(args)...);
+            }
+            catch (...)
+            {
+                detail::format_failure_record<L>(fallback, loc);
+            }
+            detail::write_all(fd, {fallback.bytes.data(), fallback.size});
         }
+        return;
+    }
+
+    auto& queue = detail::g_slots[slot].queue;
+    auto reservation = queue.try_reserve();
+    if (reservation.record == nullptr)
+    {
+        detail::g_dropped.fetch_add(1, std::memory_order_relaxed);
+        if constexpr (L == Level::Fatal)
+        {
+            detail::Record fallback{};
+            try
+            {
+                detail::format_record<L>(fallback, loc, fmt, std::forward<Args>(args)...);
+            }
+            catch (...)
+            {
+                detail::format_failure_record<L>(fallback, loc);
+            }
+            detail::write_all(fd, {fallback.bytes.data(), fallback.size});
+        }
+        return;
+    }
+
+    try
+    {
+        detail::format_record<L>(*reservation.record, loc, fmt, std::forward<Args>(args)...);
+    }
+    catch (...)
+    {
+        detail::format_failure_record<L>(*reservation.record, loc);
+    }
+
+    queue.commit(reservation);
+
+    if (reservation.was_empty)
+    {
+        detail::wake_worker();
     }
 }
 
 }  // namespace URing::ALOG
 
-// ---- Macros for proper source location capture ----
-#define ALOG_DEBUG(...) \
-    ::URing::ALOG::log_impl<::URing::ALOG::Level::Debug>(std::source_location::current(), __VA_ARGS__)
-#define ALOG_INFO(...) ::URing::ALOG::log_impl<::URing::ALOG::Level::Info>(std::source_location::current(), __VA_ARGS__)
-#define ALOG_WARN(...) ::URing::ALOG::log_impl<::URing::ALOG::Level::Warn>(std::source_location::current(), __VA_ARGS__)
-#define ALOG_ERROR(...) \
-    ::URing::ALOG::log_impl<::URing::ALOG::Level::Error>(std::source_location::current(), __VA_ARGS__)
-#define ALOG_FATAL(...) \
-    ::URing::ALOG::log_impl<::URing::ALOG::Level::Fatal>(std::source_location::current(), __VA_ARGS__)
+#define ALOG_DETAIL_WRITE(level, ...)                                                                 \
+    do                                                                                                \
+    {                                                                                                 \
+        constexpr auto alog_detail_level = (level);                                                   \
+        if (::URing::ALOG::should_log<alog_detail_level>()) [[unlikely]]                              \
+        {                                                                                             \
+            ::URing::ALOG::log_impl<alog_detail_level>(std::source_location::current(), __VA_ARGS__); \
+        }                                                                                             \
+    } while (false)
+
+#if LOG_BUILD_LEVEL <= 0
+    #define ALOG_DEBUG(...) ALOG_DETAIL_WRITE(::URing::ALOG::Level::Debug, __VA_ARGS__)
+#else
+    #define ALOG_DEBUG(...) \
+        do                  \
+        {                   \
+        } while (false)
+#endif
+
+#if LOG_BUILD_LEVEL <= 1
+    #define ALOG_INFO(...) ALOG_DETAIL_WRITE(::URing::ALOG::Level::Info, __VA_ARGS__)
+#else
+    #define ALOG_INFO(...) \
+        do                 \
+        {                  \
+        } while (false)
+#endif
+
+#if LOG_BUILD_LEVEL <= 2
+    #define ALOG_WARN(...) ALOG_DETAIL_WRITE(::URing::ALOG::Level::Warn, __VA_ARGS__)
+#else
+    #define ALOG_WARN(...) \
+        do                 \
+        {                  \
+        } while (false)
+#endif
+
+#if LOG_BUILD_LEVEL <= 3
+    #define ALOG_ERROR(...) ALOG_DETAIL_WRITE(::URing::ALOG::Level::Error, __VA_ARGS__)
+#else
+    #define ALOG_ERROR(...) \
+        do                  \
+        {                   \
+        } while (false)
+#endif
+
+#if LOG_BUILD_LEVEL <= 4
+    #define ALOG_FATAL(...) ALOG_DETAIL_WRITE(::URing::ALOG::Level::Fatal, __VA_ARGS__)
+#else
+    #define ALOG_FATAL(...) \
+        do                  \
+        {                   \
+        } while (false)
+#endif
