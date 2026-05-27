@@ -19,8 +19,9 @@ using ValueView = std::span<const uint8_t>;  // values are raw bytes
 struct ValueLocation
 {
     SegmentId segment_id;
-    uint64_t value;
-    uint64_t size;
+    uint64_t value_len;
+    uint64_t total_len;
+    uint64_t value_offset;
     uint64_t secno;
 };
 

@@ -52,6 +52,25 @@ URing::Task<uint64_t> SegmentManager::append(URing::IO& io, std::span<const std:
     co_return last_offset;
 }
 
+URing::Task<void> SegmentManager::value_into(URing::IO& io, std::span<std::byte> buf, ValueLocation& loc)
+{
+    // 1. Try to get it synchronously (Fast, no allocation, no suspension)
+    auto fd = ro_fd_cache_.get(loc.segment_id);
+
+    // 2. Fallback to slow path ONLY if necessary
+    if (!fd.has_value()) [[unlikely]]
+    {
+        // We only suspend for the OPEN if we actually missed the cache.
+        fd = URING_TRY(co_await open_and_cache_fd(io, loc.segment_id));
+    }
+
+    // 3. Issue the read (The only suspension point in the 99.9% case)
+    // TODO: size check and error if not the same,
+    auto res = URING_TRY(co_await io.read(*fd->get(), buf.subspan(0, loc.value_len), loc.value_offset));
+
+    co_return {};
+}
+
 URing::Task<void> SegmentManager::seal_active(URing::IO& io)
 {
     URING_TRY(co_await io.fsync(*active_segment_, true));
@@ -60,21 +79,46 @@ URing::Task<void> SegmentManager::seal_active(URing::IO& io)
     co_return {};
 }
 
+URing::Task<std::shared_ptr<URing::Fd>> SegmentManager::open_and_cache_fd(URing::IO& io, SegmentId id)
+{
+    ALOG_DEBUG("no cached file, opening a new one, shard{}", shard_id_);
+    std::filesystem::path path = cfg_.get_data_file_path(id, shard_id_);
+    auto fd_inner = URING_TRY(co_await io.open(std::move(path), cfg_.read_flags, cfg_.file_mode));
+    auto fd_shared = std::make_shared<URing::Fd>(std::move(fd_inner));
+
+    std::optional<std::shared_ptr<URing::Fd>> evicted_fd = ro_fd_cache_.put(id, fd_shared);
+    if (evicted_fd.has_value())
+    {
+        URING_TRY(co_await io.close(std::move(*evicted_fd->get())));
+    }
+
+    co_return fd_shared;
+}
+
 URing::Task<std::optional<URing::Fd>> SegmentManager::create_active(URing::IO& io)
 {
     const SegmentId id = next_segment_id();
     std::filesystem::path path = cfg_.get_data_file_path(id, shard_id_);
 
-    URing::Fd fd = URING_TRY(co_await io.open(std::move(path), cfg_.read_flags, cfg_.file_mode));
+    auto fd_res = co_await io.open(std::move(path), cfg_.write_flags, cfg_.file_mode);
+    if (!fd_res.has_value())
+    {
+        ALOG_ERROR("failed to create active file, shard={}, err={}", shard_id_, fd_res.error().message());
+        co_return std::unexpected(fd_res.error());
+    }
 
-    URING_TRY(co_await io.fallocate(fd, 0, 0, cfg_.max_segment_size));
+    if (const auto res = co_await io.fallocate(*fd_res, 0, 0, cfg_.max_segment_size); !res.has_value())
+    {
+        ALOG_ERROR("failed to create active file, shard={}", shard_id_);
+        co_return std::unexpected(res.error());
+    }
 
     // reset counters
     next_offset_ = 0;
     active_segment_id_ = id;
 
     // replace
-    co_return std::exchange(active_segment_, std::move(fd));
+    co_return std::exchange(active_segment_, std::move(*fd_res));
 }
 
 URing::Task<void> SegmentManager::rotate(URing::IO& io)

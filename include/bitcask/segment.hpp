@@ -53,6 +53,8 @@ class SegmentManager
     URing::Task<void> seal_active(URing::IO& io);
     URing::Task<std::optional<URing::Fd>> create_active(URing::IO& io);
 
+    URing::Task<std::shared_ptr<URing::Fd>> open_and_cache_fd(URing::IO& io, SegmentId id);
+
 public:
     // TODO: not complete yet
     SegmentManager() { xxh3_state_ = XXH3_createState(); }
@@ -62,6 +64,8 @@ public:
 
     URing::Task<uint64_t> append(URing::IO& io, std::span<const std::byte> key, std::span<const std::byte> value,
                                  EntryFlags flags = EntryFlags::HasValue);
+    // read value into buf
+    URing::Task<void> value_into(URing::IO& io, std::span<std::byte> buf, ValueLocation& loc);
 
     // rotate active file
     URing::Task<void> rotate(URing::IO& io);
