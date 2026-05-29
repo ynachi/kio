@@ -45,6 +45,18 @@ enum class ParseError : std::uint8_t
 };
 
 /**
+ * Buffer Pool errors.
+ */
+enum class PoolError : std::uint8_t
+{
+    Success = 0,
+    Exhausted,
+    SizeTooLarge,
+    RegistrationFailed,
+    AlreadyRegistered,
+};
+
+/**
  * Custom error category for Parsing
  */
 class ParseErrorCategory : public std::error_category
@@ -72,10 +84,44 @@ public:
     }
 };
 
-// Singleton instance of the category
+/**
+ * Custom error category for Buffer Pool
+ */
+class PoolErrorCategory : public std::error_category
+{
+public:
+    const char* name() const noexcept override { return "kio::PoolError"; }
+
+    std::string message(int ev) const override
+    {
+        switch (static_cast<PoolError>(ev))
+        {
+            case PoolError::Success:
+                return "Success";
+            case PoolError::Exhausted:
+                return "Buffer pool exhausted";
+            case PoolError::SizeTooLarge:
+                return "Requested size exceeds maximum buffer size";
+            case PoolError::RegistrationFailed:
+                return "Failed to register buffers with io_uring";
+            case PoolError::AlreadyRegistered:
+                return "Pool is already registered";
+            default:
+                return "Unknown pool error";
+        }
+    }
+};
+
+// Singleton instance of the categories
 inline const std::error_category& get_parse_error_category()
 {
     static ParseErrorCategory instance;
+    return instance;
+}
+
+inline const std::error_category& get_pool_error_category()
+{
+    static PoolErrorCategory instance;
     return instance;
 }
 
@@ -85,6 +131,11 @@ inline std::error_code make_error_code(ParseError e)
     return {static_cast<int>(e), get_parse_error_category()};
 }
 
+inline std::error_code make_error_code(PoolError e)
+{
+    return {static_cast<int>(e), get_pool_error_category()};
+}
+
 }  // namespace URing
 
 namespace URing::uring_try_internal
@@ -92,7 +143,7 @@ namespace URing::uring_try_internal
 template <typename Exp>
 auto unwrap(Exp&& exp)
 {
-    using ValueT = typename std::decay_t<Exp>::value_type;
+    using ValueT = std::decay_t<Exp>::value_type;
 
     if constexpr (!std::is_void_v<ValueT>)
     {

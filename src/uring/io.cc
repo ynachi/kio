@@ -13,7 +13,8 @@
 namespace URing
 {
 
-IO::IO(const size_t id, const IO* leader, const IoOptions& opts) : opts_(opts), id_(id)
+IO::IO(const size_t id, const IO* leader, const IoOptions& opts, const std::initializer_list<BucketConfig> pool_configs)
+    : opts_(opts), id_(id), buffer_pool_(pool_configs)
 {
     local_tasks_.reserve(opts_.entries);
     current_batch.reserve(kMaxResumesPerTick);
@@ -32,7 +33,8 @@ IO::IO(IO&& other) noexcept
       is_running_(other.is_running_),
       is_sleeping_(other.is_sleeping_.load(std::memory_order_relaxed)),
       opts_(other.opts_),
-      id_(other.id_)
+      id_(other.id_),
+      buffer_pool_(std::move(other.buffer_pool_))
 {
     // Safety check, we SHOULD not move a running IO.
     if (is_running_ || !other.queue_.empty() || !other.local_tasks_.empty())
@@ -88,6 +90,16 @@ void IO::init(const int wq_fd)
     {
         io_uring_queue_exit(&ring_);
         throw std::runtime_error("eventfd failed");
+    }
+
+    // register pool if not empty
+    if (buffer_pool_.bucket_count() != 0)
+    {
+        if (auto res = register_buffers(buffer_pool_); !res.has_value())
+        {
+            ALOG_ERROR("failed to register buffers: {}", res.error());
+        }
+        ALOG_INFO("the buffer pool have been registered to io_uring");
     }
 
     ALOG_INFO("Initialized IO context with {} entries (SQPOLL: {})", opts_.entries,
@@ -295,6 +307,12 @@ IO::~IO()
     {
         ::close(wake_fd_);
         wake_fd_ = -1;
+    }
+
+    // no need to check if a buffer was registered
+    if (auto res = unregister_buffers(); !res.has_value())
+    {
+        ALOG_WARN("Failed to unregister buffers: {}", res.error());
     }
 }
 }  // namespace URing

@@ -15,6 +15,7 @@
 
 #include <liburing.h>
 
+#include "buffer_pool.hpp"
 #include "detail/queue.hpp"
 #include "uring/core/awaiter.hpp"
 #include "uring/core/task.hpp"
@@ -73,6 +74,7 @@ class IO
     template <typename SetupFunc, typename MapperFunc>
         requires std::invocable<SetupFunc, io_uring_sqe*> && std::invocable<MapperFunc, int32_t>
     friend class IoAwaiter;
+    friend class FixedBufferPool;
 
 public:
     static constexpr unsigned kUringDefaultFlag =
@@ -81,7 +83,8 @@ public:
 
     /// We use a shared IoUring async backend, when master is null, IO is standalone or the master of a group
     /// of IOs.
-    explicit IO(size_t id, const IO* leader = nullptr, const IoOptions& opts = {});
+    explicit IO(size_t id, const IO* leader = nullptr, const IoOptions& opts = {},
+                std::initializer_list<BucketConfig> pool_configs = {});
     /// IO object can be moved but with some limitations. Before it start doing some actual io (before run*()),
     /// its is safe to move it. Because, in this state, it's an inert object. So it gives you more flexibilities
     /// on the object and object pools construction. But, it SHOULD not be moved after it started doing IO.
@@ -121,6 +124,32 @@ public:
     void pin_to_cpu() const;
 
     [[nodiscard]] std::uint32_t id() const noexcept { return id_; }
+
+    Result<void> register_buffers(FixedBufferPool& pool) noexcept
+    {
+        if (pool.is_registered())
+        {
+            return std::unexpected(make_error_code(PoolError::AlreadyRegistered));
+        }
+
+        if (int ret = io_uring_register_buffers(&ring_, pool.iovecs_ptr(), pool.total_capacity()); ret < 0)
+        {
+            return std::unexpected(error_from_errno(-ret));
+        }
+
+        pool.set_registered();
+
+        return {};
+    }
+
+    Result<void> unregister_buffers() noexcept
+    {
+        if (const int ret = io_uring_unregister_buffers(&ring_); ret < 0)
+        {
+            return std::unexpected(error_from_errno(-ret));
+        }
+        return {};
+    }
 
     //
     // IO Methods
@@ -167,6 +196,21 @@ public:
         return IoAwaiter(
             *this, [raw_fd = fd.fd, buf, offset](io_uring_sqe* sqe)
             { io_uring_prep_write(sqe, raw_fd, buf.data(), buf.size(), offset); }, detail::ResumeInt{});
+    }
+
+    [[nodiscard]] auto read_fixed(Fd& fd, std::span<std::byte> buf, uint32_t buf_index, off_t offset = -1)
+    {
+        return IoAwaiter(
+            *this, [raw_fd = fd.fd, buf, buf_index, offset](io_uring_sqe* sqe)
+            { io_uring_prep_read_fixed(sqe, raw_fd, buf.data(), buf.size(), offset, buf_index); }, detail::ResumeInt{});
+    }
+
+    [[nodiscard]] auto write_fixed(Fd& fd, std::span<const std::byte> buf, uint32_t buf_index, off_t offset = -1)
+    {
+        return IoAwaiter(
+            *this, [raw_fd = fd.fd, buf, buf_index, offset](io_uring_sqe* sqe)
+            { io_uring_prep_write_fixed(sqe, raw_fd, buf.data(), buf.size(), offset, buf_index); },
+            detail::ResumeInt{});
     }
 
     [[nodiscard]] auto writev(Fd& fd, std::span<const iovec> iovecs, off_t offset = -1)
@@ -278,6 +322,42 @@ public:
             { io_uring_prep_renameat(sqe, AT_FDCWD, from.c_str(), AT_FDCWD, to.c_str(), 0); }, detail::ResumeVoid{});
     }
 
+    // ============================================================================
+    // io.hpp extensions: Fixed-buffer I/O helpers
+    // ============================================================================
+
+    /// @brief Async read using a pre-registered fixed buffer
+    [[nodiscard]] auto read_fixed(Fd& fd, FixedBuffer& buf, const size_t len, off_t offset = -1)
+    {
+        const size_t safe_len = std::min(len, buf.size());
+
+        return IoAwaiter(
+            *this, [raw_fd = fd.fd, ptr = buf.ptr(), safe_len, index = buf.index(), offset](io_uring_sqe* sqe)
+            { io_uring_prep_read_fixed(sqe, raw_fd, ptr, safe_len, offset, index); }, detail::ResumeInt{});
+    }
+
+    /// @brief read to fill the buffer
+    [[nodiscard]] auto read_fixed(Fd& fd, FixedBuffer& buf, const off_t offset = -1)
+    {
+        return read_fixed(fd, buf, buf.size(), offset);
+    }
+
+    /// @brief Async write using a pre-registered fixed buffer
+    [[nodiscard]] auto write_fixed(Fd& fd, const FixedBuffer& buf, size_t len, off_t offset = -1)
+    {
+        const size_t safe_len = std::min(len, buf.size());
+
+        return IoAwaiter(
+            *this, [raw_fd = fd.fd, ptr = buf.ptr(), safe_len, index = buf.index(), offset](io_uring_sqe* sqe)
+            { io_uring_prep_write_fixed(sqe, raw_fd, ptr, safe_len, offset, index); }, detail::ResumeInt{});
+    }
+
+    /// @brief write the entire buffer
+    [[nodiscard]] auto write_fixed(Fd& fd, const FixedBuffer& buf, const off_t offset = -1)
+    {
+        return write_fixed(fd, buf, buf.size(), offset);
+    }
+
 private:
     static constexpr uint64_t kWakeupSentinel = 0xDEAD'C0DE'DEAD'C0DEULL;
     static constexpr size_t kMaxResumesPerTick = 128;
@@ -295,6 +375,8 @@ private:
     std::vector<std::coroutine_handle<>> local_tasks_{};
     std::vector<std::coroutine_handle<>> current_batch{};
     detail::CoroQueue queue_{};
+
+    FixedBufferPool buffer_pool_{};
 
     /// Creates the Ring in an uninitialized way
     void init(int wq_fd = -1);
