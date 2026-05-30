@@ -2,7 +2,7 @@
 #include <chrono>
 #include <filesystem>
 
-#include <linux/fcntl.h>
+#include <fcntl.h>
 
 #include "uring/error.hpp"
 #include "uring/logger.hpp"

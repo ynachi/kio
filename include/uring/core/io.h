@@ -3,9 +3,7 @@
 #include <cassert>
 #include <coroutine>
 #include <cstdint>
-#include <cstring>
 #include <filesystem>
-#include <future>
 #include <initializer_list>
 #include <memory>
 #include <stop_token>
@@ -81,11 +79,34 @@ public:
         IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_COOP_TASKRUN;
     static constexpr uint64_t kWakeTag = UINT64_MAX;
 
-    /// We use a shared IoUring async backend, when master is null, IO is standalone or the master of a group
-    /// of IOs.
+    /**
+     * @brief Construct a new IO worker.
+     * 
+     * @param id The unique identifier for this worker. Also used as an index for CPU pinning 
+     *           via IoOptions::worker_cpu_affinity.
+     * @param leader Optional pointer to a "leader" IO instance. If provided, this worker 
+     *               will share the same kernel workqueue (IORING_SETUP_ATTACH_WQ).
+     * @param opts Configuration options for the io_uring ring.
+     * @param pool_configs Optional list of {size, count} bucket configurations to initialize 
+     *                     a FixedBufferPool for zero-copy I/O.
+     * 
+     * @code
+     * // 1. Standalone instance
+     * URing::IO io(0);
+     * 
+     * // 2. Scaling with leader-follower pattern
+     * URing::IO leader(0);
+     * URing::IO follower(1, &leader); 
+     * 
+     * // 3. With Fixed Buffer Pool for zero-copy
+     * URing::IO io_with_pool(0, nullptr, {}, {
+     *     { .size = 4096, .count = 1024 }, // 1024 buffers of 4KB
+     *     { .size = 65536, .count = 128 }  // 128 buffers of 64KB
+     * });
+     * @endcode
+     */
     explicit IO(size_t id, const IO* leader = nullptr, const IoOptions& opts = {},
-                std::initializer_list<BucketConfig> pool_configs = {});
-    /// IO object can be moved but with some limitations. Before it start doing some actual io (before run*()),
+                std::initializer_list<BucketConfig> pool_configs = {});    /// IO object can be moved but with some limitations. Before it start doing some actual io (before run*()),
     /// its is safe to move it. Because, in this state, it's an inert object. So it gives you more flexibilities
     /// on the object and object pools construction. But, it SHOULD not be moved after it started doing IO.
     /// If you need to do it for some reason, use a std::unique_ptr<IO>. Moving the direct object while IO is active

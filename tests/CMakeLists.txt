@@ -36,3 +36,8 @@ kio_add_test(bitcask_cache_tests bitcask/cache_test.cc
         TAGS bitcask unit cache
         LIBS bitcask GTest::gtest GTest::gtest_main
 )
+
+kio_add_test(bitcask_segment_tests bitcask/segment_test.cc
+        TAGS bitcask unit segment
+        LIBS bitcask GTest::gtest GTest::gtest_main
+)

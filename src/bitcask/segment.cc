@@ -32,7 +32,12 @@ URing::Task<uint64_t> SegmentManager::append(URing::IO& io, std::span<const std:
          {&payload_crc, sizeof(payload_crc)}}
     };
 
-    const auto bytes_written = URING_TRY(co_await io.writev(*active_segment_, iovs, -1));
+    auto write_res = co_await io.writev(*active_segment_, iovs, -1);
+    if (!write_res.has_value()) [[unlikely]]
+    {
+        co_return std::unexpected(write_res.error());
+    }
+    const auto bytes_written = *write_res;
 
     if (bytes_written != static_cast<int32_t>(hdr.total_size()))
     {
@@ -47,7 +52,11 @@ URing::Task<uint64_t> SegmentManager::append(URing::IO& io, std::span<const std:
     // TODO: We must check and initiate ROTATION here to prevent race condition
     if (next_offset_ >= cfg_.max_segment_size)
     {
-        URING_TRY(co_await rotate(io));
+        auto rotate_res = co_await rotate(io);
+        if (!rotate_res.has_value()) [[unlikely]]
+        {
+            co_return std::unexpected(rotate_res.error());
+        }
     }
 
     co_return last_offset;
@@ -60,10 +69,20 @@ URing::Task<void> SegmentManager::value_into(URing::IO& io, URing::FixedBuffer& 
     if (!fd.has_value()) [[unlikely]]
     {
         // We only suspend for the OPEN if we actually missed the cache.
-        fd = URING_TRY(co_await open_and_cache_fd(io, loc.segment_id));
+        auto open_res = co_await open_and_cache_fd(io, loc.segment_id);
+        if (!open_res.has_value()) [[unlikely]]
+        {
+            co_return std::unexpected(open_res.error());
+        }
+        fd = *open_res;
     }
 
-    auto res = URING_TRY(co_await io.read_fixed(*fd->get(), buf, loc.value_len, loc.value_offset));
+    auto read_res = co_await io.read_fixed(*fd->get(), buf, loc.value_len, loc.value_offset);
+    if (!read_res.has_value()) [[unlikely]]
+    {
+        co_return std::unexpected(read_res.error());
+    }
+    auto res = *read_res;
 
     if (res != static_cast<int32_t>(loc.value_len))
     {
@@ -76,9 +95,21 @@ URing::Task<void> SegmentManager::value_into(URing::IO& io, URing::FixedBuffer& 
 
 URing::Task<void> SegmentManager::seal_active(URing::IO& io)
 {
-    URING_TRY(co_await io.fsync(*active_segment_, true));
-    URING_TRY(co_await io.ftruncate(*active_segment_, next_offset_));
-    URING_TRY(co_await io.fsync(*active_segment_, true));
+    if (auto res = co_await io.fsync(*active_segment_, true); !res.has_value()) [[unlikely]]
+    {
+        co_return std::unexpected(res.error());
+    }
+
+    if (auto res = co_await io.ftruncate(*active_segment_, next_offset_); !res.has_value()) [[unlikely]]
+    {
+        co_return std::unexpected(res.error());
+    }
+
+    if (auto res = co_await io.fsync(*active_segment_, true); !res.has_value()) [[unlikely]]
+    {
+        co_return std::unexpected(res.error());
+    }
+    
     co_return {};
 }
 
@@ -86,13 +117,22 @@ URing::Task<std::shared_ptr<URing::Fd>> SegmentManager::open_and_cache_fd(URing:
 {
     ALOG_DEBUG("no cached file, opening a new one, shard{}", shard_id_);
     std::filesystem::path path = cfg_.get_data_file_path(id, shard_id_);
-    auto fd_inner = URING_TRY(co_await io.open(std::move(path), cfg_.read_flags, cfg_.file_mode));
+
+    auto open_res = co_await io.open(std::move(path), cfg_.read_flags, cfg_.file_mode);
+    if (!open_res.has_value()) [[unlikely]]
+    {
+        co_return std::unexpected(open_res.error());
+    }
+    auto fd_inner = std::move(*open_res);
     auto fd_shared = std::make_shared<URing::Fd>(std::move(fd_inner));
 
     std::optional<std::shared_ptr<URing::Fd>> evicted_fd = ro_fd_cache_.put(id, fd_shared);
     if (evicted_fd.has_value())
     {
-        URING_TRY(co_await io.close(std::move(*evicted_fd->get())));
+        if (auto res = co_await io.close(std::move(*evicted_fd->get())); !res.has_value()) [[unlikely]]
+        {
+            co_return std::unexpected(res.error());
+        }
     }
 
     co_return fd_shared;
@@ -126,11 +166,23 @@ URing::Task<std::optional<URing::Fd>> SegmentManager::create_active(URing::IO& i
 
 URing::Task<void> SegmentManager::rotate(URing::IO& io)
 {
-    URING_TRY(co_await seal_active(io));
-
-    if (std::optional<URing::Fd> fd = URING_TRY(co_await create_active(io)); fd.has_value())
+    if (auto res = co_await seal_active(io); !res.has_value()) [[unlikely]]
     {
-        URING_TRY(co_await io.close(std::move(*fd)));
+        co_return std::unexpected(res.error());
+    }
+
+    auto create_res = co_await create_active(io);
+    if (!create_res.has_value()) [[unlikely]]
+    {
+        co_return std::unexpected(create_res.error());
+    }
+
+    if (std::optional<URing::Fd> fd = std::move(*create_res); fd.has_value())
+    {
+        if (auto res = co_await io.close(std::move(*fd)); !res.has_value()) [[unlikely]]
+        {
+            co_return std::unexpected(res.error());
+        }
     }
 
     co_return {};
@@ -188,8 +240,14 @@ SegmentManager::~SegmentManager() noexcept
 
 URing::Task<void> SegmentManager::close(URing::IO& io)
 {
-    URING_TRY(co_await seal_active(io));
-    URING_TRY(co_await io.close(std::move(*active_segment_)));
+    if (auto res = co_await seal_active(io); !res.has_value()) [[unlikely]]
+    {
+        co_return std::unexpected(res.error());
+    }
+    if (auto res = co_await io.close(std::move(*active_segment_)); !res.has_value()) [[unlikely]]
+    {
+        co_return std::unexpected(res.error());
+    }
     co_return {};
 }
 
