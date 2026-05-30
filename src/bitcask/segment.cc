@@ -18,10 +18,11 @@ URing::Task<uint64_t> SegmentManager::append(URing::IO& io, std::span<const std:
     hdr.hdr_crc = XXH3_64bits(&hdr.seq_num, 24);
 
     // payload_crc
-    XXH3_64bits_reset(xxh3_state_);
-    XXH3_64bits_update(xxh3_state_, key.data(), key.size());
-    XXH3_64bits_update(xxh3_state_, value.data(), value.size());
-    uint64_t payload_crc = XXH3_64bits_digest(xxh3_state_);
+    auto* state = xxh3_state_.get();
+    XXH3_64bits_reset(state);
+    XXH3_64bits_update(state, key.data(), key.size());
+    XXH3_64bits_update(state, value.data(), value.size());
+    uint64_t payload_crc = XXH3_64bits_digest(state);
 
     // perform io
     std::array<iovec, 4> iovs = {
@@ -52,21 +53,23 @@ URing::Task<uint64_t> SegmentManager::append(URing::IO& io, std::span<const std:
     co_return last_offset;
 }
 
-URing::Task<void> SegmentManager::value_into(URing::IO& io, std::span<std::byte> buf, ValueLocation& loc)
+URing::Task<void> SegmentManager::value_into(URing::IO& io, URing::FixedBuffer& buf, ValueLocation& loc)
 {
-    // 1. Try to get it synchronously (Fast, no allocation, no suspension)
     auto fd = ro_fd_cache_.get(loc.segment_id);
 
-    // 2. Fallback to slow path ONLY if necessary
     if (!fd.has_value()) [[unlikely]]
     {
         // We only suspend for the OPEN if we actually missed the cache.
         fd = URING_TRY(co_await open_and_cache_fd(io, loc.segment_id));
     }
 
-    // 3. Issue the read (The only suspension point in the 99.9% case)
-    // TODO: size check and error if not the same,
-    auto res = URING_TRY(co_await io.read(*fd->get(), buf.subspan(0, loc.value_len), loc.value_offset));
+    auto res = URING_TRY(co_await io.read_fixed(*fd->get(), buf, loc.value_len, loc.value_offset));
+
+    if (res != static_cast<int32_t>(loc.value_len))
+    {
+        ALOG_ERROR("Short read from segment {}: expected {}, got {}", loc.segment_id, loc.value_len, res);
+        co_return std::unexpected(URing::error_from_errc(std::errc::io_error));
+    }
 
     co_return {};
 }
@@ -130,6 +133,63 @@ URing::Task<void> SegmentManager::rotate(URing::IO& io)
         URING_TRY(co_await io.close(std::move(*fd)));
     }
 
+    co_return {};
+}
+
+SegmentManager::SegmentManager(const ShardId shard_id, BitcaskConfig cfg, const uint64_t last_secno,
+                               const SegmentId last_segment_id)
+    : cfg_(std::move(cfg)),
+      active_segment_id_(last_segment_id),
+      cache_pool_(std::pmr::pool_options{
+          .max_blocks_per_chunk = 1024,
+          .largest_required_pool_block = 256,
+      }),
+      ro_fd_cache_(cfg_.max_open_sealed_files, &cache_pool_),
+      xxh3_state_(XXH3_createState()),
+      secno_(last_secno),
+      shard_id_(shard_id)
+{
+    if (xxh3_state_ == nullptr)
+    {
+        throw std::runtime_error("XXH3 state init failed");
+    }
+
+    // Validate Bitcask configuration (e.g., O_APPEND check, size limits)
+    if (auto res = cfg_.validate(); !res.has_value())
+    {
+        throw std::invalid_argument("Invalid BitcaskConfig: " + res.error().message());
+    }
+}
+
+SegmentManager::~SegmentManager() noexcept
+{
+    // XXH3 state is automatically freed by unique_ptr.
+
+    // Safety Check for Active Segment
+    // If active_segment_ still has a valid FD, it means the user forgot
+    // to call 'co_await close(io)'. We cannot seal/truncate here because
+    // it requires async IO, so we log a warning.
+    if (active_segment_ && active_segment_->IsValid())
+    {
+        ALOG_WARN(
+            "SegmentManager destroyed with active segment still open! "
+            "This may result in missing data seals/truncations. "
+            "Ensure close(io) is called and awaited before destruction.");
+
+        // URing::Fd's destructor will still call ::close(fd) synchronously
+        // as a last resort to prevent FD leaks.
+    }
+
+    // FdCache Cleanup
+    // ro_fd_cache_ will be destroyed automatically. Since it stores
+    // shared_ptr<URing::Fd>, any files not currently being used by
+    // active tasks will be closed synchronously.
+}
+
+URing::Task<void> SegmentManager::close(URing::IO& io)
+{
+    URING_TRY(co_await seal_active(io));
+    URING_TRY(co_await io.close(std::move(*active_segment_)));
     co_return {};
 }
 

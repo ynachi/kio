@@ -287,9 +287,7 @@ add_library(uring
         src/uring/io.cc
         src/uring/net.cc
         src/uring/tcp_listener.cc
-        #        src/kio/net.cpp
-        #        src/kio/parser.cpp
-        #        src/kio/tls_context.cpp
+        src/uring/buffer_pool.cc
 )
 # Include directories
 target_include_directories(uring PUBLIC
@@ -313,6 +311,7 @@ kio_add_sanitizers(uring)
 if (KIO_BUILD_BITCASK)
     add_library(bitcask
             src/bitcask/cache.cc
+            src/bitcask/segment.cc
     )
 
     # Include directories

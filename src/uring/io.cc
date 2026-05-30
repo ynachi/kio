@@ -97,7 +97,7 @@ void IO::init(const int wq_fd)
     {
         if (auto res = register_buffers(buffer_pool_); !res.has_value())
         {
-            ALOG_ERROR("failed to register buffers: {}", res.error());
+            ALOG_ERROR("failed to register buffers: {}", res.error().message());
         }
         ALOG_INFO("the buffer pool have been registered to io_uring");
     }
@@ -312,7 +312,7 @@ IO::~IO()
     // no need to check if a buffer was registered
     if (auto res = unregister_buffers(); !res.has_value())
     {
-        ALOG_WARN("Failed to unregister buffers: {}", res.error());
+        ALOG_WARN("Failed to unregister buffers: {}", res.error().message());
     }
 }
 }  // namespace URing

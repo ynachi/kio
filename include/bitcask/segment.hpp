@@ -2,7 +2,8 @@
 #include "external_libraries/xxhash/xxhash.h"
 #include "uring/core/io.h"
 
-#include <atomic>
+#include <memory>
+#include <memory_resource>
 #include <optional>
 
 #include "common.hpp"
@@ -40,15 +41,27 @@ enum class EntryFlags : uint16_t
 // Single threaded segment write/read and active file rotation
 class SegmentManager
 {
+    struct XXH3Deleter
+    {
+        void operator()(XXH3_state_t* state) const
+        {
+            if (state != nullptr)
+            {
+                XXH3_freeState(state);
+            }
+        }
+    };
+
     // use optional to allow replacing the active fd
-    std::optional<URing::Fd> active_segment_;
-    SegmentId active_segment_id_{0};
-    uint64_t next_offset_{0};
-    FdCache ro_fd_cache_;
-    XXH3_state_t* xxh3_state_;
-    uint64_t secno_{1};
-    ShardId shard_id_{0};
     BitcaskConfig cfg_{};
+    std::optional<URing::Fd> active_segment_{std::nullopt};
+    SegmentId active_segment_id_;
+    uint64_t next_offset_{0};
+    std::pmr::unsynchronized_pool_resource cache_pool_;
+    FdCache ro_fd_cache_;
+    std::unique_ptr<XXH3_state_t, XXH3Deleter> xxh3_state_;
+    uint64_t secno_;
+    ShardId shard_id_;
 
     URing::Task<void> seal_active(URing::IO& io);
     URing::Task<std::optional<URing::Fd>> create_active(URing::IO& io);
@@ -57,17 +70,32 @@ class SegmentManager
 
 public:
     // TODO: not complete yet
-    SegmentManager() { xxh3_state_ = XXH3_createState(); }
-    ~SegmentManager() { XXH3_freeState(xxh3_state_); }
+    SegmentManager(const SegmentManager&) = delete;
+    SegmentManager& operator=(const SegmentManager&) = delete;
+
+    // Allow moving if necessary
+    SegmentManager(SegmentManager&&) = delete;
+    SegmentManager& operator=(SegmentManager&&) = delete;
+
+    /// @brief Construct a SegmentManager for a specific shard.
+    /// @param shard_id The ID of the shard this manager handles.
+    /// @param cfg Configuration for the Bitcask instance.
+    /// @param last_secno The last used sequence number.
+    /// @param last_segment_id The last used segment ID.
+    SegmentManager(ShardId shard_id, BitcaskConfig cfg, uint64_t last_secno, SegmentId last_segment_id);
+
+    ~SegmentManager() noexcept;
     uint64_t next_secno() { return ++secno_; }
     uint64_t next_segment_id() { return ++active_segment_id_; }
 
     URing::Task<uint64_t> append(URing::IO& io, std::span<const std::byte> key, std::span<const std::byte> value,
                                  EntryFlags flags = EntryFlags::HasValue);
     // read value into buf
-    URing::Task<void> value_into(URing::IO& io, std::span<std::byte> buf, ValueLocation& loc);
+    URing::Task<void> value_into(URing::IO& io, URing::FixedBuffer& buf, ValueLocation& loc);
 
     // rotate active file
     URing::Task<void> rotate(URing::IO& io);
+
+    URing::Task<void> close(URing::IO& io);
 };
 }  // namespace bitcask

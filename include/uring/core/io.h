@@ -132,7 +132,7 @@ public:
             return std::unexpected(make_error_code(PoolError::AlreadyRegistered));
         }
 
-        if (int ret = io_uring_register_buffers(&ring_, pool.iovecs_ptr(), pool.total_capacity()); ret < 0)
+        if (const int ret = io_uring_register_buffers(&ring_, pool.iovecs_ptr(), pool.total_capacity()); ret < 0)
         {
             return std::unexpected(error_from_errno(-ret));
         }
@@ -150,6 +150,8 @@ public:
         }
         return {};
     }
+
+    [[nodiscard]] Result<FixedBuffer> take_fixed_buffer(const size_t size) noexcept { return buffer_pool_.take(size); }
 
     //
     // IO Methods
@@ -229,7 +231,9 @@ public:
             [](const int32_t res) -> Result<Fd>
             {
                 if (res < 0)
+                {
                     return std::unexpected(make_error_code(res));
+                }
                 return Fd{res};
             });
     }
