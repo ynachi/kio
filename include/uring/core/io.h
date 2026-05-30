@@ -81,23 +81,23 @@ public:
 
     /**
      * @brief Construct a new IO worker.
-     * 
-     * @param id The unique identifier for this worker. Also used as an index for CPU pinning 
+     *
+     * @param id The unique identifier for this worker. Also used as an index for CPU pinning
      *           via IoOptions::worker_cpu_affinity.
-     * @param leader Optional pointer to a "leader" IO instance. If provided, this worker 
+     * @param leader Optional pointer to a "leader" IO instance. If provided, this worker
      *               will share the same kernel workqueue (IORING_SETUP_ATTACH_WQ).
      * @param opts Configuration options for the io_uring ring.
-     * @param pool_configs Optional list of {size, count} bucket configurations to initialize 
+     * @param pool_configs Optional list of {size, count} bucket configurations to initialize
      *                     a FixedBufferPool for zero-copy I/O.
-     * 
+     *
      * @code
      * // 1. Standalone instance
      * URing::IO io(0);
-     * 
+     *
      * // 2. Scaling with leader-follower pattern
      * URing::IO leader(0);
-     * URing::IO follower(1, &leader); 
-     * 
+     * URing::IO follower(1, &leader);
+     *
      * // 3. With Fixed Buffer Pool for zero-copy
      * URing::IO io_with_pool(0, nullptr, {}, {
      *     { .size = 4096, .count = 1024 }, // 1024 buffers of 4KB
@@ -106,7 +106,9 @@ public:
      * @endcode
      */
     explicit IO(size_t id, const IO* leader = nullptr, const IoOptions& opts = {},
-                std::initializer_list<BucketConfig> pool_configs = {});    /// IO object can be moved but with some limitations. Before it start doing some actual io (before run*()),
+                std::initializer_list<BucketConfig> pool_configs =
+                    {});  /// IO object can be moved but with some limitations. Before it start doing some actual io
+                          /// (before run*()),
     /// its is safe to move it. Because, in this state, it's an inert object. So it gives you more flexibilities
     /// on the object and object pools construction. But, it SHOULD not be moved after it started doing IO.
     /// If you need to do it for some reason, use a std::unique_ptr<IO>. Moving the direct object while IO is active
@@ -470,6 +472,34 @@ std::coroutine_handle<> IoAwaiter<SetupFunc, MapperFunc>::await_suspend(std::cor
     io_uring_sqe_set_data64(sqe, reinterpret_cast<uint64_t>(&ops_));
 
     return std::noop_coroutine();
+}
+
+//
+// sync_wait testing util
+//
+/// Testing utility, block a coroutine until it is done
+template <typename T>
+Result<T> sync_wait(IO& io, Task<T>&& task)
+{
+    bool done{false};
+    std::optional<Result<T>> result;
+
+    auto waiter = [&](Task<T> t) -> Task<void>
+    {
+        result = co_await t;
+        done = true;
+        co_return {};
+    };
+
+    // schedule() takes ownership and will destroy the frame when done
+    io.schedule(waiter(std::move(task)));
+
+    while (!done)
+    {
+        io.run_once();
+    }
+
+    return std::move(*result);
 }
 
 }  // namespace URing

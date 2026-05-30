@@ -297,6 +297,14 @@ void IO::pin_to_cpu() const
 
 IO::~IO()
 {
+    if (ring_.ring_fd > 0 && buffer_pool_.is_registered())
+    {
+        if (auto res = unregister_buffers(); !res.has_value())
+        {
+            ALOG_WARN("Failed to unregister buffers: {}", res.error().message());
+        }
+    }
+
     if (ring_.ring_fd > 0)
     {
         io_uring_queue_exit(&ring_);
@@ -307,12 +315,6 @@ IO::~IO()
     {
         ::close(wake_fd_);
         wake_fd_ = -1;
-    }
-
-    // no need to check if a buffer was registered
-    if (auto res = unregister_buffers(); !res.has_value())
-    {
-        ALOG_WARN("Failed to unregister buffers: {}", res.error().message());
     }
 }
 }  // namespace URing
