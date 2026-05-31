@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -6,8 +7,10 @@
 #include <filesystem>
 #include <future>
 #include <iostream>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -22,6 +25,7 @@
 #include <boost/asio/random_access_file.hpp>
 #include <boost/asio/write_at.hpp>
 
+#include "uring/core/fiber_io.hpp"
 #include "uring/core/io.h"
 
 namespace
@@ -175,6 +179,77 @@ BenchResult bench_kio(const Options& opts, const std::vector<std::byte>& block)
     return {"kio", seconds, static_cast<double>(opts.bytes) / (1024.0 * 1024.0) / seconds};
 }
 
+URing::Result<void> kio_fiber_write_all(URing::FiberIO& fio, URing::Fd& fd, std::span<const std::byte> block,
+                                        std::uint64_t bytes)
+{
+    std::uint64_t offset = 0;
+    while (offset < bytes)
+    {
+        const auto len = std::min<std::uint64_t>(block.size(), bytes - offset);
+        iovec iov{.iov_base = const_cast<std::byte*>(block.data()), .iov_len = static_cast<std::size_t>(len)};
+        FIBER_TRY(auto written, fio.writev(fd, std::span<const iovec>{&iov, 1}, static_cast<off_t>(offset)));
+        if (written != static_cast<int32_t>(len))
+        {
+            return URing::error_from_errc(std::errc::io_error);
+        }
+        offset += len;
+    }
+    return {};
+}
+
+BenchResult bench_kio_fiber(const Options& opts, const std::vector<std::byte>& block)
+{
+    const auto path = opts.path.string() + ".kio-fiber";
+    prepare_file(path, opts.bytes);
+
+    const int raw_fd = ::open(path.c_str(), O_WRONLY | O_CLOEXEC);
+    if (raw_fd < 0)
+    {
+        throw std::runtime_error("open kio fiber file failed: " + std::string(std::strerror(errno)));
+    }
+
+    URing::Fd fd{raw_fd};
+    URing::IO io{0};
+    std::atomic_bool done{false};
+    std::optional<std::error_code> error;
+    BenchResult result;
+
+    io.spawn_fiber(64 * 1024,
+                   [&](URing::FiberIO& fio) -> URing::Result<void>
+                   {
+                       const auto start = Clock::now();
+                       auto write_res = kio_fiber_write_all(fio, fd, block, opts.bytes);
+                       const auto end = Clock::now();
+
+                       if (!write_res)
+                       {
+                           error = write_res.error();
+                       }
+                       else
+                       {
+                           const double seconds = std::chrono::duration<double>(end - start).count();
+                           result = {"kio-fiber", seconds,
+                                     static_cast<double>(opts.bytes) / (1024.0 * 1024.0) / seconds};
+                       }
+                       done.store(true, std::memory_order_release);
+                       return write_res;
+                   });
+
+    std::jthread runner([&](std::stop_token st) { io.run_blocking(st); });
+    while (!done.load(std::memory_order_acquire))
+    {
+        std::this_thread::yield();
+    }
+    runner.request_stop();
+    runner.join();
+
+    if (error)
+    {
+        throw std::runtime_error("kio fiber write failed: " + error->message());
+    }
+    return result;
+}
+
 BenchResult bench_asio(const Options& opts, const std::vector<std::byte>& block)
 {
     const auto path = opts.path.string() + ".asio";
@@ -228,6 +303,7 @@ int main(int argc, char** argv)
 
         std::cout << "bytes=" << opts.bytes << " block=" << opts.block << '\n';
         print_result(bench_kio(opts, block));
+        print_result(bench_kio_fiber(opts, block));
         print_result(bench_asio(opts, block));
     }
     catch (const std::exception& e)

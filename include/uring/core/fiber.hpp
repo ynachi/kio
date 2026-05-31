@@ -2,6 +2,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <list>
 #include <memory>
 
 #include <boost/context/detail/fcontext.hpp>
@@ -20,9 +21,10 @@ class FiberIO;
 // Owned by IO::owned_fibers_. Its address is stable for the fiber's lifetime;
 // do not store in containers that can relocate (use std::list, not vector).
 //
-// ctx          — the fiber's saved execution state (updated on each suspend)
-// scheduler_ctx — the event loop's saved state (updated on each jump to fiber)
+// ctx           — fiber's saved execution state (updated on each suspend)
+// scheduler_ctx — event loop's saved state (updated on each jump to fiber)
 // last_res      — CQE result written by tick() before resuming the fiber
+// self_it       — iterator into owned_fibers_ for O(1) removal on completion
 // ============================================================================
 struct FiberContext
 {
@@ -33,8 +35,12 @@ struct FiberContext
     bool                                  done{false};
     IO*                                   io{nullptr};
     int32_t                               last_res{0};
-    std::function<Result<void>(FiberIO&)> fn;
-    Result<void>                          result{};
+    // move_only_function: avoids CopyConstructible requirement and the extra
+    // heap allocation that std::function incurs for large captures.
+    std::move_only_function<Result<void>(FiberIO&)> fn;
+    Result<void>                                    result{};
+    // Filled by spawn_fiber after insertion; enables O(1) self-removal.
+    std::list<std::unique_ptr<FiberContext>>::iterator self_it{};
 
     explicit FiberContext(const size_t sz)
         : stack(std::make_unique<std::byte[]>(sz)), stack_size(sz)
@@ -45,13 +51,6 @@ struct FiberContext
     FiberContext& operator=(const FiberContext&) = delete;
     FiberContext(FiberContext&&)                 = delete;
     FiberContext& operator=(FiberContext&&)      = delete;
-};
-
-// Stored in SQE user_data with bit 0 set to 1, distinguishing it from IoOps*
-// (which are always even-aligned).  tick() checks bit 0 to dispatch correctly.
-struct FiberOps
-{
-    FiberContext* fiber{nullptr};
 };
 
 namespace detail

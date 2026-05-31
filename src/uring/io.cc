@@ -210,9 +210,20 @@ void IO::tick() noexcept
         }
         else if (user_data & 1u)  // fiber op: bit 0 = 1
         {
-            auto* fops             = reinterpret_cast<FiberOps*>(user_data ^ 1u);
-            fops->fiber->last_res  = cqe->res;
-            ready_fibers_.push_back(fops->fiber);
+            // FiberContext* is stored directly (no FiberOps wrapper).
+            // Resume inline — fiber acts on its CQE immediately without
+            // waiting until the end of tick().
+            auto* fiber      = reinterpret_cast<FiberContext*>(user_data ^ 1u);
+            fiber->last_res  = cqe->res;
+            auto t = boost::context::detail::jump_fcontext(fiber->ctx, fiber);
+            if (fiber->done)
+            {
+                owned_fibers_.erase(fiber->self_it);  // O(1) via stored iterator
+            }
+            else
+            {
+                fiber->ctx = t.fctx;
+            }
         }
         else  // coroutine op
         {
@@ -239,20 +250,17 @@ void IO::tick() noexcept
         current_batch.clear();
     }
 
-    // Resume ready fibers.  Move the batch first so fibers that suspend again
-    // (adding themselves back to ready_fibers_) are picked up next tick.
+    // Start newly spawned fibers.  CQE-based resumes happen inline above;
+    // this batch only contains fibers that have never run yet.
     if (!ready_fibers_.empty())
     {
         auto fiber_batch = std::exchange(ready_fibers_, {});
         for (FiberContext* fiber : fiber_batch)
         {
-            // jump_fcontext saves the current (scheduler) context and resumes
-            // the fiber.  Returns when the fiber suspends or finishes.
-            // t.fctx is the fiber's saved context for the next resume.
             auto t = boost::context::detail::jump_fcontext(fiber->ctx, fiber);
             if (fiber->done)
             {
-                owned_fibers_.remove_if([fiber](const auto& p) { return p.get() == fiber; });
+                owned_fibers_.erase(fiber->self_it);  // O(1)
             }
             else
             {

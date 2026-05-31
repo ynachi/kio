@@ -179,6 +179,9 @@ public:
     /// fio provides a synchronous-looking I/O API that suspends only the fiber
     /// (never the OS thread).  IO takes ownership; the fiber is destroyed when
     /// fn returns.  stack_size is the fiber stack in bytes (e.g. 64 * 1024).
+    ///
+    /// MUST be called from the thread that owns this IO.  For cross-thread
+    /// fiber spawning use schedule_fiber() instead.
     template <std::invocable<FiberIO&> Fn>
     void spawn_fiber(const size_t stack_size, Fn&& fn)
     {
@@ -191,7 +194,23 @@ public:
 
         FiberContext* raw = ctx.get();
         owned_fibers_.push_back(std::move(ctx));
+        // Record iterator for O(1) removal when the fiber completes
+        raw->self_it = std::prev(owned_fibers_.end());
         ready_fibers_.push_back(raw);
+    }
+
+    /// Cross-thread safe fiber spawn.  Posts a lightweight coroutine to this
+    /// IO's MPSC queue; when the target thread picks it up it calls spawn_fiber()
+    /// locally.  The fiber is born on the target thread and never migrates:
+    /// all FiberIO operations use the target IO's ring for their entire lifetime.
+    ///
+    /// Safe to call from any thread.  fn is moved into the coroutine frame and
+    /// then into the fiber — at most two moves, no extra heap allocation beyond
+    /// the coroutine frame (which is freed immediately after spawn_fiber returns).
+    template <std::invocable<FiberIO&> Fn>
+    void schedule_fiber(const size_t stack_size, Fn&& fn)
+    {
+        schedule(schedule_fiber_task(stack_size, std::forward<Fn>(fn)));
     }
 
     void pin_to_cpu() const;
@@ -487,6 +506,13 @@ private:
     {
         queue_.enqueue(task);
         wake();
+    }
+
+    template <std::invocable<FiberIO&> Fn>
+    Task<void> schedule_fiber_task(const size_t stack_size, Fn fn)
+    {
+        spawn_fiber(stack_size, std::move(fn));
+        co_return {};
     }
 };
 
