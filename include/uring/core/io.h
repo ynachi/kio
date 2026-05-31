@@ -19,6 +19,9 @@
 #include "uring/core/task.hpp"
 #include "uring/fd.hpp"
 #include "uring/logger.hpp"
+#include "uring/core/fiber.hpp"
+
+#include <list>
 
 namespace URing
 {
@@ -74,6 +77,7 @@ class IO
     template <typename SetupFunc, typename MapperFunc>
         requires std::invocable<SetupFunc, io_uring_sqe*> && std::invocable<MapperFunc, int32_t>
     friend class IoAwaiter;
+    friend class FiberIO;
     friend class FixedBufferPool;
     template <typename T>
     friend Result<T> sync_wait(IO&, Task<T>&&);
@@ -168,6 +172,32 @@ public:
     }
 
     [[nodiscard]] auto schedule_on(IO& target) noexcept { return TransferTo{target}; }
+
+    /// Launch a new stackful fiber on this IO.  fn is called as fn(fio) where
+    /// fio provides a synchronous-looking I/O API that suspends only the fiber
+    /// (never the OS thread).  IO takes ownership; the fiber is destroyed when
+    /// fn returns.  stack_size is the fiber stack in bytes (e.g. 64 * 1024).
+    template <std::invocable<FiberIO&> Fn>
+    void spawn_fiber(const size_t stack_size, Fn&& fn)
+    {
+        auto ctx           = std::make_unique<FiberContext>(stack_size);
+        ctx->io            = this;
+        ctx->scheduler_ctx = &scheduler_ctx_;
+        ctx->fn            = std::forward<Fn>(fn);
+
+        getcontext(&ctx->ctx);
+        ctx->ctx.uc_stack.ss_sp   = ctx->stack.get();
+        ctx->ctx.uc_stack.ss_size = ctx->stack_size;
+        ctx->ctx.uc_link          = nullptr;
+
+        const auto ptr = reinterpret_cast<uintptr_t>(ctx.get());
+        makecontext(&ctx->ctx, reinterpret_cast<void (*)()>(detail::fiber_entry), 2,
+                    static_cast<uint32_t>(ptr >> 32), static_cast<uint32_t>(ptr & 0xFFFF'FFFFu));
+
+        FiberContext* raw = ctx.get();
+        owned_fibers_.push_back(std::move(ctx));
+        ready_fibers_.push_back(raw);
+    }
 
     void pin_to_cpu() const;
 
@@ -438,6 +468,13 @@ private:
     detail::CoroQueue queue_{};
 
     FixedBufferPool buffer_pool_{};
+
+    // ── Fiber support ────────────────────────────────────────────────────────
+    // scheduler_ctx_ is the "home" context for the event loop.  When a fiber
+    // suspends it swaps back here; when tick() resumes a fiber it swaps out.
+    ucontext_t                                scheduler_ctx_{};
+    std::vector<FiberContext*>                ready_fibers_{};
+    std::list<std::unique_ptr<FiberContext>>  owned_fibers_{};
 
     /// Creates the Ring in an uninitialized way
     void init(int wq_fd = -1);

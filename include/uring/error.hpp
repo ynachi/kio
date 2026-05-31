@@ -191,3 +191,50 @@ inline std::error_code make_error_code(PoolError e)
     }
 
 #define URING_DETAIL_LOG(LVL, ...) URING_DETAIL_CAT(ALOG_, LVL)(__VA_ARGS__)
+
+//
+// Fiber equivalents: identical to URING_TRY* but use plain `return` instead
+// of `co_return`, for use inside non-coroutine Result<T>-returning functions.
+//
+
+// Bind unwrapped value, else return the error.
+//   FIBER_TRY(auto fd, fio.open(path, flags));
+#define FIBER_TRY(decl, expr) FIBER_TRY_(URING_DETAIL_CAT(_ftry_, __COUNTER__), decl, expr)
+#define FIBER_TRY_(tmp, decl, expr)                        \
+    auto&& tmp = (expr);                                   \
+    if (!tmp.has_value()) [[unlikely]]                     \
+        return std::unexpected(std::move(tmp).error());    \
+    decl = std::move(*tmp)
+
+// Check a Result<void> (or discard a value), else return the error.
+//   FIBER_TRY_VOID(fio.fsync(fd));
+#define FIBER_TRY_VOID(expr) FIBER_TRY_VOID_(URING_DETAIL_CAT(_ftry_, __COUNTER__), expr)
+#define FIBER_TRY_VOID_(tmp, expr)                          \
+    if (auto&& tmp = (expr); !tmp.has_value()) [[unlikely]] \
+    return std::unexpected(std::move(tmp).error())
+
+// Value form with logging on error.
+//   FIBER_TRY_LOG(auto fd, fio.open(path, flags), "open segment {}", id);
+#define FIBER_TRY_LOG(decl, expr, fmt, ...) \
+    FIBER_TRY_LOG_(URING_DETAIL_CAT(_ftry_, __COUNTER__), decl, expr, fmt __VA_OPT__(, ) __VA_ARGS__)
+#define FIBER_TRY_LOG_(tmp, decl, expr, fmt, ...)                                              \
+    auto&& tmp = (expr);                                                                       \
+    if (!tmp.has_value()) [[unlikely]]                                                         \
+    {                                                                                          \
+        ALOG_ERROR(fmt " | err={} [{}:{}]" __VA_OPT__(, ) __VA_ARGS__, tmp.error().message(), \
+                   tmp.error().category().name(), tmp.error().value());                        \
+        return std::unexpected(std::move(tmp).error());                                        \
+    }                                                                                          \
+    decl = std::move(*tmp)
+
+// Void/discard form with logging on error.
+//   FIBER_TRY_VOID_LOG(fio.fsync(fd), "fsync shard {}", shard_id_);
+#define FIBER_TRY_VOID_LOG(expr, fmt, ...) \
+    FIBER_TRY_VOID_LOG_(URING_DETAIL_CAT(_ftry_, __COUNTER__), expr, fmt __VA_OPT__(, ) __VA_ARGS__)
+#define FIBER_TRY_VOID_LOG_(tmp, expr, fmt, ...)                                               \
+    if (auto&& tmp = (expr); !tmp.has_value()) [[unlikely]]                                    \
+    {                                                                                          \
+        ALOG_ERROR(fmt " | err={} [{}:{}]" __VA_OPT__(, ) __VA_ARGS__, tmp.error().message(), \
+                   tmp.error().category().name(), tmp.error().value());                        \
+        return std::unexpected(std::move(tmp).error());                                        \
+    }

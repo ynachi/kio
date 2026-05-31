@@ -9,6 +9,7 @@
 #include <sys/eventfd.h>
 
 #include "uring/core/awaiter.hpp"
+#include "uring/core/fiber_io.hpp"
 
 namespace URing
 {
@@ -124,11 +125,25 @@ void IO::activate()
     is_activated_ = true;
 }
 
+void URing::detail::fiber_entry(const uint32_t hi, const uint32_t lo) noexcept
+{
+    auto* ctx = reinterpret_cast<FiberContext*>(
+        (static_cast<uintptr_t>(hi) << 32) | static_cast<uintptr_t>(lo));
+
+    FiberIO fio{*ctx->io, *ctx};
+    ctx->result = ctx->fn(fio);
+    ctx->done   = true;
+
+    // Return control to tick() — the fiber must not be resumed after this.
+    swapcontext(&ctx->ctx, ctx->scheduler_ctx);
+}
+
 void IO::submit_or_wait_for()
 {
     // Only block if we have no local work to do.
 
-    if (io_uring_cq_ready(&ring_) > 0 || !local_tasks_.empty() || !queue_.empty())
+    if (io_uring_cq_ready(&ring_) > 0 || !local_tasks_.empty() || !queue_.empty() ||
+        !ready_fibers_.empty())
     {
         int ret;
         if (opts_.flags & IORING_SETUP_DEFER_TASKRUN)
@@ -150,8 +165,9 @@ void IO::submit_or_wait_for()
         // Thundering herd mitigation from our earlier optimizations
         is_sleeping_.store(true, std::memory_order_seq_cst);
 
-        // Double check all three sources of work before sleeping
-        if (io_uring_cq_ready(&ring_) == 0 && local_tasks_.empty() && queue_.empty())
+        // Double check all sources of work before sleeping
+        if (io_uring_cq_ready(&ring_) == 0 && local_tasks_.empty() && queue_.empty() &&
+            ready_fibers_.empty())
         {
             if (const auto ret = io_uring_submit_and_wait(&ring_, 1); ret < 0 && ret != -EINTR)
             {
@@ -177,7 +193,7 @@ void IO::tick() noexcept
     // wait for completion if needed
     submit_or_wait_for();
 
-    // Batch process CQEs into the local queue
+    // Batch process CQEs into the local queues
     io_uring_cqe* cqe = nullptr;
     unsigned head = 0;
     unsigned count = 0;
@@ -185,17 +201,22 @@ void IO::tick() noexcept
     io_uring_for_each_cqe(&ring_, head, cqe)
     {
         count++;
-        auto user_data = io_uring_cqe_get_data64(cqe);
+        const auto user_data = io_uring_cqe_get_data64(cqe);
 
         if (user_data == kWakeupSentinel)
         {
             arm_wake_read();
         }
-        else
+        else if (user_data & 1u)  // fiber op: bit 0 = 1
+        {
+            auto* fops  = reinterpret_cast<FiberOps*>(user_data ^ 1u);
+            fops->res   = cqe->res;
+            ready_fibers_.push_back(fops->fiber);
+        }
+        else  // coroutine op
         {
             auto* op = reinterpret_cast<IoOps*>(user_data);
-            op->res = cqe->res;
-
+            op->res  = cqe->res;
             local_tasks_.push_back(op->h);
         }
     }
@@ -206,16 +227,31 @@ void IO::tick() noexcept
         io_uring_cq_advance(&ring_, count);
     }
 
-    // Execute all I/O completions immediately in this tick
+    // Resume coroutine continuations
     if (!local_tasks_.empty())
     {
         current_batch.swap(local_tasks_);
-
         for (auto h : current_batch)
         {
             h.resume();
         }
         current_batch.clear();
+    }
+
+    // Resume ready fibers.  Move the batch first so fibers that suspend again
+    // (adding themselves back to ready_fibers_) are picked up next tick.
+    if (!ready_fibers_.empty())
+    {
+        auto fiber_batch = std::exchange(ready_fibers_, {});
+        for (FiberContext* fiber : fiber_batch)
+        {
+            swapcontext(&scheduler_ctx_, &fiber->ctx);
+            // Returns here when the fiber suspends on I/O or completes.
+            if (fiber->done)
+            {
+                owned_fibers_.remove_if([fiber](const auto& p) { return p.get() == fiber; });
+            }
+        }
     }
 }
 

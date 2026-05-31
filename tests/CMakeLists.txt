@@ -29,6 +29,11 @@ kio_add_test(context_remote_tests uring/context_remote_test.cpp
         LIBS uring GTest::gtest GTest::gtest_main
 )
 
+kio_add_test(fiber_io_tests uring/fiber_io_test.cpp
+        TAGS uring integration fiber
+        LIBS uring GTest::gtest GTest::gtest_main
+)
+
 #===============================
 # Bitcask tests
 #================================
