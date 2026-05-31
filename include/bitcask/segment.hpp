@@ -81,8 +81,13 @@ class SegmentManager
     // append directly without buffering
     URing::Task<uint64_t> append_direct(URing::IO& io, std::span<const std::byte> key, std::span<const std::byte> value,
                                         LogEntryHeader& hdr, uint64_t payload_crc);
+    // write an entry to the buffer
+    uint64_t copy_to_buffer(std::span<const std::byte> key, std::span<const std::byte> value, const LogEntryHeader& hdr,
+                            uint64_t payload_crc);
     void prepare_write(std::span<const std::byte> key, std::span<const std::byte> value, EntryFlags flags,
                        LogEntryHeader& hdr, uint64_t& payload_crc);
+    bool should_read_from_buffer(const uint64_t offset, const size_t len) const;
+    bool serve_from_buffer(URing::FixedBuffer& out, uint64_t offset, size_t len);
 
 public:
     // TODO: not complete yet

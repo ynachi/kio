@@ -24,7 +24,7 @@ void SegmentManager::prepare_write(std::span<const std::byte> key, std::span<con
 }
 
 URing::Task<uint64_t> SegmentManager::append(URing::IO& io, std::span<const std::byte> key,
-                                             std::span<const std::byte> value, EntryFlags flags)
+                                             std::span<const std::byte> value, const EntryFlags flags)
 {
     // ensure active file
     if (!active_segment_.has_value())
@@ -35,7 +35,33 @@ URing::Task<uint64_t> SegmentManager::append(URing::IO& io, std::span<const std:
         }
     }
 
-    // if we need to bypass buffering, direct write and return here
+    LogEntryHeader hdr{};
+    uint64_t payload_crc{};
+
+    // prepare entries
+    prepare_write(key, value, flags, hdr, payload_crc);
+    const uint64_t total_entry_size = hdr.total_size();
+
+    // case where we need to bypass buffer
+    if (cfg_.durability == Durability::SyncOnWrite || total_entry_size > cfg_.flush_buffer_size)
+    {
+        auto append_res = co_await append_direct(io, key, value, hdr, payload_crc);
+        if (!append_res.has_value()) [[unlikely]]
+        {
+            co_return std::unexpected(append_res.error());
+        }
+        const uint64_t entry_offset = append_res.value();
+
+        if (next_disk_offset_ >= cfg_.max_segment_size)
+        {
+            if (auto rotate_res = co_await rotate(io); !rotate_res.has_value()) [[unlikely]]
+            {
+                co_return std::unexpected(rotate_res.error());
+            }
+        }
+
+        co_return entry_offset;
+    }
 
     // ensure active buffer
     if (!write_buffer_.has_value())
@@ -48,28 +74,32 @@ URing::Task<uint64_t> SegmentManager::append(URing::IO& io, std::span<const std:
         write_buffer_.emplace(std::move(*buf));
     }
 
-    LogEntryHeader hdr{};
-    uint64_t payload_crc{};
-
-    // prepare entries
-    prepare_write(key, value, flags, hdr, payload_crc);
-
-    auto append_res = co_await append_direct(io, key, value, hdr, payload_crc);
-    if (!append_res.has_value()) [[unlikely]]
+    // Our buffer is not growable, so we might need to flush, if the record can fit the buffer and there is not enough
+    // space
+    if (next_buf_offset_ + total_entry_size > cfg_.flush_buffer_size)
     {
-        co_return std::unexpected(append_res.error());
-    }
-    const uint64_t entry_offset = append_res.value();
-
-    if (next_disk_offset_ >= cfg_.max_segment_size)
-    {
-        if (auto rotate_res = co_await rotate(io); !rotate_res.has_value()) [[unlikely]]
-        {
-            co_return std::unexpected(rotate_res.error());
-        }
+        co_await flush(io);
     }
 
-    co_return entry_offset;
+    co_return copy_to_buffer(key, value, hdr, payload_crc);
+}
+
+bool SegmentManager::serve_from_buffer(URing::FixedBuffer& out, const uint64_t offset, const size_t len)
+{
+    if (!should_read_from_buffer(offset, len))
+    {
+        return false;
+    }
+
+    const auto buffer_offset = offset - next_disk_offset_;
+    std::memcpy(out.ptr(), write_buffer_->ptr() + buffer_offset, len);
+    return true;
+}
+
+bool SegmentManager::should_read_from_buffer(const uint64_t offset, const size_t len) const
+{
+    const uint64_t buffer_end = next_disk_offset_ + next_buf_offset_;
+    return write_buffer_.has_value() && offset >= next_disk_offset_ && offset + len <= buffer_end;
 }
 
 URing::Task<uint64_t> SegmentManager::append_direct(URing::IO& io, std::span<const std::byte> key,
@@ -102,8 +132,51 @@ URing::Task<uint64_t> SegmentManager::append_direct(URing::IO& io, std::span<con
     co_return entry_offset;
 }
 
+uint64_t SegmentManager::copy_to_buffer(std::span<const std::byte> key, std::span<const std::byte> value,
+                                        const LogEntryHeader& hdr, const uint64_t payload_crc)
+{
+    const uint64_t entry_offset = next_disk_offset_ + next_buf_offset_;
+    std::byte* ptr = write_buffer_->ptr() + next_buf_offset_;
+
+    std::memcpy(ptr, &hdr, sizeof(hdr));
+    ptr += sizeof(hdr);
+    std::memcpy(ptr, key.data(), key.size());
+    ptr += key.size();
+    std::memcpy(ptr, value.data(), value.size());
+    ptr += value.size();
+    std::memcpy(ptr, &payload_crc, sizeof(payload_crc));
+
+    next_buf_offset_ += hdr.total_size();
+
+    return entry_offset;
+}
+
+URing::Task<void> SegmentManager::flush(URing::IO& io)
+{
+    if (!write_buffer_.has_value() || next_buf_offset_ == 0)
+    {
+        co_return {};
+    }
+
+    auto res = co_await io.write_fixed(*active_segment_, *write_buffer_, next_buf_offset_, next_disk_offset_);
+    if (!res)
+    {
+        co_return std::unexpected(res.error());
+    }
+    next_disk_offset_ += res.value();
+    // TODO: we might want to clear the buffer does we ?
+    next_buf_offset_ = 0;
+
+    co_return {};
+}
+
 URing::Task<void> SegmentManager::value_into(URing::IO& io, URing::FixedBuffer& buf, ValueLocation& loc)
 {
+    if (loc.segment_id == active_segment_id_ && serve_from_buffer(buf, loc.value_offset, loc.value_len))
+    {
+        co_return {};
+    }
+
     auto fd = ro_fd_cache_.get(loc.segment_id);
 
     if (!fd.has_value()) [[unlikely]]

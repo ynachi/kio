@@ -5,6 +5,7 @@
 #include <array>
 #include <chrono>
 #include <cstddef>
+#include <cstring>
 #include <filesystem>
 #include <format>
 #include <iostream>
@@ -21,6 +22,9 @@ namespace fs = std::filesystem;
 
 namespace
 {
+constexpr size_t kFlushBufferSize = 256 * 1024;
+constexpr size_t kFlushBufferCount = 64;
+
 struct Options
 {
     size_t entries = 100'000;
@@ -111,7 +115,7 @@ void print_result(std::string_view name, const Options& opts, double seconds, ui
 {
     const double ops_s = static_cast<double>(opts.entries) / seconds;
     const double mib_s = static_cast<double>(bytes) / (1024.0 * 1024.0) / seconds;
-    std::cout << std::format("{:<18} {:>10.3f}s {:>12.0f} ops/s {:>10.1f} MiB/s\n", name, seconds, ops_s, mib_s);
+    std::cout << std::format("{:<24} {:>10.3f}s {:>12.0f} ops/s {:>10.1f} MiB/s\n", name, seconds, ops_s, mib_s);
 }
 
 URing::Task<void> run_segment_append(URing::IO& io, bitcask::SegmentManager& manager, const Options& opts,
@@ -138,10 +142,12 @@ void bench_segment_manager(const Options& opts)
     fs::remove_all(dir);
     fs::create_directories(dir / "partition_0");
 
-    URing::IO io{0};
+    URing::IO io{0, nullptr, {}, {{.size = kFlushBufferSize, .count = kFlushBufferCount}}};
     bitcask::BitcaskConfig cfg;
     cfg.directory = dir;
     cfg.max_segment_size = segment_bytes(opts) + 4096;
+    cfg.flush_buffer_size = kFlushBufferSize;
+    cfg.durability = bitcask::Durability::Buffered;
 
     bitcask::SegmentManager manager{0, cfg, 0, 0};
     std::string key = make_payload(opts.key_size, 'k');
@@ -155,6 +161,12 @@ void bench_segment_manager(const Options& opts)
             {
                 throw std::system_error(res.error());
             }
+
+            auto flush_res = URing::sync_wait(io, manager.flush(io));
+            if (!flush_res.has_value())
+            {
+                throw std::system_error(flush_res.error());
+            }
         });
 
     auto close_res = URing::sync_wait(io, manager.close(io));
@@ -163,7 +175,30 @@ void bench_segment_manager(const Options& opts)
         throw std::system_error(close_res.error());
     }
 
-    print_result("SegmentManager", opts, seconds, segment_bytes(opts));
+    print_result("SegmentManager+flush", opts, seconds, segment_bytes(opts));
+}
+
+void write_all_at(const int fd, const std::byte* data, size_t len, off_t offset)
+{
+    while (len > 0)
+    {
+        const auto written = ::pwrite(fd, data, len, offset);
+        if (written < 0)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+            throw std::system_error(errno, std::system_category(), "pwrite");
+        }
+        if (written == 0)
+        {
+            throw std::runtime_error("zero-length pwrite");
+        }
+        data += written;
+        len -= static_cast<size_t>(written);
+        offset += written;
+    }
 }
 
 void bench_raw_pwritev(const Options& opts)
@@ -249,6 +284,127 @@ void bench_raw_pwritev(const Options& opts)
 
     print_result("raw pwritev", opts, seconds, total_bytes);
 }
+
+void bench_raw_buffered_pwrite(const Options& opts)
+{
+    fs::path dir = opts.dir / "raw_buffered_pwrite";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    fs::path path = dir / "data.db";
+
+    int fd = ::open(path.c_str(), O_CREAT | O_RDWR | O_EXCL, 0644);
+    if (fd < 0)
+    {
+        throw std::system_error(errno, std::system_category(), "open");
+    }
+
+    const uint64_t total_bytes = segment_bytes(opts);
+    if (::posix_fallocate(fd, 0, static_cast<off_t>(total_bytes + 4096)) != 0)
+    {
+        const int err = errno;
+        ::close(fd);
+        throw std::system_error(err, std::system_category(), "posix_fallocate");
+    }
+
+    std::string key = make_payload(opts.key_size, 'k');
+    std::string value = make_payload(opts.value_size, 'v');
+    std::vector<std::byte> buffer(kFlushBufferSize);
+    XXH3_state_t* state = XXH3_createState();
+    if (state == nullptr)
+    {
+        ::close(fd);
+        throw std::bad_alloc();
+    }
+
+    size_t buffer_offset = 0;
+    off_t file_offset = 0;
+    uint64_t seq = 0;
+
+    auto flush_buffer = [&]
+    {
+        if (buffer_offset == 0)
+        {
+            return;
+        }
+        write_all_at(fd, buffer.data(), buffer_offset, file_offset);
+        file_offset += static_cast<off_t>(buffer_offset);
+        buffer_offset = 0;
+    };
+
+    const double seconds = measure_seconds(
+        [&]
+        {
+            for (size_t i = 0; i < opts.entries; ++i)
+            {
+                key[0] = static_cast<char>('a' + (i % 26));
+                value[0] = static_cast<char>('A' + (i % 26));
+
+                bitcask::LogEntryHeader hdr{};
+                hdr.seq_num = ++seq;
+                hdr.val_len = static_cast<uint32_t>(value.size());
+                hdr.key_len = static_cast<uint16_t>(key.size());
+                hdr.flags = static_cast<uint16_t>(bitcask::EntryFlags::HasValue);
+                hdr.hdr_crc = XXH3_64bits(&hdr.seq_num, 24);
+
+                XXH3_64bits_reset(state);
+                XXH3_64bits_update(state, key.data(), key.size());
+                XXH3_64bits_update(state, value.data(), value.size());
+                uint64_t payload_crc = XXH3_64bits_digest(state);
+
+                const size_t entry_size = hdr.total_size();
+                if (entry_size > buffer.size())
+                {
+                    flush_buffer();
+
+                    std::array<iovec, 4> iovs = {
+                        {{&hdr, sizeof(hdr)},
+                         {key.data(), key.size()},
+                         {value.data(), value.size()},
+                         {&payload_crc, sizeof(payload_crc)}}};
+
+                    const auto written = ::pwritev(fd, iovs.data(), static_cast<int>(iovs.size()), file_offset);
+                    if (written < 0)
+                    {
+                        throw std::system_error(errno, std::system_category(), "pwritev");
+                    }
+                    if (written != static_cast<ssize_t>(entry_size))
+                    {
+                        throw std::runtime_error("short pwritev");
+                    }
+                    file_offset += written;
+                    continue;
+                }
+
+                if (buffer_offset + entry_size > buffer.size())
+                {
+                    flush_buffer();
+                }
+
+                std::byte* dst = buffer.data() + buffer_offset;
+                std::memcpy(dst, &hdr, sizeof(hdr));
+                dst += sizeof(hdr);
+                std::memcpy(dst, key.data(), key.size());
+                dst += key.size();
+                std::memcpy(dst, value.data(), value.size());
+                dst += value.size();
+                std::memcpy(dst, &payload_crc, sizeof(payload_crc));
+                buffer_offset += entry_size;
+            }
+
+            flush_buffer();
+        });
+
+    XXH3_freeState(state);
+    if (::ftruncate(fd, file_offset) != 0)
+    {
+        const int err = errno;
+        ::close(fd);
+        throw std::system_error(err, std::system_category(), "ftruncate");
+    }
+    ::close(fd);
+
+    print_result("raw buffered pwrite", opts, seconds, total_bytes);
+}
 }  // namespace
 
 int main(int argc, char** argv)
@@ -265,6 +421,7 @@ int main(int argc, char** argv)
                                  segment_bytes(opts));
 
         bench_segment_manager(opts);
+        bench_raw_buffered_pwrite(opts);
         bench_raw_pwritev(opts);
         fs::remove_all(opts.dir);
     }

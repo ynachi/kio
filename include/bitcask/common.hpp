@@ -60,7 +60,7 @@ struct BitcaskConfig
     std::chrono::milliseconds flush_max_delay{1ms};
 
     // Durability
-    Durability durability = {};
+    Durability durability = Durability::SyncOnWrite;
 
     // Compaction
     bool auto_compact = true;
