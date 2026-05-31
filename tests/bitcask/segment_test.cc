@@ -346,7 +346,8 @@ TEST_F(SegmentManagerTest, StressAppendRotateAndReadBack)
             {
                 const int ordinal = (segment - 1) * kEntriesPerSegment + i;
                 std::string key = "key_" + std::to_string(ordinal);
-                std::string value = "value_" + std::to_string(ordinal) + std::string(static_cast<size_t>(ordinal % 17), 'x');
+                std::string value =
+                    "value_" + std::to_string(ordinal) + std::string(static_cast<size_t>(ordinal % 17), 'x');
 
                 auto append_res = co_await manager_->append(*io_, key, value);
                 EXPECT_TRUE(append_res.has_value()) << (append_res ? "" : append_res.error().message());
@@ -375,14 +376,7 @@ TEST_F(SegmentManagerTest, StressAppendRotateAndReadBack)
         }
 
         const std::array<size_t, 8> samples{
-            0,
-            7,
-            31,
-            32,
-            63,
-            64,
-            entries.size() - 2,
-            entries.size() - 1,
+            0, 7, 31, 32, 63, 64, entries.size() - 2, entries.size() - 1,
         };
 
         for (const size_t sample : samples)

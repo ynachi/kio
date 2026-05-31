@@ -41,7 +41,8 @@ URing::Task<uint64_t> SegmentManager::append(URing::IO& io, std::span<const std:
          {&payload_crc, sizeof(payload_crc)}}
     };
 
-    auto write_res = co_await io.writev(*active_segment_, iovs, -1);
+    const uint64_t entry_offset = next_offset_;
+    auto write_res = co_await io.writev(*active_segment_, iovs, static_cast<off_t>(entry_offset));
     if (!write_res.has_value()) [[unlikely]]
     {
         co_return std::unexpected(write_res.error());
@@ -54,9 +55,6 @@ URing::Task<uint64_t> SegmentManager::append(URing::IO& io, std::span<const std:
         co_return std::unexpected(URing::make_error_code(EIO));
     }
 
-    // update offset
-
-    uint64_t entry_offset = next_offset_;
     next_offset_ += bytes_written;
 
     // TODO: We must check and initiate ROTATION here to prevent race condition

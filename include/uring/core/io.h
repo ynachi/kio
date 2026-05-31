@@ -73,6 +73,8 @@ class IO
         requires std::invocable<SetupFunc, io_uring_sqe*> && std::invocable<MapperFunc, int32_t>
     friend class IoAwaiter;
     friend class FixedBufferPool;
+    template <typename T>
+    friend Result<T> sync_wait(IO&, Task<T>&&);
 
 public:
     static constexpr unsigned kUringDefaultFlag =
@@ -484,19 +486,20 @@ Result<T> sync_wait(IO& io, Task<T>&& task)
     bool done{false};
     std::optional<Result<T>> result;
 
-    auto waiter = [&](Task<T> t) -> Task<void>
-    {
-        result = co_await t;
-        done = true;
-        co_return {};
-    };
+    io.schedule(
+        [&](Task<T> t) -> Task<void>
+        {
+            result = co_await std::move(t);
+            done = true;
+            co_return {};
+        }(std::move(task)));
 
-    // schedule() takes ownership and will destroy the frame when done
-    io.schedule(waiter(std::move(task)));
+    io.pin_to_cpu();
+    io.activate();
 
     while (!done)
     {
-        io.run_once();
+        io.tick();
     }
 
     return std::move(*result);

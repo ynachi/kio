@@ -168,6 +168,7 @@ option(KIO_BUILD_TESTS "Build the kio test suite" ON)
 set(KIO_TEST_FILTER "all" CACHE STRING "List of tags to build (or 'all')")
 option(KIO_BUILD_BITCASK "Build bitcask storage engine" ON)
 option(KIO_BUILD_DEMOS "Build the kio demo executables" ON)
+option(KIO_BUILD_SEGMENT_BENCH "Build temporary bitcask segment benchmark" OFF)
 # pass -DKIO_DEMO_FILTER="core;http" to build specific subsets of demo.
 option(KIO_BUILD_BENCHMARK "Build codes used to benchmark kio against other libs" OFF)
 option(ENABLE_CLANG_TIDY "Run clang-tidy during compilation" OFF)
@@ -367,4 +368,10 @@ if (KIO_BUILD_TESTS)
     )
 
     message(STATUS "Added targets: check, check-quick")
+endif ()
+
+if (KIO_BUILD_SEGMENT_BENCH)
+    add_executable(segment_append_bench benchmarks/cpp/segment_append_bench.cpp)
+    target_link_libraries(segment_append_bench PRIVATE bitcask)
+    kio_target_compile_options(segment_append_bench)
 endif ()
