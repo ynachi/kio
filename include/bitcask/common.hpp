@@ -12,6 +12,21 @@ namespace bitcask
 
 using namespace std::literals;
 
+enum class Durability : uint8_t
+{
+    /// Data handed to OS page cache only. Lost on crash/power loss.
+    /// Fastest (~µs latency). Use for caches, ephemeral logs.
+    None = 0,
+
+    /// Data buffered in user-space, flushed to OS on buffer-full or timer.
+    /// Lost on crash if not yet flushed. Default for throughput workloads.
+    Buffered = 1,
+
+    /// fsync() called after each write. Survives crash.
+    /// Slowest (~1-10ms extra latency). Use for critical data.
+    SyncOnWrite = 2,
+};
+
 struct BitcaskConfig
 {
     std::filesystem::path directory;
@@ -40,9 +55,12 @@ struct BitcaskConfig
     // File rotation
     size_t max_segment_size = 100 * 1024 * 1024;  // 100MB
 
+    // max size for user space buffering
+    size_t flush_buffer_size = 256 * 1024;  // 256k
+    std::chrono::milliseconds flush_max_delay{1ms};
+
     // Durability
-    bool sync_on_write = false;
-    std::chrono::milliseconds sync_interval{1000ms};
+    Durability durability = {};
 
     // Compaction
     bool auto_compact = true;

@@ -5,20 +5,9 @@
 namespace bitcask
 {
 
-URing::Task<uint64_t> SegmentManager::append(URing::IO& io, std::span<const std::byte> key,
-                                             std::span<const std::byte> value, EntryFlags flags)
+void SegmentManager::prepare_write(std::span<const std::byte> key, std::span<const std::byte> value, EntryFlags flags,
+                                   LogEntryHeader& hdr, uint64_t& payload_crc)
 {
-    if (!active_segment_.has_value())
-    {
-        auto active_res = co_await create_active(io);
-        if (!active_res.has_value()) [[unlikely]]
-        {
-            co_return std::unexpected(active_res.error());
-        }
-    }
-
-    LogEntryHeader hdr{};
-
     hdr.seq_num = next_secno();
     hdr.val_len = value.size();
     hdr.key_len = key.size();
@@ -31,9 +20,62 @@ URing::Task<uint64_t> SegmentManager::append(URing::IO& io, std::span<const std:
     XXH3_64bits_reset(state);
     XXH3_64bits_update(state, key.data(), key.size());
     XXH3_64bits_update(state, value.data(), value.size());
-    uint64_t payload_crc = XXH3_64bits_digest(state);
+    payload_crc = XXH3_64bits_digest(state);
+}
 
-    // perform io
+URing::Task<uint64_t> SegmentManager::append(URing::IO& io, std::span<const std::byte> key,
+                                             std::span<const std::byte> value, EntryFlags flags)
+{
+    // ensure active file
+    if (!active_segment_.has_value())
+    {
+        if (auto active_res = co_await create_active(io); !active_res.has_value()) [[unlikely]]
+        {
+            co_return std::unexpected(active_res.error());
+        }
+    }
+
+    // if we need to bypass buffering, direct write and return here
+
+    // ensure active buffer
+    if (!write_buffer_.has_value())
+    {
+        auto buf = io.take_fixed_buffer(cfg_.flush_buffer_size);
+        if (!buf.has_value()) [[unlikely]]
+        {
+            co_return std::unexpected(buf.error());
+        }
+        write_buffer_.emplace(std::move(*buf));
+    }
+
+    LogEntryHeader hdr{};
+    uint64_t payload_crc{};
+
+    // prepare entries
+    prepare_write(key, value, flags, hdr, payload_crc);
+
+    auto append_res = co_await append_direct(io, key, value, hdr, payload_crc);
+    if (!append_res.has_value()) [[unlikely]]
+    {
+        co_return std::unexpected(append_res.error());
+    }
+    const uint64_t entry_offset = append_res.value();
+
+    if (next_disk_offset_ >= cfg_.max_segment_size)
+    {
+        if (auto rotate_res = co_await rotate(io); !rotate_res.has_value()) [[unlikely]]
+        {
+            co_return std::unexpected(rotate_res.error());
+        }
+    }
+
+    co_return entry_offset;
+}
+
+URing::Task<uint64_t> SegmentManager::append_direct(URing::IO& io, std::span<const std::byte> key,
+                                                    std::span<const std::byte> value, LogEntryHeader& hdr,
+                                                    uint64_t payload_crc)
+{
     std::array<iovec, 4> iovs = {
         {{&hdr, sizeof(hdr)},
          {const_cast<std::byte*>(key.data()), key.size()},
@@ -41,31 +83,21 @@ URing::Task<uint64_t> SegmentManager::append(URing::IO& io, std::span<const std:
          {&payload_crc, sizeof(payload_crc)}}
     };
 
-    const uint64_t entry_offset = next_offset_;
+    const uint64_t entry_offset = next_disk_offset_;
     auto write_res = co_await io.writev(*active_segment_, iovs, static_cast<off_t>(entry_offset));
     if (!write_res.has_value()) [[unlikely]]
     {
         co_return std::unexpected(write_res.error());
     }
-    const auto bytes_written = *write_res;
 
+    const auto bytes_written = *write_res;
     if (bytes_written != static_cast<int32_t>(hdr.total_size()))
     {
         // Handle partial write (though rare in io_uring with O_DIRECT/Regular files)
         co_return std::unexpected(URing::make_error_code(EIO));
     }
 
-    next_offset_ += bytes_written;
-
-    // TODO: We must check and initiate ROTATION here to prevent race condition
-    if (next_offset_ >= cfg_.max_segment_size)
-    {
-        auto rotate_res = co_await rotate(io);
-        if (!rotate_res.has_value()) [[unlikely]]
-        {
-            co_return std::unexpected(rotate_res.error());
-        }
-    }
+    next_disk_offset_ += bytes_written;
 
     co_return entry_offset;
 }
@@ -101,6 +133,7 @@ URing::Task<void> SegmentManager::value_into(URing::IO& io, URing::FixedBuffer& 
     co_return {};
 }
 
+// TODO: ia badly generetad, rewrite.
 URing::Task<void> SegmentManager::verify_entry(URing::IO& io, SegmentId segment_id, uint64_t record_offset)
 {
     auto fd_res = ro_fd_cache_.get(segment_id);
@@ -127,9 +160,8 @@ URing::Task<void> SegmentManager::verify_entry(URing::IO& io, SegmentId segment_
 
     // 2. Read and verify Value CRC (at the end of the record)
     uint64_t payload_crc = 0;
-    uint64_t crc_offset = record_offset + sizeof(LogEntryHeader) + hdr.key_len + hdr.val_len;
-    auto crc_res =
-        co_await io.read(*fd_res->get(), std::as_writable_bytes(std::span(&payload_crc, 1)), crc_offset);
+    const uint64_t crc_offset = record_offset + sizeof(LogEntryHeader) + hdr.key_len + hdr.val_len;
+    auto crc_res = co_await io.read(*fd_res->get(), std::as_writable_bytes(std::span(&payload_crc, 1)), crc_offset);
     if (!crc_res.has_value())
         co_return std::unexpected(crc_res.error());
 
@@ -146,7 +178,7 @@ URing::Task<void> SegmentManager::seal_active(URing::IO& io)
         co_return std::unexpected(res.error());
     }
 
-    if (auto res = co_await io.ftruncate(*active_segment_, next_offset_); !res.has_value()) [[unlikely]]
+    if (auto res = co_await io.ftruncate(*active_segment_, next_disk_offset_); !res.has_value()) [[unlikely]]
     {
         co_return std::unexpected(res.error());
     }
@@ -159,7 +191,7 @@ URing::Task<void> SegmentManager::seal_active(URing::IO& io)
     co_return {};
 }
 
-URing::Task<std::shared_ptr<URing::Fd>> SegmentManager::open_and_cache_fd(URing::IO& io, SegmentId id)
+URing::Task<std::shared_ptr<URing::Fd>> SegmentManager::open_and_cache_fd(URing::IO& io, const SegmentId id)
 {
     ALOG_DEBUG("no cached file, opening a new one, shard{}", shard_id_);
     std::filesystem::path path = cfg_.get_data_file_path(id, shard_id_);
@@ -204,7 +236,7 @@ URing::Task<std::optional<URing::Fd>> SegmentManager::create_active(URing::IO& i
     }
 
     // reset counters
-    next_offset_ = 0;
+    next_disk_offset_ = 0;
     active_segment_id_ = id;
 
     // replace
