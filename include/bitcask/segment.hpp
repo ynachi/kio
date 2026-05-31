@@ -84,7 +84,8 @@ class SegmentManager
     // write an entry to the buffer
     uint64_t copy_to_buffer(std::span<const std::byte> key, std::span<const std::byte> value, const LogEntryHeader& hdr,
                             uint64_t payload_crc);
-    uint64_t append_buffered_ready(std::span<const std::byte> key, std::span<const std::byte> value, EntryFlags flags);
+    uint64_t append_buffered_ready(std::span<const std::byte> key, std::span<const std::byte> value, EntryFlags flags,
+                                   uint64_t entry_size);
     std::optional<uint64_t> try_append_buffered_fast(std::span<const std::byte> key, std::span<const std::byte> value,
                                                      EntryFlags flags);
     void prepare_write(std::span<const std::byte> key, std::span<const std::byte> value, EntryFlags flags,

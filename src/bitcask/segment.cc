@@ -78,7 +78,7 @@ URing::Task<uint64_t> SegmentManager::append(URing::IO& io, std::span<const std:
         URING_TRY_VOID(co_await flush(io));
     }
 
-    co_return append_buffered_ready(key, value, flags);
+    co_return append_buffered_ready(key, value, flags, total_entry_size);
 }
 
 bool SegmentManager::serve_from_buffer(URing::FixedBuffer& out, const uint64_t offset, const size_t len)
@@ -149,20 +149,20 @@ uint64_t SegmentManager::copy_to_buffer(std::span<const std::byte> key, std::spa
 }
 
 uint64_t SegmentManager::append_buffered_ready(std::span<const std::byte> key, std::span<const std::byte> value,
-                                               const EntryFlags flags)
+                                               const EntryFlags flags, const uint64_t entry_size)
 {
-    LogEntryHeader hdr{};
-    hdr.seq_num = next_secno();
-    hdr.val_len = value.size();
-    hdr.key_len = key.size();
-    hdr.flags = static_cast<uint16_t>(flags);
-    hdr.hdr_crc = XXH3_64bits(&hdr.seq_num, 24);
-
     const uint64_t entry_offset = next_disk_offset_ + next_buf_offset_;
     std::byte* ptr = write_buffer_->ptr() + next_buf_offset_;
 
-    std::memcpy(ptr, &hdr, sizeof(hdr));
-    ptr += sizeof(hdr);
+    // Write header directly to buffer — avoids stack copy of 32 bytes
+    auto* hdr = ::new (ptr) LogEntryHeader;
+    hdr->reserved = 0;
+    hdr->seq_num = next_secno();
+    hdr->val_len = value.size();
+    hdr->key_len = key.size();
+    hdr->flags = static_cast<uint16_t>(flags);
+    hdr->hdr_crc = XXH3_64bits(&hdr->seq_num, 24);
+    ptr += sizeof(LogEntryHeader);
 
     std::byte* payload = ptr;
     std::memcpy(ptr, key.data(), key.size());
@@ -170,10 +170,11 @@ uint64_t SegmentManager::append_buffered_ready(std::span<const std::byte> key, s
     std::memcpy(ptr, value.data(), value.size());
     ptr += value.size();
 
+    // One-shot hash over the contiguous buffer region is faster than streaming state for small payloads
     const uint64_t payload_crc = XXH3_64bits(payload, key.size() + value.size());
     std::memcpy(ptr, &payload_crc, sizeof(payload_crc));
 
-    next_buf_offset_ += hdr.total_size();
+    next_buf_offset_ += entry_size;
 
     return entry_offset;
 }
@@ -193,7 +194,7 @@ std::optional<uint64_t> SegmentManager::try_append_buffered_fast(std::span<const
         return std::nullopt;
     }
 
-    return append_buffered_ready(key, value, flags);
+    return append_buffered_ready(key, value, flags, total_entry_size);
 }
 
 URing::Task<void> SegmentManager::flush(URing::IO& io)
