@@ -1,11 +1,11 @@
-#include "../../include/uring/core/io.h"
-#include "../../include/uring/extention/io_pool.hpp"
+#include "uring/core/io.h"
 
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <thread>
 
+#include "uring/extention/io_pool.hpp"
 #include <gtest/gtest.h>
 
 using namespace URing;
@@ -38,7 +38,8 @@ TEST(IoContextRemoteTest, ScheduleRunsOnTargetWorker)
     std::atomic<int> observed_worker{-1};
 
     // Define a task that records the ID of the worker it runs on
-    auto task = [&](IO& target) -> Task<void> {
+    auto task = [&](IO& target) -> Task<void>
+    {
         observed_worker.store(static_cast<int>(target.id()), std::memory_order_relaxed);
         ran.fetch_add(1, std::memory_order_relaxed);
         co_return {};
@@ -84,7 +85,8 @@ TEST(IoContextRemoteTest, WorkersCanScheduleOnAnotherWorker)
 
     // Wait for all tasks to complete
     auto start = std::chrono::steady_clock::now();
-    while (ran.load() < static_cast<int>(kWorkers) && std::chrono::steady_clock::now() - start < std::chrono::seconds(2))
+    while (ran.load() < static_cast<int>(kWorkers) &&
+           std::chrono::steady_clock::now() - start < std::chrono::seconds(2))
     {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }

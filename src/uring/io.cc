@@ -130,7 +130,17 @@ void IO::submit_or_wait_for()
 
     if (io_uring_cq_ready(&ring_) > 0 || !local_tasks_.empty() || !queue_.empty())
     {
-        if (const auto ret = io_uring_submit(&ring_); ret < 0 && ret != -EINTR)
+        int ret;
+        if (opts_.flags & IORING_SETUP_DEFER_TASKRUN)
+        {
+            ret = io_uring_submit_and_get_events(&ring_);
+        }
+        else
+        {
+            ret = io_uring_submit(&ring_);
+        }
+
+        if (ret < 0 && ret != -EINTR)
         {
             ALOG_ERROR("failed to submit: {}", std::strerror(-ret));
         }

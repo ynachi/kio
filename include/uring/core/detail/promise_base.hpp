@@ -73,9 +73,6 @@ struct TaskPromiseBase
 
     // intrusive queue hook
     std::atomic<TaskPromiseBase*> next{nullptr};
-#ifndef NDEBUG
-    std::atomic<bool> is_enqueued{false};
-#endif
 
     // The type-erased handle used by the event loop to resume this frame
     std::coroutine_handle<> self_handle{nullptr};

@@ -54,7 +54,8 @@ public:
 
     [[nodiscard]] uint32_t index() const noexcept { return index_; }
     [[nodiscard]] std::span<std::byte> data() noexcept { return view_; }
-    [[nodiscard]] std::span<std::byte> data() const noexcept { return view_; }
+    [[nodiscard]] std::span<const std::byte> data() const noexcept { return view_; }
+
     [[nodiscard]] std::byte* ptr() noexcept { return view_.data(); }
     [[nodiscard]] const std::byte* ptr() const noexcept { return view_.data(); }
     [[nodiscard]] size_t size() const noexcept { return view_.size(); }

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <expected>
 #include <system_error>
+
 namespace URing
 {
 ////////////////////////////////////////////////////////////////////////////////
@@ -138,26 +139,55 @@ inline std::error_code make_error_code(PoolError e)
 
 }  // namespace URing
 
-namespace URing::uring_try_internal
-{
-template <typename Exp>
-auto unwrap(Exp&& exp)
-{
-    using ValueT = std::decay_t<Exp>::value_type;
+//
+// Rust style result unwrap macro
+//
 
-    if constexpr (!std::is_void_v<ValueT>)
-    {
-        return std::move(*std::forward<Exp>(exp));
+#define URING_DETAIL_CAT_(a, b) a##b
+#define URING_DETAIL_CAT(a, b)  URING_DETAIL_CAT_(a, b)
+
+// Bind the unwrapped value, else co_return the error.
+//   URING_TRY(auto fd, co_await io.open(path, flags));   // fd is Fd
+#define URING_TRY(decl, expr) URING_TRY_(URING_DETAIL_CAT(_utry_, __COUNTER__), decl, expr)
+#define URING_TRY_(tmp, decl, expr)                        \
+    auto&& tmp = (expr);                                   \
+    if (!tmp.has_value()) [[unlikely]]                     \
+        co_return std::unexpected(std::move(tmp).error()); \
+    decl = std::move(*tmp)
+
+// Check a Result<void> (or discard a value), else co_return the error. Single statement.
+//   URING_TRY_VOID(co_await flush(io));
+#define URING_TRY_VOID(expr) URING_TRY_VOID_(URING_DETAIL_CAT(_utry_, __COUNTER__), expr)
+#define URING_TRY_VOID_(tmp, expr)                          \
+    if (auto&& tmp = (expr); !tmp.has_value()) [[unlikely]] \
+    co_return std::unexpected(std::move(tmp).error())
+
+// Value form: bind result, else log at ERROR and co_return the error.
+//   URING_TRY_LOG(auto fd, co_await io.open(p, flags), "open segment {}", id);
+#define URING_TRY_LOG(decl, expr, fmt, ...) \
+    URING_TRY_LOG_(URING_DETAIL_CAT(_utry_, __COUNTER__), decl, expr, fmt __VA_OPT__(, ) __VA_ARGS__)
+
+#define URING_TRY_LOG_(tmp, decl, expr, fmt, ...)                                             \
+    auto&& tmp = (expr);                                                                      \
+    if (!tmp.has_value()) [[unlikely]]                                                        \
+    {                                                                                         \
+        ALOG_ERROR(fmt " | err={} [{}:{}]" __VA_OPT__(, ) __VA_ARGS__, tmp.error().message(), \
+                   tmp.error().category().name(), tmp.error().value());                       \
+        co_return std::unexpected(std::move(tmp).error());                                    \
+    }                                                                                         \
+    decl = std::move(*tmp)
+
+// Void/discard form: check a Result<void>, else log and co_return. Single statement.
+//   URING_TRY_VOID_LOG(co_await flush(io), "flush shard {}", shard_id_);
+#define URING_TRY_VOID_LOG(expr, fmt, ...) \
+    URING_TRY_VOID_LOG_(URING_DETAIL_CAT(_utry_, __COUNTER__), expr, fmt __VA_OPT__(, ) __VA_ARGS__)
+
+#define URING_TRY_VOID_LOG_(tmp, expr, fmt, ...)                                              \
+    if (auto&& tmp = (expr); !tmp.has_value()) [[unlikely]]                                   \
+    {                                                                                         \
+        ALOG_ERROR(fmt " | err={} [{}:{}]" __VA_OPT__(, ) __VA_ARGS__, tmp.error().message(), \
+                   tmp.error().category().name(), tmp.error().value());                       \
+        co_return std::unexpected(std::move(tmp).error());                                    \
     }
-}
-}  // namespace URing::uring_try_internal
 
-#define URING_TRY(expr)                                         \
-    ({                                                          \
-        auto __uring_try_res = (expr);                          \
-        if (!__uring_try_res) [[unlikely]]                      \
-        {                                                       \
-            co_return std::unexpected(__uring_try_res.error()); \
-        }                                                       \
-        ::URing::uring_try_internal::unwrap(__uring_try_res);   \
-    })
+#define URING_DETAIL_LOG(LVL, ...) URING_DETAIL_CAT(ALOG_, LVL)(__VA_ARGS__)

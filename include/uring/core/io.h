@@ -33,7 +33,7 @@ struct IoOptions
     std::uint32_t tick_timeout_ms = 10;
 
     // list of cpus, if empty, no pinning
-    std::initializer_list<int> worker_cpu_affinity{};
+    std::vector<int> worker_cpu_affinity{};
 
     /// max resume per tick
     std::size_t batch_max_size = 128;
@@ -79,7 +79,6 @@ class IO
 public:
     static constexpr unsigned kUringDefaultFlag =
         IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_COOP_TASKRUN;
-    static constexpr uint64_t kWakeTag = UINT64_MAX;
 
     /**
      * @brief Construct a new IO worker.
@@ -265,9 +264,13 @@ public:
 
     [[nodiscard]] auto close(Fd&& fd)
     {
-        auto raw_fd = fd.Release();
         return IoAwaiter(
-            *this, [raw_fd](io_uring_sqe* sqe) { io_uring_prep_close(sqe, raw_fd); }, detail::ResumeVoid{});
+            *this,
+            [fd = std::move(fd)](io_uring_sqe* sqe) mutable
+            {
+                io_uring_prep_close(sqe, fd.Release());  // Release only once an SQE exists
+            },
+            detail::ResumeVoid{});
     }
 
     [[nodiscard]] auto remove(std::filesystem::path path)

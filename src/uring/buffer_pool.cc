@@ -1,5 +1,6 @@
 #include "uring/core/buffer_pool.hpp"
 
+#include <algorithm>
 #include <utility>
 
 namespace URing
@@ -27,7 +28,7 @@ FixedBuffer& FixedBuffer::operator=(FixedBuffer&& other) noexcept
 
 void FixedBuffer::release() noexcept
 {
-    if (pool_ && index_ != kInvalidBufIndex) [[unlikely]]
+    if (pool_ && index_ != kInvalidBufIndex)
     {
         pool_->release(index_, bucket_id_);
         index_ = kInvalidBufIndex;
@@ -89,9 +90,9 @@ FixedBufferPool::FixedBufferPool(std::initializer_list<BucketConfig> configs)
 
     // Build buckets + global iovec array
     uint32_t current_global_index = 0;
+    buckets_.reserve(configs.size());
     for (const auto& config : sorted_configs)
     {
-        buckets_.reserve(configs.size());
         buckets_.emplace_back(config.size, config.count, current_global_index);
 
         // Register each slot in the flattened iovec array
@@ -118,7 +119,7 @@ FixedBufferPool::FixedBufferPool(std::initializer_list<BucketConfig> configs)
         return std::unexpected(make_error_code(PoolError::SizeTooLarge));
     }
 
-    Result<size_t> idx_res = it->pop();
+    Result<uint32_t> idx_res = it->pop();
     if (!idx_res.has_value()) [[unlikely]]
     {
         return std::unexpected(idx_res.error());

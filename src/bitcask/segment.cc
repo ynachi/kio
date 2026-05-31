@@ -29,10 +29,7 @@ URing::Task<uint64_t> SegmentManager::append(URing::IO& io, std::span<const std:
     // ensure active file
     if (!active_segment_.has_value())
     {
-        if (auto active_res = co_await create_active(io); !active_res.has_value()) [[unlikely]]
-        {
-            co_return std::unexpected(active_res.error());
-        }
+        URING_TRY_VOID(co_await create_active(io));
     }
 
     LogEntryHeader hdr{};
@@ -45,19 +42,14 @@ URing::Task<uint64_t> SegmentManager::append(URing::IO& io, std::span<const std:
     // case where we need to bypass buffer
     if (cfg_.durability == Durability::SyncOnWrite || total_entry_size > cfg_.flush_buffer_size)
     {
-        auto append_res = co_await append_direct(io, key, value, hdr, payload_crc);
-        if (!append_res.has_value()) [[unlikely]]
-        {
-            co_return std::unexpected(append_res.error());
-        }
-        const uint64_t entry_offset = append_res.value();
+        // flush first
+        URING_TRY_VOID(co_await flush(io));
 
-        if (next_disk_offset_ >= cfg_.max_segment_size)
+        URING_TRY(uint64_t entry_offset, co_await append_direct(io, key, value, hdr, payload_crc));
+
+        if (next_disk_offset_ + next_buf_offset_ >= cfg_.max_segment_size)
         {
-            if (auto rotate_res = co_await rotate(io); !rotate_res.has_value()) [[unlikely]]
-            {
-                co_return std::unexpected(rotate_res.error());
-            }
+            URING_TRY_VOID(co_await rotate(io));
         }
 
         co_return entry_offset;
@@ -66,19 +58,15 @@ URing::Task<uint64_t> SegmentManager::append(URing::IO& io, std::span<const std:
     // ensure active buffer
     if (!write_buffer_.has_value())
     {
-        auto buf = io.take_fixed_buffer(cfg_.flush_buffer_size);
-        if (!buf.has_value()) [[unlikely]]
-        {
-            co_return std::unexpected(buf.error());
-        }
-        write_buffer_.emplace(std::move(*buf));
+        URING_TRY(auto buf, io.take_fixed_buffer(cfg_.flush_buffer_size));
+        write_buffer_.emplace(std::move(buf));
     }
 
     // Our buffer is not growable, so we might need to flush, if the record can fit the buffer and there is not enough
     // space
     if (next_buf_offset_ + total_entry_size > cfg_.flush_buffer_size)
     {
-        co_await flush(io);
+        URING_TRY_VOID(co_await flush(io));
     }
 
     co_return copy_to_buffer(key, value, hdr, payload_crc);
@@ -268,22 +256,19 @@ URing::Task<std::shared_ptr<URing::Fd>> SegmentManager::open_and_cache_fd(URing:
 {
     ALOG_DEBUG("no cached file, opening a new one, shard{}", shard_id_);
     std::filesystem::path path = cfg_.get_data_file_path(id, shard_id_);
+    const auto path_str = path.string();
 
-    auto open_res = co_await io.open(std::move(path), cfg_.read_flags, cfg_.file_mode);
-    if (!open_res.has_value()) [[unlikely]]
-    {
-        co_return std::unexpected(open_res.error());
-    }
-    auto fd_inner = std::move(*open_res);
+    URING_TRY_LOG(auto fd_inner, co_await io.open(std::move(path), cfg_.read_flags, cfg_.file_mode),
+                  "open segment file failed shard={} path={}", shard_id_, path_str);
+
     auto fd_shared = std::make_shared<URing::Fd>(std::move(fd_inner));
 
     std::optional<std::shared_ptr<URing::Fd>> evicted_fd = ro_fd_cache_.put(id, fd_shared);
-    if (evicted_fd.has_value())
+    // close if we are the sole owner
+    if (evicted_fd.has_value() && evicted_fd->use_count() == 1)
     {
-        if (auto res = co_await io.close(std::move(*evicted_fd->get())); !res.has_value()) [[unlikely]]
-        {
-            co_return std::unexpected(res.error());
-        }
+        URING_TRY_VOID_LOG(co_await io.close(std::move(*evicted_fd->get())),
+                           "close evicted file failed shard={} path={}", shard_id_, path_str);
     }
 
     co_return fd_shared;
@@ -294,30 +279,29 @@ URing::Task<std::optional<URing::Fd>> SegmentManager::create_active(URing::IO& i
     const SegmentId id = next_segment_id();
     std::filesystem::path path = cfg_.get_data_file_path(id, shard_id_);
 
-    auto fd_res = co_await io.open(std::move(path), cfg_.write_flags, cfg_.file_mode);
-    if (!fd_res.has_value())
-    {
-        ALOG_ERROR("failed to create active file, shard={}, path={}, err={}", shard_id_, path.c_str(),
-                   fd_res.error().message());
-        co_return std::unexpected(fd_res.error());
-    }
+    const auto path_str = path.string();  // capture BEFORE the move
+    URING_TRY_LOG(auto fd, co_await io.open(std::move(path), cfg_.write_flags, cfg_.file_mode),
+                  "create active file failed shard={} path={}", shard_id_, path_str);
 
-    if (const auto res = co_await io.fallocate(*fd_res, 0, 0, cfg_.max_segment_size); !res.has_value())
-    {
-        ALOG_ERROR("failed to create active file, shard={}", shard_id_);
-        co_return std::unexpected(res.error());
-    }
+    URING_TRY_VOID_LOG(co_await io.fallocate(fd, 0, 0, cfg_.max_segment_size), "fallocate active failed shard={}",
+                       shard_id_);
 
     // reset counters
     next_disk_offset_ = 0;
     active_segment_id_ = id;
 
     // replace
-    co_return std::exchange(active_segment_, std::move(*fd_res));
+    co_return std::exchange(active_segment_, std::move(fd));
 }
 
 URing::Task<void> SegmentManager::rotate(URing::IO& io)
 {
+    // flush first
+    if (auto flush_res = co_await flush(io); !flush_res.has_value()) [[unlikely]]
+    {
+        co_return std::unexpected(flush_res.error());
+    }
+
     if (auto res = co_await seal_active(io); !res.has_value()) [[unlikely]]
     {
         co_return std::unexpected(res.error());
@@ -392,14 +376,13 @@ SegmentManager::~SegmentManager() noexcept
 
 URing::Task<void> SegmentManager::close(URing::IO& io)
 {
-    if (auto res = co_await seal_active(io); !res.has_value()) [[unlikely]]
-    {
-        co_return std::unexpected(res.error());
-    }
-    if (auto res = co_await io.close(std::move(*active_segment_)); !res.has_value()) [[unlikely]]
-    {
-        co_return std::unexpected(res.error());
-    }
+    // flush first
+    URING_TRY_VOID(co_await flush(io));
+
+    URING_TRY_VOID(co_await seal_active(io));
+
+    URING_TRY_VOID(co_await io.close(std::move(*active_segment_)));
+
     co_return {};
 }
 
