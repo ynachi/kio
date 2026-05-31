@@ -152,10 +152,30 @@ uint64_t SegmentManager::append_buffered_ready(std::span<const std::byte> key, s
                                                const EntryFlags flags)
 {
     LogEntryHeader hdr{};
-    uint64_t payload_crc{};
-    prepare_write(key, value, flags, hdr, payload_crc);
+    hdr.seq_num = next_secno();
+    hdr.val_len = value.size();
+    hdr.key_len = key.size();
+    hdr.flags = static_cast<uint16_t>(flags);
+    hdr.hdr_crc = XXH3_64bits(&hdr.seq_num, 24);
 
-    return copy_to_buffer(key, value, hdr, payload_crc);
+    const uint64_t entry_offset = next_disk_offset_ + next_buf_offset_;
+    std::byte* ptr = write_buffer_->ptr() + next_buf_offset_;
+
+    std::memcpy(ptr, &hdr, sizeof(hdr));
+    ptr += sizeof(hdr);
+
+    std::byte* payload = ptr;
+    std::memcpy(ptr, key.data(), key.size());
+    ptr += key.size();
+    std::memcpy(ptr, value.data(), value.size());
+    ptr += value.size();
+
+    const uint64_t payload_crc = XXH3_64bits(payload, key.size() + value.size());
+    std::memcpy(ptr, &payload_crc, sizeof(payload_crc));
+
+    next_buf_offset_ += hdr.total_size();
+
+    return entry_offset;
 }
 
 std::optional<uint64_t> SegmentManager::try_append_buffered_fast(std::span<const std::byte> key,
