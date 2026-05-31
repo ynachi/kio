@@ -26,24 +26,28 @@ void SegmentManager::prepare_write(std::span<const std::byte> key, std::span<con
 URing::Task<uint64_t> SegmentManager::append(URing::IO& io, std::span<const std::byte> key,
                                              std::span<const std::byte> value, const EntryFlags flags)
 {
+    if (auto fast_res = try_append_buffered_fast(key, value, flags); fast_res.has_value()) [[likely]]
+    {
+        co_return *fast_res;
+    }
+
     // ensure active file
     if (!active_segment_.has_value())
     {
         URING_TRY_VOID(co_await create_active(io));
     }
 
-    LogEntryHeader hdr{};
-    uint64_t payload_crc{};
-
-    // prepare entries
-    prepare_write(key, value, flags, hdr, payload_crc);
-    const uint64_t total_entry_size = hdr.total_size();
+    const uint64_t total_entry_size = sizeof(LogEntryHeader) + key.size() + value.size() + sizeof(uint64_t);
 
     // case where we need to bypass buffer
     if (cfg_.durability == Durability::SyncOnWrite || total_entry_size > cfg_.flush_buffer_size)
     {
         // flush first
         URING_TRY_VOID(co_await flush(io));
+
+        LogEntryHeader hdr{};
+        uint64_t payload_crc{};
+        prepare_write(key, value, flags, hdr, payload_crc);
 
         URING_TRY(uint64_t entry_offset, co_await append_direct(io, key, value, hdr, payload_crc));
 
@@ -74,7 +78,7 @@ URing::Task<uint64_t> SegmentManager::append(URing::IO& io, std::span<const std:
         URING_TRY_VOID(co_await flush(io));
     }
 
-    co_return copy_to_buffer(key, value, hdr, payload_crc);
+    co_return append_buffered_ready(key, value, flags);
 }
 
 bool SegmentManager::serve_from_buffer(URing::FixedBuffer& out, const uint64_t offset, const size_t len)
@@ -142,6 +146,34 @@ uint64_t SegmentManager::copy_to_buffer(std::span<const std::byte> key, std::spa
     next_buf_offset_ += hdr.total_size();
 
     return entry_offset;
+}
+
+uint64_t SegmentManager::append_buffered_ready(std::span<const std::byte> key, std::span<const std::byte> value,
+                                               const EntryFlags flags)
+{
+    LogEntryHeader hdr{};
+    uint64_t payload_crc{};
+    prepare_write(key, value, flags, hdr, payload_crc);
+
+    return copy_to_buffer(key, value, hdr, payload_crc);
+}
+
+std::optional<uint64_t> SegmentManager::try_append_buffered_fast(std::span<const std::byte> key,
+                                                                 std::span<const std::byte> value,
+                                                                 const EntryFlags flags)
+{
+    if (cfg_.durability == Durability::SyncOnWrite || !active_segment_.has_value() || !write_buffer_.has_value())
+    {
+        return std::nullopt;
+    }
+
+    const uint64_t total_entry_size = sizeof(LogEntryHeader) + key.size() + value.size() + sizeof(uint64_t);
+    if (total_entry_size > cfg_.flush_buffer_size || next_buf_offset_ + total_entry_size > cfg_.flush_buffer_size)
+    {
+        return std::nullopt;
+    }
+
+    return append_buffered_ready(key, value, flags);
 }
 
 URing::Task<void> SegmentManager::flush(URing::IO& io)
