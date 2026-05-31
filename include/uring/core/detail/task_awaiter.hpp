@@ -17,20 +17,13 @@ struct TaskAwaiter
         return handle;
     }
 
-    Result<T> await_resume()
+    Result<T> await_resume() noexcept
     {
         auto& p = handle.promise();
-
-        if (p.exception)
-        {
-            std::rethrow_exception(p.exception);
-        }
-
-        if (!p.result.has_value())
+        if (!p.result.has_value()) [[unlikely]]
         {
             return std::unexpected(make_error_code(ECANCELED));
         }
-
         return std::move(*p.result);
     }
 };

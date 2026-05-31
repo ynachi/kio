@@ -52,6 +52,11 @@ URing::Task<uint64_t> SegmentManager::append(URing::IO& io, std::span<const std:
             URING_TRY_VOID(co_await rotate(io));
         }
 
+        if (cfg_.durability == Durability::SyncOnWrite)
+        {
+            URING_TRY_VOID(co_await io.fsync(*active_segment_, /*datasync=*/true));
+        }
+
         co_return entry_offset;
     }
 

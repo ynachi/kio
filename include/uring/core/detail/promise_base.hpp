@@ -31,31 +31,10 @@ struct FinalAwaitable
         // If continuation is noop, it means this task was "detached" (scheduled).
         if (cont == std::noop_coroutine())
         {
-            // CRITICAL MEMORY SAFETY: Catch and report unhandled exceptions
-            // in detached tasks before destroying the coroutine frame.
-            if (h.promise().exception)
-            {
-                try
-                {
-                    std::rethrow_exception(h.promise().exception);
-                }
-                catch (const std::exception& e)
-                {
-                    ALOG_FATAL("Detached task terminated with unhandled exception: {}", e.what());
-                }
-                catch (...)
-                {
-                    ALOG_FATAL("Detached task terminated with unknown unhandled exception!");
-                }
-
-                // Emulate standard thread lifecycle behavior for unhandled exceptions
-                std::terminate();
-            }
-
             h.destroy();
             return std::noop_coroutine();
         }
-
+        
         // Otherwise, symmetrically transfer control back to the caller.
         return cont;
     }
@@ -66,22 +45,24 @@ struct FinalAwaitable
 // ============================================================================
 // task_promise_base — Shared logic for all URing tasks
 // ============================================================================
+/// A task SHOULD not throw an exception
 struct TaskPromiseBase
 {
     std::coroutine_handle<> continuation{std::noop_coroutine()};
-    std::exception_ptr exception = nullptr;
-
     // intrusive queue hook
     std::atomic<TaskPromiseBase*> next{nullptr};
-
     // The type-erased handle used by the event loop to resume this frame
     std::coroutine_handle<> self_handle{nullptr};
 
     std::suspend_always initial_suspend() noexcept { return {}; }
-
-    void unhandled_exception() noexcept { exception = std::current_exception(); }
-
     FinalAwaitable final_suspend() noexcept { return {}; }
+
+    // A throwing Task is a contract violation: errors travel through Result<T>.
+    [[noreturn]] void unhandled_exception() noexcept
+    {
+        ALOG_FATAL("unhandled exception in URing::Task (use Result<T> for errors)");
+        std::terminate();
+    }
 };
 
 // ============================================================================

@@ -132,13 +132,7 @@ static Task<void> dispatching_server_loop(IoContext& ctx, IO& dispatcher, uint16
 
         /*
         // Option 2: Using TransferTo (Demonstration)
-        // This requires a helper task because we can't hop the main dispatcher loop
-        auto dispatch_task = [](IO& t, Fd fd) -> Task<void> {
-            co_await TransferTo{t};
-            co_await handle_client(t, std::move(fd));
-            co_return {};
-        };
-        dispatcher.schedule(dispatch_task(target, std::move(client_fd)));
+        usage: co_await io.schedule_on(other);
         */
     }
     co_return {};

@@ -67,6 +67,8 @@ struct IoOptions
 // ============================================================================
 class IO
 {
+    struct TransferTo;
+
     friend class IoContext;
     friend struct TransferTo;
     template <typename SetupFunc, typename MapperFunc>
@@ -76,9 +78,33 @@ class IO
     template <typename T>
     friend Result<T> sync_wait(IO&, Task<T>&&);
 
+    struct TransferTo
+    {
+        IO& target;
+
+        // Optimization: If we are already on the target thread, don't suspend at all.
+        bool await_ready() const noexcept { return false; }
+
+        template <typename Promise>
+        void await_suspend(std::coroutine_handle<Promise> h) noexcept
+        {
+            // Get the base promise pointer
+            auto* p = static_cast<detail::TaskPromiseBase*>(&h.promise());
+
+            // Store the erased handle so the target thread can resume it
+            p->self_handle = h;
+
+            // Post it to the intrusive queue
+            target.post(p);
+        }
+
+        void await_resume() const noexcept {}
+    };
+
 public:
     static constexpr unsigned kUringDefaultFlag =
         IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_COOP_TASKRUN;
+    static constexpr int kDefaultAcceptFlags = SOCK_NONBLOCK | SOCK_CLOEXEC;
 
     /**
      * @brief Construct a new IO worker.
@@ -133,17 +159,15 @@ public:
     }
 
     /// Background task or post job to an io in another thread
-    template <typename T>
-    void schedule(Task<T> task)
+    void schedule(Task<void> task)
     {
         auto h = task.release();
-
         auto* p = static_cast<detail::TaskPromiseBase*>(&h.promise());
-
         p->self_handle = h;
-
         post(p);
     }
+
+    [[nodiscard]] auto schedule_on(IO& target) noexcept { return TransferTo{target}; }
 
     void pin_to_cpu() const;
 
@@ -180,7 +204,7 @@ public:
     //
     // IO Methods
     //
-    [[nodiscard]] auto accept(Fd& server_fd, SocketAddress& client_addr, const int flags = 0)
+    [[nodiscard]] auto accept(Fd& server_fd, SocketAddress& client_addr, const int flags = kDefaultAcceptFlags)
     {
         return IoAwaiter(
             *this,
@@ -197,7 +221,7 @@ public:
             });
     }
 
-    [[nodiscard]] auto accept(Fd& server_fd, const int flags = SOCK_NONBLOCK | SOCK_CLOEXEC)
+    [[nodiscard]] auto accept(Fd& server_fd, const int flags = kDefaultAcceptFlags)
     {
         return IoAwaiter(
             *this, [raw_fd = server_fd.fd, flags](io_uring_sqe* sqe)
@@ -305,7 +329,12 @@ public:
     {
         return IoAwaiter(
             *this, [raw_fd = fd.fd, poll_mask](io_uring_sqe* sqe) { io_uring_prep_poll_add(sqe, raw_fd, poll_mask); },
-            detail::ResumeVoid{});
+            [](const int32_t res) -> Result<unsigned>
+            {
+                if (res < 0)
+                    return std::unexpected(make_error_code(res));
+                return static_cast<unsigned>(res);
+            });
     }
 
     template <typename Rep, typename Period>
@@ -427,32 +456,6 @@ private:
         queue_.enqueue(task);
         wake();
     }
-};
-
-// ============================================================================
-// TransferTo — coroutine context with (hop to another thread)
-// ============================================================================
-struct TransferTo
-{
-    IO& target;
-
-    // Optimization: If we are already on the target thread, don't suspend at all.
-    bool await_ready() const noexcept { return false; }
-
-    template <typename Promise>
-    void await_suspend(std::coroutine_handle<Promise> h) noexcept
-    {
-        // Get the base promise pointer
-        auto* p = static_cast<detail::TaskPromiseBase*>(&h.promise());
-
-        // Store the erased handle so the target thread can resume it
-        p->self_handle = h;
-
-        // Post it to the intrusive queue
-        target.post(p);
-    }
-
-    void await_resume() const noexcept {}
 };
 
 // ============================================================================
