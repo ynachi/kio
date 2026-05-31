@@ -13,6 +13,8 @@
 
 #include <liburing.h>
 
+#include <boost/context/detail/fcontext.hpp>
+
 #include "buffer_pool.hpp"
 #include "detail/queue.hpp"
 #include "uring/core/awaiter.hpp"
@@ -180,19 +182,12 @@ public:
     template <std::invocable<FiberIO&> Fn>
     void spawn_fiber(const size_t stack_size, Fn&& fn)
     {
-        auto ctx           = std::make_unique<FiberContext>(stack_size);
-        ctx->io            = this;
-        ctx->scheduler_ctx = &scheduler_ctx_;
-        ctx->fn            = std::forward<Fn>(fn);
-
-        getcontext(&ctx->ctx);
-        ctx->ctx.uc_stack.ss_sp   = ctx->stack.get();
-        ctx->ctx.uc_stack.ss_size = ctx->stack_size;
-        ctx->ctx.uc_link          = nullptr;
-
-        const auto ptr = reinterpret_cast<uintptr_t>(ctx.get());
-        makecontext(&ctx->ctx, reinterpret_cast<void (*)()>(detail::fiber_entry), 2,
-                    static_cast<uint32_t>(ptr >> 32), static_cast<uint32_t>(ptr & 0xFFFF'FFFFu));
+        auto ctx    = std::make_unique<FiberContext>(stack_size);
+        ctx->io     = this;
+        ctx->fn     = std::forward<Fn>(fn);
+        // Stack grows downward: pass the top (base + size) to make_fcontext
+        ctx->ctx    = boost::context::detail::make_fcontext(
+            ctx->stack.get() + stack_size, stack_size, detail::fiber_entry);
 
         FiberContext* raw = ctx.get();
         owned_fibers_.push_back(std::move(ctx));
@@ -470,9 +465,9 @@ private:
     FixedBufferPool buffer_pool_{};
 
     // ── Fiber support ────────────────────────────────────────────────────────
-    // scheduler_ctx_ is the "home" context for the event loop.  When a fiber
-    // suspends it swaps back here; when tick() resumes a fiber it swaps out.
-    ucontext_t                                scheduler_ctx_{};
+    // With Boost.Context, there is no single scheduler_ctx_ member.  Each
+    // jump_fcontext call captures the caller's state implicitly in transfer_t,
+    // so tick() and each fiber exchange context handles on every switch.
     std::vector<FiberContext*>                ready_fibers_{};
     std::list<std::unique_ptr<FiberContext>>  owned_fibers_{};
 

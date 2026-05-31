@@ -125,17 +125,18 @@ void IO::activate()
     is_activated_ = true;
 }
 
-void URing::detail::fiber_entry(const uint32_t hi, const uint32_t lo) noexcept
+void URing::detail::fiber_entry(boost::context::detail::transfer_t t) noexcept
 {
-    auto* ctx = reinterpret_cast<FiberContext*>(
-        (static_cast<uintptr_t>(hi) << 32) | static_cast<uintptr_t>(lo));
+    auto* ctx = static_cast<FiberContext*>(t.data);
+    // Save the scheduler's context so submit_and_wait can jump back to it.
+    ctx->scheduler_ctx = t.fctx;
 
     FiberIO fio{*ctx->io, *ctx};
     ctx->result = ctx->fn(fio);
     ctx->done   = true;
 
     // Return control to tick() — the fiber must not be resumed after this.
-    swapcontext(&ctx->ctx, ctx->scheduler_ctx);
+    boost::context::detail::jump_fcontext(ctx->scheduler_ctx, nullptr);
 }
 
 void IO::submit_or_wait_for()
@@ -209,8 +210,8 @@ void IO::tick() noexcept
         }
         else if (user_data & 1u)  // fiber op: bit 0 = 1
         {
-            auto* fops  = reinterpret_cast<FiberOps*>(user_data ^ 1u);
-            fops->res   = cqe->res;
+            auto* fops             = reinterpret_cast<FiberOps*>(user_data ^ 1u);
+            fops->fiber->last_res  = cqe->res;
             ready_fibers_.push_back(fops->fiber);
         }
         else  // coroutine op
@@ -245,11 +246,17 @@ void IO::tick() noexcept
         auto fiber_batch = std::exchange(ready_fibers_, {});
         for (FiberContext* fiber : fiber_batch)
         {
-            swapcontext(&scheduler_ctx_, &fiber->ctx);
-            // Returns here when the fiber suspends on I/O or completes.
+            // jump_fcontext saves the current (scheduler) context and resumes
+            // the fiber.  Returns when the fiber suspends or finishes.
+            // t.fctx is the fiber's saved context for the next resume.
+            auto t = boost::context::detail::jump_fcontext(fiber->ctx, fiber);
             if (fiber->done)
             {
                 owned_fibers_.remove_if([fiber](const auto& p) { return p.get() == fiber; });
+            }
+            else
+            {
+                fiber->ctx = t.fctx;
             }
         }
     }

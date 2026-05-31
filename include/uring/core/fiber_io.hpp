@@ -3,6 +3,8 @@
 #include <span>
 #include <sys/uio.h>
 
+#include <boost/context/detail/fcontext.hpp>
+
 #include "uring/core/fiber.hpp"
 #include "uring/core/io.h"
 
@@ -65,10 +67,12 @@ int32_t FiberIO::submit_and_wait(FiberOps& ops, Setup&& setup) noexcept
     std::forward<Setup>(setup)(sqe);
     // Bit 0 = 1 distinguishes FiberOps* from coroutine IoOps* in tick()
     io_uring_sqe_set_data64(sqe, reinterpret_cast<uint64_t>(&ops) | 1u);
-    // Suspend: saves fiber context, resumes IO::scheduler_ctx_ (inside tick())
-    swapcontext(&ctx_.ctx, ctx_.scheduler_ctx);
-    // Resumed: tick() has written ops.res from the CQE
-    return ops.res;
+    // Suspend fiber: jump back to tick().  t.fctx is tick's saved context
+    // (updated each resume so it always points to the current tick call site).
+    auto t = boost::context::detail::jump_fcontext(ctx_.scheduler_ctx, nullptr);
+    ctx_.scheduler_ctx = t.fctx;
+    // tick() wrote ctx_.last_res from the CQE before jumping here
+    return ctx_.last_res;
 }
 
 inline Result<int32_t> FiberIO::write_fixed(Fd& fd, const FixedBuffer& buf, const size_t len, const off_t offset)

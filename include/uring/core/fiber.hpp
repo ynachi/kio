@@ -3,7 +3,8 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
-#include <ucontext.h>
+
+#include <boost/context/detail/fcontext.hpp>
 
 #include "uring/error.hpp"
 
@@ -14,19 +15,24 @@ class IO;
 class FiberIO;
 
 // ============================================================================
-// FiberContext — execution state of one stackful coroutine (fiber)
+// FiberContext — execution state of one stackful fiber
 //
 // Owned by IO::owned_fibers_. Its address is stable for the fiber's lifetime;
 // do not store in containers that can relocate (use std::list, not vector).
+//
+// ctx          — the fiber's saved execution state (updated on each suspend)
+// scheduler_ctx — the event loop's saved state (updated on each jump to fiber)
+// last_res      — CQE result written by tick() before resuming the fiber
 // ============================================================================
 struct FiberContext
 {
-    ucontext_t                            ctx{};
-    ucontext_t*                           scheduler_ctx{nullptr};  // IO::scheduler_ctx_
+    boost::context::detail::fcontext_t    ctx{nullptr};
+    boost::context::detail::fcontext_t    scheduler_ctx{nullptr};
     std::unique_ptr<std::byte[]>          stack;
     size_t                                stack_size{0};
     bool                                  done{false};
     IO*                                   io{nullptr};
+    int32_t                               last_res{0};
     std::function<Result<void>(FiberIO&)> fn;
     Result<void>                          result{};
 
@@ -46,14 +52,14 @@ struct FiberContext
 struct FiberOps
 {
     FiberContext* fiber{nullptr};
-    int32_t       res{-1};
 };
 
 namespace detail
 {
-// Called by makecontext. The FiberContext* is split into two 32-bit words to
-// satisfy makecontext's int-arg ABI on x86-64.
-void fiber_entry(uint32_t hi, uint32_t lo) noexcept;
+// Fiber entry point for Boost.Context. Called by jump_fcontext when a fiber
+// is first resumed. t.data is the FiberContext*; t.fctx is the scheduler's
+// context to jump back to on suspend/completion.
+void fiber_entry(boost::context::detail::transfer_t t) noexcept;
 }  // namespace detail
 
 }  // namespace URing

@@ -210,6 +210,9 @@ find_package(Abseil REQUIRED)
 # mimalloc
 find_package(mimalloc REQUIRED)
 
+# Boost.Context (for stackful fibers)
+find_package(Boost REQUIRED COMPONENTS context)
+
 # openssl, min 3 required
 find_package(OpenSSL 3 REQUIRED)
 message(STATUS "OpenSSL: ${OPENSSL_VERSION}")
@@ -304,6 +307,7 @@ target_link_libraries(uring PUBLIC
         pthread
         OpenSSL::SSL
         OpenSSL::Crypto
+        Boost::context
 )
 kio_add_sanitizers(uring)
 
@@ -388,6 +392,10 @@ if (KIO_BUILD_HTTP_BENCH)
     add_executable(kio_http_bench benchmarks/cpp/kio_http_bench.cpp)
     target_link_libraries(kio_http_bench PRIVATE uring)
     kio_target_compile_options(kio_http_bench)
+
+    add_executable(kio_fiber_http_bench benchmarks/cpp/kio_fiber_http_bench.cpp)
+    target_link_libraries(kio_fiber_http_bench PRIVATE uring)
+    kio_target_compile_options(kio_fiber_http_bench)
 
     add_executable(asio_http_bench benchmarks/cpp/asio_http_bench.cpp)
     target_link_libraries(asio_http_bench PRIVATE pthread)
