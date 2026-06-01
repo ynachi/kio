@@ -34,6 +34,11 @@ kio_add_test(fiber_io_tests uring/fiber_io_test.cpp
         LIBS uring GTest::gtest GTest::gtest_main
 )
 
+kio_add_test(fiber_sync_tests uring/fiber_sync_test.cpp
+        TAGS uring integration fiber sync
+        LIBS uring GTest::gtest GTest::gtest_main
+)
+
 #===============================
 # Bitcask tests
 #================================

@@ -17,6 +17,7 @@
 
 #include "buffer_pool.hpp"
 #include "detail/queue.hpp"
+#include "detail/fiber_queue.hpp"
 #include "uring/core/awaiter.hpp"
 #include "uring/core/task.hpp"
 #include "uring/fd.hpp"
@@ -201,18 +202,23 @@ public:
         ready_fibers_.push_back(raw);
     }
 
-    /// Cross-thread safe fiber spawn.  Posts a lightweight coroutine to this
-    /// IO's MPSC queue; when the target thread picks it up it calls spawn_fiber()
-    /// locally.  The fiber is born on the target thread and never migrates:
-    /// all FiberIO operations use the target IO's ring for their entire lifetime.
+    /// Cross-thread safe fiber spawn.  Constructs the fiber fully on the caller
+    /// and enqueues the raw FiberContext* into the dedicated fiber MPSC queue.
+    /// tick() drains it, takes ownership, and queues the fiber for its first
+    /// resume — so the fiber is born on the target thread and never migrates.
     ///
-    /// Safe to call from any thread.  fn is moved into the coroutine frame and
-    /// then into the fiber — at most two moves, no extra heap allocation beyond
-    /// the coroutine frame (which is freed immediately after spawn_fiber returns).
+    /// Safe to call from any thread.  fn is moved once into FiberContext::fn.
     template <std::invocable<FiberIO&> Fn>
     void schedule_fiber(Fn&& fn, const size_t stack_size = kDefaultFiberStack)
     {
-        schedule(schedule_fiber_task(stack_size, std::forward<Fn>(fn)));
+        auto ctx    = std::make_unique<FiberContext>(stack_size);
+        ctx->io     = this;
+        ctx->fn     = std::forward<Fn>(fn);
+        auto* stack_top = static_cast<char*>(ctx->stack_mem) + kFiberGuardPageSize + stack_size;
+        ctx->ctx    = boost::context::detail::make_fcontext(
+            stack_top, stack_size, detail::fiber_entry);
+        fiber_queue_.enqueue(ctx.release());
+        wake();
     }
 
     void pin_to_cpu() const;
@@ -489,6 +495,7 @@ private:
     // With Boost.Context, there is no single scheduler_ctx_ member.  Each
     // jump_fcontext call captures the caller's state implicitly in transfer_t,
     // so tick() and each fiber exchange context handles on every switch.
+    detail::FiberQueue                        fiber_queue_{};
     std::vector<FiberContext*>                ready_fibers_{};
     std::list<std::unique_ptr<FiberContext>>  owned_fibers_{};
 
@@ -501,6 +508,7 @@ private:
     void arm_wake_read() noexcept;
     void wake() const noexcept;
     io_uring_sqe* get_sqe() noexcept;
+    void cancel_all_fibers() noexcept;
 
     int ring_fd() const noexcept { return ring_.ring_fd; }
 
@@ -510,12 +518,6 @@ private:
         wake();
     }
 
-    template <typename Fn>
-    Task<void> schedule_fiber_task(const size_t stack_size, Fn fn)
-    {
-        spawn_fiber(std::move(fn), stack_size);
-        co_return {};
-    }
 };
 
 // ============================================================================

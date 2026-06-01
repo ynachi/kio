@@ -144,7 +144,7 @@ void IO::submit_or_wait_for()
     // Only block if we have no local work to do.
 
     if (io_uring_cq_ready(&ring_) > 0 || !local_tasks_.empty() || !queue_.empty() ||
-        !ready_fibers_.empty())
+        !ready_fibers_.empty() || !fiber_queue_.empty())
     {
         int ret;
         if (opts_.flags & IORING_SETUP_DEFER_TASKRUN)
@@ -168,7 +168,7 @@ void IO::submit_or_wait_for()
 
         // Double check all sources of work before sleeping
         if (io_uring_cq_ready(&ring_) == 0 && local_tasks_.empty() && queue_.empty() &&
-            ready_fibers_.empty())
+            ready_fibers_.empty() && fiber_queue_.empty())
         {
             if (const auto ret = io_uring_submit_and_wait(&ring_, 1); ret < 0 && ret != -EINTR)
             {
@@ -182,7 +182,17 @@ void IO::submit_or_wait_for()
 
 void IO::tick() noexcept
 {
-    // Drain the cross-thread MPSC queue first.
+    // Adopt fibers enqueued cross-thread via schedule_fiber().
+    fiber_queue_.drain(
+        [this](FiberContext* raw)
+        {
+            owned_fibers_.push_back(std::unique_ptr<FiberContext>(raw));
+            raw->self_it = std::prev(owned_fibers_.end());
+            ready_fibers_.push_back(raw);
+        },
+        opts_.batch_max_size);
+
+    // Drain the cross-thread MPSC queue for coroutines.
     queue_.drain(
         [this](detail::TaskPromiseBase* node)
         {
@@ -295,7 +305,54 @@ void IO::run_blocking(std::stop_token st) noexcept
     is_running_ = false;
 
     ALOG_INFO("Worker {} quiescing...", id_);
-    // TODO: implement cleanup here
+    cancel_all_fibers();
+}
+
+void IO::cancel_all_fibers() noexcept
+{
+    // Adopt any cross-thread fibers that never got a tick.
+    fiber_queue_.drain(
+        [this](FiberContext* raw)
+        {
+            owned_fibers_.push_back(std::unique_ptr<FiberContext>(raw));
+            raw->self_it = std::prev(owned_fibers_.end());
+            ready_fibers_.push_back(raw);
+        });
+
+    // Resume every suspended fiber with -ECANCELED so its stack unwinds.
+    // A well-behaved fiber using FIBER_TRY will propagate the error and exit.
+    // A misbehaving fiber could re-suspend (submit another SQE or call
+    // suspend()); the iteration cap prevents an infinite loop.
+    constexpr int kMaxIter = 1024;
+    for (int iter = 0; iter < kMaxIter && (!owned_fibers_.empty() || !ready_fibers_.empty()); ++iter)
+    {
+        if (!ready_fibers_.empty())
+        {
+            auto batch = std::exchange(ready_fibers_, {});
+            for (FiberContext* fiber : batch)
+            {
+                fiber->last_res = -ECANCELED;
+                auto t = boost::context::detail::jump_fcontext(fiber->ctx, fiber);
+                if (fiber->done)
+                    owned_fibers_.erase(fiber->self_it);
+                else
+                    fiber->ctx = t.fctx;
+            }
+            continue;
+        }
+        // No ready fibers but owned ones remain (suspended on I/O with no
+        // pending wakeup).  Force-resume the first one.
+        FiberContext* fiber = owned_fibers_.begin()->get();
+        fiber->last_res     = -ECANCELED;
+        auto t = boost::context::detail::jump_fcontext(fiber->ctx, fiber);
+        if (fiber->done)
+            owned_fibers_.erase(fiber->self_it);
+        else
+            fiber->ctx = t.fctx;
+    }
+
+    if (!owned_fibers_.empty())
+        ALOG_WARN("Worker {}: {} fiber(s) did not exit after cancellation", id_, owned_fibers_.size());
 }
 
 io_uring_sqe* IO::get_sqe() noexcept
@@ -358,6 +415,11 @@ void IO::pin_to_cpu() const
 
 IO::~IO()
 {
+    // Free any FiberContexts that were enqueued cross-thread but never drained.
+    // schedule_fiber() calls ctx.release() before enqueue, so raw ownership
+    // lives in the queue until tick() wraps it back into a unique_ptr.
+    fiber_queue_.drain([](FiberContext* raw) { delete raw; });
+
     if (ring_.ring_fd > 0 && buffer_pool_.is_registered())
     {
         if (auto res = unregister_buffers(); !res.has_value())

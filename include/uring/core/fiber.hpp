@@ -63,11 +63,23 @@ struct FiberContext
     // Intrusive link for FiberQueue (Vyukov MPSC).
     std::atomic<FiberContext*> next_queued{nullptr};
 
-    // Sentinel-node constructor: no stack allocation.
-    // Used exclusively by FiberQueue for its internal stub node.
+private:
+    // Sentinel support: only FiberQueue may construct a no-stack FiberContext.
+    friend class detail::FiberQueue;
+
     struct StubTag {};
+
+    /// Sentinel-node constructor.  Allocates no stack.
+    /// Only FiberQueue may call this via the StubTag friendship.
     explicit FiberContext(StubTag) noexcept {}
 
+public:
+
+    /// Allocate a fiber stack of @p sz usable bytes plus a PROT_NONE guard page
+    /// below it.  A stack overflow writes into the guard page and raises SIGSEGV
+    /// instead of silently corrupting adjacent heap memory.
+    ///
+    /// @throws std::bad_alloc if mmap or mprotect fails.
     explicit FiberContext(const size_t sz) : stack_size(sz)
     {
         // Allocate guard page + usable stack in one mmap call.
