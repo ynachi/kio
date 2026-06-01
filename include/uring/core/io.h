@@ -183,14 +183,16 @@ public:
     /// MUST be called from the thread that owns this IO.  For cross-thread
     /// fiber spawning use schedule_fiber() instead.
     template <std::invocable<FiberIO&> Fn>
-    void spawn_fiber(const size_t stack_size, Fn&& fn)
+    void spawn_fiber(Fn&& fn, const size_t stack_size = kDefaultFiberStack)
     {
         auto ctx    = std::make_unique<FiberContext>(stack_size);
         ctx->io     = this;
         ctx->fn     = std::forward<Fn>(fn);
-        // Stack grows downward: pass the top (base + size) to make_fcontext
+        // Stack grows downward.  The usable region starts just above the guard
+        // page; its top (highest address) is the stack pointer make_fcontext needs.
+        auto* stack_top = static_cast<char*>(ctx->stack_mem) + kFiberGuardPageSize + stack_size;
         ctx->ctx    = boost::context::detail::make_fcontext(
-            ctx->stack.get() + stack_size, stack_size, detail::fiber_entry);
+            stack_top, stack_size, detail::fiber_entry);
 
         FiberContext* raw = ctx.get();
         owned_fibers_.push_back(std::move(ctx));
@@ -208,7 +210,7 @@ public:
     /// then into the fiber — at most two moves, no extra heap allocation beyond
     /// the coroutine frame (which is freed immediately after spawn_fiber returns).
     template <std::invocable<FiberIO&> Fn>
-    void schedule_fiber(const size_t stack_size, Fn&& fn)
+    void schedule_fiber(Fn&& fn, const size_t stack_size = kDefaultFiberStack)
     {
         schedule(schedule_fiber_task(stack_size, std::forward<Fn>(fn)));
     }
@@ -508,7 +510,7 @@ private:
         wake();
     }
 
-    template <std::invocable<FiberIO&> Fn>
+    template <typename Fn>
     Task<void> schedule_fiber_task(const size_t stack_size, Fn fn)
     {
         spawn_fiber(stack_size, std::move(fn));

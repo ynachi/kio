@@ -4,6 +4,9 @@
 #include <functional>
 #include <list>
 #include <memory>
+#include <new>
+
+#include <sys/mman.h>
 
 #include <boost/context/detail/fcontext.hpp>
 
@@ -15,11 +18,25 @@ namespace URing
 class IO;
 class FiberIO;
 
+/// Default fiber stack size.  Enough for a typical I/O handler with a small
+/// parse buffer; increase for handlers that use large local arrays or call
+/// deeply into unknown third-party code.
+inline constexpr size_t kDefaultFiberStack = 64 * 1024;
+
+/// Size of the guard page placed below every fiber stack.
+/// A write into this region triggers SIGSEGV instead of silent heap corruption.
+inline constexpr size_t kFiberGuardPageSize = 4096;
+
 // ============================================================================
 // FiberContext — execution state of one stackful fiber
 //
 // Owned by IO::owned_fibers_. Its address is stable for the fiber's lifetime;
 // do not store in containers that can relocate (use std::list, not vector).
+//
+// Stack layout (addresses increase upward, stack grows downward):
+//
+//   [ guard page — PROT_NONE — kFiberGuardPageSize bytes ]
+//   [ usable stack — PROT_READ|WRITE — stack_size bytes  ]  ← sp starts here (top)
 //
 // ctx           — fiber's saved execution state (updated on each suspend)
 // scheduler_ctx — event loop's saved state (updated on each jump to fiber)
@@ -30,7 +47,7 @@ struct FiberContext
 {
     boost::context::detail::fcontext_t    ctx{nullptr};
     boost::context::detail::fcontext_t    scheduler_ctx{nullptr};
-    std::unique_ptr<std::byte[]>          stack;
+    void*                                 stack_mem{nullptr};
     size_t                                stack_size{0};
     bool                                  done{false};
     IO*                                   io{nullptr};
@@ -42,9 +59,32 @@ struct FiberContext
     // Filled by spawn_fiber after insertion; enables O(1) self-removal.
     std::list<std::unique_ptr<FiberContext>>::iterator self_it{};
 
-    explicit FiberContext(const size_t sz)
-        : stack(std::make_unique<std::byte[]>(sz)), stack_size(sz)
-    {}
+    explicit FiberContext(const size_t sz) : stack_size(sz)
+    {
+        // Allocate guard page + usable stack in one mmap call.
+        // The guard page sits at the bottom (lowest address); a write into it
+        // from an overflowing stack produces SIGSEGV instead of silent corruption.
+        void* mem = mmap(nullptr, kFiberGuardPageSize + sz,
+                         PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK,
+                         -1, 0);
+        if (mem == MAP_FAILED) [[unlikely]]
+            throw std::bad_alloc{};
+
+        if (mprotect(mem, kFiberGuardPageSize, PROT_NONE) != 0) [[unlikely]]
+        {
+            munmap(mem, kFiberGuardPageSize + sz);
+            throw std::bad_alloc{};
+        }
+
+        stack_mem = mem;
+    }
+
+    ~FiberContext()
+    {
+        if (stack_mem != nullptr)
+            munmap(stack_mem, kFiberGuardPageSize + stack_size);
+    }
 
     // Non-movable: raw pointer to this is stored in ready_fibers_ and SQE user_data
     FiberContext(const FiberContext&)            = delete;
