@@ -3,6 +3,7 @@
 #include "uring/extention/io_pool.hpp"
 
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
@@ -176,7 +177,7 @@ TEST(FiberIOTest, ScheduleFiberRunsOnTargetWorker)
     EXPECT_EQ(fiber_after_io_thread.load(std::memory_order_acquire), worker_thread.load(std::memory_order_acquire));
 }
 
-// Spawn N fibers on the same IO concurrently.  Exercises owned_fibers_ management
+// Spawn N fibers on the same IO concurrently. Exercises owned-fiber management
 // and the interleaved suspend/resume of multiple live fibers.
 TEST(FiberIOTest, MultipleConcurrentFibers)
 {
@@ -313,4 +314,48 @@ TEST(FiberIOTest, ScheduleFiberFromExternalThread)
     // Fiber must have run on the IO thread, not on the test thread.
     EXPECT_NE(fiber_thread.load(), current_thread_hash());
     EXPECT_EQ(fiber_thread.load(), io_thread.load());
+}
+
+TEST(FiberIOTest, StopCancelsInFlightFiberIoBeforeDestroyingStack)
+{
+    IoOptions opts;
+    opts.tick_timeout_ms = 1;
+
+    IO io(0, nullptr, opts, {});
+
+    int pipe_fds[2];
+    ASSERT_EQ(::pipe(pipe_fds), 0);
+    Fd read_fd{pipe_fds[0]};
+    Fd write_fd{pipe_fds[1]};
+
+    std::atomic_bool entered{false};
+    std::atomic_bool done{false};
+    std::optional<std::error_code> captured;
+
+    io.spawn_fiber(
+        [&](FiberIO& fio) -> Result<void>
+        {
+            std::array<std::byte, 16> buf{};
+            entered.store(true, std::memory_order_release);
+            auto res = fio.read(read_fd, buf);
+            captured = res.has_value() ? std::nullopt : std::optional{res.error()};
+            done.store(true, std::memory_order_release);
+            if (!res)
+                return std::unexpected(res.error());
+            return {};
+        });
+
+    std::jthread runner([&](std::stop_token st) { io.run_blocking(st); });
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (!entered.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+    ASSERT_TRUE(entered.load()) << "fiber did not submit the blocking read";
+    runner.request_stop();
+    runner.join();
+
+    ASSERT_TRUE(done.load()) << "fiber did not unwind after stop";
+    ASSERT_TRUE(captured.has_value()) << "expected cancellation error";
+    EXPECT_EQ(captured->value(), ECANCELED);
 }

@@ -97,7 +97,7 @@ URing::Result<void> write_all(URing::FiberIO& fio, URing::Fd& fd, std::span<cons
     while (!data.empty())
     {
         iovec iov{.iov_base = const_cast<std::byte*>(data.data()), .iov_len = data.size()};
-        FIBER_TRY(auto written, fio.writev(fd, std::span<const iovec>{&iov, 1}));
+        FIBER_TRY(const auto written, fio.writev(fd, std::span<const iovec>{&iov, 1}));
         if (written <= 0)
         {
             return URing::error_from_errc(std::errc::io_error);

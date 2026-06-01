@@ -196,10 +196,17 @@ public:
             stack_top, stack_size, detail::fiber_entry);
 
         FiberContext* raw = ctx.get();
-        owned_fibers_.push_back(std::move(ctx));
-        // Record iterator for O(1) removal when the fiber completes
-        raw->self_it = std::prev(owned_fibers_.end());
-        ready_fibers_.push_back(raw);
+        link_fiber(raw);
+        try
+        {
+            ready_fibers_.push_back(raw);
+        }
+        catch (...)
+        {
+            detach_fiber(raw);
+            throw;
+        }
+        ctx.release();
     }
 
     /// Cross-thread safe fiber spawn.  Constructs the fiber fully on the caller
@@ -473,6 +480,7 @@ public:
 
 private:
     static constexpr uint64_t kWakeupSentinel = 0xDEAD'C0DE'DEAD'C0DEULL;
+    static constexpr uint64_t kFiberCancelSentinel = 0xDEAD'C0DE'DEAD'C0CCULL;
     static constexpr size_t kMaxResumesPerTick = 128;
 
     io_uring ring_{};
@@ -497,7 +505,10 @@ private:
     // so tick() and each fiber exchange context handles on every switch.
     detail::FiberQueue                        fiber_queue_{};
     std::vector<FiberContext*>                ready_fibers_{};
-    std::list<std::unique_ptr<FiberContext>>  owned_fibers_{};
+    FiberContext*                             owned_head_{nullptr};
+    FiberContext*                             owned_tail_{nullptr};
+    size_t                                    owned_count_{0};
+    bool                                      canceling_fibers_{false};
 
     /// Creates the Ring in an uninitialized way
     void init(int wq_fd = -1);
@@ -508,6 +519,9 @@ private:
     void arm_wake_read() noexcept;
     void wake() const noexcept;
     io_uring_sqe* get_sqe() noexcept;
+    void link_fiber(FiberContext* ctx) noexcept;
+    void detach_fiber(FiberContext* ctx) noexcept;
+    void unlink_fiber(FiberContext* ctx) noexcept;
     void cancel_all_fibers() noexcept;
 
     int ring_fd() const noexcept { return ring_.ring_fd; }

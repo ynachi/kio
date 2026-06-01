@@ -118,7 +118,7 @@ if (user_data & 1u)                                    // fiber CQE
     fiber->last_res = cqe->res;                        // make result available before resume
     auto t = jump_fcontext(fiber->ctx, fiber);
     if (fiber->done)
-        owned_fibers_.erase(fiber->self_it);           // O(1) via stored iterator
+        unlink_fiber(fiber);                           // O(1) via intrusive links
     else
         fiber->ctx = t.fctx;                           // save fiber's new suspended state
 }
@@ -157,32 +157,33 @@ From the fiber's point of view this is a blocking call. From `tick()`'s point of
 ```
 spawn_fiber()
   │  allocates FiberContext (mmap + make_fcontext)
-  │  pushes to owned_fibers_ (std::list)
-  │  stores self_it = prev(end)   ← O(1) removal later
+  │  links into IO's intrusive owned-fiber list
   └► pushes raw ptr to ready_fibers_
 
 tick() — end of loop, ready_fibers_ batch (new spawns + sync wakeups):
   for fiber in ready_fibers_:
     jump_fcontext(fiber->ctx, fiber)   ← first-time: calls fiber_entry; re-resume: returns from suspend()
-    if done: owned_fibers_.erase(self_it)
+    if done: unlink_fiber(fiber)
     else:    fiber->ctx = t.fctx
 
 tick() — inside CQE loop, resuming suspended fibers:
   fiber->last_res = cqe->res
   jump_fcontext(fiber->ctx, fiber)
-  if done: owned_fibers_.erase(self_it)
+  if done: unlink_fiber(fiber)
   else:    fiber->ctx = t.fctx
 ```
 
-`owned_fibers_` is a `std::list<unique_ptr<FiberContext>>`. Iterators into `std::list` are stable for the object's lifetime, so `self_it` stored at spawn time is always valid until the `erase` call.
+The owned-fiber list is intrusive: `FiberContext::prev_owned` and `next_owned`
+link each live fiber into `IO`. This keeps the fiber address stable and allows
+O(1) removal without storing a nullable standard-library iterator in the fiber.
 
 ---
 
 ## Ownership and lifetime
 
-- `IO::owned_fibers_` (`std::list<unique_ptr<FiberContext>>`) — sole owner of all fiber stacks
+- `IO`'s intrusive owned-fiber list — sole owner of all fiber stacks
 - `IO::ready_fibers_` (`std::vector<FiberContext*>`) — raw pointers to fibers pending their next resume: newly spawned fibers waiting for their first run, and fibers re-enqueued by sync primitives via `FiberIO::wakeup()`
-- SQE `user_data` — raw pointer tag for fibers suspended on an I/O op; valid because the fiber is alive in `owned_fibers_` until it completes
+- SQE `user_data` — raw pointer tag for fibers suspended on an I/O op; valid because the fiber is alive in the owned-fiber list until it completes
 
 `FiberContext` is **non-movable** and **non-copyable** — its address is stored in multiple places and must be stable.
 
@@ -213,14 +214,13 @@ other_io.schedule_fiber([](FiberIO& fio) -> Result<void> {
 });
 ```
 
-Constructs the `FiberContext` fully on the caller (allocates the stack, calls `make_fcontext`), then enqueues the raw pointer into `IO::fiber_queue_` (a `FiberQueue` Vyukov MPSC queue) and calls `wake()`. The target thread's `tick()` drains `fiber_queue_` at the top of every call, takes ownership of each pointer back into `owned_fibers_`, and queues it for its first resume. The fiber is born on the target thread and never migrates.
+Constructs the `FiberContext` fully on the caller (allocates the stack, calls `make_fcontext`), then enqueues the raw pointer into `IO::fiber_queue_` (a `FiberQueue` Vyukov MPSC queue) and calls `wake()`. The target thread's `tick()` drains `fiber_queue_` at the top of every call, links each pointer into its owned-fiber list, and queues it for its first resume. The fiber is born on the target thread and never migrates.
 
 ```cpp
 // tick() — top of every call
-fiber_queue_.drain([this](FiberContext* raw) {
-    owned_fibers_.push_back(std::unique_ptr<FiberContext>(raw));
-    raw->self_it = std::prev(owned_fibers_.end());
-    ready_fibers_.push_back(raw);
+fiber_queue_.drain([this](FiberContext* fiber) {
+    link_fiber(fiber);
+    ready_fibers_.push_back(fiber);
 });
 ```
 

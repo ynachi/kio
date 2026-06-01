@@ -60,10 +60,14 @@ public:
     ///
     /// Prefer the higher-level primitives in fiber_sync.hpp.  Only call this
     /// directly when building a new synchronization abstraction.
-    void suspend() noexcept
+    Result<void> suspend() noexcept
     {
+        ctx_.state = FiberState::SyncWait;
         auto t = boost::context::detail::jump_fcontext(ctx_.scheduler_ctx, nullptr);
         ctx_.scheduler_ctx = t.fctx;
+        if (ctx_.last_res < 0) [[unlikely]]
+            return std::unexpected(make_error_code(ctx_.last_res));
+        return {};
     }
 
     /// Re-enqueue @p ctx so the event loop resumes it on its next tick.
@@ -77,6 +81,8 @@ public:
     {
         assert(ctx.io == &io_ &&
                "FiberMutex/Semaphore/Channel must not be shared across IO workers");
+        ctx.last_res = 0;
+        ctx.state = FiberState::Ready;
         io_.ready_fibers_.push_back(&ctx);
     }
 
@@ -156,6 +162,7 @@ public:
 
     /// Open or create the file at @p path and return a file descriptor.
     ///
+    /// @param path
     /// @param flags  Standard open(2) flags such as O_RDONLY, O_CREAT | O_WRONLY.
     /// @param mode   Permission bits used when O_CREAT creates a new file.
     ///               Ignored if O_CREAT is not set.
@@ -215,13 +222,22 @@ public:
 template <typename Setup>
 int32_t FiberIO::submit_and_wait(Setup&& setup) noexcept
 {
+    if (io_.canceling_fibers_) [[unlikely]]
+    {
+        return -ECANCELED;
+    }
+
     io_uring_sqe* sqe = io_.get_sqe();
     if (sqe == nullptr) [[unlikely]]
+    {
         return -EBUSY;
+    }
 
     std::forward<Setup>(setup)(sqe);
     // Store FiberContext* directly (bit 0 = 1 distinguishes from IoOps* in tick())
-    io_uring_sqe_set_data64(sqe, reinterpret_cast<uint64_t>(&ctx_) | 1u);
+    ctx_.pending_user_data = reinterpret_cast<uint64_t>(&ctx_) | 1u;
+    ctx_.state = FiberState::IoWait;
+    io_uring_sqe_set_data64(sqe, ctx_.pending_user_data);
     // Suspend fiber: jump back to tick().  t.fctx is tick's saved context
     // (updated each resume so it always points to the current tick call site).
     auto t = boost::context::detail::jump_fcontext(ctx_.scheduler_ctx, nullptr);
@@ -237,7 +253,9 @@ inline Result<int32_t> FiberIO::write_fixed(Fd& fd, const FixedBuffer& buf, cons
         [raw_fd = fd.fd, ptr = buf.ptr(), safe_len, idx = buf.index(), offset](io_uring_sqe* sqe)
         { io_uring_prep_write_fixed(sqe, raw_fd, ptr, safe_len, offset, idx); });
     if (res < 0) [[unlikely]]
+    {
         return std::unexpected(make_error_code(res));
+    }
     return res;
 }
 
@@ -253,7 +271,9 @@ inline Result<int32_t> FiberIO::read_fixed(Fd& fd, FixedBuffer& buf, const size_
         [raw_fd = fd.fd, ptr = buf.ptr(), safe_len, idx = buf.index(), offset](io_uring_sqe* sqe)
         { io_uring_prep_read_fixed(sqe, raw_fd, ptr, safe_len, offset, idx); });
     if (res < 0) [[unlikely]]
+    {
         return std::unexpected(make_error_code(res));
+    }
     return res;
 }
 
@@ -268,7 +288,9 @@ inline Result<int32_t> FiberIO::read(Fd& fd, const std::span<std::byte> buf, con
         [raw_fd = fd.fd, buf, offset](io_uring_sqe* sqe)
         { io_uring_prep_read(sqe, raw_fd, buf.data(), buf.size(), offset); });
     if (res < 0) [[unlikely]]
+    {
         return std::unexpected(make_error_code(res));
+    }
     return res;
 }
 
@@ -278,7 +300,9 @@ inline Result<int32_t> FiberIO::writev(Fd& fd, const std::span<const iovec> iove
         [raw_fd = fd.fd, iovecs, offset](io_uring_sqe* sqe)
         { io_uring_prep_writev(sqe, raw_fd, iovecs.data(), static_cast<unsigned>(iovecs.size()), offset); });
     if (res < 0) [[unlikely]]
+    {
         return std::unexpected(make_error_code(res));
+    }
     return res;
 }
 
@@ -288,7 +312,9 @@ inline Result<void> FiberIO::fsync(Fd& fd, const bool datasync)
         [raw_fd = fd.fd, datasync](io_uring_sqe* sqe)
         { io_uring_prep_fsync(sqe, raw_fd, datasync ? IORING_FSYNC_DATASYNC : 0u); });
     if (res < 0) [[unlikely]]
+    {
         return std::unexpected(make_error_code(res));
+    }
     return {};
 }
 
@@ -299,7 +325,9 @@ inline Result<Fd> FiberIO::open(std::filesystem::path path, const int flags, con
         [path = std::move(path), flags, mode](io_uring_sqe* sqe)
         { io_uring_prep_openat(sqe, AT_FDCWD, path.c_str(), flags, mode); });
     if (res < 0) [[unlikely]]
+    {
         return std::unexpected(make_error_code(res));
+    }
     return Fd{res};
 }
 
@@ -309,7 +337,9 @@ inline Result<void> FiberIO::close(Fd&& fd)
         [fd = std::move(fd)](io_uring_sqe* sqe) mutable
         { io_uring_prep_close(sqe, fd.Release()); });
     if (res < 0) [[unlikely]]
+    {
         return std::unexpected(make_error_code(res));
+    }
     return {};
 }
 
@@ -319,7 +349,9 @@ inline Result<void> FiberIO::fallocate(Fd& fd, const int mode, const off_t offse
         [raw_fd = fd.fd, mode, offset, len](io_uring_sqe* sqe)
         { io_uring_prep_fallocate(sqe, raw_fd, mode, offset, len); });
     if (res < 0) [[unlikely]]
+    {
         return std::unexpected(make_error_code(res));
+    }
     return {};
 }
 
@@ -329,7 +361,9 @@ inline Result<void> FiberIO::ftruncate(Fd& fd, const off_t len)
         [raw_fd = fd.fd, len](io_uring_sqe* sqe)
         { io_uring_prep_ftruncate(sqe, raw_fd, len); });
     if (res < 0) [[unlikely]]
+    {
         return std::unexpected(make_error_code(res));
+    }
     return {};
 }
 

@@ -18,6 +18,19 @@ namespace URing
 
 class IO;
 class FiberIO;
+namespace detail
+{
+class FiberQueue;
+}
+
+enum class FiberState : std::uint8_t
+{
+    Ready,
+    Running,
+    IoWait,
+    SyncWait,
+    Done,
+};
 
 /// Default fiber stack size.  Enough for a typical I/O handler with a small
 /// parse buffer; increase for handlers that use large local arrays or call
@@ -31,8 +44,8 @@ inline constexpr size_t kFiberGuardPageSize = 4096;
 // ============================================================================
 // FiberContext — execution state of one stackful fiber
 //
-// Owned by IO::owned_fibers_. Its address is stable for the fiber's lifetime;
-// do not store in containers that can relocate (use std::list, not vector).
+// Owned by IO's intrusive fiber list. Its address is stable for the fiber's
+// lifetime and may be stored in ready queues and SQE user_data.
 //
 // Stack layout (addresses increase upward, stack grows downward):
 //
@@ -42,7 +55,7 @@ inline constexpr size_t kFiberGuardPageSize = 4096;
 // ctx           — fiber's saved execution state (updated on each suspend)
 // scheduler_ctx — event loop's saved state (updated on each jump to fiber)
 // last_res      — CQE result written by tick() before resuming the fiber
-// self_it       — iterator into owned_fibers_ for O(1) removal on completion
+// prev/next_owned — intrusive owned-list links for O(1) removal on completion
 // ============================================================================
 struct FiberContext
 {
@@ -50,15 +63,19 @@ struct FiberContext
     boost::context::detail::fcontext_t    scheduler_ctx{nullptr};
     void*                                 stack_mem{nullptr};
     size_t                                stack_size{0};
+    FiberState                            state{FiberState::Ready};
+    bool                                  started{false};
     bool                                  done{false};
     IO*                                   io{nullptr};
     int32_t                               last_res{0};
+    uint64_t                              pending_user_data{0};
+    bool                                  cancel_requested{false};
     // move_only_function: avoids CopyConstructible requirement and the extra
     // heap allocation that std::function incurs for large captures.
     std::move_only_function<Result<void>(FiberIO&)> fn;
     Result<void>                                    result{};
-    // Filled by spawn_fiber after insertion; enables O(1) self-removal.
-    std::list<std::unique_ptr<FiberContext>>::iterator self_it{};
+    FiberContext*                         prev_owned{nullptr};
+    FiberContext*                         next_owned{nullptr};
 
     // Intrusive link for FiberQueue (Vyukov MPSC).
     std::atomic<FiberContext*> next_queued{nullptr};

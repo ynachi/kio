@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -53,7 +54,7 @@ TEST(FiberMutexTest, EnforcesMutualExclusion)
     io.spawn_fiber(
         [&](FiberIO& fio) -> Result<void>
         {
-            mu.lock(fio);
+            FIBER_TRY_VOID(mu.lock(fio));
             log.push_back("A:locked");
             FIBER_TRY(auto fd, fio.open(path, O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0644));
             log.push_back("A:io");
@@ -68,7 +69,7 @@ TEST(FiberMutexTest, EnforcesMutualExclusion)
     io.spawn_fiber(
         [&](FiberIO& fio) -> Result<void>
         {
-            mu.lock(fio);
+            FIBER_TRY_VOID(mu.lock(fio));
             log.push_back("B:locked");
             mu.unlock(fio);
             done.fetch_add(1, std::memory_order_release);
@@ -140,6 +141,7 @@ TEST(FiberMutexTest, LockGuardReleasesOnExit)
         {
             {
                 FiberLockGuard g{mu, fio};
+                FIBER_TRY_VOID(g.result());
                 FIBER_TRY(auto fd, fio.open(path, O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0644));
                 FIBER_TRY_VOID(fio.close(std::move(fd)));
             }  // guard releases here
@@ -152,6 +154,7 @@ TEST(FiberMutexTest, LockGuardReleasesOnExit)
         [&](FiberIO& fio) -> Result<void>
         {
             FiberLockGuard g{mu, fio};  // suspends until A's guard releases
+            FIBER_TRY_VOID(g.result());
             second_acquired.store(true, std::memory_order_release);
             return {};
         });
@@ -200,7 +203,7 @@ TEST(FiberSemaphoreTest, SignalingOrdering)
     io.spawn_fiber(
         [&](FiberIO& fio) -> Result<void>
         {
-            sem.wait(fio);
+            FIBER_TRY_VOID(sem.wait(fio));
             log.push_back("B:resumed");
             done.fetch_add(1, std::memory_order_release);
             return {};
@@ -237,7 +240,7 @@ TEST(FiberSemaphoreTest, CountingBehavior)
         io.spawn_fiber(
             [&](FiberIO& fio) -> Result<void>
             {
-                sem.wait(fio);
+                FIBER_TRY_VOID(sem.wait(fio));
                 passed.fetch_add(1, std::memory_order_release);
                 done.fetch_add(1, std::memory_order_release);
                 return {};
@@ -268,6 +271,42 @@ TEST(FiberSemaphoreTest, CountingBehavior)
     EXPECT_EQ(sem.value(), 0);     // all slots consumed
 }
 
+TEST(FiberSemaphoreTest, StopCancelsWaitingFiber)
+{
+    IO io(0, nullptr, fast_opts(), {});
+
+    FiberSemaphore sem{0};
+    std::atomic<bool> entered{false};
+    std::atomic<bool> done{false};
+    std::optional<std::error_code> captured;
+
+    io.spawn_fiber(
+        [&](FiberIO& fio) -> Result<void>
+        {
+            entered.store(true, std::memory_order_release);
+            auto res = sem.wait(fio);
+            captured = res.has_value() ? std::nullopt : std::optional{res.error()};
+            done.store(true, std::memory_order_release);
+            if (!res)
+                return std::unexpected(res.error());
+            return {};
+        });
+
+    std::jthread runner([&](std::stop_token st) { io.run_blocking(st); });
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (!entered.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+    ASSERT_TRUE(entered.load()) << "fiber did not enter semaphore wait";
+    runner.request_stop();
+    runner.join();
+
+    ASSERT_TRUE(done.load()) << "fiber did not unwind after stop";
+    ASSERT_TRUE(captured.has_value()) << "expected cancellation error";
+    EXPECT_EQ(captured->value(), ECANCELED);
+}
+
 // ─── FiberChannel ─────────────────────────────────────────────────────────────
 
 // Producer sends 5 integers through a capacity-2 channel.
@@ -284,7 +323,7 @@ TEST(FiberChannelTest, BoundedSendRecvOrdering)
         [&](FiberIO& fio) -> Result<void>
         {
             for (int i = 0; i < 5; ++i)
-                ch.send(fio, i);
+                FIBER_TRY_VOID(ch.send(fio, i));
             return {};
         });
 
@@ -292,7 +331,10 @@ TEST(FiberChannelTest, BoundedSendRecvOrdering)
         [&](FiberIO& fio) -> Result<void>
         {
             for (int i = 0; i < 5; ++i)
-                received.push_back(ch.recv(fio));
+            {
+                FIBER_TRY(auto value, ch.recv(fio));
+                received.push_back(value);
+            }
             done.store(true, std::memory_order_release);
             return {};
         });
@@ -327,7 +369,8 @@ TEST(FiberChannelTest, RecvBlocksUntilData)
     io.spawn_fiber(
         [&](FiberIO& fio) -> Result<void>
         {
-            got = ch.recv(fio);
+            FIBER_TRY(auto value, ch.recv(fio));
+            got = std::move(value);
             consumer_done.store(true, std::memory_order_release);
             return {};
         });
@@ -336,7 +379,7 @@ TEST(FiberChannelTest, RecvBlocksUntilData)
     io.spawn_fiber(
         [&](FiberIO& fio) -> Result<void>
         {
-            ch.send(fio, std::string{"hello"});
+            FIBER_TRY_VOID(ch.send(fio, std::string{"hello"}));
             producer_done.store(true, std::memory_order_release);
             return {};
         });
