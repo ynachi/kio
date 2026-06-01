@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -58,6 +59,14 @@ struct FiberContext
     Result<void>                                    result{};
     // Filled by spawn_fiber after insertion; enables O(1) self-removal.
     std::list<std::unique_ptr<FiberContext>>::iterator self_it{};
+
+    // Intrusive link for FiberQueue (Vyukov MPSC).
+    std::atomic<FiberContext*> next_queued{nullptr};
+
+    // Sentinel-node constructor: no stack allocation.
+    // Used exclusively by FiberQueue for its internal stub node.
+    struct StubTag {};
+    explicit FiberContext(StubTag) noexcept {}
 
     explicit FiberContext(const size_t sz) : stack_size(sz)
     {

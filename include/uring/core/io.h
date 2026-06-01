@@ -513,7 +513,7 @@ private:
     template <typename Fn>
     Task<void> schedule_fiber_task(const size_t stack_size, Fn fn)
     {
-        spawn_fiber(stack_size, std::move(fn));
+        spawn_fiber(std::move(fn), stack_size);
         co_return {};
     }
 };

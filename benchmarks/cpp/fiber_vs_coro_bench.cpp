@@ -224,8 +224,8 @@ BenchResult bench_stackful(const Options& opts)
     std::atomic_bool done{false};
     std::optional<std::error_code> error;
 
-    io.spawn_fiber(64 * 1024,
-                   [&](URing::FiberIO& fio) -> URing::Result<void>
+    io.spawn_fiber(
+        [&](URing::FiberIO& fio) -> URing::Result<void>
                    {
                        auto result = stackful_write_loop(fio, fd, opts, out);
                        if (!result.has_value())
@@ -234,7 +234,8 @@ BenchResult bench_stackful(const Options& opts)
                        }
                        done.store(true, std::memory_order_release);
                        return result;
-                   });
+                   },
+        64 * 1024);
 
     while (!done.load(std::memory_order_acquire))
     {

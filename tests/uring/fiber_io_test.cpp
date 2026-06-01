@@ -85,8 +85,8 @@ TEST(FiberIOTest, FixedBufferRoundTrip)
     std::optional<std::error_code> error;
     std::string observed;
 
-    io.spawn_fiber(64 * 1024,
-                   [&](FiberIO& fio) -> Result<void>
+    io.spawn_fiber(
+        [&](FiberIO& fio) -> Result<void>
                    {
                        auto result = write_and_read_back(fio, path, payload, observed);
                        if (!result.has_value())
@@ -95,7 +95,8 @@ TEST(FiberIOTest, FixedBufferRoundTrip)
                        }
                        done.store(true, std::memory_order_release);
                        return result;
-                   });
+                   },
+        64 * 1024);
 
     std::jthread runner([&](std::stop_token st) { io.run_blocking(st); });
 
@@ -131,8 +132,8 @@ TEST(FiberIOTest, ScheduleFiberRunsOnTargetWorker)
     std::optional<std::error_code> error;
 
     ctx.worker(1).schedule(record_current_thread(worker_thread, worker_recorded));
-    ctx.worker(1).schedule_fiber(64 * 1024,
-                                 [&](FiberIO& fio) -> Result<void>
+    ctx.worker(1).schedule_fiber(
+        [&](FiberIO& fio) -> Result<void>
                                  {
                                      fiber_start_thread.store(current_thread_hash(), std::memory_order_release);
 
@@ -155,7 +156,8 @@ TEST(FiberIOTest, ScheduleFiberRunsOnTargetWorker)
 
                                      fiber_done.store(true, std::memory_order_release);
                                      return {};
-                                 });
+                                 },
+        64 * 1024);
 
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
     while ((!worker_recorded.load(std::memory_order_acquire) || !fiber_done.load(std::memory_order_acquire)) &&

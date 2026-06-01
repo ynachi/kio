@@ -214,8 +214,8 @@ BenchResult bench_kio_fiber(const Options& opts, const std::vector<std::byte>& b
     std::optional<std::error_code> error;
     BenchResult result;
 
-    io.spawn_fiber(64 * 1024,
-                   [&](URing::FiberIO& fio) -> URing::Result<void>
+    io.spawn_fiber(
+        [&](URing::FiberIO& fio) -> URing::Result<void>
                    {
                        const auto start = Clock::now();
                        auto write_res = kio_fiber_write_all(fio, fd, block, opts.bytes);
@@ -233,7 +233,8 @@ BenchResult bench_kio_fiber(const Options& opts, const std::vector<std::byte>& b
                        }
                        done.store(true, std::memory_order_release);
                        return write_res;
-                   });
+                   },
+        64 * 1024);
 
     std::jthread runner([&](std::stop_token st) { io.run_blocking(st); });
     while (!done.load(std::memory_order_acquire))

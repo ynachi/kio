@@ -154,7 +154,7 @@ URing::Task<void> accept_loop(URing::IO& worker, uint16_t port, size_t stack_siz
         }
 
         const int raw_fd = client_res->Release();
-        worker.spawn_fiber(stack_size, [raw_fd](URing::FiberIO& fio) { return handle_client(fio, raw_fd); });
+        worker.spawn_fiber([raw_fd](URing::FiberIO& fio) { return handle_client(fio, raw_fd); }, stack_size);
     }
 
     co_return {};
