@@ -397,6 +397,26 @@ if (KIO_BUILD_HTTP_BENCH)
     target_link_libraries(kio_fiber_http_bench PRIVATE uring)
     kio_target_compile_options(kio_fiber_http_bench)
 
+    add_executable(zio_http_bench zio/bench/http_bench.cpp)
+    target_link_libraries(zio_http_bench PRIVATE uring mimalloc-static pthread)
+    kio_target_compile_options(zio_http_bench)
+
+    add_executable(zio_file_io_bench zio/bench/file_io_bench.cpp)
+    target_link_libraries(zio_file_io_bench PRIVATE uring mimalloc-static)
+    kio_target_compile_options(zio_file_io_bench)
+
+    add_executable(zio_cross_thread_spawn_smoke zio/bench/cross_thread_spawn_smoke.cpp)
+    target_link_libraries(zio_cross_thread_spawn_smoke PRIVATE uring mimalloc-static pthread)
+    kio_target_compile_options(zio_cross_thread_spawn_smoke)
+
+    add_executable(other_baseline_http_bench zio/bench/other_baseline_http_bench.cpp)
+    target_link_libraries(other_baseline_http_bench PRIVATE uring mimalloc-static pthread)
+    kio_target_compile_options(other_baseline_http_bench)
+
+    add_executable(other_baseline_file_io_bench zio/bench/other_baseline_file_io_bench.cpp)
+    target_link_libraries(other_baseline_file_io_bench PRIVATE uring mimalloc-static)
+    kio_target_compile_options(other_baseline_file_io_bench)
+
     add_executable(asio_http_bench benchmarks/cpp/asio_http_bench.cpp)
     target_link_libraries(asio_http_bench PRIVATE pthread)
     kio_target_compile_options(asio_http_bench)
