@@ -8,7 +8,7 @@
 
 namespace URing
 {
-IO::IO(size_t id, const IO* leader, const IoOptions& opts, std::initializer_list<BucketConfig> buffers)
+IO::IO(const size_t id, const IO* leader, const IoOptions& opts, std::initializer_list<BucketConfig> buffers)
     : opts_(opts), id_(id), buffer_pool_(buffers)
 {
     if (opts_.batch_max_size == 0)
@@ -40,8 +40,8 @@ IO::IO(size_t id, const IO* leader, const IoOptions& opts, std::initializer_list
     }
     if (buffer_pool_.total_capacity() != 0)
     {
-        const int ret = io_uring_register_buffers(&ring_, buffer_pool_.iovecs_ptr(), buffer_pool_.total_capacity());
-        if (ret < 0)
+        if (const int ret = io_uring_register_buffers(&ring_, buffer_pool_.iovecs_ptr(), buffer_pool_.total_capacity());
+            ret < 0)
         {
             io_uring_queue_exit(&ring_);
             ::close(wake_fd_);

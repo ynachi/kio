@@ -174,7 +174,7 @@ public:
                 return error_from_errno(res);
             });
     }
-    [[nodiscard]] auto read_fixed(Fd& fd, FixedBuffer& buf, size_t len, off_t offset)
+    [[nodiscard]] auto read_fixed(Fd& fd, FixedBuffer& buf, const size_t len, off_t offset)
     {
         const int error = buf.pool_ == &buffer_pool_ ? 0 : -EINVAL;
         return IoAwaiter(
@@ -204,7 +204,7 @@ public:
 private:
     struct ResumeFd
     {
-        Result<Fd> operator()(int32_t res) const noexcept
+        Result<Fd> operator()(const int32_t res) const noexcept
         {
             if (res < 0)
                 return error_from_errno(res);
