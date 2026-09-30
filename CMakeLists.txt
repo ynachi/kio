@@ -202,9 +202,9 @@ if (KIO_BUILD_TESTS)
     find_package(GTest REQUIRED)
 endif ()
 
+find_package(Abseil REQUIRED)
 if (KIO_BUILD_BITCASK)
     find_package(CRC32C REQUIRED)
-    find_package(Abseil REQUIRED)
 endif ()
 if (KIO_USE_MIMALLOC)
     find_package(mimalloc REQUIRED)
@@ -287,6 +287,7 @@ add_library(uring
         src/uring/net.cc
         src/uring/tcp_listener.cc
         src/uring/buffer_pool.cc
+        src/uring/logger.cc
 )
 # Include directories
 target_include_directories(uring PUBLIC
@@ -297,6 +298,13 @@ target_include_directories(uring PUBLIC
 target_link_libraries(uring PUBLIC
         PkgConfig::LibUring
         Threads::Threads
+        absl::log
+        absl::log_initialize
+        absl::log_globals
+        absl::log_sink
+        absl::log_sink_registry
+        absl::log_severity
+        absl::log_entry
 )
 if (KIO_USE_MIMALLOC)
     target_link_libraries(uring PUBLIC mimalloc-static)

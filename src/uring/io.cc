@@ -55,7 +55,7 @@ bool IO::schedule(Task<void> task)
     std::scoped_lock lock(admission_mutex_);
     if (!accepting_)
         return false;
-    auto handle = task.release();
+    const auto handle = task.release();
     if (!handle)
         throw std::invalid_argument("cannot schedule an empty Task");
     auto& promise = handle.promise();
@@ -110,11 +110,7 @@ void IO::adopt_roots()
     incoming_.drain(
         [this](detail::TaskPromiseBase* root)
         {
-            root->root_prev = nullptr;
-            root->root_next = roots_;
-            if (roots_)
-                roots_->root_prev = root;
-            roots_ = root;
+            ++active_roots_;
             root->on_complete = complete_root;
             ready_.push_back(root->self_handle);
         },
@@ -124,12 +120,7 @@ void IO::adopt_roots()
 void IO::complete_root(detail::TaskPromiseBase& root) noexcept
 {
     IO& io = *root.owner;
-    if (root.root_prev)
-        root.root_prev->root_next = root.root_next;
-    else
-        io.roots_ = root.root_next;
-    if (root.root_next)
-        root.root_next->root_prev = root.root_prev;
+    --io.active_roots_;
     root.root_next = io.completed_;
     io.completed_ = &root;
 }
@@ -235,9 +226,9 @@ void IO::shutdown()
     {
         adopt_roots();
         cancel_pending();
-        if (roots_ || pending_ || !ready_.empty())
+        if (active_roots_ || pending_ || !ready_.empty())
             tick();
-    } while (roots_ || pending_ || !ready_.empty() || !incoming_.empty());
+    } while (active_roots_ || pending_ || !ready_.empty() || !incoming_.empty());
     reap_completed();
 }
 
@@ -305,7 +296,7 @@ IO::~IO()
     {
         std::scoped_lock lock(admission_mutex_);
         accepting_ = false;
-        incoming_.drain([](detail::TaskPromiseBase* root) { root->self_handle.destroy(); });
+        incoming_.drain([](const detail::TaskPromiseBase* root) { root->self_handle.destroy(); });
     }
     // Ring teardown precedes freeing registered memory or the wake-read buffer.
     io_uring_queue_exit(&ring_);

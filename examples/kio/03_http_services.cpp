@@ -36,7 +36,7 @@ constexpr std::string_view kHttpResponse =
     "Hello, io_uring!";
 
 // Handle a single client connection
-static Task<void> handle_client(IO& worker, Fd client_fd)
+static Task<void> handle_client(IO& worker, UniqueFd client_fd)
 {
     std::byte buf[1024];
 
@@ -75,13 +75,13 @@ static Task<void> server_loop(IO& worker, uint16_t port, std::stop_token st)
     auto listener = TcpListener::Bind(port, "0.0.0.0", 4096);
     if (!listener)
     {
-        std::cerr << "[Worker " << worker.id() << "] Failed to bind: " << listener.error().message() << "\n";
+        std::cerr << "[Worker " << worker.id() << "] Failed to bind: " << listener.error().Message() << "\n";
         co_return std::unexpected(listener.error());
     }
 
     std::cout << "[Worker " << worker.id() << "] Listening on http://0.0.0.0:" << port << "\n";
 
-    Fd server_fd = std::move(*listener);
+    UniqueFd server_fd = std::move(*listener);
 
     while (!st.stop_requested())
     {
@@ -103,14 +103,14 @@ static Task<void> dispatching_server_loop(IoContext& ctx, IO& dispatcher, uint16
     auto listener = TcpListener::Bind(port, "0.0.0.0", 4096);
     if (!listener)
     {
-        std::cerr << "[Dispatcher] Failed to bind: " << listener.error().message() << "\n";
+        std::cerr << "[Dispatcher] Failed to bind: " << listener.error().Message() << "\n";
         co_return std::unexpected(listener.error());
     }
 
     std::cout << "[Dispatcher] Listening on http://0.0.0.0:" << port << " and dispatching to " << ctx.worker_count() - 1
               << " workers.\n";
 
-    Fd server_fd = std::move(*listener);
+    UniqueFd server_fd = std::move(*listener);
     std::size_t next_worker = 1;
 
     while (!st.stop_requested())
@@ -136,7 +136,7 @@ static Task<void> dispatching_server_loop(IoContext& ctx, IO& dispatcher, uint16
 
 int main()
 {
-    URing::ALOG::set_level(ALOG::Level::Debug);
+    URing::log::set_level(URing::log::level::debug);
 
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);

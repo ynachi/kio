@@ -92,8 +92,8 @@ Result<SocketAddress> ResolveIp(const std::string_view host, const uint16_t port
 
     if (const int rc = getaddrinfo(hostname.c_str(), service.c_str(), &hints, &res); rc != 0)
     {
-        // getaddrinfo returns EAI_* errors, not errno, but we map to std::error_code generically
-        return std::unexpected(std::make_error_code(std::errc::address_not_available));
+        // getaddrinfo returns EAI_* errors, not errno, but we map to a generic error code
+        return fail(std::errc::address_not_available, "getaddrinfo");
     }
 
     SocketAddress out;

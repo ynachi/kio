@@ -26,7 +26,7 @@ struct TaskAwaiter
         auto& p = handle.promise();
         if (!p.result.has_value()) [[unlikely]]
         {
-            return std::unexpected(make_error_code(ECANCELED));
+            return fail_errno(ECANCELED);
         }
         return std::move(*p.result);
     }

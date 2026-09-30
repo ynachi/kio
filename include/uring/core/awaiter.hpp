@@ -47,7 +47,7 @@ class IoAwaiter
     [[no_unique_address]] MapperFunc mapper_;
 
 public:
-    IoAwaiter(IO& io, SetupFunc setup, MapperFunc mapper, int error = 0, bool cancelable = true)
+    IoAwaiter(IO& io, SetupFunc setup, MapperFunc mapper, const int error = 0, const bool cancelable = true)
         : io_(io), error_(error), setup_(std::move(setup)), mapper_(std::move(mapper))
     {
         ops_.cancelable = cancelable;
@@ -82,7 +82,7 @@ struct ResumeVoid
     {
         if (res < 0)
         {
-            return std::unexpected(make_error_code(res));
+            return fail_cqe(res);
         }
 
         return {};
@@ -95,7 +95,7 @@ struct ResumeInt
     {
         if (res < 0)
         {
-            return std::unexpected(make_error_code(res));
+            return fail_cqe(res);
         }
         return res;
     }

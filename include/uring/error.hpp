@@ -1,35 +1,32 @@
 #pragma once
-#include <cerrno>
 #include <expected>
 #include <system_error>
-#include <utility>
+
+#include "error_types.hpp"
+#include "result.hpp"
 
 namespace URing
 {
-template <typename T = void>
-using Result = std::expected<T, std::error_code>;
-
-// Accept both errno and negative io_uring completion codes.
-inline std::error_code make_error_code(int error) noexcept
-{
-    return {error < 0 ? -error : error, std::system_category()};
-}
-inline std::unexpected<std::error_code> error_from_errno(int error) noexcept
-{
-    return std::unexpected(make_error_code(error));
-}
-inline std::unexpected<std::error_code> error_from_errc(std::errc error) noexcept
-{
-    return std::unexpected(std::make_error_code(error));
-}
-enum class PoolError
+enum class PoolError: uint8_t
 {
     Exhausted = 1,
     SizeTooLarge
 };
 inline std::error_code make_error_code(PoolError error) noexcept
 {
-    return make_error_code(error == PoolError::Exhausted ? ENOBUFS : EMSGSIZE);
+    return {error == PoolError::Exhausted ? ENOBUFS : EMSGSIZE, std::system_category()};
+}
+inline std::unexpected<Error> fail(PoolError error, const char* operation = "") noexcept
+{
+    return std::unexpected(Error{.code = make_error_code(error), .operation = operation != nullptr ? operation : ""});
+}
+
+// io_uring completion queue entries carry -errno on failure. Normalize the
+// sign before handing the code to Error::from_errno, which — unlike the old
+// kio make_error_code(int) — does not do this itself.
+inline std::unexpected<Error> fail_cqe(int32_t res, const char* operation = "") noexcept
+{
+    return fail_errno(res < 0 ? -res : res, operation);
 }
 }  // namespace URing
 

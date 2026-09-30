@@ -86,7 +86,7 @@ Options parse_args(int argc, char** argv)
     return opts;
 }
 
-URing::Task<void> write_all(URing::IO& io, URing::Fd& fd, std::span<const std::byte> data)
+URing::Task<void> write_all(URing::IO& io, URing::UniqueFd& fd, std::span<const std::byte> data)
 {
     while (!data.empty())
     {
@@ -97,14 +97,14 @@ URing::Task<void> write_all(URing::IO& io, URing::Fd& fd, std::span<const std::b
         }
         if (*write_res <= 0)
         {
-            co_return std::unexpected(URing::error_from_errc(std::errc::io_error));
+            co_return URing::fail(std::errc::io_error, "write_all");
         }
         data = data.subspan(static_cast<size_t>(*write_res));
     }
     co_return {};
 }
 
-URing::Task<void> handle_client(URing::IO& worker, URing::Fd client_fd)
+URing::Task<void> handle_client(URing::IO& worker, URing::UniqueFd client_fd)
 {
     std::byte buf[4096];
     const auto response = std::as_bytes(std::span{kHttpResponse.data(), kHttpResponse.size()});
@@ -140,7 +140,7 @@ URing::Task<void> dispatch_accept_loop(URing::IoContext& ctx, URing::IO& dispatc
         co_return std::unexpected(listener.error());
     }
 
-    URing::Fd server_fd = std::move(*listener);
+    URing::UniqueFd server_fd = std::move(*listener);
     size_t next_worker = 1;
     while (!st.stop_requested())
     {
@@ -170,7 +170,7 @@ URing::Task<void> reuseport_accept_loop(URing::IO& worker, uint16_t port, std::s
         co_return std::unexpected(listener.error());
     }
 
-    URing::Fd server_fd = std::move(*listener);
+    URing::UniqueFd server_fd = std::move(*listener);
     while (!st.stop_requested())
     {
         auto client_res = co_await worker.accept(server_fd);
@@ -197,7 +197,7 @@ int main(int argc, char** argv)
         std::signal(SIGINT, signal_handler);
         std::signal(SIGTERM, signal_handler);
         std::signal(SIGPIPE, SIG_IGN);
-        URing::ALOG::set_level(URing::ALOG::Level::Disabled);
+        URing::log::set_level(URing::log::level::off);
 
         const size_t io_threads = opts.dispatch ? opts.workers + 1 : opts.workers;
         URing::IoContext ctx(io_threads);

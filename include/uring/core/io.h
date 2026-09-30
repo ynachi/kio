@@ -61,13 +61,13 @@ public:
     // Borrowed buffers must be used and returned on this worker. IO outlives them.
     [[nodiscard]] Result<FixedBuffer> take_fixed_buffer(size_t size);
 
-    [[nodiscard]] auto accept(Fd& fd, int flags = kDefaultAcceptFlags)
+    [[nodiscard]] auto accept(UniqueFd& fd, int flags = kDefaultAcceptFlags)
     {
         return IoAwaiter(
             *this, [raw = fd.Get(), flags](io_uring_sqe* sqe)
             { io_uring_prep_accept(sqe, raw, nullptr, nullptr, flags); }, ResumeFd{});
     }
-    [[nodiscard]] auto accept(Fd& fd, SocketAddress& addr, int flags = kDefaultAcceptFlags)
+    [[nodiscard]] auto accept(UniqueFd& fd, SocketAddress& addr, int flags = kDefaultAcceptFlags)
     {
         return IoAwaiter(
             *this,
@@ -78,32 +78,32 @@ public:
             },
             ResumeFd{});
     }
-    [[nodiscard]] auto connect(Fd& fd, SocketAddress addr)
+    [[nodiscard]] auto connect(UniqueFd& fd, SocketAddress addr)
     {
         return IoAwaiter(
             *this, [raw = fd.Get(), addr](io_uring_sqe* sqe)
             { io_uring_prep_connect(sqe, raw, addr.Get(), addr.addrlen); }, detail::ResumeVoid{});
     }
-    [[nodiscard]] auto read(Fd& fd, std::span<std::byte> buf, off_t offset = -1)
+    [[nodiscard]] auto read(UniqueFd& fd, std::span<std::byte> buf, off_t offset = -1)
     {
         return IoAwaiter(
             *this, [raw = fd.Get(), buf, offset](io_uring_sqe* sqe)
             { io_uring_prep_read(sqe, raw, buf.data(), buf.size(), offset); }, detail::ResumeInt{});
     }
-    [[nodiscard]] auto write(Fd& fd, std::span<const std::byte> buf, off_t offset = -1)
+    [[nodiscard]] auto write(UniqueFd& fd, std::span<const std::byte> buf, off_t offset = -1)
     {
         return IoAwaiter(
             *this, [raw = fd.Get(), buf, offset](io_uring_sqe* sqe)
             { io_uring_prep_write(sqe, raw, buf.data(), buf.size(), offset); }, detail::ResumeInt{});
     }
-    [[nodiscard]] auto readv(Fd& fd, std::span<const iovec> vecs, off_t offset = -1)
+    [[nodiscard]] auto readv(UniqueFd& fd, std::span<const iovec> vecs, off_t offset = -1)
     {
         return IoAwaiter(
             *this, [raw = fd.Get(), vecs, offset](io_uring_sqe* sqe)
             { io_uring_prep_readv(sqe, raw, vecs.data(), static_cast<unsigned>(vecs.size()), offset); },
             detail::ResumeInt{});
     }
-    [[nodiscard]] auto writev(Fd& fd, std::span<const iovec> vecs, off_t offset = -1)
+    [[nodiscard]] auto writev(UniqueFd& fd, std::span<const iovec> vecs, off_t offset = -1)
     {
         return IoAwaiter(
             *this, [raw = fd.Get(), vecs, offset](io_uring_sqe* sqe)
@@ -116,7 +116,7 @@ public:
             *this, [path = std::move(path), flags, mode](io_uring_sqe* sqe)
             { io_uring_prep_openat(sqe, AT_FDCWD, path.c_str(), flags, mode); }, ResumeFd{});
     }
-    [[nodiscard]] auto close(Fd&& fd)
+    [[nodiscard]] auto close(UniqueFd&& fd)
     {
         // Once submitted, the kernel owns the descriptor. Drain rather than
         // cancel close so shutdown cannot abandon that ownership transfer.
@@ -136,25 +136,25 @@ public:
             *this, [from = std::move(from), to = std::move(to)](io_uring_sqe* sqe)
             { io_uring_prep_renameat(sqe, AT_FDCWD, from.c_str(), AT_FDCWD, to.c_str(), 0); }, detail::ResumeVoid{});
     }
-    [[nodiscard]] auto fsync(Fd& fd, bool full_sync = false)
+    [[nodiscard]] auto fsync(UniqueFd& fd, bool full_sync = false)
     {
         return IoAwaiter(
             *this, [raw = fd.Get(), full_sync](io_uring_sqe* sqe)
             { io_uring_prep_fsync(sqe, raw, full_sync ? 0u : IORING_FSYNC_DATASYNC); }, detail::ResumeVoid{});
     }
-    [[nodiscard]] auto fallocate(Fd& fd, int mode, off_t offset, off_t len)
+    [[nodiscard]] auto fallocate(UniqueFd& fd, int mode, off_t offset, off_t len)
     {
         return IoAwaiter(
             *this, [raw = fd.Get(), mode, offset, len](io_uring_sqe* sqe)
             { io_uring_prep_fallocate(sqe, raw, mode, offset, len); }, detail::ResumeVoid{});
     }
-    [[nodiscard]] auto ftruncate(Fd& fd, off_t len)
+    [[nodiscard]] auto ftruncate(UniqueFd& fd, off_t len)
     {
         return IoAwaiter(
             *this, [raw = fd.Get(), len](io_uring_sqe* sqe) { io_uring_prep_ftruncate(sqe, raw, len); },
             detail::ResumeVoid{});
     }
-    [[nodiscard]] auto poll(Fd& fd, unsigned mask)
+    [[nodiscard]] auto poll(UniqueFd& fd, unsigned mask)
     {
         return IoAwaiter(
             *this, [raw = fd.Get(), mask](io_uring_sqe* sqe) { io_uring_prep_poll_add(sqe, raw, mask); },
@@ -171,10 +171,10 @@ public:
             {
                 if (res == -ETIME || res == 0)
                     return {};
-                return error_from_errno(res);
+                return fail_cqe(res);
             });
     }
-    [[nodiscard]] auto read_fixed(Fd& fd, FixedBuffer& buf, const size_t len, off_t offset)
+    [[nodiscard]] auto read_fixed(UniqueFd& fd, FixedBuffer& buf, const size_t len, off_t offset)
     {
         const int error = buf.pool_ == &buffer_pool_ ? 0 : -EINVAL;
         return IoAwaiter(
@@ -183,11 +183,11 @@ public:
              offset](io_uring_sqe* sqe) { io_uring_prep_read_fixed(sqe, raw, ptr, len, offset, index); },
             detail::ResumeInt{}, error);
     }
-    [[nodiscard]] auto read_fixed(Fd& fd, FixedBuffer& buf, off_t offset = -1)
+    [[nodiscard]] auto read_fixed(UniqueFd& fd, FixedBuffer& buf, off_t offset = -1)
     {
         return read_fixed(fd, buf, buf.size(), offset);
     }
-    [[nodiscard]] auto write_fixed(Fd& fd, const FixedBuffer& buf, size_t len, off_t offset)
+    [[nodiscard]] auto write_fixed(UniqueFd& fd, const FixedBuffer& buf, size_t len, off_t offset)
     {
         const int error = buf.pool_ == &buffer_pool_ ? 0 : -EINVAL;
         return IoAwaiter(
@@ -196,7 +196,7 @@ public:
              offset](io_uring_sqe* sqe) { io_uring_prep_write_fixed(sqe, raw, ptr, len, offset, index); },
             detail::ResumeInt{}, error);
     }
-    [[nodiscard]] auto write_fixed(Fd& fd, const FixedBuffer& buf, off_t offset = -1)
+    [[nodiscard]] auto write_fixed(UniqueFd& fd, const FixedBuffer& buf, off_t offset = -1)
     {
         return write_fixed(fd, buf, buf.size(), offset);
     }
@@ -204,11 +204,11 @@ public:
 private:
     struct ResumeFd
     {
-        Result<Fd> operator()(const int32_t res) const noexcept
+        Result<UniqueFd> operator()(const int32_t res) const noexcept
         {
             if (res < 0)
-                return error_from_errno(res);
-            return Fd{res};
+                return fail_cqe(res);
+            return UniqueFd{res};
         }
     };
     static constexpr uint64_t kWakeTag = 1;
@@ -229,7 +229,10 @@ private:
     bool accepting_ = true;
     detail::CoroQueue incoming_;
     std::deque<std::coroutine_handle<>> ready_;
-    detail::TaskPromiseBase* roots_ = nullptr;
+    // Count of adopted root tasks not yet completed; only ever checked for
+    // "any outstanding" and touched from the owner thread, so a plain counter
+    // (not a list) is enough — see IO::adopt_roots/complete_root.
+    size_t active_roots_ = 0;
     detail::TaskPromiseBase* completed_ = nullptr;
     IoOps* pending_ = nullptr;
 
@@ -298,12 +301,12 @@ Result<T> sync_wait(IO& io, Task<T>&& task)
     if (io.running_)
         throw std::logic_error("sync_wait cannot nest inside a running reactor");
     if (io.stopping_)
-        return error_from_errno(ECANCELED);
+        return fail_errno(ECANCELED);
     io.activate();
     bool done = false;
     std::optional<Result<T>> result;
     if (!io.schedule(detail::wait_for(std::move(task), result, done)))
-        return error_from_errno(ECANCELED);
+        return fail_errno(ECANCELED);
     io.running_ = true;
     try
     {

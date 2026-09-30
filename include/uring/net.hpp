@@ -20,7 +20,7 @@ concept SocketOption = requires(const Opt& o, int fd) {
 };
 
 template <SocketOption... Options>
-[[nodiscard]] Result<void> set_socket_options(const Fd& fd, const Options&... options) noexcept
+[[nodiscard]] Result<void> set_socket_options(const UniqueFd& fd, const Options&... options) noexcept
 {
     Result<void> result;
     ((result = options.Apply(fd.Get()), result.has_value()) && ...);
@@ -41,7 +41,7 @@ struct BasicOption
     [[nodiscard]] Result<void> Apply(const int fd) const noexcept
     {
         if (::setsockopt(fd, Level, Name, &value, sizeof(value)) < 0)
-            return error_from_errno(errno);
+            return fail_errno(errno);
         return {};
     }
 };
@@ -85,10 +85,10 @@ struct NonBlocking
     {
         int flags = ::fcntl(fd, F_GETFL, 0);
         if (flags == -1)
-            return error_from_errno(errno);
+            return fail_errno(errno);
         flags = enable ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK);
         if (::fcntl(fd, F_SETFL, flags) == -1)
-            return error_from_errno(errno);
+            return fail_errno(errno);
         return {};
     }
 };

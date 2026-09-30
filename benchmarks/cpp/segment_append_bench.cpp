@@ -159,20 +159,20 @@ void bench_segment_manager(const Options& opts)
             auto res = URing::sync_wait(io, run_segment_append(io, manager, opts, key, value));
             if (!res.has_value())
             {
-                throw std::system_error(res.error());
+                throw std::system_error(res.error().code);
             }
 
             auto flush_res = URing::sync_wait(io, manager.flush(io));
             if (!flush_res.has_value())
             {
-                throw std::system_error(flush_res.error());
+                throw std::system_error(flush_res.error().code);
             }
         });
 
     auto close_res = URing::sync_wait(io, manager.close(io));
     if (!close_res.has_value())
     {
-        throw std::system_error(close_res.error());
+        throw std::system_error(close_res.error().code);
     }
 
     print_result("SegmentManager+flush", opts, seconds, segment_bytes(opts));
@@ -411,7 +411,7 @@ int main(int argc, char** argv)
 {
     try
     {
-        URing::ALOG::set_level(URing::ALOG::Level::Disabled);
+        URing::log::set_level(URing::log::level::off);
 
         const Options opts = parse_args(argc, argv);
         fs::remove_all(opts.dir);

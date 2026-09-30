@@ -65,7 +65,7 @@ FixedBufferPool::Bucket::Bucket(const size_t size, const size_t count, const uin
     if (free_stack.empty()) [[unlikely]]
     {
         // resize is not allowed
-        return std::unexpected(make_error_code(PoolError::Exhausted));
+        return fail(PoolError::Exhausted, "buffer_pool.pop");
     }
     const uint32_t idx = free_stack.back();
     free_stack.pop_back();
@@ -121,7 +121,7 @@ FixedBufferPool::FixedBufferPool(std::initializer_list<BucketConfig> configs)
 
     if (it == buckets_.end()) [[unlikely]]
     {
-        return std::unexpected(make_error_code(PoolError::SizeTooLarge));
+        return fail(PoolError::SizeTooLarge, "buffer_pool.take");
     }
 
     Result<uint32_t> idx_res = it->pop();

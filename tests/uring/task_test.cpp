@@ -15,7 +15,7 @@ Task<int> value_task()
 
 Task<int> error_task()
 {
-    co_return std::unexpected(make_error_code(EINVAL));
+    co_return std::unexpected(fail_errno(EINVAL));
 }
 
 Task<int> await_value_task()
@@ -42,7 +42,7 @@ Task<int> await_error_task()
 
 Task<void> void_error_task()
 {
-    co_return std::unexpected(make_error_code(EINVAL));
+    co_return std::unexpected(fail_errno(EINVAL));
 }
 
 Task<void> void_value_task()
@@ -90,7 +90,7 @@ TEST(TaskTest, CoAwaitPropagatesUnexpected)
 
     auto res = result_of(task);
     ASSERT_FALSE(res.has_value());
-    EXPECT_EQ(res.error().value(), EINVAL);
+    EXPECT_EQ(res.error().Value(), EINVAL);
 }
 
 TEST(TaskTest, VoidTaskCanReturnUnexpected)
@@ -100,7 +100,7 @@ TEST(TaskTest, VoidTaskCanReturnUnexpected)
 
     auto res = result_of(task);
     ASSERT_FALSE(res.has_value());
-    EXPECT_EQ(res.error().value(), EINVAL);
+    EXPECT_EQ(res.error().Value(), EINVAL);
 }
 
 TEST(TaskTest, VoidTaskCanReturnResultVoid)

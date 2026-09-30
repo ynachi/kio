@@ -29,12 +29,14 @@ struct FinalAwaitable
     template <typename Promise>
     std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> h) noexcept
     {
-        auto cont = h.promise().continuation;
-
-        if (cont)
+        if (auto cont = h.promise().continuation)
+        {
             return cont;
+        }
         if (auto complete = h.promise().on_complete)
+        {
             complete(h.promise());
+        }
         return std::noop_coroutine();
     }
 
@@ -53,7 +55,8 @@ struct TaskPromiseBase
     // The type-erased handle used by the event loop to resume this frame
     std::coroutine_handle<> self_handle{nullptr};
     IO* owner{nullptr};
-    TaskPromiseBase* root_prev{nullptr};
+    // Singly-linked destroy-queue hook, used only once a root task completes
+    // (see IO::completed_ / IO::reap_completed).
     TaskPromiseBase* root_next{nullptr};
     void (*on_complete)(TaskPromiseBase&) noexcept {nullptr};
     bool started{false};
@@ -71,7 +74,7 @@ struct TaskPromiseBase
     // A throwing Task is a contract violation: errors travel through Result<T>.
     [[noreturn]] void unhandled_exception() noexcept
     {
-        ALOG_FATAL("unhandled exception in URing::Task (use Result<T> for errors)");
+        KIO_LOG_FATAL("unhandled exception in URing::Task (use Result<T> for errors)");
         std::terminate();
     }
 };
@@ -88,7 +91,7 @@ struct TaskPromise : TaskPromiseBase
     void return_value(T val) noexcept { result.emplace(std::move(val)); }
 
     // Handle 'co_return std::unexpected(err);'
-    void return_value(std::unexpected<std::error_code> err) noexcept { result.emplace(std::move(err)); }
+    void return_value(std::unexpected<Error> err) noexcept { result.emplace(std::move(err)); }
 
     // Handle 'co_return Result<T>(...);'
     void return_value(Result<T> res) noexcept { result.emplace(std::move(res)); }
@@ -105,7 +108,7 @@ struct TaskPromise<void> : TaskPromiseBase
     std::optional<Result<void>> result;
 
     // Handle 'co_return std::unexpected(err);'
-    void return_value(std::unexpected<std::error_code> err) noexcept { result.emplace(std::move(err)); }
+    void return_value(std::unexpected<Error> err) noexcept { result.emplace(std::move(err)); }
 
     // Handle 'co_return Result<void>(...);' or 'co_return {};'
     void return_value(Result<void> res) noexcept { result.emplace(std::move(res)); }

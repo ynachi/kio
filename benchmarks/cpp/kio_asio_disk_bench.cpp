@@ -132,7 +132,7 @@ void print_result(const BenchResult& r)
     std::cout << r.seconds << "s  " << r.mib_per_sec << " MiB/s\n";
 }
 
-URing::Task<void> kio_write_all(URing::IO& io, URing::Fd& fd, std::span<const std::byte> block, std::uint64_t bytes)
+URing::Task<void> kio_write_all(URing::IO& io, URing::UniqueFd& fd, std::span<const std::byte> block, std::uint64_t bytes)
 {
     std::uint64_t offset = 0;
     while (offset < bytes)
@@ -163,7 +163,7 @@ BenchResult bench_kio(const Options& opts, const std::vector<std::byte>& block)
         throw std::runtime_error("open kio file failed: " + std::string(std::strerror(errno)));
     }
 
-    URing::Fd fd{raw_fd};
+    URing::UniqueFd fd{raw_fd};
     URing::IO io{0};
 
     const auto start = Clock::now();

@@ -61,6 +61,7 @@ test_cases/
 *.rar
 *.tar
 *.zip
+!kio_photon_benchmarks.zip
 
 # CMake
 CMakeCache.txt

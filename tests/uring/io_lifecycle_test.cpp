@@ -34,62 +34,62 @@ Task<void> increment(std::atomic<int>& count)
     ++count;
     co_return {};
 }
-Task<void> unused_root(Fd fd, CountDestruction guard)
+Task<void> unused_root(UniqueFd fd, CountDestruction guard)
 {
     (void)fd;
     (void)guard;
     co_return {};
 }
-Task<void> close_on_stop(IO& io, Fd fd, std::stop_source& stop, std::atomic<int>& error)
+Task<void> close_on_stop(IO& io, UniqueFd fd, std::stop_source& stop, std::atomic<int>& error)
 {
     stop.request_stop();
     auto result = co_await io.close(std::move(fd));
-    error = result ? 0 : result.error().value();
+    error = result ? 0 : result.error().Value();
     co_return {};
 }
-Task<int> nested_read(IO& io, Fd& fd)
+Task<int> nested_read(IO& io, UniqueFd& fd)
 {
     std::byte buffer[16];
     co_return co_await io.read(fd, buffer);
 }
-Task<void> blocked_read(IO& io, Fd fd, std::latch& entered, std::atomic<int>& error, CountDestruction guard)
+Task<void> blocked_read(IO& io, UniqueFd fd, std::latch& entered, std::atomic<int>& error, CountDestruction guard)
 {
     (void)guard;
     entered.count_down();
     auto result = co_await nested_read(io, fd);
-    error = result ? 0 : result.error().value();
+    error = result ? 0 : result.error().Value();
     co_return {};
 }
 Task<void> blocked_sleep(IO& io, std::latch& entered, std::atomic<int>& error)
 {
     entered.count_down();
     auto result = co_await io.sleep(1h);
-    error = result ? 0 : result.error().value();
+    error = result ? 0 : result.error().Value();
     // Cleanup code can attempt I/O and must receive cancellation immediately.
     auto retry = co_await io.sleep(1h);
     EXPECT_FALSE(retry);
-    EXPECT_EQ(retry.error().value(), ECANCELED);
+    EXPECT_EQ(retry.error().Value(), ECANCELED);
     co_return {};
 }
-Task<void> blocked_accept(IO& io, Fd listener, std::latch& entered, std::atomic<int>& error)
+Task<void> blocked_accept(IO& io, UniqueFd listener, std::latch& entered, std::atomic<int>& error)
 {
     entered.count_down();
     auto result = co_await io.accept(listener);
-    error = result ? 0 : result.error().value();
+    error = result ? 0 : result.error().Value();
     co_return {};
 }
-Task<void> wrong_worker(IO& other, Fd fd, std::atomic<int>& error)
+Task<void> wrong_worker(IO& other, UniqueFd fd, std::atomic<int>& error)
 {
     auto result = co_await other.sleep(1ms);
-    error = result ? 0 : result.error().value();
+    error = result ? 0 : result.error().Value();
     (void)fd;
     co_return {};
 }
 Task<void> buffer_round_trip(IO& io)
 {
     URING_TRY(auto buffer, io.take_fixed_buffer(4096));
-    Fd fd{memfd_create("fixed-buffer-test", MFD_CLOEXEC)};
-    EXPECT_TRUE(fd.IsValid());
+    UniqueFd fd{memfd_create("fixed-buffer-test", MFD_CLOEXEC)};
+    EXPECT_TRUE(fd.Valid());
     std::fill(buffer.data().begin(), buffer.data().end(), std::byte{0x5a});
     URING_TRY(auto written, co_await io.write_fixed(fd, buffer, buffer.size(), 0));
     EXPECT_EQ(written, 4096);
@@ -101,7 +101,7 @@ Task<void> buffer_round_trip(IO& io)
     EXPECT_FALSE(exhausted);
     co_return {};
 }
-Task<Fd> return_fd(IO& io)
+Task<UniqueFd> return_fd(IO& io)
 {
     co_return co_await io.open("/dev/null", O_RDONLY);
 }
@@ -121,17 +121,17 @@ Task<FixedBuffer> borrow_buffer(IO& io)
 }
 Task<void> use_foreign_buffer(IO& io, FixedBuffer& buffer)
 {
-    Fd fd{memfd_create("foreign-buffer", MFD_CLOEXEC)};
+    UniqueFd fd{memfd_create("foreign-buffer", MFD_CLOEXEC)};
     auto result = co_await io.write_fixed(fd, buffer, 0);
     EXPECT_FALSE(result);
-    EXPECT_EQ(result.error().value(), EINVAL);
+    EXPECT_EQ(result.error().Value(), EINVAL);
     co_return {};
 }
-Task<void> successful_read(IO& io, Fd fd, std::stop_source& stop, std::atomic<int>& value)
+Task<void> successful_read(IO& io, UniqueFd fd, std::stop_source& stop, std::atomic<int>& value)
 {
     std::byte byte{};
     auto result = co_await io.read(fd, std::span{&byte, 1});
-    value = result ? static_cast<int>(byte) : -result.error().value();
+    value = result ? static_cast<int>(byte) : -result.error().Value();
     stop.request_stop();
     co_return {};
 }
@@ -180,7 +180,7 @@ TEST(IoLifecycleTest, DestructionReleasesNeverStartedRoots)
     ASSERT_GE(raw, 0);
     {
         IO io(0);
-        EXPECT_TRUE(io.schedule(unused_root(Fd{raw}, CountDestruction{destroyed})));
+        EXPECT_TRUE(io.schedule(unused_root(UniqueFd{raw}, CountDestruction{destroyed})));
     }
     EXPECT_EQ(destroyed, 1);
     EXPECT_EQ(fcntl(raw, F_GETFD), -1);
@@ -194,7 +194,7 @@ TEST(IoLifecycleTest, ShutdownDrainsSubmittedClose)
     ASSERT_GE(raw, 0);
     std::stop_source stop;
     std::atomic<int> error{-1};
-    ASSERT_TRUE(io.schedule(close_on_stop(io, Fd{raw}, stop, error)));
+    ASSERT_TRUE(io.schedule(close_on_stop(io, UniqueFd{raw}, stop, error)));
     io.run(stop.get_token());
     EXPECT_EQ(error, 0);
     EXPECT_EQ(fcntl(raw, F_GETFD), -1);
@@ -206,10 +206,10 @@ TEST(IoLifecycleTest, StopUnwindsNestedReadAndReleasesDescriptor)
     IO io(0);
     int sockets[2];
     ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sockets), 0);
-    Fd peer{sockets[1]};
+    UniqueFd peer{sockets[1]};
     std::atomic<int> destroyed{0}, error{-1};
     std::latch entered{1};
-    ASSERT_TRUE(io.schedule(blocked_read(io, Fd{sockets[0]}, entered, error, CountDestruction{destroyed})));
+    ASSERT_TRUE(io.schedule(blocked_read(io, UniqueFd{sockets[0]}, entered, error, CountDestruction{destroyed})));
     std::jthread runner([&](std::stop_token stop) { io.run(stop); });
     entered.wait();
     runner.request_stop();
@@ -278,7 +278,7 @@ TEST(IoLifecycleTest, IoCannotMigrateAnAwaitedChain)
 {
     IO io(0), other(1);
     std::atomic<int> error{-1};
-    ASSERT_TRUE(sync_wait(io, wrong_worker(other, Fd{}, error)));
+    ASSERT_TRUE(sync_wait(io, wrong_worker(other, UniqueFd{}, error)));
     EXPECT_EQ(error, EXDEV);
 }
 
@@ -290,7 +290,7 @@ TEST(IoLifecycleTest, SyncWaitSupportsRepeatedCallsAndMoveOnlyResults)
     EXPECT_EQ(*value, 42);
     auto fd = sync_wait(io, return_fd(io));
     ASSERT_TRUE(fd);
-    EXPECT_TRUE(fd->IsValid());
+    EXPECT_TRUE(fd->Valid());
 }
 
 TEST(IoLifecycleTest, RegisteredBuffersRoundTripAndAreReturned)
@@ -320,11 +320,11 @@ TEST(IoLifecycleTest, SuccessfulCompletionIsPreservedDuringStop)
     IO io(0);
     int sockets[2];
     ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets), 0);
-    Fd peer{sockets[1]};
+    UniqueFd peer{sockets[1]};
     ASSERT_EQ(::write(peer.Get(), "Z", 1), 1);
     std::stop_source stop;
     std::atomic<int> value{0};
-    ASSERT_TRUE(io.schedule(successful_read(io, Fd{sockets[0]}, stop, value)));
+    ASSERT_TRUE(io.schedule(successful_read(io, UniqueFd{sockets[0]}, stop, value)));
     io.run(stop.get_token());
     EXPECT_EQ(value, 'Z');
 }
@@ -340,7 +340,7 @@ TEST(IoLifecycleTest, ConcurrentSubmissionAndShutdownReleaseEveryTask)
             [&]
             {
                 for (int i = 0; i < 128; ++i)
-                    io.schedule(unused_root(Fd{}, CountDestruction{destroyed}));
+                    io.schedule(unused_root(UniqueFd{}, CountDestruction{destroyed}));
             });
     runner.request_stop();
     for (auto& producer : producers)
@@ -354,7 +354,7 @@ TEST(IoLifecycleTest, SmallRingDrainsManyPendingReads)
     IO io(0, nullptr, {.entries = 8, .batch_max_size = 1});
     int sockets[2];
     ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sockets), 0);
-    Fd reader{sockets[0]}, peer{sockets[1]};
+    UniqueFd reader{sockets[0]}, peer{sockets[1]};
     constexpr int count = 48;
     std::latch entered{count};
     std::atomic<int> destroyed{0};
@@ -365,7 +365,7 @@ TEST(IoLifecycleTest, SmallRingDrainsManyPendingReads)
     {
         const int duplicate = dup(reader.Get());
         ASSERT_GE(duplicate, 0);
-        ASSERT_TRUE(io.schedule(blocked_read(io, Fd{duplicate}, entered, error, CountDestruction{destroyed})));
+        ASSERT_TRUE(io.schedule(blocked_read(io, UniqueFd{duplicate}, entered, error, CountDestruction{destroyed})));
     }
     std::jthread runner([&](std::stop_token stop) { io.run(stop); });
     entered.wait();

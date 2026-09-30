@@ -29,7 +29,7 @@ void signal_handler(int)
 }
 
 // Handle a single client connection
-Task<void> handle_client(IO& worker, Fd client_fd)
+Task<void> handle_client(IO& worker, UniqueFd client_fd)
 {
     std::byte buf[1024];
 
@@ -65,7 +65,7 @@ Task<void> dispatcher_loop(IoContext& context, IO& worker, uint16_t port)
     auto listener = TcpListener::Bind(port, "0.0.0.0", 4096);
     if (!listener)
     {
-        std::cerr << "[Dispatcher] Failed to bind: " << listener.error().message() << "\n";
+        std::cerr << "[Dispatcher] Failed to bind: " << listener.error().Message() << "\n";
         co_return std::unexpected(listener.error());
     }
 
@@ -73,7 +73,7 @@ Task<void> dispatcher_loop(IoContext& context, IO& worker, uint16_t port)
     std::cout << "[Dispatcher] Listening on http://0.0.0.0:" << port << " and routing to " << num_workers
               << " workers.\n";
 
-    Fd server_fd = std::move(*listener);
+    UniqueFd server_fd = std::move(*listener);
     size_t worker_idx = 0;
 
     while (!global_stop_source.stop_requested())
@@ -89,7 +89,7 @@ Task<void> dispatcher_loop(IoContext& context, IO& worker, uint16_t port)
         IO& target_worker = context.worker(selected_worker);
         worker_idx++;
 
-        ALOG_DEBUG("Dispatching accepted client to worker {}", selected_worker);
+        KIO_LOG_DEBUG("Dispatching accepted client to worker {}", selected_worker);
 
         // Directly schedule the client handler on the target worker's thread
         target_worker.schedule(handle_client(target_worker, std::move(*client_res)));
@@ -99,8 +99,8 @@ Task<void> dispatcher_loop(IoContext& context, IO& worker, uint16_t port)
 
 int main()
 {
-    URing::ALOG::set_level(ALOG::Level::Debug);
-    ALOG_DEBUG("Debug logging enabled");
+    URing::log::set_level(URing::log::level::debug);
+    KIO_LOG_DEBUG("Debug logging enabled");
 
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
