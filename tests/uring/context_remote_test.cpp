@@ -31,7 +31,6 @@ Task<void> schedule_record_on(IO& target, std::array<std::atomic<int>, N>& obser
 TEST(IoContextRemoteTest, ScheduleRunsOnTargetWorker)
 {
     IoOptions opts;
-    opts.tick_timeout_ms = 1;
 
     IoContext ctx(2, opts);
     std::atomic<int> ran{0};
@@ -64,7 +63,6 @@ TEST(IoContextRemoteTest, ScheduleRunsOnTargetWorker)
 TEST(IoContextRemoteTest, WorkersCanScheduleOnAnotherWorker)
 {
     IoOptions opts;
-    opts.tick_timeout_ms = 1;
 
     constexpr std::size_t kWorkers = 4;
     IoContext ctx(kWorkers, opts);

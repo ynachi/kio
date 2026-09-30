@@ -1,5 +1,3 @@
-#include "uring/mpsc_queue.hpp"
-
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
@@ -7,6 +5,7 @@
 #include <thread>
 #include <vector>
 
+#include "uring/core/detail/queue.hpp"
 #include <gtest/gtest.h>
 
 using namespace URing;
@@ -14,7 +13,7 @@ using namespace URing;
 namespace
 {
 
-struct IntNode : MpscNode
+struct IntNode : detail::TaskPromiseBase
 {
     explicit IntNode(int value_) : value(value_) {}
 
@@ -25,21 +24,18 @@ struct IntNode : MpscNode
 
 TEST(MpscQueueTest, DrainsSingleProducerInFifoOrder)
 {
-    MpscQueue queue;
+    detail::CoroQueue queue;
     std::vector<std::unique_ptr<IntNode>> nodes;
     std::vector<int> values;
 
     for (int i = 0; i < 16; ++i)
     {
         nodes.push_back(std::make_unique<IntNode>(i));
-        queue.push(nodes.back().get());
+        queue.enqueue(nodes.back().get());
     }
 
-    const std::size_t drained = queue.drain(
-        [&](MpscNode* raw)
-        {
-            values.push_back(static_cast<IntNode*>(raw)->value);
-        });
+    const std::size_t drained =
+        queue.drain([&](detail::TaskPromiseBase* raw) { values.push_back(static_cast<IntNode*>(raw)->value); });
 
     EXPECT_EQ(drained, nodes.size());
     EXPECT_EQ(values.size(), nodes.size());
@@ -47,30 +43,30 @@ TEST(MpscQueueTest, DrainsSingleProducerInFifoOrder)
     {
         EXPECT_EQ(values[static_cast<std::size_t>(i)], i);
     }
-    EXPECT_EQ(queue.try_pop(), nullptr);
+    EXPECT_EQ(queue.dequeue(), nullptr);
 }
 
 TEST(MpscQueueTest, ReturnedSingletonNodesCanBeDeletedImmediately)
 {
-    MpscQueue queue;
+    detail::CoroQueue queue;
 
     for (int i = 0; i < 1024; ++i)
     {
         auto* node = new IntNode(i);
-        queue.push(node);
+        queue.enqueue(node);
 
-        MpscNode* raw = queue.try_pop();
+        detail::TaskPromiseBase* raw = queue.dequeue();
         ASSERT_NE(raw, nullptr);
         EXPECT_EQ(static_cast<IntNode*>(raw)->value, i);
         delete static_cast<IntNode*>(raw);
 
-        EXPECT_EQ(queue.try_pop(), nullptr);
+        EXPECT_EQ(queue.dequeue(), nullptr);
     }
 }
 
 TEST(MpscQueueTest, DrainsManyConcurrentProducers)
 {
-    MpscQueue queue;
+    detail::CoroQueue queue;
     constexpr int kProducerCount = 4;
     constexpr int kItemsPerProducer = 4096;
     constexpr int kTotalItems = kProducerCount * kItemsPerProducer;
@@ -87,7 +83,7 @@ TEST(MpscQueueTest, DrainsManyConcurrentProducers)
             {
                 for (int i = 0; i < kItemsPerProducer; ++i)
                 {
-                    queue.push(new IntNode(producer * kItemsPerProducer + i));
+                    queue.enqueue(new IntNode(producer * kItemsPerProducer + i));
                 }
                 producers_left.fetch_sub(1, std::memory_order_release);
             });
@@ -99,7 +95,7 @@ TEST(MpscQueueTest, DrainsManyConcurrentProducers)
     while (producers_left.load(std::memory_order_acquire) > 0 || drained.load(std::memory_order_relaxed) < kTotalItems)
     {
         const std::size_t count = queue.drain(
-            [&](MpscNode* raw)
+            [&](detail::TaskPromiseBase* raw)
             {
                 auto* node = static_cast<IntNode*>(raw);
                 values.push_back(node->value);
@@ -126,5 +122,5 @@ TEST(MpscQueueTest, DrainsManyConcurrentProducers)
     {
         EXPECT_EQ(values[static_cast<std::size_t>(i)], i);
     }
-    EXPECT_EQ(queue.try_pop(), nullptr);
+    EXPECT_EQ(queue.dequeue(), nullptr);
 }

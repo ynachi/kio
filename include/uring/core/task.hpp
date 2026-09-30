@@ -27,7 +27,7 @@ struct [[nodiscard]] Task
         {
             if (handle_)
             {
-                handle_.destroy();
+                destroy();
             }
             handle_ = std::exchange(o.handle_, {});
         }
@@ -41,12 +41,12 @@ struct [[nodiscard]] Task
     {
         if (handle_)
         {
-            handle_.destroy();
+            destroy();
         }
     }
 
     // Transfers ownership of the coroutine frame to the scheduler.
-    // The Task object becomes empty and the frame will self-destruct on completion.
+    // The Task object becomes empty; the scheduler destroys completed roots.
     Handle release() { return std::exchange(handle_, {}); }
 
     bool done() const noexcept { return handle_ && handle_.done(); }
@@ -55,6 +55,14 @@ struct [[nodiscard]] Task
     // co_await support — Returns Result<T> to the caller.
     // -----------------------------------------------------------------------
     auto operator co_await() noexcept { return detail::TaskAwaiter{handle_}; }
+
+private:
+    void destroy() noexcept
+    {
+        if (handle_.promise().started && !handle_.done())
+            std::terminate();
+        handle_.destroy();
+    }
 };
 
 template <typename T>

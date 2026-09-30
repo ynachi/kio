@@ -1,13 +1,16 @@
 #pragma once
 
+#include <atomic>
 #include <coroutine>
 #include <exception>
+#include <optional>
 
 #include "uring/error.hpp"
 #include "uring/logger.hpp"
 
 namespace URing
 {
+class IO;
 // Forward declarations
 template <typename T>
 struct Task;
@@ -17,7 +20,7 @@ struct Task;
 namespace URing::detail
 {
 // -----------------------------------------------------------------------
-// FinalAwaitable — The "Self-Cleaning" Mechanism
+// FinalAwaitable — Return to the parent or notify the owning reactor.
 // -----------------------------------------------------------------------
 struct FinalAwaitable
 {
@@ -28,15 +31,11 @@ struct FinalAwaitable
     {
         auto cont = h.promise().continuation;
 
-        // If continuation is noop, it means this task was "detached" (scheduled).
-        if (cont == std::noop_coroutine())
-        {
-            h.destroy();
-            return std::noop_coroutine();
-        }
-        
-        // Otherwise, symmetrically transfer control back to the caller.
-        return cont;
+        if (cont)
+            return cont;
+        if (auto complete = h.promise().on_complete)
+            complete(h.promise());
+        return std::noop_coroutine();
     }
 
     void await_resume() noexcept {}
@@ -48,13 +47,25 @@ struct FinalAwaitable
 /// A task SHOULD not throw an exception
 struct TaskPromiseBase
 {
-    std::coroutine_handle<> continuation{std::noop_coroutine()};
+    std::coroutine_handle<> continuation{nullptr};
     // intrusive queue hook
     std::atomic<TaskPromiseBase*> next{nullptr};
     // The type-erased handle used by the event loop to resume this frame
     std::coroutine_handle<> self_handle{nullptr};
+    IO* owner{nullptr};
+    TaskPromiseBase* root_prev{nullptr};
+    TaskPromiseBase* root_next{nullptr};
+    void (*on_complete)(TaskPromiseBase&) noexcept {nullptr};
+    bool started{false};
 
-    std::suspend_always initial_suspend() noexcept { return {}; }
+    struct InitialAwaitable
+    {
+        TaskPromiseBase& promise;
+        bool await_ready() const noexcept { return false; }
+        void await_suspend(std::coroutine_handle<>) const noexcept {}
+        void await_resume() const noexcept { promise.started = true; }
+    };
+    InitialAwaitable initial_suspend() noexcept { return {*this}; }
     FinalAwaitable final_suspend() noexcept { return {}; }
 
     // A throwing Task is a contract violation: errors travel through Result<T>.

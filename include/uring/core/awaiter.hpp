@@ -18,6 +18,16 @@ struct IoOps
 {
     std::coroutine_handle<> h{std::noop_coroutine()};
     int32_t res{-1};
+    IoOps* prev{nullptr};
+    IoOps* next{nullptr};
+    bool pending{false};
+    bool cancel_requested{false};
+    bool cancelable{true};
+    ~IoOps()
+    {
+        if (pending)
+            std::terminate();
+    }
 };
 
 template <typename SetupFunc, typename MapperFunc>
@@ -32,13 +42,15 @@ class IoAwaiter
     // for friend access
     IoOps ops_{};
     IO& io_;
+    int error_{0};
     [[no_unique_address]] SetupFunc setup_;
     [[no_unique_address]] MapperFunc mapper_;
 
 public:
-    IoAwaiter(IO& io, SetupFunc setup, MapperFunc mapper)
-        : io_(io), setup_(std::move(setup)), mapper_(std::move(mapper))
+    IoAwaiter(IO& io, SetupFunc setup, MapperFunc mapper, int error = 0, bool cancelable = true)
+        : io_(io), error_(error), setup_(std::move(setup)), mapper_(std::move(mapper))
     {
+        ops_.cancelable = cancelable;
     }
 
     bool await_ready() const noexcept { return false; }
@@ -59,7 +71,7 @@ public:
     Result<T> await_resume() noexcept { return mapper_(ops_.res); }
 };
 
-// Implementation is moved to context.h after IO is fully defined
+// Implementation is in io.h after IO is fully defined.
 
 // Helper for void-returning operations in io.hpp (e.g., detail::ResumeVoid)
 namespace detail

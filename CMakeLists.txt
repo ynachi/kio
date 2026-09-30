@@ -9,7 +9,7 @@ set(GTEST_GIT_TAG v1.17.0)
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 
 # Cmake find modules
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 option(ENABLE_AIO_STATS "Enable AIO observability metrics" ON)
 if (ENABLE_AIO_STATS)
@@ -106,7 +106,7 @@ function(kio_add_sanitizers target_name)
                 -g -O1
                 -fno-omit-frame-pointer
         )
-        target_link_options(${target_name} PRIVATE -fsanitize=${KIO_SANITIZER})
+        target_link_options(${target_name} PUBLIC -fsanitize=${KIO_SANITIZER})
 
         if (KIO_SANITIZER STREQUAL "thread")
             target_compile_definitions(${target_name} PUBLIC __SANITIZE_THREAD__=1)
@@ -169,11 +169,11 @@ set(KIO_TEST_FILTER "all" CACHE STRING "List of tags to build (or 'all')")
 option(KIO_BUILD_BITCASK "Build bitcask storage engine" ON)
 option(KIO_BUILD_DEMOS "Build the kio demo executables" ON)
 option(KIO_BUILD_SEGMENT_BENCH "Build temporary bitcask segment benchmark" OFF)
-option(KIO_BUILD_FIBER_BENCH "Build stackful vs stackless benchmark" OFF)
 option(KIO_BUILD_HTTP_BENCH "Build HTTP server benchmark targets" OFF)
 # pass -DKIO_DEMO_FILTER="core;http" to build specific subsets of demo.
 option(KIO_BUILD_BENCHMARK "Build codes used to benchmark kio against other libs" OFF)
 option(ENABLE_CLANG_TIDY "Run clang-tidy during compilation" OFF)
+option(KIO_USE_MIMALLOC "Use mimalloc for allocation" OFF)
 
 # Enable clang-tidy during build if requested
 if (ENABLE_CLANG_TIDY)
@@ -193,29 +193,22 @@ set(ENV{PKG_CONFIG_PATH} "$ENV{PKG_CONFIG_PATH}:/usr/local/lib/pkgconfig:/usr/lo
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LibUring REQUIRED IMPORTED_TARGET liburing)
 
-#gflags
-find_package(gflags REQUIRED)
+if (KIO_BUILD_BENCHMARK)
+    find_package(gflags REQUIRED)
+endif ()
 
 # gtest
 if (KIO_BUILD_TESTS)
     find_package(GTest REQUIRED)
 endif ()
 
-# CRC32C
-find_package(CRC32C REQUIRED)
-
-# Abseil
-find_package(Abseil REQUIRED)
-
-# mimalloc
-find_package(mimalloc REQUIRED)
-
-# Boost.Context (for stackful fibers)
-find_package(Boost REQUIRED COMPONENTS context)
-
-# openssl, min 3 required
-find_package(OpenSSL 3 REQUIRED)
-message(STATUS "OpenSSL: ${OPENSSL_VERSION}")
+if (KIO_BUILD_BITCASK)
+    find_package(CRC32C REQUIRED)
+    find_package(Abseil REQUIRED)
+endif ()
+if (KIO_USE_MIMALLOC)
+    find_package(mimalloc REQUIRED)
+endif ()
 find_package(Threads REQUIRED)
 
 # for benchmarks
@@ -235,13 +228,13 @@ find_program(CLANG_TIDY_EXE NAMES clang-tidy-22)
 
 # Collect all source files for formatting/linting
 file(GLOB_RECURSE ALL_SOURCE_FILES
-        ${CMAKE_SOURCE_DIR}/uring/*.cpp
-        ${CMAKE_SOURCE_DIR}/uring/*.h
-        ${CMAKE_SOURCE_DIR}/bitcask/src/*.cpp
-        ${CMAKE_SOURCE_DIR}/bitcask/include/*.h
-        ${CMAKE_SOURCE_DIR}/examples/*.cpp
-        ${CMAKE_SOURCE_DIR}/tests/*.cpp
-        ${CMAKE_SOURCE_DIR}/benchmarks/cpp/*.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cc
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/*.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/*.hpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/examples/*.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cc
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/cpp/*.cpp
 )
 
 # Format target - applies clang-format
@@ -302,13 +295,12 @@ target_include_directories(uring PUBLIC
 )
 # Link dependencies
 target_link_libraries(uring PUBLIC
-        mimalloc-static
         PkgConfig::LibUring
-        pthread
-        OpenSSL::SSL
-        OpenSSL::Crypto
-        Boost::context
+        Threads::Threads
 )
+if (KIO_USE_MIMALLOC)
+    target_link_libraries(uring PUBLIC mimalloc-static)
+endif ()
 kio_add_sanitizers(uring)
 
 #-----------------------------------------------
@@ -343,7 +335,7 @@ endif ()
 #-----------------------------------------------
 # Includes
 #----------------------------------------------
-include_directories(${CMAKE_SOURCE_DIR})
+include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
 if (KIO_BUILD_DEMOS)
     add_subdirectory(examples)
@@ -382,40 +374,10 @@ if (KIO_BUILD_SEGMENT_BENCH)
     kio_target_compile_options(segment_append_bench)
 endif ()
 
-if (KIO_BUILD_FIBER_BENCH)
-    add_executable(fiber_vs_coro_bench benchmarks/cpp/fiber_vs_coro_bench.cpp)
-    target_link_libraries(fiber_vs_coro_bench PRIVATE uring)
-    kio_target_compile_options(fiber_vs_coro_bench)
-endif ()
-
 if (KIO_BUILD_HTTP_BENCH)
     add_executable(kio_http_bench benchmarks/cpp/kio_http_bench.cpp)
     target_link_libraries(kio_http_bench PRIVATE uring)
     kio_target_compile_options(kio_http_bench)
-
-    add_executable(kio_fiber_http_bench benchmarks/cpp/kio_fiber_http_bench.cpp)
-    target_link_libraries(kio_fiber_http_bench PRIVATE uring)
-    kio_target_compile_options(kio_fiber_http_bench)
-
-    add_executable(zio_http_bench zio/bench/http_bench.cpp)
-    target_link_libraries(zio_http_bench PRIVATE uring mimalloc-static pthread)
-    kio_target_compile_options(zio_http_bench)
-
-    add_executable(zio_file_io_bench zio/bench/file_io_bench.cpp)
-    target_link_libraries(zio_file_io_bench PRIVATE uring mimalloc-static)
-    kio_target_compile_options(zio_file_io_bench)
-
-    add_executable(zio_cross_thread_spawn_smoke zio/bench/cross_thread_spawn_smoke.cpp)
-    target_link_libraries(zio_cross_thread_spawn_smoke PRIVATE uring mimalloc-static pthread)
-    kio_target_compile_options(zio_cross_thread_spawn_smoke)
-
-    add_executable(other_baseline_http_bench zio/bench/other_baseline_http_bench.cpp)
-    target_link_libraries(other_baseline_http_bench PRIVATE uring mimalloc-static pthread)
-    kio_target_compile_options(other_baseline_http_bench)
-
-    add_executable(other_baseline_file_io_bench zio/bench/other_baseline_file_io_bench.cpp)
-    target_link_libraries(other_baseline_file_io_bench PRIVATE uring mimalloc-static)
-    kio_target_compile_options(other_baseline_file_io_bench)
 
     add_executable(asio_http_bench benchmarks/cpp/asio_http_bench.cpp)
     target_link_libraries(asio_http_bench PRIVATE pthread)

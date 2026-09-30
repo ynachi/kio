@@ -11,8 +11,12 @@ struct TaskAwaiter
 
     bool await_ready() const noexcept { return handle.done(); }
 
-    std::coroutine_handle<> await_suspend(std::coroutine_handle<> caller) noexcept
+    template <typename Promise>
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> caller) noexcept
     {
+        if (handle.promise().started || handle.promise().owner)
+            std::terminate();
+        handle.promise().owner = caller.promise().owner;
         handle.promise().continuation = caller;
         return handle;
     }

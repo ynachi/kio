@@ -1,6 +1,9 @@
 #include "uring/core/buffer_pool.hpp"
 
 #include <algorithm>
+#include <cstdlib>
+#include <limits>
+#include <stdexcept>
 #include <utility>
 
 namespace URing
@@ -8,7 +11,7 @@ namespace URing
 FixedBuffer::FixedBuffer(FixedBuffer&& other) noexcept
     : index_(std::exchange(other.index_, kInvalidBufIndex)),
       bucket_id_(other.bucket_id_),
-      view_(other.view_),
+      view_(std::exchange(other.view_, {})),
       pool_(std::exchange(other.pool_, nullptr))
 {
 }
@@ -20,7 +23,7 @@ FixedBuffer& FixedBuffer::operator=(FixedBuffer&& other) noexcept
         release();
         index_ = std::exchange(other.index_, kInvalidBufIndex);
         bucket_id_ = other.bucket_id_;
-        view_ = other.view_;
+        view_ = std::exchange(other.view_, {});
         pool_ = std::exchange(other.pool_, nullptr);
     }
     return *this;
@@ -33,6 +36,7 @@ void FixedBuffer::release() noexcept
         pool_->release(index_, bucket_id_);
         index_ = kInvalidBufIndex;
         pool_ = nullptr;
+        view_ = {};
     }
 }
 
@@ -79,18 +83,24 @@ FixedBufferPool::FixedBufferPool(std::initializer_list<BucketConfig> configs)
     std::vector sorted_configs(configs);
     std::ranges::sort(sorted_configs, [](const auto& a, const auto& b) { return a.size < b.size; });
 
-    // Validate: all sizes must be page-aligned for io_uring + O_DIRECT compatibility
+    // Fixed-buffer SQEs use a 16-bit index. Validate before allocating slabs.
+    constexpr size_t max_slots = size_t{std::numeric_limits<uint16_t>::max()} + 1;
+    size_t total_slots = 0;
     for (const auto& cfg : sorted_configs)
     {
-        if (cfg.size % 4096 != 0)
+        if (cfg.size == 0 || cfg.count == 0 || cfg.size % 4096 != 0)
         {
             throw std::invalid_argument("slot_size must be page-aligned (multiple of 4096) for io_uring fixed buffers");
         }
+        if (cfg.count > max_slots - total_slots || cfg.size > std::numeric_limits<size_t>::max() / cfg.count)
+            throw std::invalid_argument("fixed-buffer configuration exceeds size or index limits");
+        total_slots += cfg.count;
     }
 
     // Build buckets + global iovec array
     uint32_t current_global_index = 0;
     buckets_.reserve(configs.size());
+    global_iovecs_.reserve(total_slots);
     for (const auto& config : sorted_configs)
     {
         buckets_.emplace_back(config.size, config.count, current_global_index);
@@ -102,11 +112,6 @@ FixedBufferPool::FixedBufferPool(std::initializer_list<BucketConfig> configs)
         }
         current_global_index += config.count;
     }
-
-    ALOG_INFO("MultiSizeFixedBufferPool: {} buckets, {} total slots, {} MB allocated", buckets_.size(),
-              global_iovecs_.size(),
-              std::ranges::fold_left(configs, 0ull, [](size_t acc, const auto& c) { return acc + c.size * c.count; }) /
-                  (1024 * 1024));
 }
 
 [[nodiscard]] Result<FixedBuffer> FixedBufferPool::take(const size_t size) noexcept
@@ -133,5 +138,15 @@ FixedBufferPool::FixedBufferPool(std::initializer_list<BucketConfig> configs)
     std::span view(&it->slab[local_idx * it->slot_size], it->slot_size);
 
     return FixedBuffer(global_idx, bucket_id, view, this);
+}
+
+FixedBufferPool::~FixedBufferPool()
+{
+    size_t available = 0;
+    for (const auto& bucket : buckets_)
+        available += bucket.free_stack.size();
+    // A borrowed buffer keeps a pointer into this pool and must not outlive it.
+    if (available != global_iovecs_.size())
+        std::terminate();
 }
 }  // namespace URing

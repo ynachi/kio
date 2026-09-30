@@ -1,7 +1,8 @@
 #pragma once
 #include <atomic>
+#include <limits>
 
-#include "uring/core/task.hpp"
+#include "promise_base.hpp"
 
 namespace URing::detail
 {

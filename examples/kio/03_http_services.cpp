@@ -130,10 +130,6 @@ static Task<void> dispatching_server_loop(IoContext& ctx, IO& dispatcher, uint16
         // Option 1: Direct scheduling on target worker (Thread-safe)
         target.schedule(handle_client(target, std::move(*client_res)));
 
-        /*
-        // Option 2: Using TransferTo (Demonstration)
-        usage: co_await io.schedule_on(other);
-        */
     }
     co_return {};
 }

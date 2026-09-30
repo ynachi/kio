@@ -1,4 +1,6 @@
 #pragma once
+#include <concepts>
+#include <cstdint>
 #include <optional>
 #include <string>
 
@@ -6,6 +8,7 @@
 #include <unistd.h>
 
 #include "error.hpp"
+#include "fd.hpp"
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 
@@ -15,6 +18,14 @@ template <typename Opt>
 concept SocketOption = requires(const Opt& o, int fd) {
     { o.Apply(fd) } noexcept -> std::same_as<Result<void>>;
 };
+
+template <SocketOption... Options>
+[[nodiscard]] Result<void> set_socket_options(const Fd& fd, const Options&... options) noexcept
+{
+    Result<void> result;
+    ((result = options.Apply(fd.Get()), result.has_value()) && ...);
+    return result;
+}
 
 // ----------------------------------------------------------
 // Options

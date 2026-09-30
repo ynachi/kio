@@ -1,12 +1,13 @@
 #pragma once
 
 #include <initializer_list>
+#include <memory>
 #include <span>
+#include <vector>
 
 #include <liburing.h>
 
 #include "uring/error.hpp"
-#include "uring/logger.hpp"
 
 namespace URing
 {
@@ -24,23 +25,20 @@ class FixedBufferPool;
 
 class FixedBuffer
 {
+    friend class IO;
+    friend class FixedBufferPool;
     uint32_t index_ = kInvalidBufIndex;  ///< Global index in io_uring iovec array
     uint32_t bucket_id_ = 0;             ///< Which bucket this buffer belongs to
     std::span<std::byte> view_;          ///< View into the pinned memory region
     FixedBufferPool* pool_ = nullptr;
 
-public:
-    ///@brief
-    /// @param index the global index in io_uring iovec array
-    /// @param bucket_id The bucket which this buffer belongs to
-    /// @param view
-    /// @param pool
     FixedBuffer(const uint32_t index, const uint32_t bucket_id, std::span<std::byte> view,
                 FixedBufferPool* pool) noexcept
         : index_(index), bucket_id_(bucket_id), view_(view), pool_(pool)
     {
     }
 
+public:
     FixedBuffer(const FixedBuffer&) = delete;
 
     FixedBuffer(FixedBuffer&& other) noexcept;
@@ -52,7 +50,6 @@ public:
     /// Return buffer to pool (idempotent)
     void release() noexcept;
 
-    [[nodiscard]] uint32_t index() const noexcept { return index_; }
     [[nodiscard]] std::span<std::byte> data() noexcept { return view_; }
     [[nodiscard]] std::span<const std::byte> data() const noexcept { return view_; }
 
@@ -67,6 +64,8 @@ public:
 // ============================================================================
 class FixedBufferPool
 {
+    friend class IO;
+    friend class FixedBuffer;
     struct Bucket
     {
         size_t slot_size;                                    ///< Size of each slot in this bucket
@@ -84,43 +83,29 @@ class FixedBufferPool
 
     std::vector<Bucket> buckets_;       ///< Size-sorted buckets
     std::vector<iovec> global_iovecs_;  ///< Flattened array for io_uring_register_buffers
-    bool registered_{false};            ///< Track registration state
 
 public:
     /// Construct pool from bucket configurations
     /// @param configs List of {slot_size, count} pairs (will be sorted internally)
-    explicit FixedBufferPool(std::initializer_list<BucketConfig> configs);
+    FixedBufferPool(std::initializer_list<BucketConfig> configs);
+    ~FixedBufferPool();
+    FixedBufferPool(const FixedBufferPool&) = delete;
+    FixedBufferPool& operator=(const FixedBufferPool&) = delete;
+    FixedBufferPool(FixedBufferPool&&) = delete;
+    FixedBufferPool& operator=(FixedBufferPool&&) = delete;
 
     /// Acquire the smallest buffer >= requested size
     /// @param size Minimum buffer size needed
     /// @return FixedBuffer on success, PoolError on failure
     [[nodiscard]] Result<FixedBuffer> take(size_t size) noexcept;
 
-    /// Return buffer to pool (called automatically by FixedBuffer destructor)
-    /// @param global_index Index returned by take()
-    /// @param bucket_id Bucket ID stored in FixedBuffer
+private:
     void release(uint32_t global_index, const uint32_t bucket_id) noexcept { buckets_[bucket_id].push(global_index); }
 
     [[nodiscard]] const iovec* iovecs_ptr() const noexcept { return global_iovecs_.data(); }
 
-    bool is_registered() const noexcept { return registered_; }
-    void set_registered() noexcept { registered_ = true; }
-
-    /// Query available slots in a specific bucket (debug/observability)
-    [[nodiscard]] size_t available_in_bucket(const uint32_t bucket_id) const noexcept
-    {
-        if (bucket_id >= buckets_.size())
-        {
-            return 0;
-        }
-        return buckets_[bucket_id].free_stack.size();
-    }
-
     /// Total number of buffer slots across all buckets
     [[nodiscard]] size_t total_capacity() const noexcept { return global_iovecs_.size(); }
-
-    /// Number of buckets (for iteration/debugging)
-    [[nodiscard]] size_t bucket_count() const noexcept { return buckets_.size(); }
 };
 
 }  // namespace URing

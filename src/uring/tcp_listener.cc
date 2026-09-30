@@ -16,10 +16,9 @@ Result<Fd> TcpListener::Bind(const SocketAddress& addr, int backlog)
     // Immediately wrap in your RAII Fd primitive
     Fd sock{raw_fd};
 
-    // Reuse your variadic SetOptions!
     // Note: TCP_NODELAY set on a listening socket is inherited by accepted clients in Linux.
-    if (auto r = sock.SetOptions(SockOpt::ReuseAddr{true}, SockOpt::ReusePort{true}, SockOpt::NoDelay{true},
-                                 SockOpt::NonBlocking{true});
+    if (auto r = set_socket_options(sock, SockOpt::ReuseAddr{true}, SockOpt::ReusePort{true}, SockOpt::NoDelay{true},
+                                    SockOpt::NonBlocking{true});
         !r)
     {
         return std::unexpected(r.error());

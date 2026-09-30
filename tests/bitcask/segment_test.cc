@@ -18,15 +18,12 @@ class SegmentManagerTest : public ::testing::Test
 protected:
     void SetUp() override
     {
-        auto io = URing::IO(0, nullptr,
-                            {
-        },
-                            {
+        io_ = std::make_unique<URing::IO>(0, nullptr, URing::IoOptions{},
+                            std::initializer_list<URing::BucketConfig>{
                                 {.size = 4096, .count = 256},
                                 {.size = 8192, .count = 16},
                                 {.size = 1024 * 1024 + 4096, .count = 2},
                             });
-        io_ = std::make_unique<URing::IO>(std::move(io));
 
         fs::path temp_base = fs::temp_directory_path();
         test_dir_ = temp_base / "bitcask_test_dir_12345";

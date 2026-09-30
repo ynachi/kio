@@ -9,6 +9,7 @@
 #include "../../include/uring/core/task.hpp"
 #include "uring/logger.hpp"
 #include "uring/tcp_listener.hpp"
+#include "uring/extention/io_pool.hpp"
 
 using namespace URing;
 

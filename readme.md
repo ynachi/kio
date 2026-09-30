@@ -1,158 +1,97 @@
-# URing: High-Performance C++20 io_uring Framework
+# URing
 
-URing is a low-latency, "thread-per-core" asynchronous I/O framework for Linux. It provides a type-safe C++20 coroutine
-interface over `io_uring`, designed for maximum throughput and predictable latency in systems programming.
-
-## Architectural Philosophy
-
-Unlike high-level "managed" runtimes, URing follows a **Resource-Provider** model:
-
-1. **Inert Initialization**: `IO` contexts are initialized in a "disabled" state. This allows you to perform heavy
-   setup (FD allocation, memory reservation, shared backend attachment) on a main thread before moving the context to a
-   dedicated worker.
-2. **Explicit Ownership**: Leverages `IORING_SETUP_SINGLE_ISSUER`. The thread that calls `run_blocking()` becomes the
-   registered owner, ensuring zero-mutex submission paths.
-3. **Shared Backend (WQ Attachment)**: Enables a "Leader-Follower" model where multiple rings share a single async
-   worker pool, reducing kernel-thread sprawl and context-switching overhead.
-4. **Stable Memory Architecture**: Designed for stack-friendly usage with strict move-semantics that prevent
-   invalidating coroutine references.
-
-## Key Features
-
-- **C++20 Coroutines**: Native `Task<T>` and `IoAwaiter` implementation with symmetric transfer for flat stack frames.
-- **Zero-Allocation Hot Path**: MPSC intrusive queues and optimized SQE management.
-- **Shared Async Workers**: Attach multiple rings to a single leader's kernel worker pool.
-- **Direct I/O & Buffering**: Unified support for file and network descriptors via `Fd` RAII wrappers.
-- **Observability**: Built-in async logging and performance counters.
-
-## Requirements
-
-- **OS**: Linux Kernel 5.11+ (6.0+ recommended for best performance)
-- **Compiler**: GCC 14+ or Clang 18+ (C++23 support required)
-- **Library**: `liburing` 2.5+
-
-## Quick Start
-
-### 1. Basic Setup (Standalone)
+A C++23 coroutine interface to Linux io_uring. Each `IO` owns one ring, its
+scheduled root tasks, their pending operations, and an optional registered-buffer pool.
 
 ```cpp
 #include "uring/core/io.h"
-#include <iostream>
 
-using namespace URing;
-
-Task<void> HelloWorld(IO& io) {
-    auto open_res = co_await io.open("test.txt", O_RDONLY);
-    if (!open_res) {
-        std::cerr << "Failed to open file\n";
-        co_return {};
-    }
-
-    Fd file = std::move(*open_res);
+URing::Task<void> read_file(URing::IO& io, std::stop_source& stop) {
+    URING_TRY(auto fd, co_await io.open("input.txt", O_RDONLY));
     std::byte buffer[1024];
-    auto read_res = co_await io.read(file, buffer);
-    
-    std::cout << "Read " << *read_res << " bytes\n";
+    URING_TRY(auto bytes, co_await io.read(fd, buffer));
+    // Process buffer[0..bytes).
+    stop.request_stop();
     co_return {};
 }
 
 int main() {
-    IO io(0); // Create inert IO context
-    
+    URing::IO io(0);
     std::stop_source stop;
-    io.schedule(HelloWorld(io));
-    
-    // run_blocking activates the ring and takes ownership
-    io.run_blocking(stop.get_token());
-    
-    return 0;
+    io.schedule(read_file(io, stop));
+    io.run(stop.get_token());
 }
 ```
 
-### 2. Multi-Threaded Shared Backend (Leader/Follower)
+## Ownership and execution
+
+`Task<T>` is lazy and completes with `Result<T>`. An awaited child remains
+owned by its parent's Task object. `io.schedule(Task<void>)` transfers an
+unstarted root to the reactor and returns false once shutdown begins.
+Arguments used after suspension must live in the coroutine frame or outlive
+the task; use named coroutine functions or retain capturing lambda closures.
+
+Scheduling is safe from any thread. A root and its children remain on their
+assigned worker. I/O against a different reactor returns `EXDEV`. Tasks must
+suspend through the reactor's I/O awaiters or awaited children; arbitrary
+external awaiters need their own integration with the reactor's lifetime rules.
+There is no coroutine migration API.
+
+`IO` is non-copyable and non-movable. Its ring is created disabled, then
+activated by the thread that calls `run(stop_token)`. That thread exclusively
+submits and processes I/O. `run` is a single lifecycle and cannot restart.
+The `sync_wait(io, task)` testing helper drives tasks on its caller's thread;
+repeated calls must use that same thread and precede terminal shutdown.
+
+## Shutdown
+
+A stop request wakes the reactor even when idle. Shutdown closes admission,
+requests cancellation of pending operations, and processes their original
+completions before resuming tasks. An operation that already succeeded retains
+its success result; new I/O attempted during shutdown returns `ECANCELED`.
+Submitted close requests drain without cancellation so descriptor ownership
+is not abandoned after transfer to the kernel.
+Task chains must propagate cancellation or otherwise finish. Root frames are
+destroyed only after completion, so descriptors and borrowed buffers unwind
+through normal C++ destruction. Work submitted before run also remains owned:
+destroying an unrun reactor destroys those unstarted frames.
+
+The optional `uring/extention/io_pool.hpp` wrapper owns stable reactor objects
+and their worker threads. `pool.worker(i).schedule(task)` submits independent
+work; `pool.join()` requests stop and waits for every worker to drain.
+
+## I/O and buffers
+
+The IO methods provide accept/connect, read/write and vectored I/O, filesystem
+operations, poll, and sleep. Reads and writes may complete partially.
+`Fd` owns a descriptor; socket options live in `uring/net.hpp`.
+
+Configure registered buffers through the IO constructor:
 
 ```cpp
-#include "uring/extention/io_pool.hpp"
-
-void StartNetworkSystem() {
-    IoOptions opts;
-    opts.entries = 4096;
-    opts.worker_cpu_affinity = {0, 1, 2, 3}; // Pin to physical cores
-
-    // IoContext manages Leader/Follower initialization automatically
-    IoContext pool(4, opts); 
-
-    // Schedule work on specific workers
-    pool.worker(0).schedule(MyServerTask(pool.worker(0)));
-    
-    // Join or stop via stop_source
-    pool.join();
-}
+URing::IO io(0, nullptr, {}, {{.size = 4096, .count = 128}});
 ```
 
-## Lifecycle & State Machine
+Borrow with `io.take_fixed_buffer(size)` inside a task. Use the typed
+`read_fixed`/`write_fixed` methods; return buffers on their owning worker.
+The reactor must outlive borrowed buffers. Buffer registration is owned by
+the reactor and fails construction if the kernel rejects it.
 
-An `IO` object exists in three states:
+`IoOptions::batch_max_size` bounds coroutine resumptions per tick.
+CPU affinity and io_uring setup flags are explicit options.
 
-| State         | Transition             | Action                                                |
-|:--------------|:-----------------------|:------------------------------------------------------|
-| **Inert**     | Constructor / `init()` | `io_uring` created but disabled. **Move is allowed.** |
-| **Activated** | `activate()`           | Ring enabled, `eventfd` armed. **Move is forbidden.** |
-| **Running**   | `run_blocking()`       | Loop entering `tick()`. Thread ownership registered.  |
+## Build
 
-> **Warning**: Moving an `IO` object while it is in the **Running** state will trigger `std::terminate()`. This protects
-> suspended coroutines from holding dangling references to the `IO` context.
+The core requires C++23, liburing, and threads. Tests require GoogleTest.
+Storage dependencies are discovered only when Bitcask is enabled.
+Mimalloc is optional through `KIO_USE_MIMALLOC=ON`.
 
-## API Reference
-
-### Core I/O Operations
-
-All operations are available as methods on the `IO` instance:
-
-- `accept(Fd& server_fd, ...)`
-- `connect(Fd& fd, const SocketAddress& addr)`
-- `read(Fd& fd, std::span<std::byte> buf, off_t offset)`
-- `write(Fd& fd, std::span<const std::byte> buf, off_t offset)`
-- `open(std::filesystem::path, flags, mode)`
-- `close(Fd&& fd)`
-- `timeout(std::chrono::duration)`
-
-### Performance Tuning
-
-Configure `IoOptions` before initialization:
-
-- `entries`: Submission Queue size.
-- `sq_thread_idle_ms`: Kernel thread sleep time (for `SQPOLL`).
-- `worker_cpu_affinity`: List of CPU cores for thread pinning.
-- `batch_max_size`: Max completions processed per tick.
-
-## Build System
-
-### CMake Integration
-
-```cmake
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(LibUring REQUIRED liburing)
-
-add_executable(my_app main.cpp)
-target_link_libraries(my_app PRIVATE uring)
+```sh
+cmake -S . -B build -DKIO_BUILD_BITCASK=OFF -DKIO_BUILD_DEMOS=OFF \
+    -DKIO_BUILD_BENCHMARK=OFF -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j2
+ctest --test-dir build --output-on-failure
 ```
 
-### Building from Source
-
-```bash
-cmake --preset dev
-cmake --build build -j$(nproc)
-cd build && make check
-```
-
-## Contributing
-
-URing is built for high-performance networking and storage. Tests and demos are verified with **TSAN** and **ASAN** to
-ensure memory safety and race-free operation.
-
----
-**Author**: ynachi  
-**License**: MIT
-
-```
+The test suite covers task composition, remote submission, shutdown and resource
+release, worker affinity, registered buffers, and the intrusive incoming queue.

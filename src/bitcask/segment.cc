@@ -314,10 +314,7 @@ URing::Task<std::shared_ptr<URing::Fd>> SegmentManager::open_and_cache_fd(URing:
 {
     ALOG_DEBUG("no cached file, opening a new one, shard{}", shard_id_);
     std::filesystem::path path = cfg_.get_data_file_path(id, shard_id_);
-    const auto path_str = path.string();
-
-    URING_TRY_LOG(auto fd_inner, co_await io.open(std::move(path), cfg_.read_flags, cfg_.file_mode),
-                  "open segment file failed shard={} path={}", shard_id_, path_str);
+    URING_TRY(auto fd_inner, co_await io.open(std::move(path), cfg_.read_flags, cfg_.file_mode));
 
     auto fd_shared = std::make_shared<URing::Fd>(std::move(fd_inner));
 
@@ -325,8 +322,7 @@ URing::Task<std::shared_ptr<URing::Fd>> SegmentManager::open_and_cache_fd(URing:
     // close if we are the sole owner
     if (evicted_fd.has_value() && evicted_fd->use_count() == 1)
     {
-        URING_TRY_VOID_LOG(co_await io.close(std::move(*evicted_fd->get())),
-                           "close evicted file failed shard={} path={}", shard_id_, path_str);
+        URING_TRY_VOID(co_await io.close(std::move(*evicted_fd->get())));
     }
 
     co_return fd_shared;
@@ -337,12 +333,8 @@ URing::Task<std::optional<URing::Fd>> SegmentManager::create_active(URing::IO& i
     const SegmentId id = next_segment_id();
     std::filesystem::path path = cfg_.get_data_file_path(id, shard_id_);
 
-    const auto path_str = path.string();  // capture BEFORE the move
-    URING_TRY_LOG(auto fd, co_await io.open(std::move(path), cfg_.write_flags, cfg_.file_mode),
-                  "create active file failed shard={} path={}", shard_id_, path_str);
-
-    URING_TRY_VOID_LOG(co_await io.fallocate(fd, 0, 0, cfg_.max_segment_size), "fallocate active failed shard={}",
-                       shard_id_);
+    URING_TRY(auto fd, co_await io.open(std::move(path), cfg_.write_flags, cfg_.file_mode));
+    URING_TRY_VOID(co_await io.fallocate(fd, 0, 0, cfg_.max_segment_size));
 
     // reset counters
     next_disk_offset_ = 0;
