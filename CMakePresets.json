@@ -2,7 +2,7 @@
   "version": 6,
   "cmakeMinimumRequired": {
     "major": 3,
-    "minor": 25,
+    "minor": 28,
     "patch": 0
   },
   "configurePresets": [
@@ -26,7 +26,7 @@
         "KIO_BUILD_TESTS": "ON",
         "KIO_BUILD_DEMOS": "ON",
         "KIO_BUILD_BITCASK": "OFF",
-        "KIO_BUILD_BENCHMARK": "ON"
+        "KIO_BUILD_BENCHMARK": "OFF"
       }
     },
     {

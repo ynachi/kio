@@ -9,7 +9,7 @@ set(GTEST_GIT_TAG v1.17.0)
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 
 # Cmake find modules
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 option(ENABLE_AIO_STATS "Enable AIO observability metrics" ON)
 if (ENABLE_AIO_STATS)
@@ -90,22 +90,27 @@ function(kio_add_demo target_name source_file)
     message(STATUS "Enabled Demo: ${target_name} [${ARG_TAGS}]")
 endfunction()
 
-function(kio_add_sanitizers target_name)
-    if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-        message(STATUS "🔍 ThreadSanitizer enabled on target ${target_name}")
+set(KIO_SANITIZER "thread" CACHE STRING "Sanitizer to use (address, thread, undefined, none)")
 
-        # Check if we're using moodycamel
+function(kio_add_sanitizers target_name)
+    if (KIO_SANITIZER STREQUAL "none")
+        return()
+    endif ()
+
+    if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+        message(STATUS "🔍 ${KIO_SANITIZER} Sanitizer enabled on target ${target_name}")
+
         target_compile_options(${target_name}
                 PRIVATE
-                -fsanitize=thread
-                -g -o1
+                -fsanitize=${KIO_SANITIZER}
+                -g -O1
                 -fno-omit-frame-pointer
         )
-        target_link_options(${target_name} PRIVATE -fsanitize=thread)
+        target_link_options(${target_name} PUBLIC -fsanitize=${KIO_SANITIZER})
 
-
-        # But also enable general thread sanitizer flag for other code
-        target_compile_definitions(${target_name} PUBLIC __SANITIZE_THREAD__=1)
+        if (KIO_SANITIZER STREQUAL "thread")
+            target_compile_definitions(${target_name} PUBLIC __SANITIZE_THREAD__=1)
+        endif ()
     endif ()
 endfunction()
 
@@ -163,9 +168,12 @@ option(KIO_BUILD_TESTS "Build the kio test suite" ON)
 set(KIO_TEST_FILTER "all" CACHE STRING "List of tags to build (or 'all')")
 option(KIO_BUILD_BITCASK "Build bitcask storage engine" ON)
 option(KIO_BUILD_DEMOS "Build the kio demo executables" ON)
+option(KIO_BUILD_SEGMENT_BENCH "Build temporary bitcask segment benchmark" OFF)
+option(KIO_BUILD_HTTP_BENCH "Build HTTP server benchmark targets" OFF)
 # pass -DKIO_DEMO_FILTER="core;http" to build specific subsets of demo.
-option(KIO_BUILD_BENCHMARK "Build codes used to benchmark kio against other libs" ON)
+option(KIO_BUILD_BENCHMARK "Build codes used to benchmark kio against other libs" OFF)
 option(ENABLE_CLANG_TIDY "Run clang-tidy during compilation" OFF)
+option(KIO_USE_MIMALLOC "Use mimalloc for allocation" OFF)
 
 # Enable clang-tidy during build if requested
 if (ENABLE_CLANG_TIDY)
@@ -185,26 +193,22 @@ set(ENV{PKG_CONFIG_PATH} "$ENV{PKG_CONFIG_PATH}:/usr/local/lib/pkgconfig:/usr/lo
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LibUring REQUIRED IMPORTED_TARGET liburing)
 
-#gflags
-find_package(gflags REQUIRED)
+if (KIO_BUILD_BENCHMARK)
+    find_package(gflags REQUIRED)
+endif ()
 
 # gtest
 if (KIO_BUILD_TESTS)
     find_package(GTest REQUIRED)
 endif ()
 
-# YLT
-find_package(YLT REQUIRED)
-
-# CRC32C
-find_package(CRC32C REQUIRED)
-
-# Abseil
 find_package(Abseil REQUIRED)
-
-# openssl, min 3 required
-find_package(OpenSSL 3 REQUIRED)
-message(STATUS "OpenSSL: ${OPENSSL_VERSION}")
+if (KIO_BUILD_BITCASK)
+    find_package(CRC32C REQUIRED)
+endif ()
+if (KIO_USE_MIMALLOC)
+    find_package(mimalloc REQUIRED)
+endif ()
 find_package(Threads REQUIRED)
 
 # for benchmarks
@@ -224,13 +228,13 @@ find_program(CLANG_TIDY_EXE NAMES clang-tidy-22)
 
 # Collect all source files for formatting/linting
 file(GLOB_RECURSE ALL_SOURCE_FILES
-        ${CMAKE_SOURCE_DIR}/kio/*.cpp
-        ${CMAKE_SOURCE_DIR}/kio/*.h
-        ${CMAKE_SOURCE_DIR}/bitcask/src/*.cpp
-        ${CMAKE_SOURCE_DIR}/bitcask/include/*.h
-        ${CMAKE_SOURCE_DIR}/examples/*.cpp
-        ${CMAKE_SOURCE_DIR}/tests/*.cpp
-        ${CMAKE_SOURCE_DIR}/benchmarks/cpp/*.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cc
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/*.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/*.hpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/examples/*.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cc
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/cpp/*.cpp
 )
 
 # Format target - applies clang-format
@@ -278,34 +282,68 @@ endif ()
 # Aio lib, change later to kio
 #----------------------------------------------
 # Library definition
-add_library(kio
-        src/kio/core.cpp
-        src/kio/io.cpp
-        src/kio/net.cpp
-        src/kio/parser.cpp
-        src/kio/tls_context.cpp
+add_library(uring
+        src/uring/io.cc
+        src/uring/net.cc
+        src/uring/tcp_listener.cc
+        src/uring/buffer_pool.cc
+        src/uring/logger.cc
 )
 # Include directories
-target_include_directories(kio PUBLIC
+target_include_directories(uring PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
 )
 # Link dependencies
-target_link_libraries(kio PUBLIC
+target_link_libraries(uring PUBLIC
         PkgConfig::LibUring
-        pthread
-        OpenSSL::SSL
-        OpenSSL::Crypto
+        Threads::Threads
+        absl::log
+        absl::log_initialize
+        absl::log_globals
+        absl::log_sink
+        absl::log_sink_registry
+        absl::log_severity
+        absl::log_entry
 )
+if (KIO_USE_MIMALLOC)
+    target_link_libraries(uring PUBLIC mimalloc-static)
+endif ()
+kio_add_sanitizers(uring)
+
+#-----------------------------------------------
+# bitcask lib
+#----------------------------------------------
+# Library definition
+if (KIO_BUILD_BITCASK)
+    add_library(bitcask
+            src/bitcask/cache.cc
+            src/bitcask/segment.cc
+    )
+
+    # Include directories
+    target_include_directories(bitcask PUBLIC
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+            $<INSTALL_INTERFACE:include>
+    )
+    # Link dependencies
+    target_link_libraries(bitcask
+            PUBLIC
+            uring
+            absl::flat_hash_map
+            absl::flat_hash_set
+            absl::inlined_vector
+            PRIVATE
+            crc32c
+    )
+    kio_add_sanitizers(bitcask)
+endif ()
+
 
 #-----------------------------------------------
 # Includes
 #----------------------------------------------
-include_directories(${CMAKE_SOURCE_DIR})
-
-if (KIO_BUILD_BITCASK)
-    add_subdirectory(bitcask)
-endif ()
+include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
 if (KIO_BUILD_DEMOS)
     add_subdirectory(examples)
@@ -338,3 +376,22 @@ if (KIO_BUILD_TESTS)
     message(STATUS "Added targets: check, check-quick")
 endif ()
 
+if (KIO_BUILD_SEGMENT_BENCH)
+    add_executable(segment_append_bench benchmarks/cpp/segment_append_bench.cpp)
+    target_link_libraries(segment_append_bench PRIVATE bitcask)
+    kio_target_compile_options(segment_append_bench)
+endif ()
+
+if (KIO_BUILD_HTTP_BENCH)
+    add_executable(kio_http_bench benchmarks/cpp/kio_http_bench.cpp)
+    target_link_libraries(kio_http_bench PRIVATE uring)
+    kio_target_compile_options(kio_http_bench)
+
+    add_executable(asio_http_bench benchmarks/cpp/asio_http_bench.cpp)
+    target_link_libraries(asio_http_bench PRIVATE pthread)
+    kio_target_compile_options(asio_http_bench)
+
+    add_executable(kio_asio_disk_bench benchmarks/cpp/kio_asio_disk_bench.cpp)
+    target_link_libraries(kio_asio_disk_bench PRIVATE uring pthread)
+    kio_target_compile_options(kio_asio_disk_bench)
+endif ()
