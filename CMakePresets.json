@@ -1,119 +1,57 @@
 {
   "version": 6,
-  "cmakeMinimumRequired": {
-    "major": 3,
-    "minor": 25,
-    "patch": 0
-  },
+  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
   "configurePresets": [
     {
-      "name": "base",
-      "hidden": true,
-      "binaryDir": "${sourceDir}/build",
-      "cacheVariables": {
-        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-        "CMAKE_C_COMPILER": "clang-22",
-        "CMAKE_CXX_COMPILER": "clang++-22"
-      }
+      "name": "base", "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": { "KIO_BUILD_TESTS": "ON" }
     },
     {
-      "name": "dev",
-      "displayName": "Development Build",
-      "description": "Debug build with thread sanitizer",
-      "inherits": "base",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
-        "KIO_BUILD_TESTS": "ON",
-        "KIO_BUILD_DEMOS": "ON",
-        "KIO_BUILD_BITCASK": "OFF",
-        "KIO_BUILD_BENCHMARK": "ON"
-      }
+      "name": "dev", "inherits": "base",
+      "displayName": "Debug, no sanitizer: the fast edit-compile-test loop",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "KIO_BUILD_DEMOS": "ON" }
     },
     {
-      "name": "dev-tidy",
-      "displayName": "Development with clang-tidy",
-      "description": "Debug build with clang-tidy enabled during compilation",
-      "inherits": "dev",
-      "cacheVariables": {
-        "ENABLE_CLANG_TIDY": "ON"
-      }
+      "name": "asan", "inherits": "base",
+      "displayName": "AddressSanitizer + UndefinedBehaviorSanitizer",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "CMAKE_CXX_FLAGS_DEBUG": "-O1 -g", "KIO_SANITIZER": "address" }
     },
     {
-      "name": "release",
-      "displayName": "Release Build",
-      "description": "Optimized release build",
-      "inherits": "base",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release",
-        "KIO_BUILD_TESTS": "OFF",
-        "KIO_BUILD_DEMOS": "OFF",
-        "KIO_BUILD_BITCASK": "ON",
-        "KIO_BUILD_BENCHMARK": "OFF"
-      }
+      "name": "tsan", "inherits": "base",
+      "displayName": "ThreadSanitizer",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "CMAKE_CXX_FLAGS_DEBUG": "-O1 -g", "KIO_SANITIZER": "thread" }
     },
     {
-      "name": "ci",
-      "displayName": "CI Build",
-      "description": "Build for continuous integration",
-      "inherits": "base",
+      "name": "release", "inherits": "base",
+      "displayName": "Optimized, with mimalloc and the benchmark server: the only build you measure",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
-        "KIO_BUILD_TESTS": "ON",
-        "KIO_BUILD_DEMOS": "OFF",
-        "KIO_BUILD_BITCASK": "OFF",
-        "KIO_BUILD_BENCHMARK": "OFF",
-        "ENABLE_CLANG_TIDY": "ON"
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O3 -g -fno-omit-frame-pointer",
+        "KIO_USE_MIMALLOC": "ON", "KIO_BUILD_BENCH": "ON", "KIO_BUILD_DEMOS": "ON"
       }
     }
   ],
   "buildPresets": [
-    {
-      "name": "dev",
-      "displayName": "Build All (Dev)",
-      "configurePreset": "dev",
-      "jobs": 0
-    },
-    {
-      "name": "dev-tidy",
-      "displayName": "Build with Tidy",
-      "configurePreset": "dev-tidy",
-      "jobs": 0
-    },
-    {
-      "name": "release",
-      "displayName": "Build All (Release)",
-      "configurePreset": "release",
-      "jobs": 0
-    },
-    {
-      "name": "format",
-      "displayName": "Format Code",
-      "configurePreset": "dev",
-      "targets": ["format"]
-    },
-    {
-      "name": "tidy",
-      "displayName": "Run Tidy",
-      "configurePreset": "dev",
-      "targets": ["tidy"]
-    }
+    { "name": "dev", "configurePreset": "dev" },
+    { "name": "asan", "configurePreset": "asan" },
+    { "name": "tsan", "configurePreset": "tsan" },
+    { "name": "release", "configurePreset": "release" }
   ],
   "testPresets": [
-    {
-      "name": "dev",
-      "displayName": "Run All Tests",
-      "configurePreset": "dev",
-      "output": {
-        "outputOnFailure": true
-      }
-    },
-    {
-      "name": "dev-verbose",
-      "displayName": "Run All Tests (Verbose)",
-      "configurePreset": "dev",
-      "output": {
-        "verbosity": "verbose"
-      }
-    }
+    { "name": "base", "hidden": true, "output": { "outputOnFailure": true }, "execution": { "timeout": 120 } },
+    { "name": "dev", "inherits": "base", "configurePreset": "dev" },
+    { "name": "asan", "inherits": "base", "configurePreset": "asan",
+      "environment": { "ASAN_OPTIONS": "detect_stack_use_after_return=1:strict_string_checks=1", "UBSAN_OPTIONS": "print_stacktrace=1" } },
+    { "name": "tsan", "inherits": "base", "configurePreset": "tsan",
+      "environment": { "TSAN_OPTIONS": "halt_on_error=1:second_deadlock_stack=1" } },
+    { "name": "release", "inherits": "base", "configurePreset": "release" }
+  ],
+  "workflowPresets": [
+    { "name": "dev", "steps": [ { "type": "configure", "name": "dev" }, { "type": "build", "name": "dev" }, { "type": "test", "name": "dev" } ] },
+    { "name": "asan", "steps": [ { "type": "configure", "name": "asan" }, { "type": "build", "name": "asan" }, { "type": "test", "name": "asan" } ] },
+    { "name": "tsan", "steps": [ { "type": "configure", "name": "tsan" }, { "type": "build", "name": "tsan" }, { "type": "test", "name": "tsan" } ] },
+    { "name": "release", "steps": [ { "type": "configure", "name": "release" }, { "type": "build", "name": "release" }, { "type": "test", "name": "release" } ] }
   ]
 }

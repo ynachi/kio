@@ -17,161 +17,16 @@ if (ENABLE_AIO_STATS)
 endif ()
 
 # -----------------------------------------
-# Common Build Functions
-#------------------------------------------
-function(kio_target_compile_options target_name)
-    # Check if target is an INTERFACE library
-    get_target_property(target_type ${target_name} TYPE)
-
-    # Common flags for both Interface and Normal targets
-    set(COMMON_COMPILE_FLAGS
-            -Wall
-            -Wextra
-            -Wpedantic
-            -Wno-gnu-statement-expression
-            -Wno-missing-field-initializers
-
-            #"-DLOG_BUILD_LEVEL=${LOG_BUILD_LEVEL}"
-
-            $<$<CONFIG:Release>:-O3>
-            $<$<CONFIG:Release>:-march=native>
-    )
-
-    if (target_type STREQUAL "INTERFACE_LIBRARY")
-        target_compile_options(${target_name} INTERFACE ${COMMON_COMPILE_FLAGS})
-    else ()
-        target_compile_options(${target_name} PRIVATE ${COMMON_COMPILE_FLAGS})
-    endif ()
-
-endfunction()
-
-# -----------------------------------------------------------------------------
-# Function: kio_add_demo
-# Usage: kio_add_demo(demo_name source.cpp TAGS core network LIBS <libs to link>)
-# -----------------------------------------------------------------------------
-function(kio_add_demo target_name source_file)
-    # Parse Arguments (supports optional TAGS list)
-    set(options "")
-    set(oneValueArgs "")
-    set(multiValueArgs TAGS LIBS)
-    cmake_parse_arguments(ARG "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
-
-    # 2. Check Global Toggle
-    if (NOT KIO_BUILD_DEMOS)
-        return()
-    endif ()
-
-    # Check Tag Filtering
-    # If KIO_DEMO_FILTER is set (and not "all"), we check if this demo has a matching tag.
-    if (DEFINED KIO_DEMO_FILTER AND NOT "${KIO_DEMO_FILTER}" STREQUAL "all")
-        set(MATCH_FOUND FALSE)
-        foreach (tag IN LISTS ARG_TAGS)
-            if ("${tag}" IN_LIST KIO_DEMO_FILTER)
-                set(MATCH_FOUND TRUE)
-                break()
-            endif ()
-        endforeach ()
-
-        if (NOT MATCH_FOUND)
-            return() # Skip this target
-        endif ()
-    endif ()
-
-    # Create the Target (If we passed the checks)
-    add_executable(${target_name} ${source_file})
-    target_link_libraries(${target_name} PRIVATE ${ARG_LIBS})
-    kio_target_compile_options(${target_name})
-
-    # Install to bin/examples
-    install(TARGETS ${target_name}
-            RUNTIME DESTINATION bin/examples
-    )
-
-    message(STATUS "Enabled Demo: ${target_name} [${ARG_TAGS}]")
-endfunction()
-
-set(KIO_SANITIZER "thread" CACHE STRING "Sanitizer to use (address, thread, undefined, none)")
-
-function(kio_add_sanitizers target_name)
-    if (KIO_SANITIZER STREQUAL "none")
-        return()
-    endif ()
-
-    if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-        message(STATUS "🔍 ${KIO_SANITIZER} Sanitizer enabled on target ${target_name}")
-
-        target_compile_options(${target_name}
-                PRIVATE
-                -fsanitize=${KIO_SANITIZER}
-                -g -O1
-                -fno-omit-frame-pointer
-        )
-        target_link_options(${target_name} PRIVATE -fsanitize=${KIO_SANITIZER})
-
-        if (KIO_SANITIZER STREQUAL "thread")
-            target_compile_definitions(${target_name} PUBLIC __SANITIZE_THREAD__=1)
-        endif ()
-    endif ()
-endfunction()
-
-
-# -----------------------------------------------------------------------------
-# Function: kio_add_test
-# Usage: kio_add_test(test_name source.cpp TAGS core network LIBS <libs to link>)
-# -----------------------------------------------------------------------------
-function(kio_add_test target_name source_file)
-    # Parse Arguments (supports optional TAGS list)
-    set(options "")
-    set(oneValueArgs "")
-    set(multiValueArgs TAGS LIBS)
-    cmake_parse_arguments(ARG "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
-
-    # 2. Check Global Toggle
-    if (NOT KIO_BUILD_TESTS)
-        return()
-    endif ()
-
-    # Check Tag Filtering
-    # If KIO_TEST_FILTER is set (and not "all"), we check if this demo has a matching tag.
-    if (DEFINED KIO_TEST_FILTER AND NOT "${KIO_TEST_FILTER}" STREQUAL "all")
-        set(MATCH_FOUND FALSE)
-        foreach (tag IN LISTS ARG_TAGS)
-            if ("${tag}" IN_LIST KIO_TEST_FILTER)
-                set(MATCH_FOUND TRUE)
-                break()
-            endif ()
-        endforeach ()
-
-        if (NOT MATCH_FOUND)
-            return() # Skip this target
-        endif ()
-    endif ()
-
-    # Create the Target (If we passed the checks)
-    add_executable(${target_name} ${source_file})
-    target_link_libraries(${target_name} PRIVATE ${ARG_LIBS})
-    kio_target_compile_options(${target_name})
-    # always enable sanitizer on debug builds
-    kio_add_sanitizers(${target_name})
-
-    add_test(NAME ${target_name} COMMAND ${target_name})
-    gtest_discover_tests(${target_name})
-
-    message(STATUS "Enabled Test: ${target_name} [${ARG_TAGS}]")
-endfunction()
-
-# -----------------------------------------
 # Optional Components
 #------------------------------------------
-set(KIO_DEMO_FILTER "all" CACHE STRING "List of tags to build (or 'all')")
-option(KIO_BUILD_TESTS "Build the kio test suite" ON)
-set(KIO_TEST_FILTER "all" CACHE STRING "List of tags to build (or 'all')")
-option(KIO_BUILD_BITCASK "Build bitcask storage engine" ON)
-option(KIO_BUILD_DEMOS "Build the kio demo executables" ON)
-option(KIO_BUILD_SEGMENT_BENCH "Build temporary bitcask segment benchmark" OFF)
-option(KIO_BUILD_HTTP_BENCH "Build HTTP server benchmark targets" OFF)
-# pass -DKIO_DEMO_FILTER="core;http" to build specific subsets of demo.
-option(KIO_BUILD_BENCHMARK "Build codes used to benchmark kio against other libs" OFF)
+option(KIO_BUILD_TESTS "Build the test suite" ON)
+option(KIO_BUILD_DEMOS "Build the example programs" ON)
+option(KIO_BUILD_BENCH "Build the HTTP benchmark server" OFF)
+option(KIO_BUILD_BITCASK "Build the bitcask library (Abseil, CRC32C)" OFF)
+option(KIO_USE_MIMALLOC "Link mimalloc as the global allocator" OFF)
+option(KIO_FETCH_LIBURING "Build a pinned liburing instead of the system one" ON)
+set(KIO_SANITIZER "none" CACHE STRING "none | address (ASan+UBSan) | thread (TSan)")
+set_property(CACHE KIO_SANITIZER PROPERTY STRINGS none address thread)
 option(ENABLE_CLANG_TIDY "Run clang-tidy during compilation" OFF)
 
 # Enable clang-tidy during build if requested
@@ -185,101 +40,30 @@ if (ENABLE_CLANG_TIDY)
     endif ()
 endif ()
 
+
 #-----------------------------------------
 # Dependencies
 #----------------------------------------
-set(ENV{PKG_CONFIG_PATH} "$ENV{PKG_CONFIG_PATH}:/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/usr/lib64/pkgconfig")
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(LibUring REQUIRED IMPORTED_TARGET liburing)
-
-#gflags
-find_package(gflags REQUIRED)
-
-# gtest
-if (KIO_BUILD_TESTS)
-    find_package(GTest REQUIRED)
+find_program(KIO_CCACHE ccache)
+if (KIO_CCACHE AND NOT CMAKE_CXX_COMPILER_LAUNCHER)
+    set(CMAKE_C_COMPILER_LAUNCHER "${KIO_CCACHE}")
+    set(CMAKE_CXX_COMPILER_LAUNCHER "${KIO_CCACHE}")
+endif ()
+find_program(KIO_MOLD mold)
+if (KIO_MOLD)
+    add_link_options(-fuse-ld=mold)
 endif ()
 
-# CRC32C
-find_package(CRC32C REQUIRED)
+include(KioWarnings)
+include(KioDependencies)
+include(KioSanitizers)
+include(KioHelpers)
 
-# Abseil
-find_package(Abseil REQUIRED)
+kio_configure_dependencies()
+kio_configure_sanitizers()
+kio_configure_warnings()
 
-# mimalloc
-find_package(mimalloc REQUIRED)
-
-# openssl, min 3 required
-find_package(OpenSSL 3 REQUIRED)
-message(STATUS "OpenSSL: ${OPENSSL_VERSION}")
-find_package(Threads REQUIRED)
-
-# for benchmarks
-if (KIO_BUILD_BENCHMARK)
-    find_package(PhotonLibOS REQUIRED)
-endif ()
-
-# ============================================================================
-# Development Targets
-# ============================================================================
-
-# Find clang-format
-find_program(CLANG_FORMAT_EXE NAMES clang-format-22)
-
-# Find clang-tidy
-find_program(CLANG_TIDY_EXE NAMES clang-tidy-22)
-
-# Collect all source files for formatting/linting
-file(GLOB_RECURSE ALL_SOURCE_FILES
-        ${CMAKE_SOURCE_DIR}/uring/*.cpp
-        ${CMAKE_SOURCE_DIR}/uring/*.h
-        ${CMAKE_SOURCE_DIR}/bitcask/src/*.cpp
-        ${CMAKE_SOURCE_DIR}/bitcask/include/*.h
-        ${CMAKE_SOURCE_DIR}/examples/*.cpp
-        ${CMAKE_SOURCE_DIR}/tests/*.cpp
-        ${CMAKE_SOURCE_DIR}/benchmarks/cpp/*.cpp
-)
-
-# Format target - applies clang-format
-if (CLANG_FORMAT_EXE)
-    add_custom_target(format
-            COMMAND ${CLANG_FORMAT_EXE} -i ${ALL_SOURCE_FILES}
-            COMMENT "Running clang-format on all source files"
-            VERBATIM
-    )
-
-    add_custom_target(format-check
-            COMMAND ${CLANG_FORMAT_EXE} --dry-run --Werror ${ALL_SOURCE_FILES}
-            COMMENT "Checking code formatting (no changes)"
-            VERBATIM
-    )
-    message(STATUS "Added targets: format, format-check")
-else ()
-    message(WARNING "clang-format not found - format targets not available")
-endif ()
-
-# Tidy target - runs clang-tidy on all sources
-if (CLANG_TIDY_EXE)
-    add_custom_target(tidy
-            COMMAND ${CLANG_TIDY_EXE}
-            -p ${CMAKE_BINARY_DIR}
-            ${ALL_SOURCE_FILES}
-            COMMENT "Running clang-tidy on all source files"
-            VERBATIM
-    )
-
-    add_custom_target(tidy-fix
-            COMMAND ${CLANG_TIDY_EXE}
-            -p ${CMAKE_BINARY_DIR}
-            --fix
-            ${ALL_SOURCE_FILES}
-            COMMENT "Running clang-tidy with automatic fixes"
-            VERBATIM
-    )
-    message(STATUS "Added targets: tidy, tidy-fix")
-else ()
-    message(WARNING "clang-tidy not found - tidy targets not available")
-endif ()
+include_directories(${CMAKE_SOURCE_DIR})
 
 #-----------------------------------------------
 # Aio lib, change later to kio
@@ -297,14 +81,16 @@ target_include_directories(uring PUBLIC
         $<INSTALL_INTERFACE:include>
 )
 # Link dependencies
+target_include_directories(uring PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(uring PUBLIC
-        mimalloc-static
-        PkgConfig::LibUring
-        pthread
+        kio::liburing
+        Threads::Threads
         OpenSSL::SSL
         OpenSSL::Crypto
-)
-kio_add_sanitizers(uring)
+        PRIVATE kio_warnings)
+if (KIO_USE_MIMALLOC)
+    target_link_libraries(uring PUBLIC mimalloc-static)
+endif ()
 
 #-----------------------------------------------
 # bitcask lib
@@ -317,10 +103,7 @@ if (KIO_BUILD_BITCASK)
     )
 
     # Include directories
-    target_include_directories(bitcask PUBLIC
-            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-            $<INSTALL_INTERFACE:include>
-    )
+    target_include_directories(bitcask PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR})
     # Link dependencies
     target_link_libraries(bitcask
             PUBLIC
@@ -331,14 +114,8 @@ if (KIO_BUILD_BITCASK)
             PRIVATE
             crc32c
     )
-    kio_add_sanitizers(bitcask)
 endif ()
 
-
-#-----------------------------------------------
-# Includes
-#----------------------------------------------
-include_directories(${CMAKE_SOURCE_DIR})
 
 if (KIO_BUILD_DEMOS)
     add_subdirectory(examples)
@@ -353,40 +130,6 @@ if (KIO_BUILD_TESTS)
     include(CTest)
     enable_testing()
     add_subdirectory(tests)
-
-    # Check target - runs all tests
-    add_custom_target(check
-            COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
-            COMMENT "Running all tests"
-            VERBATIM
-    )
-
-    # Quick check - only fast tests
-    add_custom_target(check-quick
-            COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -L "unit"
-            COMMENT "Running quick unit tests"
-            VERBATIM
-    )
-
     message(STATUS "Added targets: check, check-quick")
 endif ()
 
-if (KIO_BUILD_SEGMENT_BENCH)
-    add_executable(segment_append_bench benchmarks/cpp/segment_append_bench.cpp)
-    target_link_libraries(segment_append_bench PRIVATE bitcask)
-    kio_target_compile_options(segment_append_bench)
-endif ()
-
-if (KIO_BUILD_HTTP_BENCH)
-    add_executable(kio_http_bench benchmarks/cpp/kio_http_bench.cpp)
-    target_link_libraries(kio_http_bench PRIVATE uring)
-    kio_target_compile_options(kio_http_bench)
-
-    add_executable(asio_http_bench benchmarks/cpp/asio_http_bench.cpp)
-    target_link_libraries(asio_http_bench PRIVATE pthread)
-    kio_target_compile_options(asio_http_bench)
-
-    add_executable(kio_asio_disk_bench benchmarks/cpp/kio_asio_disk_bench.cpp)
-    target_link_libraries(kio_asio_disk_bench PRIVATE uring pthread)
-    kio_target_compile_options(kio_asio_disk_bench)
-endif ()

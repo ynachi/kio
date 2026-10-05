@@ -121,3 +121,8 @@ dump.rdb
 go-benchmark.iml
 /testdata
 **/*/.rustc_info.json
+# tooling
+build-docker/
+compile_commands.json
+CMakeUserPresets.json
+!/Makefile

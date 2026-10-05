@@ -1,0 +1,29 @@
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [asan, tsan, release]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compiler cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/kio-ccache
+          key: ccache-${{ matrix.preset }}-${{ github.sha }}
+          restore-keys: ccache-${{ matrix.preset }}-
+      - name: Configure, build and test in the toolchain container
+        run: make docker-${{ matrix.preset }}
+
+  format:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: make docker-fmt-check
