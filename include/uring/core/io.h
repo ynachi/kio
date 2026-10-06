@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <initializer_list>
 #include <memory>
+#include <optional>
 #include <stop_token>
 #include <system_error>
 #include <thread>
@@ -20,495 +21,582 @@
 #include "uring/fd.hpp"
 #include "uring/logger.hpp"
 
-namespace URing
+namespace kio
 {
-//
-// Uring options
-//
-struct IoOptions
-{
-    std::uint32_t entries = 16800;
-    unsigned flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_COOP_TASKRUN;
-
-    std::uint32_t tick_timeout_ms = 10;
-
-    // list of cpus, if empty, no pinning
-    std::vector<int> worker_cpu_affinity{};
-
-    /// max resume per tick
-    std::size_t batch_max_size = 128;
-
-    // Sleep after 2 seconds of inactivity
-    // Liburing auto wakeup the kernel thread so no need to manually do it
-    /// IORING_SETUP_DEFER_TASKRUN is not compatible to SQ_POLL
-    /// Also, when SQ_POLL is enabled, make sure to pin work threads and kernel threads
-    /// and do them on different CPUs, overwhise, the bench reveals that performance
-    /// drops on throughput and latency.
-    std::uint32_t sq_thread_idle_ms = 2000;
-    // -1 means don't pin to a specific CPU
-    int sq_thread_cpu = -1;
-};
-
-// ============================================================================
-// io_uring C++20 IoWorker
-//
-// Design decisions:
-//   - Share-nothing: each IoThread owns its ring, queue, and allocator
-//   - TransferTo is the ONLY cross-thread mechanism
-//   - MPSC queue holds raw coroutine_handle<> (8 bytes, no type erasure)
-//   - mimalloc linked globally — no custom operator new needed in Task
-//   - h.resume() is safe because handles are only enqueued while suspended
-//   - Symmetric transfer used inside Task to keep final resume stack-flat
-//   - Exceptions: std::expected is the preferred error management mechanism (except during critical resources
-//   initialization)
-//   - Explicit orchestration
-//   IO io0();
-//   IO io1(..,io0.ring_fd())
-// ============================================================================
-class IO
-{
-    struct TransferTo;
-
-    friend class IoContext;
-    friend struct TransferTo;
-    template <typename SetupFunc, typename MapperFunc>
-        requires std::invocable<SetupFunc, io_uring_sqe*> && std::invocable<MapperFunc, int32_t>
-    friend class IoAwaiter;
-    friend class FixedBufferPool;
-    template <typename T>
-    friend Result<T> sync_wait(IO&, Task<T>&&);
-
-    struct TransferTo
+    //
+    // Uring options
+    //
+    struct IoOptions
     {
-        IO& target;
+        std::uint32_t entries = 16800;
+        unsigned flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_COOP_TASKRUN;
 
-        // Optimization: If we are already on the target thread, don't suspend at all.
-        bool await_ready() const noexcept { return false; }
+        std::uint32_t tick_timeout_ms = 10;
 
-        template <typename Promise>
-        void await_suspend(std::coroutine_handle<Promise> h) noexcept
-        {
-            // Get the base promise pointer
-            auto* p = static_cast<detail::TaskPromiseBase*>(&h.promise());
+        // list of cpus, if empty, no pinning
+        std::vector<int> worker_cpu_affinity{};
 
-            // Store the erased handle so the target thread can resume it
-            p->self_handle = h;
+        /// max resume per tick
+        std::size_t batch_max_size = 128;
 
-            // Post it to the intrusive queue
-            target.post(p);
-        }
-
-        void await_resume() const noexcept {}
+        // Sleep after 2 seconds of inactivity
+        // Liburing auto wakeup the kernel thread so no need to manually do it
+        /// IORING_SETUP_DEFER_TASKRUN is not compatible to SQ_POLL
+        /// Also, when SQ_POLL is enabled, make sure to pin work threads and kernel threads
+        /// and do them on different CPUs, overwhise, the bench reveals that performance
+        /// drops on throughput and latency.
+        std::uint32_t sq_thread_idle_ms = 2000;
+        // -1 means don't pin to a specific CPU
+        int sq_thread_cpu = -1;
     };
 
-public:
-    static constexpr unsigned kUringDefaultFlag =
-        IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_COOP_TASKRUN;
-    static constexpr int kDefaultAcceptFlags = SOCK_NONBLOCK | SOCK_CLOEXEC;
-
-    /**
-     * @brief Construct a new IO worker.
-     *
-     * @param id The unique identifier for this worker. Also used as an index for CPU pinning
-     *           via IoOptions::worker_cpu_affinity.
-     * @param leader Optional pointer to a "leader" IO instance. If provided, this worker
-     *               will share the same kernel workqueue (IORING_SETUP_ATTACH_WQ).
-     * @param opts Configuration options for the io_uring ring.
-     * @param pool_configs Optional list of {size, count} bucket configurations to initialize
-     *                     a FixedBufferPool for zero-copy I/O.
-     *
-     * @code
-     * // 1. Standalone instance
-     * URing::IO io(0);
-     *
-     * // 2. Scaling with leader-follower pattern
-     * URing::IO leader(0);
-     * URing::IO follower(1, &leader);
-     *
-     * // 3. With Fixed Buffer Pool for zero-copy
-     * URing::IO io_with_pool(0, nullptr, {}, {
-     *     { .size = 4096, .count = 1024 }, // 1024 buffers of 4KB
-     *     { .size = 65536, .count = 128 }  // 128 buffers of 64KB
-     * });
-     * @endcode
-     */
-    explicit IO(size_t id, const IO* leader = nullptr, const IoOptions& opts = {},
-                std::initializer_list<BucketConfig> pool_configs =
-                    {});  /// IO object can be moved but with some limitations. Before it start doing some actual io
-                          /// (before run*()),
-    /// its is safe to move it. Because, in this state, it's an inert object. So it gives you more flexibilities
-    /// on the object and object pools construction. But, it SHOULD not be moved after it started doing IO.
-    /// If you need to do it for some reason, use a std::unique_ptr<IO>. Moving the direct object while IO is active
-    /// will terminate the program.
-    IO(IO&& other) noexcept;
-    IO(const IO&) = delete;
-    IO& operator=(const IO&) = delete;
-    IO& operator=(IO&&) = delete;
-    ~IO();
-
-    /// Run an event loop.
-    /// Shutdown is coordinated externally, by the caller's provided stop token
-    void run_blocking(std::stop_token st) noexcept;
-
-    /// Run until done, no loop
-    void run_once() noexcept
-    {
-        pin_to_cpu();
-        activate();
-        tick();
-    }
-
-    /// Background task or post job to an io in another thread
-    void schedule(Task<void> task)
-    {
-        auto h = task.release();
-        auto* p = static_cast<detail::TaskPromiseBase*>(&h.promise());
-        p->self_handle = h;
-        post(p);
-    }
-
-    [[nodiscard]] auto schedule_on(IO& target) noexcept { return TransferTo{target}; }
-
-    void pin_to_cpu() const;
-
-    [[nodiscard]] std::uint32_t id() const noexcept { return id_; }
-
-    Result<void> register_buffers(FixedBufferPool& pool) noexcept
-    {
-        if (pool.is_registered())
-        {
-            return std::unexpected(make_error_code(PoolError::AlreadyRegistered));
-        }
-
-        if (const int ret = io_uring_register_buffers(&ring_, pool.iovecs_ptr(), pool.total_capacity()); ret < 0)
-        {
-            return std::unexpected(error_from_errno(-ret));
-        }
-
-        pool.set_registered();
-
-        return {};
-    }
-
-    Result<void> unregister_buffers() noexcept
-    {
-        if (const int ret = io_uring_unregister_buffers(&ring_); ret < 0)
-        {
-            return std::unexpected(error_from_errno(-ret));
-        }
-        return {};
-    }
-
-    [[nodiscard]] Result<FixedBuffer> take_fixed_buffer(const size_t size) noexcept { return buffer_pool_.take(size); }
-
+    // ============================================================================
+    // io_uring C++20 IoWorker
     //
-    // IO Methods
-    //
-    [[nodiscard]] auto accept(Fd& server_fd, SocketAddress& client_addr, const int flags = kDefaultAcceptFlags)
+    // Design decisions:
+    //   - Share-nothing: each IoThread owns its ring, queue, and allocator
+    //   - TransferTo is the ONLY cross-thread mechanism
+    //   - MPSC queue holds raw coroutine_handle<> (8 bytes, no type erasure)
+    //   - mimalloc linked globally — no custom operator new needed in Task
+    //   - h.resume() is safe because handles are only enqueued while suspended
+    //   - Symmetric transfer used inside Task to keep final resume stack-flat
+    //   - Exceptions: std::expected is the preferred error management mechanism (except during critical resources
+    //   initialization)
+    //   - Explicit orchestration
+    //   IO io0();
+    //   IO io1(..,io0.ring_fd())
+    // ============================================================================
+    class IO
     {
-        return IoAwaiter(
-            *this,
-            [raw_fd = server_fd.fd, &client_addr, flags](io_uring_sqe* sqe)
+        struct TransferTo;
+
+        friend class IoContext;
+        friend struct TransferTo;
+        template <typename SetupFunc, typename MapperFunc>
+            requires std::invocable<SetupFunc, io_uring_sqe*> && std::invocable<MapperFunc, int32_t>
+        friend class IoAwaiter;
+        friend class RegisteredBufferPool;
+        template <typename T>
+        friend Result<T> sync_wait(IO&, Task<T>&&);
+
+        struct TransferTo
+        {
+            IO& target;
+
+            // Optimization: If we are already on the target thread, don't suspend at all.
+            bool await_ready() const noexcept { return false; }
+
+            template <typename Promise>
+            void await_suspend(std::coroutine_handle<Promise> h) noexcept
             {
-                client_addr.addrlen = sizeof(sockaddr_storage);
-                io_uring_prep_accept(sqe, raw_fd, client_addr.GetMutable(), &client_addr.addrlen, flags);
-            },
-            [](const int32_t res) -> Result<Fd>
+                // Get the base promise pointer
+                auto* p = static_cast<detail::TaskPromiseBase*>(&h.promise());
+
+                // Store the erased handle so the target thread can resume it
+                p->self_handle = h;
+
+                // Post it to the intrusive queue
+                target.post(p);
+            }
+
+            void await_resume() const noexcept
             {
-                if (res < 0)
-                    return std::unexpected(make_error_code(res));
-                return Fd{res};
-            });
-    }
+            }
+        };
 
-    [[nodiscard]] auto accept(Fd& server_fd, const int flags = kDefaultAcceptFlags)
-    {
-        return IoAwaiter(
-            *this, [raw_fd = server_fd.fd, flags](io_uring_sqe* sqe)
-            { io_uring_prep_accept(sqe, raw_fd, nullptr, nullptr, flags); },
-            [](const int32_t res) -> Result<Fd>
+    public:
+        static constexpr unsigned kUringDefaultFlag =
+            IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_COOP_TASKRUN;
+        static constexpr int kDefaultAcceptFlags = SOCK_NONBLOCK | SOCK_CLOEXEC;
+
+        /**
+         * @brief Construct a new IO worker.
+         *
+         * @param id The unique identifier for this worker. Also used as an index for CPU pinning
+         *           via IoOptions::worker_cpu_affinity.
+         * @param leader Optional pointer to a "leader" IO instance. If provided, this worker
+         *               will share the same kernel workqueue (IORING_SETUP_ATTACH_WQ).
+         * @param opts Configuration options for the io_uring ring.
+         * @param pool_cfg Optional BufferPoolConfig to initialize a contiguous RegisteredBufferPool.
+         *
+         * @code
+         * // 1. Standalone instance without fixed buffer pool
+         * kio::IO io(0);
+         *
+         * // 2. With Registered Buffer Pool (e.g., 64 MiB total, 64 KiB slots)
+         * kio::IO io_with_pool(0, nullptr, {}, kio::BufferPoolConfig{
+         *     .slot_size = 65536,
+         *     .slots = 1024
+         * });
+         * @endcode
+         */
+        explicit IO(size_t id, const IO* leader = nullptr, const IoOptions& opts = {},
+                    std::optional<BufferPoolConfig> pool_cfg = std::nullopt);
+        /// IO object can be moved but with some limitations. Before it start doing some actual io
+                                 /// (before run*()),
+           /// its is safe to move it. Because, in this state, it's an inert object. So it gives you more flexibilities
+           /// on the object and object pools construction. But, it SHOULD not be moved after it started doing IO.
+           /// If you need to do it for some reason, use a std::unique_ptr<IO>. Moving the direct object while IO is active
+           /// will terminate the program.
+        IO(IO&& other) noexcept;
+        IO(const IO&) = delete;
+        IO& operator=(const IO&) = delete;
+        IO& operator=(IO&&) = delete;
+        ~IO();
+
+        /// Run an event loop.
+        /// Shutdown is coordinated externally, by the caller's provided stop token
+        void run_blocking(std::stop_token st) noexcept;
+
+        /// Run until done, no loop
+        void run_once() noexcept
+        {
+            pin_to_cpu();
+            activate();
+            tick();
+        }
+
+        /// Background task or post job to an io in another thread
+        void schedule(Task<void> task)
+        {
+            auto h = task.release();
+            auto* p = static_cast<detail::TaskPromiseBase*>(&h.promise());
+            p->self_handle = h;
+            post(p);
+        }
+
+        [[nodiscard]] auto schedule_on(IO& target) noexcept { return TransferTo{target}; }
+
+        void pin_to_cpu() const;
+
+        [[nodiscard]] std::uint32_t id() const noexcept { return static_cast<std::uint32_t>(id_); }
+
+        /// @brief Non-blocking attempt to acquire a buffer from the registered pool.
+        [[nodiscard]] BufferLease try_acquire_buffer() noexcept
+        {
+            if (!buffer_pool_.has_value()) [[unlikely]]
+                return {};
+            return buffer_pool_->try_acquire();
+        }
+
+        /// @brief Asynchronously acquire a buffer with FIFO backpressure.
+        [[nodiscard]] auto acquire_buffer() noexcept
+        {
+            struct Awaiter
             {
-                if (res < 0)
-                    return std::unexpected(make_error_code(res));
-                return Fd{res};
-            });
-    }
+                IO& io;
+                std::optional<RegisteredBufferPool::AcquireAwaiter> inner{};
 
-    [[nodiscard]] auto read(Fd& fd, std::span<std::byte> buf, off_t offset = -1)
-    {
-        return IoAwaiter(
-            *this, [raw_fd = fd.fd, buf, offset](io_uring_sqe* sqe)
-            { io_uring_prep_read(sqe, raw_fd, buf.data(), buf.size(), offset); }, detail::ResumeInt{});
-    }
-
-    [[nodiscard]] auto write(Fd& fd, std::span<const std::byte> buf, off_t offset = -1)
-    {
-        return IoAwaiter(
-            *this, [raw_fd = fd.fd, buf, offset](io_uring_sqe* sqe)
-            { io_uring_prep_write(sqe, raw_fd, buf.data(), buf.size(), offset); }, detail::ResumeInt{});
-    }
-
-    [[nodiscard]] auto read_fixed(Fd& fd, std::span<std::byte> buf, uint32_t buf_index, off_t offset = -1)
-    {
-        return IoAwaiter(
-            *this, [raw_fd = fd.fd, buf, buf_index, offset](io_uring_sqe* sqe)
-            { io_uring_prep_read_fixed(sqe, raw_fd, buf.data(), buf.size(), offset, buf_index); }, detail::ResumeInt{});
-    }
-
-    [[nodiscard]] auto write_fixed(Fd& fd, std::span<const std::byte> buf, uint32_t buf_index, off_t offset = -1)
-    {
-        return IoAwaiter(
-            *this, [raw_fd = fd.fd, buf, buf_index, offset](io_uring_sqe* sqe)
-            { io_uring_prep_write_fixed(sqe, raw_fd, buf.data(), buf.size(), offset, buf_index); },
-            detail::ResumeInt{});
-    }
-
-    [[nodiscard]] auto writev(Fd& fd, std::span<const iovec> iovecs, off_t offset = -1)
-    {
-        return IoAwaiter(
-            *this, [raw_fd = fd.fd, iovecs, offset](io_uring_sqe* sqe)
-            { io_uring_prep_writev(sqe, raw_fd, iovecs.data(), static_cast<unsigned>(iovecs.size()), offset); },
-            detail::ResumeInt{});
-    }
-
-    [[nodiscard]] auto open(std::filesystem::path path, const int flags, const mode_t mode = 0644)
-    {
-        return IoAwaiter(
-            *this,
-            [path, flags, mode](io_uring_sqe* sqe) { io_uring_prep_openat(sqe, AT_FDCWD, path.c_str(), flags, mode); },
-            [](const int32_t res) -> Result<Fd>
-            {
-                if (res < 0)
+                explicit Awaiter(IO& self) noexcept : io(self)
                 {
-                    return std::unexpected(make_error_code(res));
+                    if (io.buffer_pool_.has_value())
+                        inner.emplace(*io.buffer_pool_);
                 }
-                return Fd{res};
-            });
-    }
 
-    [[nodiscard]] auto close(Fd&& fd)
-    {
-        return IoAwaiter(
-            *this,
-            [fd = std::move(fd)](io_uring_sqe* sqe) mutable
-            {
-                io_uring_prep_close(sqe, fd.Release());  // Release only once an SQE exists
-            },
-            detail::ResumeVoid{});
-    }
+                bool await_ready() noexcept
+                {
+                    if (!inner.has_value())
+                        return true;
+                    return inner->await_ready();
+                }
 
-    [[nodiscard]] auto remove(std::filesystem::path path)
-    {
-        return IoAwaiter(
-            *this, [path](io_uring_sqe* sqe) { io_uring_prep_unlinkat(sqe, AT_FDCWD, path.c_str(), 0); },
-            detail::ResumeVoid{});
-    }
+                void await_suspend(std::coroutine_handle<> h) noexcept
+                {
+                    assert(inner.has_value());
+                    inner->await_suspend(h);
+                }
 
-    [[nodiscard]] auto fsync(Fd& fd, const bool full_sync = false)
-    {
-        return IoAwaiter(
-            *this, [raw_fd = fd.fd, full_sync](io_uring_sqe* sqe)
-            { io_uring_prep_fsync(sqe, raw_fd, full_sync ? 0u : IORING_FSYNC_DATASYNC); }, detail::ResumeVoid{});
-    }
+                Result<BufferLease> await_resume() noexcept
+                {
+                    if (!inner.has_value())
+                        return Error::fail_errc(std::errc::not_supported, "buffer pool not configured");
+                    return inner->await_resume();
+                }
+            };
 
-    [[nodiscard]] auto fallocate(Fd& fd, const int mode, const off_t offset, const off_t len)
-    {
-        return IoAwaiter(
-            *this, [raw_fd = fd.fd, mode, offset, len](io_uring_sqe* sqe)
-            { io_uring_prep_fallocate(sqe, raw_fd, mode, offset, len); }, detail::ResumeVoid{});
-    }
+            return Awaiter{*this};
+        }
 
-    [[nodiscard]] auto ftruncate(Fd& fd, const off_t len)
-    {
-        return IoAwaiter(
-            *this, [raw_fd = fd.fd, len](io_uring_sqe* sqe) { io_uring_prep_ftruncate(sqe, raw_fd, len); },
-            detail::ResumeVoid{});
-    }
-
-    [[nodiscard]] auto poll(Fd& fd, const unsigned poll_mask)
-    {
-        return IoAwaiter(
-            *this, [raw_fd = fd.fd, poll_mask](io_uring_sqe* sqe) { io_uring_prep_poll_add(sqe, raw_fd, poll_mask); },
-            [](const int32_t res) -> Result<unsigned>
-            {
-                if (res < 0)
-                    return std::unexpected(make_error_code(res));
-                return static_cast<unsigned>(res);
-            });
-    }
-
-    template <typename Rep, typename Period>
-    [[nodiscard]] auto timeout(const std::chrono::duration<Rep, Period> dur)
-    {
-        return IoAwaiter(
-            *this,
-            [ts = __kernel_timespec{.tv_sec = std::chrono::duration_cast<std::chrono::seconds>(dur).count(),
-                                    .tv_nsec = std::chrono::duration_cast<std::chrono::nanoseconds>(dur).count() %
-                                               1'000'000'000}](io_uring_sqe* sqe) mutable
-            { io_uring_prep_timeout(sqe, &ts, 0, 0); },
-            [](const int32_t res) -> Result<void>
-            {
-                if (res == -ETIME || res == 0)
-                    return {};
-                return std::unexpected(make_error_code(res));
-            });
-    }
-
-    template <typename Rep, typename Period>
-    [[nodiscard]] auto sleep(const std::chrono::duration<Rep, Period> dur)
-    {
-        return timeout(dur);
-    }
-
-    /// addr MUST outlive the connect method
-    [[nodiscard]] auto connect(Fd& fd, const SocketAddress& addr)
-    {
-        return IoAwaiter(
-            *this, [raw_fd = fd.fd, &addr](io_uring_sqe* sqe) mutable
-            { io_uring_prep_connect(sqe, raw_fd, addr.Get(), addr.addrlen); }, detail::ResumeVoid{});
-    }
-
-    [[nodiscard]] auto readv(Fd& fd, std::span<const iovec> iovecs, off_t offset = -1)
-    {
-        return IoAwaiter(
-            *this, [raw_fd = fd.fd, iovecs, offset](io_uring_sqe* sqe)
-            { io_uring_prep_readv(sqe, raw_fd, iovecs.data(), static_cast<unsigned>(iovecs.size()), offset); },
-            detail::ResumeInt{});
-    }
-
-    [[nodiscard]] auto rename(std::filesystem::path from, std::filesystem::path to)
-    {
-        return IoAwaiter(
-            *this, [from = std::move(from), to = std::move(to)](io_uring_sqe* sqe)
-            { io_uring_prep_renameat(sqe, AT_FDCWD, from.c_str(), AT_FDCWD, to.c_str(), 0); }, detail::ResumeVoid{});
-    }
-
-    // ============================================================================
-    // io.hpp extensions: Fixed-buffer I/O helpers
-    // ============================================================================
-
-    /// @brief Async read using a pre-registered fixed buffer
-    [[nodiscard]] auto read_fixed(Fd& fd, FixedBuffer& buf, const size_t len, off_t offset = -1)
-    {
-        const size_t safe_len = std::min(len, buf.size());
-
-        return IoAwaiter(
-            *this, [raw_fd = fd.fd, ptr = buf.ptr(), safe_len, index = buf.index(), offset](io_uring_sqe* sqe)
-            { io_uring_prep_read_fixed(sqe, raw_fd, ptr, safe_len, offset, index); }, detail::ResumeInt{});
-    }
-
-    /// @brief read to fill the buffer
-    [[nodiscard]] auto read_fixed(Fd& fd, FixedBuffer& buf, const off_t offset = -1)
-    {
-        return read_fixed(fd, buf, buf.size(), offset);
-    }
-
-    /// @brief Async write using a pre-registered fixed buffer
-    [[nodiscard]] auto write_fixed(Fd& fd, const FixedBuffer& buf, size_t len, off_t offset = -1)
-    {
-        const size_t safe_len = std::min(len, buf.size());
-
-        return IoAwaiter(
-            *this, [raw_fd = fd.fd, ptr = buf.ptr(), safe_len, index = buf.index(), offset](io_uring_sqe* sqe)
-            { io_uring_prep_write_fixed(sqe, raw_fd, ptr, safe_len, offset, index); }, detail::ResumeInt{});
-    }
-
-    /// @brief write the entire buffer
-    [[nodiscard]] auto write_fixed(Fd& fd, const FixedBuffer& buf, const off_t offset = -1)
-    {
-        return write_fixed(fd, buf, buf.size(), offset);
-    }
-
-private:
-    static constexpr uint64_t kWakeupSentinel = 0xDEAD'C0DE'DEAD'C0DEULL;
-    static constexpr size_t kMaxResumesPerTick = 128;
-
-    io_uring ring_{};
-    int wake_fd_{-1};
-    uint64_t wake_value_{0};
-    bool is_activated_{false};
-    bool is_running_{false};
-    // cross-thread needs to check this, this is why it is an atomic
-    alignas(64) std::atomic<bool> is_sleeping_{false};
-    IoOptions opts_;
-    /// This is not a typical id, it is use for CPU pining too
-    size_t id_;
-    std::vector<std::coroutine_handle<>> local_tasks_{};
-    std::vector<std::coroutine_handle<>> current_batch{};
-    detail::CoroQueue queue_{};
-
-    FixedBufferPool buffer_pool_{};
-
-    /// Creates the Ring in an uninitialized way
-    void init(int wq_fd = -1);
-    /// Activate a disabled ring, MUST be called after init()
-    void activate();
-    void tick() noexcept;
-    void submit_or_wait_for();
-    void arm_wake_read() noexcept;
-    void wake() const noexcept;
-    io_uring_sqe* get_sqe() noexcept;
-
-    int ring_fd() const noexcept { return ring_.ring_fd; }
-
-    void post(detail::TaskPromiseBase* task)
-    {
-        queue_.enqueue(task);
-        wake();
-    }
-};
-
-// ============================================================================
-// IoAwaiter Implementation
-// This must be defined after IO is fully defined to avoid incomplete type errors.
-// ============================================================================
-template <typename SetupFunc, typename MapperFunc>
-    requires std::invocable<SetupFunc, io_uring_sqe*> && std::invocable<MapperFunc, int32_t>
-template <typename Promise>
-std::coroutine_handle<> IoAwaiter<SetupFunc, MapperFunc>::await_suspend(std::coroutine_handle<Promise> h) noexcept
-{
-    io_uring_sqe* sqe = io_.get_sqe();
-    if (sqe == nullptr)
-    {
-        ALOG_WARN("SQ ring full; returning EAGAIN to apply backpressure");
-        ops_.res = -EAGAIN;
-        return h;
-    }
-
-    this->ops_.h = h;
-    setup_(sqe);
-    io_uring_sqe_set_data64(sqe, reinterpret_cast<uint64_t>(&ops_));
-
-    return std::noop_coroutine();
-}
-
-//
-// sync_wait testing util
-//
-/// Testing utility, block a coroutine until it is done
-template <typename T>
-Result<T> sync_wait(IO& io, Task<T>&& task)
-{
-    bool done{false};
-    std::optional<Result<T>> result;
-
-    io.schedule(
-        [&](Task<T> t) -> Task<void>
+        /// @brief Query the registered buffer pool, if configured.
+        [[nodiscard]] const std::optional<RegisteredBufferPool>& buffer_pool() const noexcept
         {
-            result = co_await std::move(t);
-            done = true;
-            co_return {};
-        }(std::move(task)));
+            return buffer_pool_;
+        }
 
-    io.pin_to_cpu();
-    io.activate();
+        //
+        // IO Methods
+        //
+        [[nodiscard]] auto accept(Fd& server_fd, SocketAddress& client_addr, const int flags = kDefaultAcceptFlags)
+        {
+            return IoAwaiter(
+                *this,
+                [raw_fd = server_fd.fd, &client_addr, flags](io_uring_sqe* sqe)
+                {
+                    client_addr.addrlen = sizeof(sockaddr_storage);
+                    io_uring_prep_accept(sqe, raw_fd, client_addr.GetMutable(), &client_addr.addrlen, flags);
+                },
+                [](const int32_t res) -> Result<Fd>
+                {
+                    if (res < 0)
+                        return kio::Error::fail_errno(-res);
+                    return Fd{res};
+                });
+        }
 
-    while (!done)
+        [[nodiscard]] auto accept(Fd& server_fd, const int flags = kDefaultAcceptFlags)
+        {
+            return IoAwaiter(
+                *this, [raw_fd = server_fd.fd, flags](io_uring_sqe* sqe)
+                {
+                    io_uring_prep_accept(sqe, raw_fd, nullptr, nullptr, flags);
+                },
+                [](const int32_t res) -> Result<Fd>
+                {
+                    if (res < 0)
+                        return Error::fail_errno(-res);
+                    return Fd{res};
+                });
+        }
+
+        [[nodiscard]] auto read(Fd& fd, std::span<std::byte> buf, off_t offset = -1)
+        {
+            return IoAwaiter(
+                *this, [raw_fd = fd.fd, buf, offset](io_uring_sqe* sqe)
+                {
+                    io_uring_prep_read(sqe, raw_fd, buf.data(), static_cast<unsigned>(buf.size()),
+                                       static_cast<__u64>(offset));
+                }, detail::ResumeInt{});
+        }
+
+        [[nodiscard]] auto write(Fd& fd, std::span<const std::byte> buf, off_t offset = -1)
+        {
+            return IoAwaiter(
+                *this, [raw_fd = fd.fd, buf, offset](io_uring_sqe* sqe)
+                {
+                    io_uring_prep_write(sqe, raw_fd, buf.data(), static_cast<unsigned>(buf.size()),
+                                        static_cast<__u64>(offset));
+                }, detail::ResumeInt{});
+        }
+
+        [[nodiscard]] auto read_fixed(Fd& fd, std::span<std::byte> buf, uint32_t buf_index, off_t offset = -1)
+        {
+            return IoAwaiter(
+                *this, [raw_fd = fd.fd, buf, buf_index, offset](io_uring_sqe* sqe)
+                {
+                    io_uring_prep_read_fixed(sqe, raw_fd, buf.data(), static_cast<unsigned>(buf.size()),
+                                             static_cast<__u64>(offset), static_cast<int>(buf_index));
+                }, detail::ResumeInt{});
+        }
+
+        [[nodiscard]] auto write_fixed(Fd& fd, std::span<const std::byte> buf, uint32_t buf_index, off_t offset = -1)
+        {
+            return IoAwaiter(
+                *this, [raw_fd = fd.fd, buf, buf_index, offset](io_uring_sqe* sqe)
+                {
+                    io_uring_prep_write_fixed(sqe, raw_fd, buf.data(), static_cast<unsigned>(buf.size()),
+                                              static_cast<__u64>(offset), static_cast<int>(buf_index));
+                },
+                detail::ResumeInt{});
+        }
+
+        [[nodiscard]] auto writev(Fd& fd, std::span<const iovec> iovecs, off_t offset = -1)
+        {
+            return IoAwaiter(
+                *this, [raw_fd = fd.fd, iovecs, offset](io_uring_sqe* sqe)
+                {
+                    io_uring_prep_writev(sqe, raw_fd, iovecs.data(), static_cast<unsigned>(iovecs.size()),
+                                         static_cast<__u64>(offset));
+                },
+                detail::ResumeInt{});
+        }
+
+        [[nodiscard]] auto open(std::filesystem::path path, const int flags, const mode_t mode = 0644)
+        {
+            return IoAwaiter(
+                *this,
+                [path, flags, mode](io_uring_sqe* sqe)
+                {
+                    io_uring_prep_openat(sqe, AT_FDCWD, path.c_str(), flags, mode);
+                },
+                [](const int32_t res) -> Result<Fd>
+                {
+                    if (res < 0)
+                    {
+                        return Error::fail_errno(-res);
+                    }
+                    return Fd{res};
+                });
+        }
+
+        [[nodiscard]] auto close(Fd&& fd)
+        {
+            return IoAwaiter(
+                *this,
+                [fd = std::move(fd)](io_uring_sqe* sqe) mutable
+                {
+                    io_uring_prep_close(sqe, fd.Release()); // Release only once an SQE exists
+                },
+                detail::ResumeVoid{});
+        }
+
+        [[nodiscard]] auto remove(std::filesystem::path path)
+        {
+            return IoAwaiter(
+                *this, [path](io_uring_sqe* sqe) { io_uring_prep_unlinkat(sqe, AT_FDCWD, path.c_str(), 0); },
+                detail::ResumeVoid{});
+        }
+
+        [[nodiscard]] auto fsync(Fd& fd, const bool full_sync = false)
+        {
+            return IoAwaiter(
+                *this, [raw_fd = fd.fd, full_sync](io_uring_sqe* sqe)
+                {
+                    io_uring_prep_fsync(sqe, raw_fd, full_sync ? 0u : IORING_FSYNC_DATASYNC);
+                }, detail::ResumeVoid{});
+        }
+
+        [[nodiscard]] auto fallocate(Fd& fd, const int mode, const off_t offset, const off_t len)
+        {
+            return IoAwaiter(
+                *this, [raw_fd = fd.fd, mode, offset, len](io_uring_sqe* sqe)
+                {
+                    io_uring_prep_fallocate(sqe, raw_fd, mode, static_cast<__u64>(offset), static_cast<__u64>(len));
+                }, detail::ResumeVoid{});
+        }
+
+        [[nodiscard]] auto ftruncate(Fd& fd, const off_t len)
+        {
+            return IoAwaiter(
+                *this, [raw_fd = fd.fd, len](io_uring_sqe* sqe) { io_uring_prep_ftruncate(sqe, raw_fd, len); },
+                detail::ResumeVoid{});
+        }
+
+        [[nodiscard]] auto poll(Fd& fd, const unsigned poll_mask)
+        {
+            return IoAwaiter(
+                *this, [raw_fd = fd.fd, poll_mask](io_uring_sqe* sqe)
+                {
+                    io_uring_prep_poll_add(sqe, raw_fd, poll_mask);
+                },
+                [](const int32_t res) -> Result<unsigned>
+                {
+                    if (res < 0)
+                        return kio::Error::fail_errno(-res);
+                    return static_cast<unsigned>(res);
+                });
+        }
+
+        template <typename Rep, typename Period>
+        [[nodiscard]] auto timeout(const std::chrono::duration<Rep, Period> dur)
+        {
+            return IoAwaiter(
+                *this,
+                [ts = __kernel_timespec{
+                    .tv_sec = std::chrono::duration_cast<std::chrono::seconds>(dur).count(),
+                    .tv_nsec = std::chrono::duration_cast<std::chrono::nanoseconds>(dur).count() %
+                    1'000'000'000
+                }](io_uring_sqe* sqe) mutable
+                {
+                    io_uring_prep_timeout(sqe, &ts, 0, 0);
+                },
+                [](const int32_t res) -> Result<void>
+                {
+                    if (res == -ETIME || res == 0)
+                        return {};
+                    return kio::Error::fail_errno(-res);
+                });
+        }
+
+        template <typename Rep, typename Period>
+        [[nodiscard]] auto sleep(const std::chrono::duration<Rep, Period> dur)
+        {
+            return timeout(dur);
+        }
+
+        /// addr MUST outlive the connect method
+        [[nodiscard]] auto connect(Fd& fd, const SocketAddress& addr)
+        {
+            return IoAwaiter(
+                *this, [raw_fd = fd.fd, &addr](io_uring_sqe* sqe) mutable
+                {
+                    io_uring_prep_connect(sqe, raw_fd, addr.Get(), addr.addrlen);
+                }, detail::ResumeVoid{});
+        }
+
+        [[nodiscard]] auto readv(Fd& fd, std::span<const iovec> iovecs, off_t offset = -1)
+        {
+            return IoAwaiter(
+                *this, [raw_fd = fd.fd, iovecs, offset](io_uring_sqe* sqe)
+                {
+                    io_uring_prep_readv(sqe, raw_fd, iovecs.data(), static_cast<unsigned>(iovecs.size()),
+                                        static_cast<__u64>(offset));
+                },
+                detail::ResumeInt{});
+        }
+
+        [[nodiscard]] auto rename(std::filesystem::path from, std::filesystem::path to)
+        {
+            return IoAwaiter(
+                *this, [from = std::move(from), to = std::move(to)](io_uring_sqe* sqe)
+                {
+                    io_uring_prep_renameat(sqe, AT_FDCWD, from.c_str(), AT_FDCWD, to.c_str(), 0);
+                }, detail::ResumeVoid{});
+        }
+
+        // ============================================================================
+        // io.hpp extensions: Fixed-buffer I/O helpers
+        // ============================================================================
+
+        /// @brief Async read using a pre-registered fixed buffer
+        [[nodiscard]] auto read_fixed(Fd& fd,
+                                      BufferLease& buf,
+                                      const size_t len,
+                                      const size_t buffer_offset = 0,
+                                      off_t file_offset = -1)
+        {
+            const size_t safe_len = (buffer_offset < buf.size())
+                                        ? std::min(len, buf.size() - buffer_offset)
+                                        : 0;
+
+            auto* ptr = buf.data() + buffer_offset;
+            const uint16_t buf_index = buf.pool()->registration_index(ptr);
+
+            return IoAwaiter(
+                *this,
+                [raw_fd = fd.fd, ptr, safe_len, buf_index, file_offset](io_uring_sqe* sqe)
+                {
+                    io_uring_prep_read_fixed(sqe, raw_fd, ptr, static_cast<unsigned>(safe_len),
+                                             static_cast<__u64>(file_offset), buf_index);
+                },
+                detail::ResumeInt{});
+        }
+
+        /// @brief read to fill the buffer
+        [[nodiscard]] auto read_fixed(Fd& fd, BufferLease& buf, const off_t file_offset = -1)
+        {
+            return read_fixed(fd, buf, buf.size(), /*buffer_offset=*/0, file_offset);
+        }
+
+        /// @brief Async write using a pre-registered fixed buffer
+        [[nodiscard]] auto write_fixed(Fd& fd,
+                                       const BufferLease& buf,
+                                       const size_t len,
+                                       const size_t buffer_offset = 0,
+                                       off_t file_offset = -1)
+        {
+            const size_t safe_len = (buffer_offset < buf.size())
+                                        ? std::min(len, buf.size() - buffer_offset)
+                                        : 0;
+
+            const auto* ptr = buf.data() + buffer_offset;
+            const uint16_t buf_index = buf.pool()->registration_index(ptr);
+
+            return IoAwaiter(
+                *this,
+                [raw_fd = fd.fd, ptr, safe_len, buf_index, file_offset](io_uring_sqe* sqe)
+                {
+                    io_uring_prep_write_fixed(sqe, raw_fd, ptr, static_cast<unsigned>(safe_len),
+                                              static_cast<__u64>(file_offset), static_cast<int>(buf_index));
+                },
+                detail::ResumeInt{});
+        }
+
+        /// @brief write the entire buffer
+        [[nodiscard]] auto write_fixed(Fd& fd, const BufferLease& buf, const off_t file_offset = -1)
+        {
+            return write_fixed(fd, buf, buf.size(), /*buffer_offset=*/0, file_offset);
+        }
+
+    private:
+        static constexpr uint64_t kWakeupSentinel = 0xDEAD'C0DE'DEAD'C0DEULL;
+        static constexpr size_t kMaxResumesPerTick = 128;
+
+        io_uring ring_{};
+        int wake_fd_{-1};
+        uint64_t wake_value_{0};
+        bool is_activated_{false};
+        bool is_running_{false};
+        // cross-thread needs to check this, this is why it is an atomic
+        alignas(64) std::atomic<bool> is_sleeping_{false};
+        IoOptions opts_;
+        /// This is not a typical id, it is use for CPU pining too
+        size_t id_;
+        std::vector<std::coroutine_handle<>> local_tasks_{};
+        std::vector<std::coroutine_handle<>> current_batch{};
+        detail::CoroQueue queue_{};
+
+        std::optional<RegisteredBufferPool> buffer_pool_{std::nullopt};
+        std::vector<iovec> registered_iovecs_{};
+
+        /// Creates the Ring in an uninitialized way
+        void init(int wq_fd = -1);
+        /// Activate a disabled ring, MUST be called after init()
+        void activate();
+        void tick() noexcept;
+        void submit_or_wait_for();
+        void arm_wake_read() noexcept;
+        void wake() const noexcept;
+        io_uring_sqe* get_sqe() noexcept;
+
+        int ring_fd() const noexcept { return ring_.ring_fd; }
+
+        void post(detail::TaskPromiseBase* task)
+        {
+            queue_.enqueue(task);
+            wake();
+        }
+    };
+
+    // ============================================================================
+    // IoAwaiter Implementation
+    // This must be defined after IO is fully defined to avoid incomplete type errors.
+    // ============================================================================
+    template <typename SetupFunc, typename MapperFunc>
+        requires std::invocable<SetupFunc, io_uring_sqe*> && std::invocable<MapperFunc, int32_t>
+    template <typename Promise>
+    std::coroutine_handle<> IoAwaiter<SetupFunc, MapperFunc>::await_suspend(std::coroutine_handle<Promise> h) noexcept
     {
-        io.tick();
+        io_uring_sqe* sqe = io_.get_sqe();
+        if (sqe == nullptr)
+        {
+            KIO_LOG_WARN("SQ ring full; returning EAGAIN to apply backpressure");
+            ops_.res = -EAGAIN;
+            return h;
+        }
+
+        this->ops_.h = h;
+        setup_(sqe);
+        io_uring_sqe_set_data64(sqe, reinterpret_cast<uint64_t>(&ops_));
+
+        return std::noop_coroutine();
     }
 
-    return std::move(*result);
-}
+    //
+    // sync_wait testing util
+    //
+    /// Testing utility, block a coroutine until it is done
+    template <typename T>
+    Result<T> sync_wait(IO& io, Task<T>&& task)
+    {
+        bool done{false};
+        std::optional<Result<T>> result;
 
-}  // namespace URing
+        io.schedule(
+            [&](Task<T> t) -> Task<void>
+            {
+                result = co_await std::move(t);
+                done = true;
+                co_return {};
+            }(std::move(task)));
+
+        io.pin_to_cpu();
+        io.activate();
+
+        while (!done)
+        {
+            io.tick();
+        }
+
+        return std::move(*result);
+    }
+} // namespace kio

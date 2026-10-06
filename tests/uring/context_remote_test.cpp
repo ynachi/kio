@@ -8,7 +8,7 @@
 #include "uring/extention/io_pool.hpp"
 #include <gtest/gtest.h>
 
-using namespace URing;
+using namespace kio;
 
 namespace
 {

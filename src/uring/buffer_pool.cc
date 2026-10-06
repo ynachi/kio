@@ -1,137 +1,223 @@
 #include "uring/core/buffer_pool.hpp"
 
 #include <algorithm>
-#include <utility>
+#include <cassert>
+#include <cerrno>
+#include <system_error>
 
-namespace URing
+namespace kio
 {
-FixedBuffer::FixedBuffer(FixedBuffer&& other) noexcept
-    : index_(std::exchange(other.index_, kInvalidBufIndex)),
-      bucket_id_(other.bucket_id_),
-      view_(other.view_),
-      pool_(std::exchange(other.pool_, nullptr))
-{
-}
-
-FixedBuffer& FixedBuffer::operator=(FixedBuffer&& other) noexcept
-{
-    if (this != &other) [[likely]]
+    RegisteredBufferPool::RegisteredBufferPool(const size_t slot_size, const uint32_t slots)
+        : slot_size_(slot_size), slots_(slots)
     {
-        release();
-        index_ = std::exchange(other.index_, kInvalidBufIndex);
-        bucket_id_ = other.bucket_id_;
-        view_ = other.view_;
-        pool_ = std::exchange(other.pool_, nullptr);
-    }
-    return *this;
-}
-
-void FixedBuffer::release() noexcept
-{
-    if (pool_ && index_ != kInvalidBufIndex)
-    {
-        pool_->release(index_, bucket_id_);
-        index_ = kInvalidBufIndex;
-        pool_ = nullptr;
-    }
-}
-
-FixedBufferPool::Bucket::Bucket(const size_t size, const size_t count, const uint32_t start)
-    : slot_size(size), start_index(start), slab(nullptr, std::free)
-{
-    // Allocate page-aligned slab (required for io_uring fixed buffers + O_DIRECT)
-    void* ptr = nullptr;
-    const size_t total = size * count;
-
-    if (posix_memalign(&ptr, kBufferAlignment, total) != 0)
-    {
-        throw std::bad_alloc();
-    }
-    slab.reset(static_cast<std::byte*>(ptr));
-
-    free_stack.reserve(count);
-    for (uint32_t i = 0; i < count; ++i)
-    {
-        free_stack.push_back(start + (count - 1 - i));
-    }
-}
-
-[[nodiscard]] Result<uint32_t> FixedBufferPool::Bucket::pop() noexcept
-{
-    if (free_stack.empty()) [[unlikely]]
-    {
-        // resize is not allowed
-        return std::unexpected(make_error_code(PoolError::Exhausted));
-    }
-    const uint32_t idx = free_stack.back();
-    free_stack.pop_back();
-    return idx;
-}
-
-FixedBufferPool::FixedBufferPool(std::initializer_list<BucketConfig> configs)
-{
-    if (configs.size() == 0)
-    {
-        return;
-    }
-
-    // Sort by slot_size ascending for efficient binary search in take()
-    std::vector sorted_configs(configs);
-    std::ranges::sort(sorted_configs, [](const auto& a, const auto& b) { return a.size < b.size; });
-
-    // Validate: all sizes must be page-aligned for io_uring + O_DIRECT compatibility
-    for (const auto& cfg : sorted_configs)
-    {
-        if (cfg.size % 4096 != 0)
+        // Invariant 2: slot_size must be a power of two >= 4096 and divide 1 GiB evenly
+        if (slot_size < kPageSize || (slot_size & (slot_size - 1)) != 0 || (kOneGiB % slot_size) != 0)
         {
-            throw std::invalid_argument("slot_size must be page-aligned (multiple of 4096) for io_uring fixed buffers");
+            throw std::invalid_argument(
+                "slot_size must be a power of two >= 4096 that evenly divides 1 GiB");
+        }
+
+        if (slots == 0)
+        {
+            throw std::invalid_argument("slots must be > 0");
+        }
+
+        // Invariant 1: Check for multiplication overflow
+        if (__builtin_mul_overflow(slot_size_, size_t{slots_}, &total_bytes_))
+        {
+            throw std::overflow_error("Total buffer pool size overflows size_t");
+        }
+
+        // Invariant 1: Round up to 2 MiB boundary for Transparent Huge Pages (THP)
+        aligned_total_bytes_ = (total_bytes_ + kHugePageSize - 1) & ~(kHugePageSize - 1);
+
+        // Pre-reserve free-list to guarantee that release() and try_acquire() are strictly noexcept
+        free_slots_.reserve(slots_);
+        for (uint32_t i = slots_; i != 0; --i)
+        {
+            free_slots_.push_back(i - 1);
+        }
+
+        void* mapping = ::mmap(
+            nullptr,
+            aligned_total_bytes_,
+            PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS,
+            -1,
+            0);
+
+        if (mapping == MAP_FAILED)
+        {
+            throw std::system_error(errno, std::system_category(), "mmap buffer pool failed");
+        }
+
+        base_ = static_cast<std::byte*>(mapping);
+
+        // Advise kernel to back the mapping with huge pages
+        (void)::madvise(base_, aligned_total_bytes_, MADV_HUGEPAGE);
+    }
+
+    RegisteredBufferPool::~RegisteredBufferPool() noexcept
+    {
+        close();
+
+        if (base_ != nullptr)
+        {
+            (void)::munmap(base_, aligned_total_bytes_);
+            base_ = nullptr;
         }
     }
 
-    // Build buckets + global iovec array
-    uint32_t current_global_index = 0;
-    buckets_.reserve(configs.size());
-    for (const auto& config : sorted_configs)
+    BufferLease RegisteredBufferPool::try_acquire() noexcept
     {
-        buckets_.emplace_back(config.size, config.count, current_global_index);
-
-        // Register each slot in the flattened iovec array
-        for (uint32_t i = 0; i < config.count; ++i)
+        if (closed_ || free_slots_.empty())
         {
-            global_iovecs_.push_back({.iov_base = &buckets_.back().slab[i * config.size], .iov_len = config.size});
+            return {};
         }
-        current_global_index += config.count;
+
+        // LIFO pop: returns the most recently used slot for CPU cache warmth
+        const uint32_t ordinal = free_slots_.back();
+        free_slots_.pop_back();
+
+        return make_lease(ordinal);
     }
 
-    ALOG_INFO("MultiSizeFixedBufferPool: {} buckets, {} total slots, {} MB allocated", buckets_.size(),
-              global_iovecs_.size(),
-              std::ranges::fold_left(configs, 0ull, [](size_t acc, const auto& c) { return acc + c.size * c.count; }) /
-                  (1024 * 1024));
-}
-
-[[nodiscard]] Result<FixedBuffer> FixedBufferPool::take(const size_t size) noexcept
-{
-    // Binary search for first bucket with slot_size >= requested size
-    const auto it = std::ranges::lower_bound(buckets_, size, {}, &Bucket::slot_size);
-
-    if (it == buckets_.end()) [[unlikely]]
+    void RegisteredBufferPool::release(const uint32_t ordinal) noexcept
     {
-        return std::unexpected(make_error_code(PoolError::SizeTooLarge));
+        assert(ordinal < slots_);
+
+        if (!closed_ && wait_head_ != nullptr)
+        {
+            // Direct handoff to the oldest FIFO waiter without passing through free_slots_
+            auto* waiter = pop_waiter();
+            waiter->result = make_lease(ordinal);
+            resume_waiter(waiter);
+            return;
+        }
+
+        // LIFO push: keeps recently freed memory warm in cache
+        free_slots_.push_back(ordinal);
     }
 
-    Result<uint32_t> idx_res = it->pop();
-    if (!idx_res.has_value()) [[unlikely]]
+    void RegisteredBufferPool::close() noexcept
     {
-        return std::unexpected(idx_res.error());
+        if (closed_)
+        {
+            return;
+        }
+
+        closed_ = true;
+
+        // Wake all pending FIFO waiters with operation_canceled
+        while (auto* waiter = pop_waiter())
+        {
+            waiter->result = Error::fail_errc(std::errc::operation_canceled, "pool closed");
+            resume_waiter(waiter);
+        }
     }
 
-    const uint32_t bucket_id = static_cast<uint32_t>(it - buckets_.begin());
-    const uint32_t global_idx = *idx_res;
+    uint16_t RegisteredBufferPool::append_regions(std::vector<iovec>& table)
+    {
+        first_index_ = static_cast<uint16_t>(table.size());
 
-    // Compute local offset within bucket's slab
-    const uint32_t local_idx = global_idx - it->start_index;
-    std::span view(&it->slab[local_idx * it->slot_size], it->slot_size);
+        // Invariant 2 & 3: Slice contiguous mapping into <= 1 GiB iovec chunks
+        for (size_t offset = 0; offset < total_bytes_; offset += kOneGiB)
+        {
+            const size_t len = std::min(kOneGiB, total_bytes_ - offset);
+            table.push_back(iovec{
+                .iov_base = base_ + offset,
+                .iov_len = len
+            });
+        }
 
-    return FixedBuffer(global_idx, bucket_id, view, this);
-}
-}  // namespace URing
+        return first_index_;
+    }
+
+    void RegisteredBufferPool::enqueue_waiter(Waiter* w) noexcept
+    {
+        assert(w != nullptr);
+        w->next = nullptr;
+        w->prev = wait_tail_;
+
+        if (wait_tail_ != nullptr)
+        {
+            wait_tail_->next = w;
+        }
+        else
+        {
+            wait_head_ = w;
+        }
+        wait_tail_ = w;
+    }
+
+    RegisteredBufferPool::Waiter* RegisteredBufferPool::pop_waiter() noexcept
+    {
+        if (wait_head_ == nullptr)
+        {
+            return nullptr;
+        }
+
+        auto* w = wait_head_;
+        wait_head_ = w->next;
+
+        if (wait_head_ != nullptr)
+        {
+            wait_head_->prev = nullptr;
+        }
+        else
+        {
+            wait_tail_ = nullptr;
+        }
+
+        w->next = nullptr;
+        w->prev = nullptr;
+        return w;
+    }
+
+    void RegisteredBufferPool::remove_waiter(Waiter* w) noexcept
+    {
+        assert(w != nullptr);
+
+        if (w->prev != nullptr)
+        {
+            w->prev->next = w->next;
+        }
+        else if (wait_head_ == w)
+        {
+            wait_head_ = w->next;
+        }
+
+        if (w->next != nullptr)
+        {
+            w->next->prev = w->prev;
+        }
+        else if (wait_tail_ == w)
+        {
+            wait_tail_ = w->prev;
+        }
+
+        w->next = nullptr;
+        w->prev = nullptr;
+        w->handle = {};
+    }
+
+    void RegisteredBufferPool::resume_waiter(Waiter* w) const noexcept
+    {
+        assert(w != nullptr);
+        const auto h = w->handle;
+        w->handle = {}; // Mark unlinked/consumed
+
+        if (h)
+        {
+            if (reschedule_fn_ != nullptr)
+            {
+                // Invariant 6: Reschedule through IO worker to prevent stack overflow
+                reschedule_fn_(reschedule_ctx_, h);
+            }
+            else
+            {
+                h.resume();
+            }
+        }
+    }
+} // namespace kio

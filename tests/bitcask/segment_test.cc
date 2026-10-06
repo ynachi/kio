@@ -18,7 +18,7 @@ class SegmentManagerTest : public ::testing::Test
 protected:
     void SetUp() override
     {
-        auto io = URing::IO(0, nullptr,
+        auto io = kio::IO(0, nullptr,
                             {
         },
                             {
@@ -26,7 +26,7 @@ protected:
                                 {.size = 8192, .count = 16},
                                 {.size = 1024 * 1024 + 4096, .count = 2},
                             });
-        io_ = std::make_unique<URing::IO>(std::move(io));
+        io_ = std::make_unique<kio::IO>(std::move(io));
 
         fs::path temp_base = fs::temp_directory_path();
         test_dir_ = temp_base / "bitcask_test_dir_12345";
@@ -42,14 +42,14 @@ protected:
 
     void TearDown() override { std::filesystem::remove_all(test_dir_); }
 
-    std::unique_ptr<URing::IO> io_;
+    std::unique_ptr<kio::IO> io_;
     std::filesystem::path test_dir_;
     std::unique_ptr<bitcask::SegmentManager> manager_;
 };
 
 TEST_F(SegmentManagerTest, SuccessfulAppend)
 {
-    auto test_coro = [&]() -> URing::Task<void>
+    auto test_coro = [&]() -> kio::Task<void>
     {
         const std::string key{"key"};
         std::string value{"value"};
@@ -66,12 +66,12 @@ TEST_F(SegmentManagerTest, SuccessfulAppend)
         co_return {};
     };
 
-    URing::sync_wait(*io_, test_coro());
+    kio::sync_wait(*io_, test_coro());
 }
 
 TEST_F(SegmentManagerTest, RotationAndRetrieval)
 {
-    auto test_coro = [&]() -> URing::Task<void>
+    auto test_coro = [&]() -> kio::Task<void>
     {
         // 1. Write first entry to Segment 1
         std::string val1 = "value_in_segment_1";
@@ -110,35 +110,35 @@ TEST_F(SegmentManagerTest, RotationAndRetrieval)
         EXPECT_EQ(fs::file_size(path2), 1024 * 1024);
 
         // 4. Verify retrieval from Segment 1 (sealed)
-        auto buf1 = io_->take_fixed_buffer(val1.size());
-        EXPECT_TRUE(buf1.has_value());
+        auto buf1 = io_->try_acquire_buffer();
+        EXPECT_TRUE(bool(buf1));
         if (!buf1)
             co_return {};
 
         bitcask::ValueLocation loc1{
-            .segment_id = 1, .value_len = static_cast<uint32_t>(val1.size()), .value_offset = offset1 + 32 + 4};
+            .segment_id = 1, .value_len = static_cast<uint32_t>(val1.size()), .value_offset = offset1 + 32 + 4, .total_len = 0, .secno = 0};
 
-        auto read_res1 = co_await manager_->value_into(*io_, *buf1, loc1);
+        auto read_res1 = co_await manager_->value_into(*io_, buf1, loc1);
         EXPECT_TRUE(read_res1.has_value());
         if (read_res1)
         {
-            EXPECT_EQ(std::string_view(reinterpret_cast<const char*>(buf1->ptr()), val1.size()), val1);
+            EXPECT_EQ(std::string_view(reinterpret_cast<const char*>(buf1.data()), val1.size()), val1);
         }
 
         // 5. Verify retrieval from Segment 2 (active)
-        auto buf2 = io_->take_fixed_buffer(val2.size());
-        EXPECT_TRUE(buf2.has_value());
+        auto buf2 = io_->try_acquire_buffer();
+        EXPECT_TRUE(bool(buf2));
         if (!buf2)
             co_return {};
 
         bitcask::ValueLocation loc2{
-            .segment_id = 2, .value_len = static_cast<uint32_t>(val2.size()), .value_offset = offset3 + 32 + 4};
+            .segment_id = 2, .value_len = static_cast<uint32_t>(val2.size()), .value_offset = offset3 + 32 + 4, .total_len = 0, .secno = 0};
 
-        auto read_res2 = co_await manager_->value_into(*io_, *buf2, loc2);
+        auto read_res2 = co_await manager_->value_into(*io_, buf2, loc2);
         EXPECT_TRUE(read_res2.has_value());
         if (read_res2)
         {
-            EXPECT_EQ(std::string_view(reinterpret_cast<const char*>(buf2->ptr()), val2.size()), val2);
+            EXPECT_EQ(std::string_view(reinterpret_cast<const char*>(buf2.data()), val2.size()), val2);
         }
 
         auto close_res = co_await manager_->close(*io_);
@@ -147,7 +147,7 @@ TEST_F(SegmentManagerTest, RotationAndRetrieval)
         co_return {};
     };
 
-    URing::sync_wait(*io_, test_coro());
+    kio::sync_wait(*io_, test_coro());
 }
 
 TEST_F(SegmentManagerTest, CacheEviction)
@@ -159,7 +159,7 @@ TEST_F(SegmentManagerTest, CacheEviction)
 
     auto tiny_manager = std::make_unique<bitcask::SegmentManager>(0, tiny_cfg, 0, 0);
 
-    auto test_coro = [&]() -> URing::Task<void>
+    auto test_coro = [&]() -> kio::Task<void>
     {
         auto res1 = co_await tiny_manager->append(*io_, "k1", "val1");
         co_await tiny_manager->rotate(*io_);
@@ -170,42 +170,42 @@ TEST_F(SegmentManagerTest, CacheEviction)
         auto res3 = co_await tiny_manager->append(*io_, "k3", "val3");
         co_await tiny_manager->rotate(*io_);
 
-        auto buf = io_->take_fixed_buffer(10);
-        EXPECT_TRUE(buf.has_value());
+        auto buf = io_->try_acquire_buffer();
+        EXPECT_TRUE(bool(buf));
         if (!buf)
         {
             co_return {};
         }
 
         // 3. Access Segment 1 -> Added to cache
-        bitcask::ValueLocation loc1{.segment_id = 1, .value_len = 4, .value_offset = *res1 + 32 + 2};
-        EXPECT_TRUE((co_await tiny_manager->value_into(*io_, *buf, loc1)).has_value());
+        bitcask::ValueLocation loc1{.segment_id = 1, .value_len = 4, .value_offset = *res1 + 32 + 2, .total_len = 0, .secno = 0};
+        EXPECT_TRUE((co_await tiny_manager->value_into(*io_, buf, loc1)).has_value());
 
         // 4. Access Segment 2 -> Added to cache
-        bitcask::ValueLocation loc2{.segment_id = 2, .value_len = 4, .value_offset = *res2 + 32 + 2};
-        EXPECT_TRUE((co_await tiny_manager->value_into(*io_, *buf, loc2)).has_value());
+        bitcask::ValueLocation loc2{.segment_id = 2, .value_len = 4, .value_offset = *res2 + 32 + 2, .total_len = 0, .secno = 0};
+        EXPECT_TRUE((co_await tiny_manager->value_into(*io_, buf, loc2)).has_value());
 
         // 5. Access Segment 3 -> Cache is full (limit 2), evicts Segment 1
-        bitcask::ValueLocation loc3{.segment_id = 3, .value_len = 4, .value_offset = *res3 + 32 + 2};
-        EXPECT_TRUE((co_await tiny_manager->value_into(*io_, *buf, loc3)).has_value());
+        bitcask::ValueLocation loc3{.segment_id = 3, .value_len = 4, .value_offset = *res3 + 32 + 2, .total_len = 0, .secno = 0};
+        EXPECT_TRUE((co_await tiny_manager->value_into(*io_, buf, loc3)).has_value());
 
-        auto final_res = co_await tiny_manager->value_into(*io_, *buf, loc1);
+        auto final_res = co_await tiny_manager->value_into(*io_, buf, loc1);
         EXPECT_TRUE(final_res.has_value());
         if (final_res)
         {
-            EXPECT_EQ(std::string_view(reinterpret_cast<const char*>(buf->ptr()), 4), "val1");
+            EXPECT_EQ(std::string_view(reinterpret_cast<const char*>(buf.data()), 4), "val1");
         }
 
         co_await tiny_manager->close(*io_);
         co_return {};
     };
 
-    URing::sync_wait(*io_, test_coro());
+    kio::sync_wait(*io_, test_coro());
 }
 
 TEST_F(SegmentManagerTest, CacheConsistency)
 {
-    auto test_coro = [&]() -> URing::Task<void>
+    auto test_coro = [&]() -> kio::Task<void>
     {
         // 1. Write and rotate to Segment 1
         std::string val = "consistency_test";
@@ -218,15 +218,15 @@ TEST_F(SegmentManagerTest, CacheConsistency)
         co_await manager_->rotate(*io_);
 
         // 2. Read once to populate cache
-        auto buf = io_->take_fixed_buffer(val.size());
-        EXPECT_TRUE(buf.has_value());
+        auto buf = io_->try_acquire_buffer();
+        EXPECT_TRUE(bool(buf));
         if (!buf)
             co_return {};
 
         bitcask::ValueLocation loc{
-            .segment_id = 1, .value_len = static_cast<uint32_t>(val.size()), .value_offset = offset + 32 + 3};
+            .segment_id = 1, .value_len = static_cast<uint32_t>(val.size()), .value_offset = offset + 32 + 3, .total_len = 0, .secno = 0};
 
-        auto read_res1 = co_await manager_->value_into(*io_, *buf, loc);
+        auto read_res1 = co_await manager_->value_into(*io_, buf, loc);
         EXPECT_TRUE(read_res1.has_value());
 
         // 3. DELETE the file from disk!
@@ -238,23 +238,23 @@ TEST_F(SegmentManagerTest, CacheConsistency)
         // If the cache is working, it should still have the FD open and succeed.
         // If it's not caching, it will try to open() the deleted file and fail.
         // Note: It works because linux do not completely remove the file on unlink unless the ref count is 0.
-        auto read_res2 = co_await manager_->value_into(*io_, *buf, loc);
+        auto read_res2 = co_await manager_->value_into(*io_, buf, loc);
         EXPECT_TRUE(read_res2.has_value()) << "Should have used cached FD even if file is deleted";
         if (read_res2)
         {
-            EXPECT_EQ(std::string_view(reinterpret_cast<const char*>(buf->ptr()), val.size()), val);
+            EXPECT_EQ(std::string_view(reinterpret_cast<const char*>(buf.data()), val.size()), val);
         }
 
         co_await manager_->close(*io_);
         co_return {};
     };
 
-    URing::sync_wait(*io_, test_coro());
+    kio::sync_wait(*io_, test_coro());
 }
 
 TEST_F(SegmentManagerTest, CorruptionDetection)
 {
-    auto test_coro = [&]() -> URing::Task<void>
+    auto test_coro = [&]() -> kio::Task<void>
     {
         std::string val = "integrity_test";
         auto res = co_await manager_->append(*io_, "key", val);
@@ -320,12 +320,12 @@ TEST_F(SegmentManagerTest, CorruptionDetection)
         co_return {};
     };
 
-    URing::sync_wait(*io_, test_coro());
+    kio::sync_wait(*io_, test_coro());
 }
 
 TEST_F(SegmentManagerTest, StressAppendRotateAndReadBack)
 {
-    auto test_coro = [&]() -> URing::Task<void>
+    auto test_coro = [&]() -> kio::Task<void>
     {
         struct Entry
         {
@@ -382,8 +382,8 @@ TEST_F(SegmentManagerTest, StressAppendRotateAndReadBack)
         for (const size_t sample : samples)
         {
             const auto& entry = entries[sample];
-            auto buf = io_->take_fixed_buffer(entry.value.size());
-            EXPECT_TRUE(buf.has_value()) << (buf ? "" : buf.error().message());
+            auto buf = io_->try_acquire_buffer();
+            EXPECT_TRUE(bool(buf)) << (buf ? "" : buf.error().message());
             if (!buf)
             {
                 co_return {};
@@ -395,14 +395,14 @@ TEST_F(SegmentManagerTest, StressAppendRotateAndReadBack)
                 .value_offset = entry.offset + sizeof(bitcask::LogEntryHeader) + entry.key.size(),
             };
 
-            auto read_res = co_await manager_->value_into(*io_, *buf, loc);
+            auto read_res = co_await manager_->value_into(*io_, buf, loc);
             EXPECT_TRUE(read_res.has_value()) << (read_res ? "" : read_res.error().message());
             if (!read_res)
             {
                 co_return {};
             }
 
-            EXPECT_EQ(std::string_view(reinterpret_cast<const char*>(buf->ptr()), entry.value.size()), entry.value);
+            EXPECT_EQ(std::string_view(reinterpret_cast<const char*>(buf.data()), entry.value.size()), entry.value);
         }
 
         auto close_res = co_await manager_->close(*io_);
@@ -411,5 +411,5 @@ TEST_F(SegmentManagerTest, StressAppendRotateAndReadBack)
         co_return {};
     };
 
-    URing::sync_wait(*io_, test_coro());
+    kio::sync_wait(*io_, test_coro());
 }

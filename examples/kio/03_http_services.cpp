@@ -13,7 +13,7 @@
 #include "uring/logger.hpp"
 #include "uring/tcp_listener.hpp"
 
-using namespace URing;
+using namespace kio;
 
 namespace
 {
@@ -69,8 +69,10 @@ static Task<void> handle_client(IO& worker, Fd client_fd)
     co_return {};
 }
 
-// Accept incoming connections on a single worker
-static Task<void> server_loop(IO& worker, uint16_t port, std::stop_token st)
+// Accept incoming connections on a single worker.
+// Selected by kUseRemoteDispatch at compile time; the unused branch is kept
+// readable but must not trip -Werror,-Wunneeded-internal-declaration.
+[[maybe_unused]] static Task<void> server_loop(IO& worker, uint16_t port, std::stop_token st)
 {
     auto listener = TcpListener::Bind(port, "0.0.0.0", 4096);
     if (!listener)
@@ -140,7 +142,7 @@ static Task<void> dispatching_server_loop(IoContext& ctx, IO& dispatcher, uint16
 
 int main()
 {
-    URing::ALOG::set_level(ALOG::Level::Debug);
+    kio::ALOG::set_level(ALOG::level::debug);
 
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);

@@ -10,7 +10,7 @@
 
 #include "uring/error.hpp"
 
-namespace URing
+namespace kio
 {
 class IO;
 
@@ -70,7 +70,7 @@ struct ResumeVoid
     {
         if (res < 0)
         {
-            return std::unexpected(make_error_code(res));
+            return kio::Error::fail_errno(-res);
         }
 
         return {};
@@ -83,7 +83,7 @@ struct ResumeInt
     {
         if (res < 0)
         {
-            return std::unexpected(make_error_code(res));
+            return kio::Error::fail_errno(-res);
         }
         return res;
     }

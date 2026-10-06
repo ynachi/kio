@@ -23,7 +23,7 @@ void SegmentManager::prepare_write(std::span<const std::byte> key, std::span<con
     payload_crc = XXH3_64bits_digest(state);
 }
 
-URing::Task<uint64_t> SegmentManager::append(URing::IO& io, std::span<const std::byte> key,
+kio::Task<uint64_t> SegmentManager::append(kio::IO& io, std::span<const std::byte> key,
                                              std::span<const std::byte> value, const EntryFlags flags)
 {
     if (auto fast_res = try_append_buffered_fast(key, value, flags); fast_res.has_value()) [[likely]]
@@ -81,7 +81,7 @@ URing::Task<uint64_t> SegmentManager::append(URing::IO& io, std::span<const std:
     co_return append_buffered_ready(key, value, flags, total_entry_size);
 }
 
-bool SegmentManager::serve_from_buffer(URing::FixedBuffer& out, const uint64_t offset, const size_t len)
+bool SegmentManager::serve_from_buffer(kio::FixedBuffer& out, const uint64_t offset, const size_t len)
 {
     if (!should_read_from_buffer(offset, len))
     {
@@ -99,7 +99,7 @@ bool SegmentManager::should_read_from_buffer(const uint64_t offset, const size_t
     return write_buffer_.has_value() && offset >= next_disk_offset_ && offset + len <= buffer_end;
 }
 
-URing::Task<uint64_t> SegmentManager::append_direct(URing::IO& io, std::span<const std::byte> key,
+kio::Task<uint64_t> SegmentManager::append_direct(kio::IO& io, std::span<const std::byte> key,
                                                     std::span<const std::byte> value, LogEntryHeader& hdr,
                                                     uint64_t payload_crc)
 {
@@ -121,7 +121,7 @@ URing::Task<uint64_t> SegmentManager::append_direct(URing::IO& io, std::span<con
     if (bytes_written != static_cast<int32_t>(hdr.total_size()))
     {
         // Handle partial write (though rare in io_uring with O_DIRECT/Regular files)
-        co_return std::unexpected(URing::make_error_code(EIO));
+        co_return std::unexpected(kio::make_error_code(EIO));
     }
 
     next_disk_offset_ += bytes_written;
@@ -197,7 +197,7 @@ std::optional<uint64_t> SegmentManager::try_append_buffered_fast(std::span<const
     return append_buffered_ready(key, value, flags, total_entry_size);
 }
 
-URing::Task<void> SegmentManager::flush(URing::IO& io)
+kio::Task<void> SegmentManager::flush(kio::IO& io)
 {
     if (!write_buffer_.has_value() || next_buf_offset_ == 0)
     {
@@ -216,7 +216,7 @@ URing::Task<void> SegmentManager::flush(URing::IO& io)
     co_return {};
 }
 
-URing::Task<void> SegmentManager::value_into(URing::IO& io, URing::FixedBuffer& buf, ValueLocation& loc)
+kio::Task<void> SegmentManager::value_into(kio::IO& io, kio::FixedBuffer& buf, ValueLocation& loc)
 {
     if (loc.segment_id == active_segment_id_ && serve_from_buffer(buf, loc.value_offset, loc.value_len))
     {
@@ -245,15 +245,15 @@ URing::Task<void> SegmentManager::value_into(URing::IO& io, URing::FixedBuffer& 
 
     if (res != static_cast<int32_t>(loc.value_len))
     {
-        ALOG_ERROR("Short read from segment {}: expected {}, got {}", loc.segment_id, loc.value_len, res);
-        co_return std::unexpected(URing::error_from_errc(std::errc::io_error));
+        KIO_LOG_ERROR("Short read from segment {}: expected {}, got {}", loc.segment_id, loc.value_len, res);
+        co_return std::unexpected(kio::error_from_errc(std::errc::io_error));
     }
 
     co_return {};
 }
 
 // TODO: ia badly generetad, rewrite.
-URing::Task<void> SegmentManager::verify_entry(URing::IO& io, SegmentId segment_id, uint64_t record_offset)
+kio::Task<void> SegmentManager::verify_entry(kio::IO& io, SegmentId segment_id, uint64_t record_offset)
 {
     auto fd_res = ro_fd_cache_.get(segment_id);
     if (!fd_res.has_value())
@@ -273,8 +273,8 @@ URing::Task<void> SegmentManager::verify_entry(URing::IO& io, SegmentId segment_
     uint64_t expected_hdr_crc = XXH3_64bits(&hdr.seq_num, 24);
     if (hdr.hdr_crc != expected_hdr_crc)
     {
-        ALOG_ERROR("Header CRC mismatch at segment {}, offset {}", segment_id, record_offset);
-        co_return std::unexpected(URing::error_from_errc(std::errc::bad_message));
+        KIO_LOG_ERROR("Header CRC mismatch at segment {}, offset {}", segment_id, record_offset);
+        co_return std::unexpected(kio::error_from_errc(std::errc::bad_message));
     }
 
     // 2. Read and verify Value CRC (at the end of the record)
@@ -290,7 +290,7 @@ URing::Task<void> SegmentManager::verify_entry(URing::IO& io, SegmentId segment_
     co_return {};
 }
 
-URing::Task<void> SegmentManager::seal_active(URing::IO& io)
+kio::Task<void> SegmentManager::seal_active(kio::IO& io)
 {
     if (auto res = co_await io.fsync(*active_segment_, true); !res.has_value()) [[unlikely]]
     {
@@ -310,18 +310,18 @@ URing::Task<void> SegmentManager::seal_active(URing::IO& io)
     co_return {};
 }
 
-URing::Task<std::shared_ptr<URing::Fd>> SegmentManager::open_and_cache_fd(URing::IO& io, const SegmentId id)
+kio::Task<std::shared_ptr<kio::Fd>> SegmentManager::open_and_cache_fd(kio::IO& io, const SegmentId id)
 {
-    ALOG_DEBUG("no cached file, opening a new one, shard{}", shard_id_);
+    KIO_LOG_DEBUG("no cached file, opening a new one, shard{}", shard_id_);
     std::filesystem::path path = cfg_.get_data_file_path(id, shard_id_);
     const auto path_str = path.string();
 
     URING_TRY_LOG(auto fd_inner, co_await io.open(std::move(path), cfg_.read_flags, cfg_.file_mode),
                   "open segment file failed shard={} path={}", shard_id_, path_str);
 
-    auto fd_shared = std::make_shared<URing::Fd>(std::move(fd_inner));
+    auto fd_shared = std::make_shared<kio::Fd>(std::move(fd_inner));
 
-    std::optional<std::shared_ptr<URing::Fd>> evicted_fd = ro_fd_cache_.put(id, fd_shared);
+    std::optional<std::shared_ptr<kio::Fd>> evicted_fd = ro_fd_cache_.put(id, fd_shared);
     // close if we are the sole owner
     if (evicted_fd.has_value() && evicted_fd->use_count() == 1)
     {
@@ -332,7 +332,7 @@ URing::Task<std::shared_ptr<URing::Fd>> SegmentManager::open_and_cache_fd(URing:
     co_return fd_shared;
 }
 
-URing::Task<std::optional<URing::Fd>> SegmentManager::create_active(URing::IO& io)
+kio::Task<std::optional<kio::Fd>> SegmentManager::create_active(kio::IO& io)
 {
     const SegmentId id = next_segment_id();
     std::filesystem::path path = cfg_.get_data_file_path(id, shard_id_);
@@ -352,7 +352,7 @@ URing::Task<std::optional<URing::Fd>> SegmentManager::create_active(URing::IO& i
     co_return std::exchange(active_segment_, std::move(fd));
 }
 
-URing::Task<void> SegmentManager::rotate(URing::IO& io)
+kio::Task<void> SegmentManager::rotate(kio::IO& io)
 {
     // flush first
     if (auto flush_res = co_await flush(io); !flush_res.has_value()) [[unlikely]]
@@ -371,7 +371,7 @@ URing::Task<void> SegmentManager::rotate(URing::IO& io)
         co_return std::unexpected(create_res.error());
     }
 
-    if (std::optional<URing::Fd> fd = std::move(*create_res); fd.has_value())
+    if (std::optional<kio::Fd> fd = std::move(*create_res); fd.has_value())
     {
         if (auto res = co_await io.close(std::move(*fd)); !res.has_value()) [[unlikely]]
         {
@@ -417,7 +417,7 @@ SegmentManager::~SegmentManager() noexcept
     // it requires async IO, so we log a warning.
     if (active_segment_ && active_segment_->IsValid())
     {
-        ALOG_WARN(
+        KIO_LOG_WARN(
             "SegmentManager destroyed with active segment still open! "
             "This may result in missing data seals/truncations. "
             "Ensure close(io) is called and awaited before destruction.");
@@ -432,7 +432,7 @@ SegmentManager::~SegmentManager() noexcept
     // active tasks will be closed synchronously.
 }
 
-URing::Task<void> SegmentManager::close(URing::IO& io)
+kio::Task<void> SegmentManager::close(kio::IO& io)
 {
     // flush first
     URING_TRY_VOID(co_await flush(io));

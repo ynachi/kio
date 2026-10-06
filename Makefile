@@ -10,8 +10,13 @@ TTY          := $(shell [ -t 0 ] && echo -it)
 
 # The container sees the repository at /src. Its build trees go to ./build-docker on the
 # host, so host builds (./build) and container builds never share a CMake cache.
+# memlock: io_uring mlocks its rings, and Docker caps the limit at 8 MB by
+# default. IoContext's default 16800 entries exceed that once a test creates
+# several workers, failing with "io_uring_queue_init_params failed: Cannot
+# allocate memory". -1 lifts the cap for the container.
 DOCKER_RUN = docker run --rm $(TTY) \
 	--security-opt seccomp=unconfined \
+	--ulimit memlock=-1 \
 	-u $(shell id -u):$(shell id -g) -e HOME=/tmp -e CCACHE_DIR=/ccache \
 	-v $(CURDIR):/src -v $(CURDIR)/build-docker:/src/build -v $(CCACHE_HOST):/ccache \
 	-w /src $(IMAGE)

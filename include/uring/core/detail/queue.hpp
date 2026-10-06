@@ -3,7 +3,7 @@
 
 #include "uring/core/task.hpp"
 
-namespace URing::detail
+namespace kio::detail
 {
 /// MPSC intrusive queue for coroutines
 class CoroQueue

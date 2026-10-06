@@ -4,7 +4,7 @@
 #include "error.hpp"
 #include "net.hpp"
 
-namespace URing
+namespace kio
 {
 struct Fd
 {
@@ -80,7 +80,12 @@ struct Fd
     [[nodiscard]] Result<void> SetOptions(Opts&&... opts) const noexcept
     {
         Result<void> r;
-        ((r = std::forward<Opts>(opts).Apply(fd), r.has_value()) && ...);
+        // Short-circuit on the first failing option. The result must be used,
+        // otherwise -Wunused-value fires under -Werror (clang 20).
+        if (((r = std::forward<Opts>(opts).Apply(fd), r.has_value()) && ...))
+        {
+            return r;
+        }
         return r;
     }
 };

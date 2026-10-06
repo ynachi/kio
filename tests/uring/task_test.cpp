@@ -4,7 +4,7 @@
 
 #include <gtest/gtest.h>
 
-using namespace URing;
+using namespace kio;
 
 namespace
 {
@@ -15,7 +15,7 @@ Task<int> value_task()
 
 Task<int> error_task()
 {
-    co_return std::unexpected(make_error_code(EINVAL));
+    co_return kio::Error::fail_errno(EINVAL);
 }
 
 Task<int> await_value_task()
@@ -42,7 +42,7 @@ Task<int> await_error_task()
 
 Task<void> void_error_task()
 {
-    co_return std::unexpected(make_error_code(EINVAL));
+    co_return kio::Error::fail_errno(EINVAL);
 }
 
 Task<void> void_value_task()

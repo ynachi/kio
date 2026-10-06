@@ -6,7 +6,7 @@
 #include "detail/promise_base.hpp"
 #include "detail/task_awaiter.hpp"
 
-namespace URing
+namespace kio
 {
 // ============================================================================
 // Task<T> — The Primary Coroutine Type
@@ -45,9 +45,27 @@ struct [[nodiscard]] Task
         }
     }
 
+
+    Result<T> get() noexcept
+    {
+        if (handle_ && handle_.promise().result.has_value())
+        {
+            return std::move(*handle_.promise().result);
+        }
+        return kio::Error::fail_errc(std::errc::operation_canceled);
+    }
+
     // Transfers ownership of the coroutine frame to the scheduler.
     // The Task object becomes empty and the frame will self-destruct on completion.
-    Handle release() { return std::exchange(handle_, {}); }
+    Handle release()
+    {
+        auto h = std::exchange(handle_, {});
+        if (h)
+        {
+            h.promise().detached = true;
+        }
+        return h;
+    }
 
     bool done() const noexcept { return handle_ && handle_.done(); }
 

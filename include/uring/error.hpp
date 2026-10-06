@@ -1,143 +1,77 @@
 #pragma once
 
-#include <cstdint>
 #include <expected>
+#include <string>
+#include <string_view>
 #include <system_error>
 
-namespace URing
+namespace kio
 {
-////////////////////////////////////////////////////////////////////////////////
-// Standardized Error Handling
-//
-// Unifies the project on std::expected<T, std::error_code>.
-// Allows usage of Result<int> or Result<> (defaults to void).
-////////////////////////////////////////////////////////////////////////////////
-
-template <typename T = void>
-using Result = std::expected<T, std::error_code>;
-
-inline std::unexpected<std::error_code> error_from_errno(const int err) noexcept
-{
-    return std::unexpected(std::error_code(err, std::system_category()));
-}
-
-inline std::unexpected<std::error_code> error_from_errc(std::errc err) noexcept
-{
-    return std::unexpected(std::make_error_code(err));
-}
-
-inline std::error_code make_error_code(const int err) noexcept
-{
-    return std::error_code{err > 0 ? err : -err, std::system_category()};
-}
-
-/**
- * Generic high-level parse errors.
- * These are protocol-agnostic, allowing different parsers to map
- * specific failures to these general categories.
- */
-enum class ParseError : std::uint8_t
-{
-    Success = 0,
-    Incomplete,       // Not enough data to finish frame
-    InvalidProtocol,  // Violation of protocol rules (bad characters, etc)
-    Overflow,         // Data size exceeds limits
-    InternalError,    // Logical failure in parser
-};
-
-/**
- * Buffer Pool errors.
- */
-enum class PoolError : std::uint8_t
-{
-    Success = 0,
-    Exhausted,
-    SizeTooLarge,
-    RegistrationFailed,
-    AlreadyRegistered,
-};
-
-/**
- * Custom error category for Parsing
- */
-class ParseErrorCategory : public std::error_category
-{
-public:
-    const char* name() const noexcept override { return "kio::ParseError"; }
-
-    std::string message(int ev) const override
+    // A deliberately small error value. `operation` is diagnostic context and must
+    // have static storage duration; use a string literal.
+    struct Error
     {
-        switch (static_cast<ParseError>(ev))
+        std::error_code code{};
+        const char* operation = "";
+
+        [[nodiscard]] static Error from_errno(int value, const char* operation = "") noexcept
         {
-            case ParseError::Success:
-                return "Success";
-            case ParseError::Incomplete:
-                return "Incomplete data (need more)";
-            case ParseError::InvalidProtocol:
-                return "Protocol violation / Invalid format";
-            case ParseError::Overflow:
-                return "Data exceeds buffer or protocol limits";
-            case ParseError::InternalError:
-                return "Internal parsing logic error";
-            default:
-                return "Unknown parse error";
+            return {
+                .code = {value, std::generic_category()},
+                .operation = operation != nullptr ? operation : ""
+            };
         }
-    }
-};
 
-/**
- * Custom error category for Buffer Pool
- */
-class PoolErrorCategory : public std::error_category
-{
-public:
-    const char* name() const noexcept override { return "kio::PoolError"; }
-
-    std::string message(int ev) const override
-    {
-        switch (static_cast<PoolError>(ev))
+        [[nodiscard]] static Error from_errc(const std::errc value,
+                                             const char* operation = "") noexcept
         {
-            case PoolError::Success:
-                return "Success";
-            case PoolError::Exhausted:
-                return "Buffer pool exhausted";
-            case PoolError::SizeTooLarge:
-                return "Requested size exceeds maximum buffer size";
-            case PoolError::RegistrationFailed:
-                return "Failed to register buffers with io_uring";
-            case PoolError::AlreadyRegistered:
-                return "Pool is already registered";
-            default:
-                return "Unknown pool error";
+            return {
+                .code = std::make_error_code(value),
+                .operation = operation != nullptr ? operation : ""
+            };
         }
-    }
-};
 
-// Singleton instance of the categories
-inline const std::error_category& get_parse_error_category()
-{
-    static ParseErrorCategory instance;
-    return instance;
-}
+        [[nodiscard]] static std::unexpected<Error> fail_errc(const std::errc value,
+                                                              const char* operation = "") noexcept
+        {
+            return std::unexpected(from_errc(value, operation));
+        }
 
-inline const std::error_category& get_pool_error_category()
-{
-    static PoolErrorCategory instance;
-    return instance;
-}
+        [[nodiscard]] static std::unexpected<Error> fail_errno(const int code,
+                                                               const char* operation = "") noexcept
+        {
+            return std::unexpected(from_errno(code, operation));
+        }
 
-// Overload make_error_code for ADL
-inline std::error_code make_error_code(ParseError e)
-{
-    return {static_cast<int>(e), get_parse_error_category()};
-}
 
-inline std::error_code make_error_code(PoolError e)
-{
-    return {static_cast<int>(e), get_pool_error_category()};
-}
+        [[nodiscard]] explicit operator bool() const noexcept
+        {
+            return static_cast<bool>(code);
+        }
 
-}  // namespace URing
+        [[nodiscard]] int value() const noexcept { return code.value(); }
+        [[nodiscard]] std::string message() const { return code.message(); }
+
+        [[nodiscard]] std::string_view context() const noexcept
+        {
+            return operation != nullptr ? operation : "";
+        }
+
+        [[nodiscard]] bool operator==(const std::error_code& rhs) const noexcept
+        {
+            return code == rhs;
+        }
+
+        [[nodiscard]] bool operator==(const Error& rhs) const noexcept
+        {
+            return code == rhs.code;
+        }
+    };
+
+    template <typename T>
+    using Result = std::expected<T, Error>;
+} // namespace URing
+
 
 //
 // Rust style result unwrap macro
@@ -171,7 +105,7 @@ inline std::error_code make_error_code(PoolError e)
     auto&& tmp = (expr);                                                                      \
     if (!tmp.has_value()) [[unlikely]]                                                        \
     {                                                                                         \
-        ALOG_ERROR(fmt " | err={} [{}:{}]" __VA_OPT__(, ) __VA_ARGS__, tmp.error().message(), \
+        KIO_LOG_ERROR(fmt " | err={} [{}:{}]" __VA_OPT__(, ) __VA_ARGS__, tmp.error().message(), \
                    tmp.error().category().name(), tmp.error().value());                       \
         co_return std::unexpected(std::move(tmp).error());                                    \
     }                                                                                         \
@@ -185,9 +119,9 @@ inline std::error_code make_error_code(PoolError e)
 #define URING_TRY_VOID_LOG_(tmp, expr, fmt, ...)                                              \
     if (auto&& tmp = (expr); !tmp.has_value()) [[unlikely]]                                   \
     {                                                                                         \
-        ALOG_ERROR(fmt " | err={} [{}:{}]" __VA_OPT__(, ) __VA_ARGS__, tmp.error().message(), \
+        KIO_LOG_ERROR(fmt " | err={} [{}:{}]" __VA_OPT__(, ) __VA_ARGS__, tmp.error().message(), \
                    tmp.error().category().name(), tmp.error().value());                       \
         co_return std::unexpected(std::move(tmp).error());                                    \
     }
 
-#define URING_DETAIL_LOG(LVL, ...) URING_DETAIL_CAT(ALOG_, LVL)(__VA_ARGS__)
+#define URING_DETAIL_LOG(LVL, ...) URING_DETAIL_CAT(KIO_LOG_, LVL)(__VA_ARGS__)

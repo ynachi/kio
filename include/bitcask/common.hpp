@@ -78,20 +78,20 @@ struct BitcaskConfig
      * @brief Validate configuration.
      * @throws std::invalid_argument if the configuration is invalid
      */
-    URing::Result<> validate() const noexcept
+    kio::Result<> validate() const noexcept
     {
         if ((write_flags & O_APPEND) != 0)
         {
-            ALOG_ERROR(
+            KIO_LOG_ERROR(
                 "BitcaskConfig: write_flags must NOT include O_APPEND. "
                 "O_APPEND breaks pwrite() offset semantics and causes data corruption.");
-            return URing::error_from_errc(std::errc::invalid_argument);
+            return kio::error_from_errc(std::errc::invalid_argument);
         }
 
         if (max_segment_size == 0)
         {
-            ALOG_ERROR("BitcaskConfig: max_file_size must be > 0");
-            return URing::error_from_errc(std::errc::invalid_argument);
+            KIO_LOG_ERROR("BitcaskConfig: max_file_size must be > 0");
+            return kio::error_from_errc(std::errc::invalid_argument);
         }
         return {};
     }

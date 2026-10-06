@@ -1,7 +1,7 @@
 #pragma once
 #include "promise_base.hpp"
 
-namespace URing::detail
+namespace kio::detail
 {
 template <typename T>
 struct TaskAwaiter
@@ -22,7 +22,7 @@ struct TaskAwaiter
         auto& p = handle.promise();
         if (!p.result.has_value()) [[unlikely]]
         {
-            return std::unexpected(make_error_code(ECANCELED));
+            return kio::Error::fail_errc(std::errc::operation_canceled);
         }
         return std::move(*p.result);
     }

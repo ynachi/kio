@@ -57,7 +57,7 @@ class SegmentManager
 
     // use optional to allow replacing the active fd
     BitcaskConfig cfg_{};
-    std::optional<URing::Fd> active_segment_{std::nullopt};
+    std::optional<kio::Fd> active_segment_{std::nullopt};
     SegmentId active_segment_id_;
     uint64_t next_disk_offset_{0};
     uint64_t next_buf_offset_{0};
@@ -66,7 +66,7 @@ class SegmentManager
     // There is an invariant: while append allow to pass the reference of an IO
     // within a shard, IO SHOULD not be switched.
     // TODO: we could enforce it by making each shard own an IO, lets see
-    std::optional<URing::FixedBuffer> write_buffer_{std::nullopt};
+    std::optional<kio::FixedBuffer> write_buffer_{std::nullopt};
     FdCache ro_fd_cache_;
     std::unique_ptr<XXH3_state_t, XXH3Deleter> xxh3_state_;
     uint64_t secno_;
@@ -75,11 +75,11 @@ class SegmentManager
     //
     // Helper methods
     //
-    URing::Task<void> seal_active(URing::IO& io);
-    URing::Task<std::optional<URing::Fd>> create_active(URing::IO& io);
-    URing::Task<std::shared_ptr<URing::Fd>> open_and_cache_fd(URing::IO& io, SegmentId id);
+    kio::Task<void> seal_active(kio::IO& io);
+    kio::Task<std::optional<kio::Fd>> create_active(kio::IO& io);
+    kio::Task<std::shared_ptr<kio::Fd>> open_and_cache_fd(kio::IO& io, SegmentId id);
     // append directly without buffering
-    URing::Task<uint64_t> append_direct(URing::IO& io, std::span<const std::byte> key, std::span<const std::byte> value,
+    kio::Task<uint64_t> append_direct(kio::IO& io, std::span<const std::byte> key, std::span<const std::byte> value,
                                         LogEntryHeader& hdr, uint64_t payload_crc);
     // write an entry to the buffer
     uint64_t copy_to_buffer(std::span<const std::byte> key, std::span<const std::byte> value, const LogEntryHeader& hdr,
@@ -91,7 +91,7 @@ class SegmentManager
     void prepare_write(std::span<const std::byte> key, std::span<const std::byte> value, EntryFlags flags,
                        LogEntryHeader& hdr, uint64_t& payload_crc);
     bool should_read_from_buffer(const uint64_t offset, const size_t len) const;
-    bool serve_from_buffer(URing::FixedBuffer& out, uint64_t offset, size_t len);
+    bool serve_from_buffer(kio::FixedBuffer& out, uint64_t offset, size_t len);
 
 public:
     // TODO: not complete yet
@@ -141,14 +141,14 @@ public:
     /// @thread_safety
     /// - SegmentManager is single-threaded per shard. Do not call append()
     ///   concurrently from multiple threads without external synchronization.
-    URing::Task<uint64_t> append(URing::IO& io, std::span<const std::byte> key, std::span<const std::byte> value,
+    kio::Task<uint64_t> append(kio::IO& io, std::span<const std::byte> key, std::span<const std::byte> value,
                                  EntryFlags flags = EntryFlags::HasValue);
 
     /// @brief Generic overload that accepts any contiguous ranges (string, vector, literal).
     ///
     /// Automatically converts input to byte spans and ensures safe string handling.
     template <std::ranges::contiguous_range K, std::ranges::contiguous_range V>
-    URing::Task<uint64_t> append(URing::IO& io, const K& key, const V& value,
+    kio::Task<uint64_t> append(kio::IO& io, const K& key, const V& value,
                                  const EntryFlags flags = EntryFlags::HasValue)
     {
         // Internal helper to handle the common footgun of string literals in spans
@@ -169,7 +169,7 @@ public:
     }
 
     /// read value into a fixed buf
-    URing::Task<void> value_into(URing::IO& io, URing::FixedBuffer& buf, ValueLocation& loc);
+    kio::Task<void> value_into(kio::IO& io, kio::FixedBuffer& buf, ValueLocation& loc);
 
     /// @brief Verify the integrity of an entry at a specific offset.
     ///
@@ -177,17 +177,17 @@ public:
     /// @param segment_id
     /// @param record_offset The start of the record (where the header begins).
     // TODO, rewrite
-    URing::Task<void> verify_entry(URing::IO& io, SegmentId segment_id, uint64_t record_offset);
+    kio::Task<void> verify_entry(kio::IO& io, SegmentId segment_id, uint64_t record_offset);
 
     // rotate active file
-    URing::Task<void> rotate(URing::IO& io);
+    kio::Task<void> rotate(kio::IO& io);
 
     // Push buffered data to OS page cache (non-blocking, no fsync)
-    URing::Task<void> flush(URing::IO& io);
+    kio::Task<void> flush(kio::IO& io);
 
     // Force fsync to physical media (blocking until disk ACK)
-    URing::Task<void> sync(URing::IO& io);
+    kio::Task<void> sync(kio::IO& io);
 
-    URing::Task<void> close(URing::IO& io);
+    kio::Task<void> close(kio::IO& io);
 };
 }  // namespace bitcask

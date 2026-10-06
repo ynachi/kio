@@ -1,3 +1,4 @@
+#include <atomic>
 #pragma once
 
 #include <coroutine>
@@ -6,7 +7,7 @@
 #include "uring/error.hpp"
 #include "uring/logger.hpp"
 
-namespace URing
+namespace kio
 {
 // Forward declarations
 template <typename T>
@@ -14,7 +15,7 @@ struct Task;
 
 }  // namespace URing
 
-namespace URing::detail
+namespace kio::detail
 {
 // -----------------------------------------------------------------------
 // FinalAwaitable — The "Self-Cleaning" Mechanism
@@ -28,10 +29,17 @@ struct FinalAwaitable
     {
         auto cont = h.promise().continuation;
 
-        // If continuation is noop, it means this task was "detached" (scheduled).
+        // Only a frame whose ownership was transferred to the scheduler (via
+        // Task::release()) may self-destroy here. A Task the caller still holds
+        // has a default-constructed (noop) continuation too, and destroying it
+        // freed the frame while Task::handle_ still pointed at it -- ASan
+        // reported heap-use-after-free at task.hpp:62 (done()).
         if (cont == std::noop_coroutine())
         {
-            h.destroy();
+            if (h.promise().detached)
+            {
+                h.destroy();
+            }
             return std::noop_coroutine();
         }
         
@@ -49,6 +57,8 @@ struct FinalAwaitable
 struct TaskPromiseBase
 {
     std::coroutine_handle<> continuation{std::noop_coroutine()};
+    // Set by Task::release(): frame ownership moved to the scheduler.
+    bool detached{false};
     // intrusive queue hook
     std::atomic<TaskPromiseBase*> next{nullptr};
     // The type-erased handle used by the event loop to resume this frame
@@ -60,7 +70,7 @@ struct TaskPromiseBase
     // A throwing Task is a contract violation: errors travel through Result<T>.
     [[noreturn]] void unhandled_exception() noexcept
     {
-        ALOG_FATAL("unhandled exception in URing::Task (use Result<T> for errors)");
+        KIO_LOG_FATAL("unhandled exception in URing::Task (use Result<T> for errors)");
         std::terminate();
     }
 };

@@ -8,6 +8,10 @@ FROM ubuntu:24.04
 ARG LLVM=20
 ENV DEBIAN_FRONTEND=noninteractive
 
+# libssl-dev is required: cmake/KioDependencies.cmake does
+# find_package(OpenSSL 3 REQUIRED). Without the -dev package CMake reports a
+# missing OPENSSL_CRYPTO_LIBRARY and configure fails before any build starts.
+
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         ca-certificates wget gnupg lsb-release software-properties-common \
@@ -19,6 +23,7 @@ RUN apt-get update \
         cmake ninja-build make git pkg-config \
         ccache mold \
         gdb wrk \
+        libssl-dev \
  && rm -rf /var/lib/apt/lists/* /tmp/llvm.sh
 
 # Unversioned names, so the Makefile and editors need no version suffix.

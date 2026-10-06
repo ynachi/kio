@@ -10,7 +10,7 @@
 #include "uring/logger.hpp"
 #include "uring/tcp_listener.hpp"
 
-using namespace URing;
+using namespace kio;
 
 constexpr std::string_view kHttpResponse =
     "HTTP/1.1 200 OK\r\n"
@@ -98,7 +98,7 @@ Task<void> dispatcher_loop(IoContext& context, IO& worker, uint16_t port)
 
 int main()
 {
-    URing::ALOG::set_level(ALOG::Level::Debug);
+    kio::ALOG::set_level(ALOG::Level::Debug);
     ALOG_DEBUG("Debug logging enabled");
 
     std::signal(SIGINT, signal_handler);

@@ -1,7 +1,7 @@
 #pragma once
 #include "uring/core/io.h"
 
-namespace URing
+namespace kio
 {
 
 /// IoContext serves as an example of IO pool.

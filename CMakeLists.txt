@@ -70,6 +70,7 @@ include_directories(${CMAKE_SOURCE_DIR})
 #----------------------------------------------
 # Library definition
 add_library(uring
+        src/uring/logger.cpp
         src/uring/io.cc
         src/uring/net.cc
         src/uring/tcp_listener.cc
@@ -87,6 +88,7 @@ target_link_libraries(uring PUBLIC
         Threads::Threads
         OpenSSL::SSL
         OpenSSL::Crypto
+        spdlog::spdlog
         PRIVATE kio_warnings)
 if (KIO_USE_MIMALLOC)
     target_link_libraries(uring PUBLIC mimalloc-static)
@@ -129,6 +131,9 @@ endif ()
 if (KIO_BUILD_TESTS)
     include(CTest)
     enable_testing()
+    # Defines gtest_discover_tests(). FetchContent(googletest) only supplies the
+    # GTest:: targets, so without this the call in kio_add_test is unknown.
+    include(GoogleTest)
     add_subdirectory(tests)
     message(STATUS "Added targets: check, check-quick")
 endif ()
