@@ -36,6 +36,12 @@ Task<int> read_fixed_with(IO& io, Fd& fd, BufferLease& lease)
     co_return *r;
 }
 
+Task<void> bump(std::atomic<int>& counter)
+{
+    counter.fetch_add(1, std::memory_order_release);
+    co_return {};
+}
+
 std::int64_t thread_cpu_ns()
 {
     timespec ts{};
@@ -119,6 +125,71 @@ TEST(IoRegressionTest, DrainParksInsteadOfSpinning)
 
     close(read_fd.Release());
     close(fds[1]);
+}
+
+// post() skips the eventfd write unless the worker announced it is parking. If
+// that handshake had a hole, a task would sit in the queue with the worker
+// asleep and this would time out. Producers pause at random so the worker
+// parks between hand-offs, which is where a lost wakeup would show.
+TEST(IoRegressionTest, CrossThreadPostNeverLosesAWakeup)
+{
+    IO io{0};
+    std::stop_source stop;
+    std::jthread worker{[&] { io.run_blocking(stop.get_token()); }};
+
+    constexpr int kProducers = 4;
+    constexpr int kPerProducer = 5000;
+    std::atomic<int> done{0};
+
+    std::vector<std::jthread> producers;
+    for (int p = 0; p < kProducers; ++p)
+    {
+        producers.emplace_back(
+            [&, p]
+            {
+                unsigned rng = 12345u + static_cast<unsigned>(p);
+                for (int i = 0; i < kPerProducer; ++i)
+                {
+                    io.schedule(bump(done));
+                    rng = rng * 1664525u + 1013904223u;
+                    if ((rng >> 24) % 8 == 0)
+                        std::this_thread::sleep_for(std::chrono::microseconds(50 + (rng >> 16) % 200));
+                }
+            });
+    }
+    for (auto& t : producers)
+        t.join();
+
+    const auto deadline = std::chrono::steady_clock::now() + 10s;
+    while (done.load(std::memory_order_acquire) < kProducers * kPerProducer &&
+           std::chrono::steady_clock::now() < deadline)
+    {
+        std::this_thread::sleep_for(1ms);
+    }
+    EXPECT_EQ(done.load(), kProducers * kPerProducer) << "a posted task was stranded: lost wakeup";
+
+    stop.request_stop();
+}
+
+// One task in flight at a time: the worker is parked every time, so every post
+// must wake it.
+TEST(IoRegressionTest, SingleInFlightPostAlwaysWakesParkedWorker)
+{
+    IO io{0};
+    std::stop_source stop;
+    std::jthread worker{[&] { io.run_blocking(stop.get_token()); }};
+
+    std::atomic<int> done{0};
+    for (int i = 1; i <= 20000; ++i)
+    {
+        io.schedule(bump(done));
+        const auto deadline = std::chrono::steady_clock::now() + 5s;
+        while (done.load(std::memory_order_acquire) < i)
+        {
+            ASSERT_LT(std::chrono::steady_clock::now(), deadline) << "post #" << i << " never ran";
+        }
+    }
+    stop.request_stop();
 }
 
 TEST(IoRegressionTest, FixedReadRejectsEmptyAndForeignLeases)

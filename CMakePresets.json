@@ -28,7 +28,7 @@
       "displayName": "Optimized, with mimalloc and the benchmark server: the only build you measure",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-        "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O3 -g -fno-omit-frame-pointer",
+        "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O3 -DNDEBUG -g -fno-omit-frame-pointer",
         "KIO_USE_MIMALLOC": "ON", "KIO_BUILD_BENCH": "ON", "KIO_BUILD_DEMOS": "ON"
       }
     }

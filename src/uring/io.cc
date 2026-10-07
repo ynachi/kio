@@ -215,6 +215,18 @@ namespace kio
             return;
         }
 
+        // Announce the park, then recheck every source of work. Producers that
+        // enqueued before this point are seen by the recheck; producers after it
+        // see sleeping_ and write the eventfd (see IO::post()).
+        sleeping_.store(true, std::memory_order_seq_cst);
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        if (io_uring_cq_ready(&ring_) > 0 || !local_tasks_.empty() || !queue_.empty())
+        {
+            sleeping_.store(false, std::memory_order_relaxed);
+            flush();
+            return;
+        }
+
         // NOTE: liburing returns the count of SQEs the kernel consumed,
         // so this is POSITIVE on success -- only negative is an error.
         int ret = 0;
@@ -229,6 +241,8 @@ namespace kio
         {
             ret = io_uring_submit_and_wait(&ring_, 1);
         }
+
+        sleeping_.store(false, std::memory_order_relaxed);
 
         // -ETIME is the bounded park expiring, which is the expected outcome.
         if (ret < 0 && ret != -EINTR && ret != -ETIME)
@@ -347,7 +361,9 @@ namespace kio
         io_uring_prep_read(sqe, wake_fd_, &wake_value_, sizeof(wake_value_), 0);
         io_uring_sqe_set_data64(sqe, kWakeupSentinel);
         ++armed_wake_reads_;
-        io_uring_submit(&ring_);
+        // No io_uring_submit() here: the next submit_or_wait_for() flushes this SQE,
+        // and it always runs before the worker can park. An inline submit cost one
+        // extra enter per wake.
     }
 
     void IO::run_blocking(std::stop_token st) noexcept
@@ -478,6 +494,15 @@ namespace kio
         }
 
         KIO_LOG_INFO("Worker {} quiesced", id_);
+    }
+
+    void IO::note_sq_full() noexcept
+    {
+        if ((sq_full_events_++ & 0xFFF) == 0)
+        {
+            KIO_LOG_WARN("Worker {}: SQ ring full; returning EAGAIN to apply backpressure ({} event(s) so far)",
+                         id_, sq_full_events_);
+        }
     }
 
     io_uring_sqe* IO::get_sqe() noexcept

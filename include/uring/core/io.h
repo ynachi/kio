@@ -30,7 +30,12 @@ namespace kio
     //
     struct IoOptions
     {
-        std::uint32_t entries = 16800;
+        // SQ size. Operations in flight do not occupy SQ slots; it only has to hold
+        // what is prepared between two submits (get_sqe() flushes when it fills),
+        // so a small ring is better: producer and consumer cycle through the whole
+        // ring, and a multi-MiB ring means every SQE/CQE touches a cold cache line.
+        // The CQ defaults to twice this and overflow is handled by the kernel.
+        std::uint32_t entries = 4096;
         unsigned flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_COOP_TASKRUN;
 
         // Share one kernel worker pool (the leader's) across every ring via
@@ -602,6 +607,10 @@ namespace kio
         // the load observes the flag and never parks. A weaker pairing here
         // would reopen the lost-wakeup window that Option A closed.
         std::atomic<bool> stop_requested_{false};
+        // Set by the worker immediately before it parks in the kernel, cleared on
+        // return. Producers consult it to decide whether post() must write the
+        // eventfd. See post() for the handshake.
+        std::atomic<bool> sleeping_{false};
         IoOptions opts_;
         /// This is not a typical id, it is use for CPU pining too
         size_t id_;
@@ -634,6 +643,7 @@ namespace kio
         // work, so they must not count as outstanding or every shutdown would
         // wait out the full grace period for a read that is supposed to hang.
         std::uint32_t armed_wake_reads_{0};
+        std::uint64_t sq_full_events_{0};
 
         /// Creates the Ring in an uninitialized way
         void init(int wq_fd = -1);
@@ -673,13 +683,31 @@ namespace kio
         void arm_wake_read() noexcept;
         void wake() const noexcept;
         io_uring_sqe* get_sqe() noexcept;
+        /// Count an SQ-full backpressure event. Logs the first and then every
+        /// 4096th: a synchronous log write per event would stall the very loop
+        /// that is already saturated.
+        void note_sq_full() noexcept;
 
         int ring_fd() const noexcept { return ring_.ring_fd; }
 
+        /// Cross-thread hand-off. The eventfd write is a syscall, so it is only
+        /// issued when the worker has announced it is about to park.
+        ///
+        /// This is a store-buffering handshake with submit_or_wait_for():
+        ///   producer: enqueue; fence(seq_cst); load sleeping_
+        ///   worker:   store sleeping_; fence(seq_cst); recheck the queue
+        /// The two fences guarantee that at least one side sees the other, so a
+        /// node is either noticed by the worker's recheck or triggers the wake.
+        /// Skipping the write when the worker is awake is safe: it is already
+        /// running and drains the queue at the top of its next tick.
         void post(detail::TaskPromiseBase* task)
         {
             queue_.enqueue(task);
-            wake();
+            std::atomic_thread_fence(std::memory_order_seq_cst);
+            if (sleeping_.load(std::memory_order_relaxed))
+            {
+                wake();
+            }
         }
     };
 
@@ -704,7 +732,7 @@ namespace kio
         io_uring_sqe* sqe = io_.get_sqe();
         if (sqe == nullptr)
         {
-            KIO_LOG_WARN("SQ ring full; returning EAGAIN to apply backpressure");
+            io_.note_sq_full();
             ops_.res = -EAGAIN;
             return h;
         }

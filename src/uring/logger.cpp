@@ -78,6 +78,7 @@ namespace kio::ALOG
     {
         try
         {
+            detail::g_runtime_level.store(static_cast<std::uint8_t>(value), std::memory_order_relaxed);
             logger_instance()->set_level(to_spdlog(value));
         }
         catch (...)

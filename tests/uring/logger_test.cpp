@@ -53,3 +53,38 @@ int main(int argc, char** argv)
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }
+
+namespace
+{
+int g_format_calls = 0;
+struct CountsFormatting
+{
+};
+}  // namespace
+
+template <>
+struct std::formatter<CountsFormatting> : std::formatter<int>
+{
+    auto format(const CountsFormatting&, std::format_context& ctx) const
+    {
+        ++g_format_calls;
+        return std::formatter<int>::format(0, ctx);
+    }
+};
+
+// A message below the runtime level must not be formatted at all.
+TEST(LoggerTest, FilteredMessagesAreNotFormatted)
+{
+    using namespace kio::ALOG;
+    set_level(level::warn);
+    g_format_calls = 0;
+
+    KIO_LOG_DEBUG("never {}", CountsFormatting{});
+    KIO_LOG_INFO("never {}", CountsFormatting{});
+    EXPECT_EQ(g_format_calls, 0);
+
+    KIO_LOG_WARN("once {}", CountsFormatting{});
+    EXPECT_EQ(g_format_calls, 1);
+
+    set_level(level::info);
+}

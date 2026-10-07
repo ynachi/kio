@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <format>
 #include <source_location>
@@ -26,6 +27,21 @@ namespace kio::ALOG
 
     [[nodiscard]] constexpr bool is_compiled(const level value) noexcept { return value >= active_level; }
 
+    namespace detail
+    {
+        // Mirror of the logger's runtime level, so call sites can skip formatting a
+        // message that would be filtered anyway. Written only by set_level().
+        inline std::atomic<std::uint8_t> g_runtime_level{static_cast<std::uint8_t>(level::info)};
+    } // namespace detail
+
+    /// True if a message at `value` would currently be emitted. Fatal always is:
+    /// it aborts regardless of the configured level.
+    [[nodiscard]] inline bool enabled(const level value) noexcept
+    {
+        return value == level::fatal ||
+               static_cast<std::uint8_t>(value) >= detail::g_runtime_level.load(std::memory_order_relaxed);
+    }
+
     void set_level(level value) noexcept;
     [[nodiscard]] level get_level() noexcept;
     void set_colors(bool enabled) noexcept;
@@ -39,6 +55,12 @@ namespace kio::ALOG
         void write_formatted(const std::source_location location, std::format_string<Args...> format,
                              Args&&... args) noexcept
         {
+            // Filter before formatting: std::format allocates, and a disabled
+            // message must cost one relaxed load, not a format plus a drop.
+            if (!enabled(Level))
+            {
+                return;
+            }
             try
             {
                 write(Level, location, std::format(format, std::forward<Args>(args)...));
