@@ -95,8 +95,9 @@ public:
 private:
     alignas(64) std::atomic<TaskPromiseBase*> head_;
     alignas(64) TaskPromiseBase* tail_;
-    // Dummy node to prevent empty-queue race conditions
-    TaskPromiseBase stub_{};
+    // Dummy node to prevent empty-queue race conditions. Producers store to
+    // stub_.next when it is the last node, so keep it off the consumer's tail_ line.
+    alignas(64) TaskPromiseBase stub_{};
 };
 
 }  // namespace URing::detail

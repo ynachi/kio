@@ -372,7 +372,7 @@ namespace kio
         {
             return IoAwaiter(
                 *this,
-                [path, flags, mode](io_uring_sqe* sqe)
+                [path = std::move(path), flags, mode](io_uring_sqe* sqe)
                 {
                     io_uring_prep_openat(sqe, AT_FDCWD, path.c_str(), flags, mode);
                 },
@@ -400,7 +400,7 @@ namespace kio
         [[nodiscard]] auto remove(std::filesystem::path path)
         {
             return IoAwaiter(
-                *this, [path](io_uring_sqe* sqe) { io_uring_prep_unlinkat(sqe, AT_FDCWD, path.c_str(), 0); },
+                *this, [path = std::move(path)](io_uring_sqe* sqe) { io_uring_prep_unlinkat(sqe, AT_FDCWD, path.c_str(), 0); },
                 detail::ResumeVoid{});
         }
 
@@ -592,11 +592,16 @@ namespace kio
         static constexpr uint64_t kCancelSentinel = 0xCACE'1ED0'CACE'1ED0ULL;
         static constexpr size_t kMaxResumesPerTick = 128;
 
-        io_uring ring_{};
-        int wake_fd_{-1};
-        uint64_t wake_value_{0};
-        bool is_activated_{false};
-        bool is_running_{false};
+        // ---- Producer-visible state: read by other threads on every post() and
+        // schedule(), so it must not share a cache line with anything the owner
+        // thread writes per tick (ring_, counters, the kernel-written wake_value_).
+        // Each group starts on its own line; the next alignas(64) member closes it.
+
+        // Set by the worker immediately before it parks in the kernel, cleared on
+        // return. Producers consult it to decide whether post() must write the
+        // eventfd. See post() for the handshake. Alone on its line because the
+        // worker writes it at every park.
+        alignas(64) std::atomic<bool> sleeping_{false};
         // One-shot stop latch, set by the stop callback before wake(). The
         // pre-sleep recheck loads it so a stop landing between the loop's
         // stop_requested() test and the park cannot be lost.
@@ -606,11 +611,14 @@ namespace kio
         // (and it parks only after wake() has already written the eventfd) or
         // the load observes the flag and never parks. A weaker pairing here
         // would reopen the lost-wakeup window that Option A closed.
-        std::atomic<bool> stop_requested_{false};
-        // Set by the worker immediately before it parks in the kernel, cleared on
-        // return. Producers consult it to decide whether post() must write the
-        // eventfd. See post() for the handshake.
-        std::atomic<bool> sleeping_{false};
+        alignas(64) std::atomic<bool> stop_requested_{false};
+        int wake_fd_{-1};
+
+        // ---- Owner-thread state.
+        alignas(64) io_uring ring_{};
+        uint64_t wake_value_{0};
+        bool is_activated_{false};
+        bool is_running_{false};
         IoOptions opts_;
         /// This is not a typical id, it is use for CPU pining too
         size_t id_;

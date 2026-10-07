@@ -46,9 +46,9 @@ namespace kio
     }
 
     IO::IO(IO&& other) noexcept
-        : is_activated_(other.is_activated_),
+        : stop_requested_(other.stop_requested_.load(std::memory_order_seq_cst)),
+          is_activated_(other.is_activated_),
           is_running_(other.is_running_),
-          stop_requested_(other.stop_requested_.load(std::memory_order_seq_cst)),
           opts_(other.opts_),
           id_(other.id_),
           buffer_pool_(std::move(other.buffer_pool_)),
