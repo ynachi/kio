@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cassert>
 #include <coroutine>
 #include <utility>
 
@@ -48,22 +49,34 @@ struct [[nodiscard]] Task
 
     Result<T> get() noexcept
     {
-        if (handle_ && handle_.promise().result.has_value())
+        assert(handle_ && "Task::get() on a moved-from or released Task");
+        assert(handle_.done() && "Task::get() before the coroutine completed");
+
+        // Asserts vanish under NDEBUG, so keep a defined fallback rather than
+        // dereferencing an empty optional.
+        if (!handle_ || !handle_.done()) [[unlikely]]
         {
-            return std::move(*handle_.promise().result);
+            return kio::Error::fail_errc(std::errc::operation_canceled);
         }
-        return kio::Error::fail_errc(std::errc::operation_canceled);
+
+        assert(!handle_.promise().result_taken && "Task::get() called twice; the Result is single-consume");
+
+        if (handle_.promise().result_taken || !handle_.promise().result.has_value()) [[unlikely]]
+        {
+            return kio::Error::fail_errc(std::errc::operation_canceled);
+        }
+
+        handle_.promise().result_taken = true;
+        return std::move(*handle_.promise().result);
     }
 
     // Transfers ownership of the coroutine frame to the scheduler.
     // The Task object becomes empty and the frame will self-destruct on completion.
     Handle release()
     {
+        assert(handle_ && "Task::release() on a moved-from or already-released Task");
         auto h = std::exchange(handle_, {});
-        if (h)
-        {
-            h.promise().detached = true;
-        }
+        h.promise().detached = true;
         return h;
     }
 

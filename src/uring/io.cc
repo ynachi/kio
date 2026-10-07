@@ -1,8 +1,11 @@
 #include "uring/core/io.h"
 
+#include <algorithm>
 #include <cassert>
+#include <cstddef>
 #include <cstring>
 #include <future>
+#include <iterator>
 
 #include <unistd.h>
 
@@ -29,9 +32,10 @@ namespace kio
                 });
         }
 
-        // init
+        // init. When share_work_queues is false, every worker builds a fully
+        // independent ring instead of attaching to the leader's worker pool.
         int leader_fd = -1;
-        if (leader != nullptr)
+        if (leader != nullptr && opts_.share_work_queues)
         {
             leader_fd = leader->ring_fd();
         }
@@ -41,7 +45,7 @@ namespace kio
     IO::IO(IO&& other) noexcept
         : is_activated_(other.is_activated_),
           is_running_(other.is_running_),
-          is_sleeping_(other.is_sleeping_.load(std::memory_order_relaxed)),
+          stop_requested_(other.stop_requested_.load(std::memory_order_seq_cst)),
           opts_(other.opts_),
           id_(other.id_),
           buffer_pool_(std::move(other.buffer_pool_)),
@@ -137,7 +141,7 @@ namespace kio
                      (opts_.flags & IORING_SETUP_SQPOLL) ? "enabled" : "disabled");
     }
 
-    void IO::activate()
+    void IO::activate() noexcept
     {
         if (is_activated_)
         {
@@ -145,10 +149,13 @@ namespace kio
             return;
         }
 
+        // Not noexcept-throwing: run_blocking() and run_once() are both noexcept,
+        // so throwing here would terminate the worker thread instead of reporting.
         if (const int ret = io_uring_register(static_cast<unsigned>(ring_.ring_fd),
                                               IORING_REGISTER_ENABLE_RINGS, nullptr, 0); ret < 0)
         {
-            throw std::runtime_error(std::format("io_uring_register failed: {}", std::strerror(-ret)));
+            KIO_LOG_FATAL("io_uring_register failed: {}", std::strerror(-ret));
+            return;
         }
 
         // we need to submit a first read, and this is a good place
@@ -179,19 +186,21 @@ namespace kio
         }
         else
         {
-            // Thundering herd mitigation from our earlier optimizations
-            is_sleeping_.store(true, std::memory_order_seq_cst);
-
-            // Double check all three sources of work before sleeping
-            if (io_uring_cq_ready(&ring_) == 0 && local_tasks_.empty() && queue_.empty())
+            // Thundering herd mitigation from our earlier optimizations.
+            // We recheck every source of work before parking. Because wake()
+            // writes the eventfd unconditionally, a producer that raced us
+            // either already left its token in the eventfd counter (level
+            // triggered, so the park returns at once) or writes it after we
+            // park. stop_requested_ closes the one remaining window: the loop's
+            // own stop test has already passed by the time we get here.
+            if (io_uring_cq_ready(&ring_) == 0 && local_tasks_.empty() && queue_.empty()
+                && !stop_requested_.load(std::memory_order_seq_cst))
             {
                 if (const auto ret = io_uring_submit_and_wait(&ring_, 1); ret < 0 && ret != -EINTR)
                 {
                     KIO_LOG_ERROR("failed to submit and wait: {}", std::strerror(-ret));
                 }
             }
-
-            is_sleeping_.store(false, std::memory_order_relaxed);
         }
     }
 
@@ -238,15 +247,33 @@ namespace kio
             io_uring_cq_advance(&ring_, count);
         }
 
-        // Execute all I/O completions immediately in this tick
+        // Execute completions, capped per tick. Resuming an unbounded batch let
+        // one large completion burst monopolise the worker: the stop check only
+        // runs between ticks. The remainder carries over instead of being
+        // dropped, so nothing is lost.
         if (!local_tasks_.empty())
         {
             current_batch.swap(local_tasks_);
 
-            for (auto h : current_batch)
+            const size_t resume_count = std::min(current_batch.size(), kMaxResumesPerTick);
+            for (size_t i = 0; i < resume_count; ++i)
             {
-                h.resume();
+                current_batch[i].resume();
             }
+
+            if (resume_count < current_batch.size())
+            {
+                // The resumes above consumed the FRONT of the batch, so the
+                // un-started tasks are current_batch[resume_count .. end).
+                // Tasks resumed above may have rescheduled themselves into
+                // local_tasks_, so append the leftovers after those.
+                const auto carried = current_batch.begin() + static_cast<std::ptrdiff_t>(resume_count);
+                local_tasks_.insert(
+                    local_tasks_.end(),
+                    std::make_move_iterator(carried),
+                    std::make_move_iterator(current_batch.end()));
+            }
+
             current_batch.clear();
         }
     }
@@ -254,6 +281,15 @@ namespace kio
     void IO::arm_wake_read() noexcept
     {
         io_uring_sqe* sqe = get_sqe();
+        if (sqe == nullptr)
+        {
+            // SQ is full. Do not dereference null: skip the re-arm. The eventfd
+            // is level-triggered and keeps its token, so the next completion that
+            // re-arms will pick it up -- the wake is delayed, never lost.
+            KIO_LOG_WARN("SQ ring full, deferring wake-read re-arm");
+            return;
+        }
+
         io_uring_prep_read(sqe, wake_fd_, &wake_value_, sizeof(wake_value_), 0);
         io_uring_sqe_set_data64(sqe, kWakeupSentinel);
         io_uring_submit(&ring_);
@@ -261,13 +297,24 @@ namespace kio
 
     void IO::run_blocking(std::stop_token st) noexcept
     {
+        // The ring is SINGLE_ISSUER, so ownership is claimed by whichever thread
+        // actually drives the loop -- not by whichever thread constructed the IO.
+        // IoContext builds every IO on the caller thread and then hands each one
+        // to a jthread that calls run_blocking(), so capturing in the constructor
+        // would name the wrong thread.
+        owner_thread_ = std::this_thread::get_id();
+
         is_running_ = true;
 
         pin_to_cpu();
 
         activate();
 
-        std::stop_callback wake_on_stop{st, [this] { wake(); }};
+        // Publish the flag before waking so the pre-sleep recheck cannot miss it.
+        std::stop_callback wake_on_stop{st, [this] {
+            stop_requested_.store(true, std::memory_order_seq_cst);
+            wake();
+        }};
         while (!st.stop_requested())
         {
             tick();
@@ -290,6 +337,11 @@ namespace kio
 
     io_uring_sqe* IO::get_sqe() noexcept
     {
+        // IORING_SETUP_SINGLE_ISSUER: only the owner thread may produce SQEs.
+        assert(std::this_thread::get_id() == owner_thread_ &&
+               "IO::get_sqe() called from a non-owner thread; the ring is SINGLE_ISSUER "
+               "(check for a missing co_await io.schedule_on(...))");
+
         io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
         if (sqe == nullptr)
         {
@@ -302,12 +354,11 @@ namespace kio
 
     void IO::wake() const noexcept
     {
-        // Only write to the eventfd if the thread is actually parked in the kernel
-        if (!is_sleeping_.load(std::memory_order_seq_cst))
-        {
-            return;
-        }
-
+        // Write unconditionally. Gating this on a "worker is sleeping" flag lost
+        // any wake that arrived before the worker parked -- notably a stop
+        // request, which then wedged the worker in io_uring_submit_and_wait()
+        // forever. The eventfd is level-triggered and accumulates, so an
+        // unconsumed write only costs one extra loop iteration later.
         constexpr uint64_t one = 1;
         for (;;)
         {
@@ -348,7 +399,7 @@ namespace kio
 
     IO::~IO()
     {
-        if (ring_.ring_fd > 0 && !registered_iovecs_.empty())
+        if (ring_.ring_fd >= 0 && !registered_iovecs_.empty())
         {
             if (const int ret = io_uring_unregister_buffers(&ring_); ret < 0)
             {
@@ -357,7 +408,7 @@ namespace kio
             registered_iovecs_.clear();
         }
 
-        if (ring_.ring_fd > 0)
+        if (ring_.ring_fd >= 0)
         {
             io_uring_queue_exit(&ring_);
             ring_.ring_fd = -1;

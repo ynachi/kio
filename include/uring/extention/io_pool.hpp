@@ -15,6 +15,13 @@ class IoContext
     std::vector<std::jthread> threads_;
 
 public:
+    // A live IoContext owns threads whose lambdas captured `this`. Moving it would
+    // leave those threads pointing at the old object.
+    IoContext(const IoContext&) = delete;
+    IoContext& operator=(const IoContext&) = delete;
+    IoContext(IoContext&&) = delete;
+    IoContext& operator=(IoContext&&) = delete;
+
     explicit IoContext(const std::size_t num_threads, const IoOptions& opts = {}) : opts_(opts)
     {
         if (num_threads == 0)

@@ -31,7 +31,12 @@ namespace kio
         std::uint32_t entries = 16800;
         unsigned flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_COOP_TASKRUN;
 
-        std::uint32_t tick_timeout_ms = 10;
+        // Share one kernel worker pool (the leader's) across every ring via
+        // IORING_SETUP_ATTACH_WQ. Keeping it true means N rings but one shared
+        // backend, so the kernel balances submissions across a fixed pool of
+        // worker threads. Setting it false gives every worker its own ring and
+        // its own pool: true isolation, at the cost of N× the kernel threads.
+        bool share_work_queues = true;
 
         // list of cpus, if empty, no pinning
         std::vector<int> worker_cpu_affinity{};
@@ -151,6 +156,9 @@ namespace kio
         /// Run until done, no loop
         void run_once() noexcept
         {
+            // Claim ring ownership before activate(), which submits SQEs.
+            // See the owner_thread_ comment below.
+            owner_thread_ = std::this_thread::get_id();
             pin_to_cpu();
             activate();
             tick();
@@ -165,7 +173,7 @@ namespace kio
             post(p);
         }
 
-        [[nodiscard]] auto schedule_on(IO& target) noexcept { return TransferTo{target}; }
+        [[nodiscard]] static auto schedule_on(IO& target) noexcept { return TransferTo{target}; }
 
         void pin_to_cpu() const;
 
@@ -268,6 +276,7 @@ namespace kio
                 }, detail::ResumeInt{});
         }
 
+        // Kernel-side write, for file I/O and any stream that cannot raise SIGPIPE.
         [[nodiscard]] auto write(Fd& fd, std::span<const std::byte> buf, off_t offset = -1)
         {
             return IoAwaiter(
@@ -275,6 +284,21 @@ namespace kio
                 {
                     io_uring_prep_write(sqe, raw_fd, buf.data(), static_cast<unsigned>(buf.size()),
                                         static_cast<__u64>(offset));
+                }, detail::ResumeInt{});
+        }
+
+        // Socket send. io_uring_prep_write() leaves sqe->msg_flags at 0, so writing to
+        // a peer that has already disconnected raises SIGPIPE and takes the whole
+        // process down -- one dead client kills the server. prep_send() carries
+        // msg_flags, so MSG_NOSIGNAL turns that into an EPIPE completion the
+        // caller can handle.
+        // No offset parameter: sockets are not written positionally.
+        [[nodiscard]] auto send(Fd& fd, std::span<const std::byte> buf)
+        {
+            return IoAwaiter(
+                *this, [raw_fd = fd.fd, buf](io_uring_sqe* sqe)
+                {
+                    io_uring_prep_send(sqe, raw_fd, buf.data(), buf.size(), MSG_NOSIGNAL);
                 }, detail::ResumeInt{});
         }
 
@@ -381,7 +405,7 @@ namespace kio
                 [](const int32_t res) -> Result<unsigned>
                 {
                     if (res < 0)
-                        return kio::Error::fail_errno(-res);
+                        return Error::fail_errno(-res);
                     return static_cast<unsigned>(res);
                 });
         }
@@ -516,11 +540,31 @@ namespace kio
         uint64_t wake_value_{0};
         bool is_activated_{false};
         bool is_running_{false};
-        // cross-thread needs to check this, this is why it is an atomic
-        alignas(64) std::atomic<bool> is_sleeping_{false};
+        // One-shot stop latch, set by the stop callback before wake(). The
+        // pre-sleep recheck loads it so a stop landing between the loop's
+        // stop_requested() test and the park cannot be lost.
+        //
+        // seq_cst on both sides is what makes that safe: the store and the load
+        // share one total order, so either the worker's load precedes the stop
+        // (and it parks only after wake() has already written the eventfd) or
+        // the load observes the flag and never parks. A weaker pairing here
+        // would reopen the lost-wakeup window that Option A closed.
+        std::atomic<bool> stop_requested_{false};
         IoOptions opts_;
         /// This is not a typical id, it is use for CPU pining too
         size_t id_;
+        // The ring is created in SINGLE_ISSUER mode, so SQEs must only ever be
+        // produced by the thread that runs this IO. After co_await
+        // io.schedule_on(other), the awaiting chain continues on the *other*
+        // thread, so a following co_await io.read(...) would submit to this ring
+        // from the wrong thread. get_sqe() asserts on this.
+        //
+        // This is claimed by the thread that *drives* the ring -- set at the top
+        // of run_blocking()/run_once() -- because IoContext constructs every IO
+        // on the caller's thread and only afterwards hands each to a jthread.
+        // Cross-thread schedule()/post() stay safe: they use a lock-free queue
+        // plus the eventfd, never get_sqe().
+        std::thread::id owner_thread_{};
         std::vector<std::coroutine_handle<>> local_tasks_{};
         std::vector<std::coroutine_handle<>> current_batch{};
         detail::CoroQueue queue_{};
@@ -531,7 +575,10 @@ namespace kio
         /// Creates the Ring in an uninitialized way
         void init(int wq_fd = -1);
         /// Activate a disabled ring, MUST be called after init()
-        void activate();
+        /// Enable a ring created with IORING_SETUP_R_DISABLED. noexcept: callers
+        /// include run_blocking()/run_once(), where a throw would terminate the
+        /// worker. Failure is logged and leaves the ring disabled.
+        void activate() noexcept;
         void tick() noexcept;
         void submit_or_wait_for();
         void arm_wake_read() noexcept;
@@ -574,6 +621,22 @@ namespace kio
     //
     // sync_wait testing util
     //
+    namespace detail
+    {
+    /// Body of sync_wait, as a named coroutine rather than a lambda. A capturing
+    /// lambda would be a temporary destroyed at the end of the call expression,
+    /// while the coroutine it builds has not run yet (initial_suspend is
+    /// suspend_always) and still holds the dead closure's `this` -- ASan reported
+    /// stack-use-after-scope when it was finally resumed.
+    template <typename T>
+    Task<void> sync_wait_body(Task<T> t, std::optional<Result<T>>& out, bool& done)
+    {
+        out = co_await std::move(t);
+        done = true;
+        co_return {};
+    }
+    } // namespace detail
+
     /// Testing utility, block a coroutine until it is done
     template <typename T>
     Result<T> sync_wait(IO& io, Task<T>&& task)
@@ -581,13 +644,7 @@ namespace kio
         bool done{false};
         std::optional<Result<T>> result;
 
-        io.schedule(
-            [&](Task<T> t) -> Task<void>
-            {
-                result = co_await std::move(t);
-                done = true;
-                co_return {};
-            }(std::move(task)));
+        io.schedule(detail::sync_wait_body<T>(std::move(task), result, done));
 
         io.pin_to_cpu();
         io.activate();
