@@ -42,17 +42,13 @@ namespace kio
 
     Result<Fd> TcpListener::Bind(const uint16_t port, const char* ip, const int backlog)
     {
-        SocketAddress addr;
-
-        if (ip != nullptr && std::string_view(ip).find(':') != std::string_view::npos)
+        const bool v6 = ip != nullptr && std::string_view(ip).find(':') != std::string_view::npos;
+        auto addr = v6 ? SocketAddress::V6(port, ip) : SocketAddress::V4(port, ip);
+        if (!addr)
         {
-            addr = SocketAddress::V6(port, ip);
-        }
-        else
-        {
-            addr = SocketAddress::V4(port, ip);
+            return std::unexpected(addr.error());
         }
 
-        return Bind(addr, backlog);
+        return Bind(*addr, backlog);
     }
 } // namespace URing

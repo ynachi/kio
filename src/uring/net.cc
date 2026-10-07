@@ -1,5 +1,6 @@
 #include "uring/net.hpp"
 
+#include <cerrno>
 #include <cstring>
 
 #include <netdb.h>
@@ -8,7 +9,7 @@
 
 namespace kio
 {
-    SocketAddress SocketAddress::V4(const uint16_t port, const char* ip)
+    Result<SocketAddress> SocketAddress::V4(const uint16_t port, const char* ip)
     {
         SocketAddress sa;
         auto* in = reinterpret_cast<sockaddr_in*>(&sa.addr);
@@ -16,7 +17,12 @@ namespace kio
         in->sin_port = htons(port);
         if (ip && *ip)
         {
-            inet_pton(AF_INET, ip, &in->sin_addr);
+            // A malformed literal must not fall through to INADDR_ANY: a typo would
+            // silently widen a bind to every interface.
+            if (inet_pton(AF_INET, ip, &in->sin_addr) != 1)
+            {
+                return Error::fail_errc(std::errc::invalid_argument, "inet_pton(AF_INET)");
+            }
         }
         else
         {
@@ -26,7 +32,7 @@ namespace kio
         return sa;
     }
 
-    SocketAddress SocketAddress::V6(const uint16_t port, const char* ip)
+    Result<SocketAddress> SocketAddress::V6(const uint16_t port, const char* ip)
     {
         SocketAddress sa;
         auto* in6 = reinterpret_cast<sockaddr_in6*>(&sa.addr);
@@ -34,7 +40,10 @@ namespace kio
         in6->sin6_port = htons(port);
         if (ip && *ip)
         {
-            inet_pton(AF_INET6, ip, &in6->sin6_addr);
+            if (inet_pton(AF_INET6, ip, &in6->sin6_addr) != 1)
+            {
+                return Error::fail_errc(std::errc::invalid_argument, "inet_pton(AF_INET6)");
+            }
         }
         else
         {
@@ -92,17 +101,34 @@ namespace kio
 
         if (const int rc = getaddrinfo(hostname.c_str(), service.c_str(), &hints, &res); rc != 0)
         {
-            // getaddrinfo returns EAI_* errors, not errno, but we map to std::error_code generically
+            // getaddrinfo returns EAI_* codes, not errno; map the ones with a clear
+            // errc equivalent and fall back to address_not_available.
+            switch (rc)
+            {
+            case EAI_SYSTEM:
+                return Error::fail_errno(errno, "getaddrinfo");
+            case EAI_AGAIN:
+                return Error::fail_errc(std::errc::resource_unavailable_try_again, "getaddrinfo");
+            case EAI_MEMORY:
+                return Error::fail_errc(std::errc::not_enough_memory, "getaddrinfo");
+            default:
+                return Error::fail_errc(std::errc::address_not_available, "getaddrinfo");
+            }
+        }
+
+        if (res == nullptr || res->ai_addrlen > sizeof(sockaddr_storage))
+        {
+            if (res != nullptr)
+            {
+                freeaddrinfo(res);
+            }
             return Error::fail_errc(std::errc::address_not_available, "getaddrinfo");
         }
 
         SocketAddress out;
-        if (res)
-        {
-            std::memcpy(&out.addr, res->ai_addr, res->ai_addrlen);
-            out.addrlen = res->ai_addrlen;
-            freeaddrinfo(res);
-        }
+        std::memcpy(&out.addr, res->ai_addr, res->ai_addrlen);
+        out.addrlen = res->ai_addrlen;
+        freeaddrinfo(res);
         return out;
     }
 } // namespace URing

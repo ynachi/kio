@@ -1,5 +1,7 @@
 #pragma once
 #include <atomic>
+#include <cstddef>
+#include <limits>
 
 #include "uring/core/task.hpp"
 
@@ -77,7 +79,18 @@ public:
         return count;
     }
 
-    bool empty() const noexcept { return head_.load(std::memory_order_acquire) == tail_; }
+    /// Consumer-side only. tail_ always points at the next node dequeue() will
+    /// return, so the queue is empty only if that is the stub with nothing linked
+    /// behind it. Comparing head_ to tail_ instead reported "empty" while exactly
+    /// one real node was still pending (head_ == tail_ == that node), which let
+    /// the worker park with a task stranded in the queue.
+    ///
+    /// A producer between its exchange and its link store reads as empty; that is
+    /// fine, because it calls wake() only after the link is published.
+    bool empty() const noexcept
+    {
+        return tail_ == &stub_ && stub_.next.load(std::memory_order_acquire) == nullptr;
+    }
 
 private:
     alignas(64) std::atomic<TaskPromiseBase*> head_;

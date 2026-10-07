@@ -21,3 +21,8 @@ kio_add_test(shutdown_tests uring/shutdown_test.cpp
         TAGS uring integration shutdown
         LIBS uring GTest::gtest GTest::gtest_main
 )
+
+kio_add_test(io_regression_tests uring/io_regression_test.cpp
+        TAGS uring integration
+        LIBS uring GTest::gtest GTest::gtest_main
+)

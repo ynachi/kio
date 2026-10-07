@@ -1,7 +1,9 @@
 #pragma once
+#include <concepts>
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -114,15 +116,14 @@ namespace kio
 
     /// @brief Wrapper for sockaddr_storage supporting both IPv4 and IPv6.
     ///
-    /// Provides convenient factory methods for creating addresses and async DNS
-    /// resolution that doesn't block the event loop.
+    /// Provides convenient factory methods for creating addresses.
     ///
     /// @code
     ///   // Direct IPv4 address
     ///   auto addr = SocketAddress::V4(8080, "0.0.0.0");
     ///
-    ///   // Async DNS resolution (non-blocking)
-    ///   auto addr = co_await SocketAddress::ResolveAsync(ctx, pool, "example.com", 443);
+    ///   // Blocking DNS resolution (initialisation code only)
+    ///   auto addr = ResolveIp("example.com", 443);
     /// @endcode
     struct SocketAddress
     {
@@ -134,24 +135,24 @@ namespace kio
         /// @brief Creates an IPv4 address.
         /// @param port Port number in host byte order (automatically converted to network order)
         /// @param ip IPv4 address string (e.g., "127.0.0.1"). Pass nullptr for INADDR_ANY (0.0.0.0).
-        /// @return SocketAddress configured for IPv4
+        /// @return SocketAddress configured for IPv4, or EINVAL if `ip` is not a valid literal
         ///
         /// @code
-        ///   auto any = SocketAddress::V4(8080);              // Bind to all interfaces
-        ///   auto local = SocketAddress::V4(8080, "127.0.0.1"); // Localhost only
+        ///   auto any = SocketAddress::V4(8080).value();       // Bind to all interfaces
+        ///   auto local = SocketAddress::V4(8080, "127.0.0.1").value(); // Localhost only
         /// @endcode
-        static SocketAddress V4(std::uint16_t port, const char* ip = nullptr);
+        static Result<SocketAddress> V4(std::uint16_t port, const char* ip = nullptr);
 
         /// @brief Creates an IPv6 address.
         /// @param port Port number in host byte order (automatically converted to network order)
         /// @param ip IPv6 address string (e.g., "::1"). Pass nullptr for in6addr_any (::).
-        /// @return SocketAddress configured for IPv6
+        /// @return SocketAddress configured for IPv6, or EINVAL if `ip` is not a valid literal
         ///
         /// @code
-        ///   auto any = SocketAddress::V6(8080);         // Bind to all IPv6 interfaces
-        ///   auto local = SocketAddress::V6(8080, "::1"); // IPv6 localhost only
+        ///   auto any = SocketAddress::V6(8080).value();  // Bind to all IPv6 interfaces
+        ///   auto local = SocketAddress::V6(8080, "::1").value(); // IPv6 localhost only
         /// @endcode
-        static SocketAddress V6(uint16_t port, const char* ip = nullptr);
+        static Result<SocketAddress> V6(uint16_t port, const char* ip = nullptr);
 
         /// @brief Returns the raw sockaddr pointer.
         [[nodiscard]] const sockaddr* Get() const { return reinterpret_cast<const sockaddr*>(&addr); }
@@ -172,11 +173,11 @@ namespace kio
     /// @return Result<SocketAddress> with resolved address or error
     ///
     /// @warning This is a BLOCKING call that may take seconds for DNS resolution.
-    ///          Use ResolveAsync() in async code paths to avoid blocking the event loop.
+    ///          Do not call it from a coroutine running on an event loop.
     ///
     /// @code
     ///   // OK in initialization code
-    ///   auto addr = SocketAddress::Resolve("database.local", 5432);
+    ///   auto addr = ResolveIp("database.local", 5432);
     /// @endcode
     Result<SocketAddress> ResolveIp(std::string_view host, uint16_t port);
 } // namespace URing

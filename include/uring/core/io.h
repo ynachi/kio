@@ -43,7 +43,9 @@ namespace kio
         // list of cpus, if empty, no pinning
         std::vector<int> worker_cpu_affinity{};
 
-        /// max resume per tick
+        /// Max cross-thread tasks (schedule()/TransferTo) moved off the MPSC queue
+        /// per tick. Completion resumes per tick are capped separately by
+        /// kMaxResumesPerTick. Values below 1 are treated as 1.
         std::size_t batch_max_size = 128;
 
         // How long teardown waits for in-flight operations to finish on their
@@ -144,16 +146,18 @@ namespace kio
          */
         explicit IO(size_t id, const IO* leader = nullptr, const IoOptions& opts = {},
                     std::optional<BufferPoolConfig> pool_cfg = std::nullopt);
-        /// IO object can be moved but with some limitations. Before it start doing some actual io
-                                 /// (before run*()),
-           /// its is safe to move it. Because, in this state, it's an inert object. So it gives you more flexibilities
-           /// on the object and object pools construction. But, it SHOULD not be moved after it started doing IO.
-           /// If you need to do it for some reason, use a std::unique_ptr<IO>. Moving the direct object while IO is active
-           /// will terminate the program.
+        /// An IO can be moved only while inert: before run*()/sync_wait, with nothing
+        /// scheduled. That allows object pools to be built by value. Moving an
+        /// activated, running, or non-empty IO terminates the program; use a
+        /// std::unique_ptr<IO> instead. Any BufferLease taken before a move still
+        /// points at the old pool and is rejected by the fixed-buffer helpers.
         IO(IO&& other) noexcept;
         IO(const IO&) = delete;
         IO& operator=(const IO&) = delete;
         IO& operator=(IO&&) = delete;
+        /// Tasks still queued at destruction (never resumed) are abandoned: their
+        /// frames are leaked and a warning is logged. run_blocking() drains before
+        /// it returns, so this only affects an IO destroyed without being run.
         ~IO();
 
         /// Run an event loop.
@@ -435,16 +439,27 @@ namespace kio
                 });
         }
 
+        /// Relative duration to a kernel timespec. Negative durations clamp to zero
+        /// (the kernel rejects a negative tv_nsec) and the nanosecond part is taken
+        /// from the sub-second remainder, so huge durations cannot overflow.
+        template <typename Rep, typename Period>
+        [[nodiscard]] static __kernel_timespec to_timespec(const std::chrono::duration<Rep, Period> dur) noexcept
+        {
+            using namespace std::chrono;
+            if (dur <= dur.zero())
+                return {};
+            const auto secs = duration_cast<seconds>(dur);
+            return __kernel_timespec{
+                .tv_sec = static_cast<__kernel_time64_t>(secs.count()),
+                .tv_nsec = static_cast<long long>(duration_cast<nanoseconds>(dur - secs).count())};
+        }
+
         template <typename Rep, typename Period>
         [[nodiscard]] auto timeout(const std::chrono::duration<Rep, Period> dur)
         {
             return IoAwaiter(
                 *this,
-                [ts = __kernel_timespec{
-                    .tv_sec = std::chrono::duration_cast<std::chrono::seconds>(dur).count(),
-                    .tv_nsec = std::chrono::duration_cast<std::chrono::nanoseconds>(dur).count() %
-                    1'000'000'000
-                }](io_uring_sqe* sqe) mutable
+                [ts = to_timespec(dur)](io_uring_sqe* sqe) mutable
                 {
                     io_uring_prep_timeout(sqe, &ts, 0, 0);
                 },
@@ -508,11 +523,15 @@ namespace kio
                                         : 0;
 
             auto* ptr = buf.data() + buffer_offset;
-            const uint16_t buf_index = buf.pool()->registration_index(ptr);
+            // An empty lease, or one from another IO's pool, has no valid index in
+            // this ring's table. Submit against fd -1 so it completes with -EBADF
+            // instead of dereferencing a null pool or using a foreign index.
+            const bool usable = owns(buf);
+            const uint16_t buf_index = usable ? buf.pool()->registration_index(ptr) : 0;
 
             return IoAwaiter(
                 *this,
-                [raw_fd = fd.fd, ptr, safe_len, buf_index, file_offset](io_uring_sqe* sqe)
+                [raw_fd = usable ? fd.fd : -1, ptr, safe_len, buf_index, file_offset](io_uring_sqe* sqe)
                 {
                     io_uring_prep_read_fixed(sqe, raw_fd, ptr, static_cast<unsigned>(safe_len),
                                              static_cast<__u64>(file_offset), buf_index);
@@ -538,11 +557,12 @@ namespace kio
                                         : 0;
 
             const auto* ptr = buf.data() + buffer_offset;
-            const uint16_t buf_index = buf.pool()->registration_index(ptr);
+            const bool usable = owns(buf);
+            const uint16_t buf_index = usable ? buf.pool()->registration_index(ptr) : 0;
 
             return IoAwaiter(
                 *this,
-                [raw_fd = fd.fd, ptr, safe_len, buf_index, file_offset](io_uring_sqe* sqe)
+                [raw_fd = usable ? fd.fd : -1, ptr, safe_len, buf_index, file_offset](io_uring_sqe* sqe)
                 {
                     io_uring_prep_write_fixed(sqe, raw_fd, ptr, static_cast<unsigned>(safe_len),
                                               static_cast<__u64>(file_offset), static_cast<int>(buf_index));
@@ -557,6 +577,12 @@ namespace kio
         }
 
     private:
+        /// True if the lease is live and belongs to this IO's registered pool.
+        [[nodiscard]] bool owns(const BufferLease& lease) const noexcept
+        {
+            return lease && buffer_pool_.has_value() && lease.pool() == &*buffer_pool_;
+        }
+
         static constexpr uint64_t kWakeupSentinel = 0xDEAD'C0DE'DEAD'C0DEULL;
         static constexpr uint64_t kCancelSentinel = 0xCACE'1ED0'CACE'1ED0ULL;
         static constexpr size_t kMaxResumesPerTick = 128;
@@ -599,7 +625,8 @@ namespace kio
         std::vector<iovec> registered_iovecs_{};
         // CQEs consumed off the ring so far. Every SQE the user writes produces
         // exactly one CQE, so (ktail - completed_count_) is the number of
-        // operations the kernel still owns -- including ones not yet submitted.
+        // operations the kernel still owns. SQEs not yet flushed are not in ktail;
+        // outstanding_ops() adds them back via unflushed_sqes().
         // Derived from ring state rather than a per-op counter, so quiescence
         // costs one subtraction instead of a store on the I/O path.
         std::uint64_t completed_count_{0};
@@ -613,7 +640,7 @@ namespace kio
         /// Activate a disabled ring, MUST be called after init()
         /// Enable a ring created with IORING_SETUP_R_DISABLED. noexcept: callers
         /// include run_blocking()/run_once(), where a throw would terminate the
-        /// worker. Failure is logged and leaves the ring disabled.
+        /// worker. Failure is logged FATAL (aborts): the ring is unusable.
         void activate() noexcept;
         void tick(__kernel_timespec* park_timeout = nullptr) noexcept;
         /// @param park_timeout If non-null, the blocking park is bounded by
@@ -624,12 +651,25 @@ namespace kio
         /// IORING_ASYNC_CANCEL_ANY and then draining the cancellations.
         void drain_until_quiescent() noexcept;
         void submit_cancel_all() noexcept;
-        /// Operations the kernel still owns, excluding internal wake reads.
-        /// Owner-thread only; no atomics.
+        /// SQEs prepared by get_sqe() but not yet flushed to the kernel tail.
+        [[nodiscard]] std::uint32_t unflushed_sqes() const noexcept
+        {
+            return ring_.sq.sqe_tail - ring_.sq.sqe_head;
+        }
+        /// Operations in flight or queued, excluding internal wake reads: those
+        /// flushed to the kernel and not yet completed, plus those still sitting
+        /// unflushed in the SQ. Owner-thread only; no atomics.
+        ///
+        /// ktail is a free-running 32-bit counter that wraps, so the difference is
+        /// taken in 32 bits; widening first would underflow after 2^32 operations.
         [[nodiscard]] std::uint64_t outstanding_ops() const noexcept
         {
-            return static_cast<std::uint64_t>(*ring_.sq.ktail) - completed_count_ - armed_wake_reads_;
+            const auto submitted =
+                static_cast<std::uint32_t>(*ring_.sq.ktail) - static_cast<std::uint32_t>(completed_count_);
+            return std::uint64_t{submitted} + unflushed_sqes() - armed_wake_reads_;
         }
+        /// Anything left for teardown to wait on or run.
+        [[nodiscard]] bool has_pending_work() const noexcept;
         void arm_wake_read() noexcept;
         void wake() const noexcept;
         io_uring_sqe* get_sqe() noexcept;
@@ -704,6 +744,9 @@ namespace kio
 
         io.schedule(detail::sync_wait_body<T>(std::move(task), result, done));
 
+        // Claim ring ownership before activate(), which submits SQEs
+        // (see IO::owner_thread_).
+        io.owner_thread_ = std::this_thread::get_id();
         io.pin_to_cpu();
         io.activate();
 

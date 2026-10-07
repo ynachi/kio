@@ -20,6 +20,7 @@ namespace kio
     IO::IO(const size_t id, const IO* leader, const IoOptions& opts, const std::optional<BufferPoolConfig> pool_cfg)
         : opts_(opts), id_(id)
     {
+        opts_.batch_max_size = std::max<std::size_t>(1, opts_.batch_max_size);
         local_tasks_.reserve(opts_.entries);
         current_batch.reserve(kMaxResumesPerTick);
 
@@ -53,10 +54,12 @@ namespace kio
           buffer_pool_(std::move(other.buffer_pool_)),
           registered_iovecs_(std::move(other.registered_iovecs_))
     {
-        // Safety check, we SHOULD not move a running IO.
-        if (is_running_ || !other.queue_.empty() || !other.local_tasks_.empty())
+        // Safety check, we SHOULD not move a running IO. An activated one is not
+        // inert either: its wake read is still in flight against other.wake_value_,
+        // and completed_count_/armed_wake_reads_ would not travel with the ring.
+        if (is_running_ || is_activated_ || !other.queue_.empty() || !other.local_tasks_.empty())
         {
-            KIO_LOG_FATAL("FATAL: IO move failed. IO must be inert (not running and empty) to move.");
+            KIO_LOG_FATAL("FATAL: IO move failed. IO must be inert (not activated, not running, empty) to move.");
             std::terminate();
         }
 
@@ -132,6 +135,9 @@ namespace kio
             {
                 KIO_LOG_ERROR("failed to register buffer pool: {}", std::strerror(-ret));
                 io_uring_queue_exit(&ring_);
+                // The constructor is about to throw, so ~IO() will not run.
+                ::close(wake_fd_);
+                wake_fd_ = -1;
                 throw std::runtime_error("io_uring_register_buffers failed");
             }
             KIO_LOG_INFO("Worker {} registered {} MB buffer pool ({} x 1GB chunks)",
@@ -151,13 +157,12 @@ namespace kio
             return;
         }
 
-        // Not noexcept-throwing: run_blocking() and run_once() are both noexcept,
-        // so throwing here would terminate the worker thread instead of reporting.
+        // Not throwing: run_blocking() and run_once() are both noexcept. A ring that
+        // cannot be enabled is unusable, so this is logged FATAL (which aborts).
         if (const int ret = io_uring_register(static_cast<unsigned>(ring_.ring_fd),
                                               IORING_REGISTER_ENABLE_RINGS, nullptr, 0); ret < 0)
         {
             KIO_LOG_FATAL("io_uring_register failed: {}", std::strerror(-ret));
-            return;
         }
 
         // we need to submit a first read, and this is a good place
@@ -167,62 +172,81 @@ namespace kio
 
     void IO::submit_or_wait_for(__kernel_timespec* park_timeout)
     {
-        // Only block if we have no local work to do.
-
-        if (io_uring_cq_ready(&ring_) > 0 || !local_tasks_.empty() || !queue_.empty())
+        // Non-blocking flush: push pending SQEs and, under DEFER_TASKRUN, run the
+        // deferred task work that actually posts completions.
+        const auto flush = [this]
         {
-            int ret = 0;
-            if (opts_.flags & IORING_SETUP_DEFER_TASKRUN)
-            {
-                ret = io_uring_submit_and_get_events(&ring_);
-            }
-            else
-            {
-                ret = io_uring_submit(&ring_);
-            }
-
+            const int ret = (opts_.flags & IORING_SETUP_DEFER_TASKRUN) ? io_uring_submit_and_get_events(&ring_)
+                                                                        : io_uring_submit(&ring_);
             if (ret < 0 && ret != -EINTR)
             {
                 KIO_LOG_ERROR("failed to submit: {}", std::strerror(-ret));
             }
+        };
+
+        // Only block if we have no local work to do.
+        if (io_uring_cq_ready(&ring_) > 0 || !local_tasks_.empty() || !queue_.empty())
+        {
+            flush();
+            return;
+        }
+
+        // Thundering herd mitigation: we recheck every source of work before
+        // parking. Because wake() writes the eventfd unconditionally, a producer
+        // that raced us either already left its token in the eventfd counter
+        // (level triggered, so the park returns at once) or writes it after we
+        // park.
+        //
+        // Two cases must not park without a deadline:
+        //  - stop_requested_: the loop's own stop test has already passed by the
+        //    time we get here, so a stop landing in that window would be slept
+        //    through.
+        //  - no wake read armed: nothing could interrupt the park.
+        // Both flush instead; the loop comes back around and re-evaluates.
+        //
+        // A bounded park (teardown) is always safe: it cannot sleep forever, and it
+        // must actually park, or the drain would spin without ever entering the
+        // kernel to reap completions.
+        const bool may_park = park_timeout != nullptr ||
+                              (!stop_requested_.load(std::memory_order_seq_cst) && armed_wake_reads_ > 0);
+        if (!may_park)
+        {
+            flush();
+            return;
+        }
+
+        // NOTE: liburing returns the count of SQEs the kernel consumed,
+        // so this is POSITIVE on success -- only negative is an error.
+        int ret = 0;
+        if (park_timeout != nullptr)
+        {
+            // liburing writes through cqe_ptr unconditionally, so this
+            // cannot be null even though we only care about the wait.
+            io_uring_cqe* cqe = nullptr;
+            ret = io_uring_submit_and_wait_timeout(&ring_, &cqe, 1, park_timeout, nullptr);
         }
         else
         {
-            // Thundering herd mitigation from our earlier optimizations.
-            // We recheck every source of work before parking. Because wake()
-            // writes the eventfd unconditionally, a producer that raced us
-            // either already left its token in the eventfd counter (level
-            // triggered, so the park returns at once) or writes it after we
-            // park. stop_requested_ closes the one remaining window: the loop's
-            // own stop test has already passed by the time we get here.
-            if (io_uring_cq_ready(&ring_) == 0 && local_tasks_.empty() && queue_.empty()
-                && !stop_requested_.load(std::memory_order_seq_cst))
-            {
-                // NOTE: liburing returns the count of SQEs the kernel consumed,
-                // so this is POSITIVE on success -- only negative is an error.
-                int ret = 0;
-                if (park_timeout != nullptr)
-                {
-                    // liburing writes through cqe_ptr unconditionally, so this
-                    // cannot be null even though we only care about the wait.
-                    io_uring_cqe* cqe = nullptr;
-                    ret = io_uring_submit_and_wait_timeout(&ring_, &cqe, 1, park_timeout, nullptr);
-                }
-                else
-                {
-                    ret = io_uring_submit_and_wait(&ring_, 1);
-                }
+            ret = io_uring_submit_and_wait(&ring_, 1);
+        }
 
-                if (ret < 0 && ret != -EINTR)
-                {
-                    KIO_LOG_ERROR("failed to submit and wait: {}", std::strerror(-ret));
-                }
-            }
+        // -ETIME is the bounded park expiring, which is the expected outcome.
+        if (ret < 0 && ret != -EINTR && ret != -ETIME)
+        {
+            KIO_LOG_ERROR("failed to submit and wait: {}", std::strerror(-ret));
         }
     }
 
     void IO::tick(__kernel_timespec* park_timeout) noexcept
     {
+        // A re-arm skipped because the SQ was full is only retried here: with no
+        // wake read in flight nothing would ever re-arm it, and post()/stop could
+        // no longer interrupt a park.
+        if (armed_wake_reads_ == 0 && is_activated_)
+        {
+            arm_wake_read();
+        }
+
         // Drain the cross-thread MPSC queue first.
         queue_.drain(
             [this](detail::TaskPromiseBase* node)
@@ -387,6 +411,27 @@ namespace kio
         }
     }
 
+    namespace
+    {
+        __kernel_timespec timespec_until(const std::chrono::steady_clock::time_point deadline) noexcept
+        {
+            const auto now = std::chrono::steady_clock::now();
+            const auto remaining = deadline > now ? deadline - now : std::chrono::steady_clock::duration::zero();
+            const auto secs = std::chrono::duration_cast<std::chrono::seconds>(remaining);
+            const auto nsecs = std::chrono::duration_cast<std::chrono::nanoseconds>(remaining - secs);
+
+            __kernel_timespec ts{};
+            ts.tv_sec = secs.count();
+            ts.tv_nsec = static_cast<long long>(nsecs.count());
+            return ts;
+        }
+    } // namespace
+
+    bool IO::has_pending_work() const noexcept
+    {
+        return outstanding_ops() > 0 || !local_tasks_.empty() || !queue_.empty() || io_uring_cq_ready(&ring_) > 0;
+    }
+
     void IO::drain_until_quiescent() noexcept
     {
         // Deliberately NOT using an IOSQE_IO_DRAIN barrier here. Measured on
@@ -400,23 +445,9 @@ namespace kio
         // Phase 1 -- graceful. Resume anything runnable; when there is nothing
         // runnable but the kernel still owns work, park (bounded) waiting for
         // it to complete on its own.
-        while (outstanding_ops() > 0 || !local_tasks_.empty() || !queue_.empty() ||
-               io_uring_cq_ready(&ring_) > 0)
+        while (has_pending_work() && std::chrono::steady_clock::now() < deadline)
         {
-            const auto now = std::chrono::steady_clock::now();
-            if (now >= deadline)
-            {
-                break;
-            }
-
-            const auto remaining = deadline - now;
-            const auto secs = std::chrono::duration_cast<std::chrono::seconds>(remaining);
-            const auto nsecs = remaining - secs;
-
-            __kernel_timespec ts{};
-            ts.tv_sec = secs.count();
-            ts.tv_nsec = static_cast<long long>(std::chrono::duration_cast<std::chrono::nanoseconds>(nsecs).count());
-
+            auto ts = timespec_until(deadline);
             tick(&ts);
         }
 
@@ -428,11 +459,11 @@ namespace kio
 
             // Phase 2 -- drain the cancellations. Cancelled operations complete
             // with -ECANCELED, which resumes their coroutines so they unwind
-            // through the normal error path instead of being stranded.
+            // through the normal error path instead of being stranded. Parks are
+            // bounded here too so the wait neither spins nor outlives the deadline.
             const auto hard_deadline = std::chrono::steady_clock::now() +
                                        std::chrono::milliseconds(opts_.shutdown_grace_ms);
-            while (outstanding_ops() > 0 || !local_tasks_.empty() || !queue_.empty() ||
-                   io_uring_cq_ready(&ring_) > 0)
+            while (has_pending_work())
             {
                 if (std::chrono::steady_clock::now() >= hard_deadline)
                 {
@@ -441,7 +472,8 @@ namespace kio
                                   id_, outstanding_ops());
                     break;
                 }
-                tick();
+                auto ts = timespec_until(hard_deadline);
+                tick(&ts);
             }
         }
 
@@ -497,11 +529,16 @@ namespace kio
             return;
         }
 
-        int physical_core_id = opts_.worker_cpu_affinity[id_];
+        const int physical_core_id = opts_.worker_cpu_affinity[id_];
+        if (physical_core_id < 0 || physical_core_id >= CPU_SETSIZE)
+        {
+            KIO_LOG_WARN("Worker {}: ignoring invalid CPU id {} in worker_cpu_affinity", id_, physical_core_id);
+            return;
+        }
 
         cpu_set_t cpuset;
         CPU_ZERO(&cpuset);
-        CPU_SET(static_cast<size_t>(physical_core_id), &cpuset);
+        CPU_SET(physical_core_id, &cpuset);
 
         if (const int rc = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset); rc != 0)
         {
@@ -512,15 +549,20 @@ namespace kio
 
     IO::~IO()
     {
-        if (ring_.ring_fd >= 0 && !registered_iovecs_.empty())
+        // Contract: tasks still queued here are abandoned, not destroyed. A queued
+        // handle may be a child frame owned by its parent's frame, so destroying
+        // it blindly could free it twice. This only happens when the IO is torn
+        // down without being drained (run_blocking() drains before returning).
+        if (const auto abandoned = local_tasks_.size() + queue_.drain([](detail::TaskPromiseBase*) {});
+            abandoned > 0)
         {
-            if (const int ret = io_uring_unregister_buffers(&ring_); ret < 0)
-            {
-                KIO_LOG_WARN("Failed to unregister buffers: {}", std::strerror(-ret));
-            }
-            registered_iovecs_.clear();
+            KIO_LOG_WARN("Worker {}: destroyed with {} task(s) never resumed; their frames are leaked", id_,
+                         abandoned);
         }
 
+        // Registered buffers need no explicit unregister: io_uring_queue_exit()
+        // drops them. Unregistering here would also fail with -EEXIST on a
+        // SINGLE_ISSUER ring, since the destroying thread is rarely the issuer.
         if (ring_.ring_fd >= 0)
         {
             io_uring_queue_exit(&ring_);

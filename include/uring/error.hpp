@@ -5,6 +5,8 @@
 #include <string_view>
 #include <system_error>
 
+#include "uring/logger.hpp"
+
 namespace kio
 {
     // A deliberately small error value. `operation` is diagnostic context and must
@@ -106,7 +108,7 @@ namespace kio
     if (!tmp.has_value()) [[unlikely]]                                                        \
     {                                                                                         \
         KIO_LOG_ERROR(fmt " | err={} [{}:{}]" __VA_OPT__(, ) __VA_ARGS__, tmp.error().message(), \
-                   tmp.error().category().name(), tmp.error().value());                       \
+                   tmp.error().code.category().name(), tmp.error().value());                       \
         co_return std::unexpected(std::move(tmp).error());                                    \
     }                                                                                         \
     decl = std::move(*tmp)
@@ -120,7 +122,7 @@ namespace kio
     if (auto&& tmp = (expr); !tmp.has_value()) [[unlikely]]                                   \
     {                                                                                         \
         KIO_LOG_ERROR(fmt " | err={} [{}:{}]" __VA_OPT__(, ) __VA_ARGS__, tmp.error().message(), \
-                   tmp.error().category().name(), tmp.error().value());                       \
+                   tmp.error().code.category().name(), tmp.error().value());                       \
         co_return std::unexpected(std::move(tmp).error());                                    \
     }
 
