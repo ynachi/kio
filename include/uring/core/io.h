@@ -1,6 +1,8 @@
 #pragma once
 #include <atomic>
 #include <cassert>
+#include <cerrno>
+#include <chrono>
 #include <coroutine>
 #include <cstdint>
 #include <filesystem>
@@ -43,6 +45,11 @@ namespace kio
 
         /// max resume per tick
         std::size_t batch_max_size = 128;
+
+        // How long teardown waits for in-flight operations to finish on their
+        // own before escalating to IORING_ASYNC_CANCEL_ANY. Bounded by default:
+        // an unbounded drain wedges forever on a single stuck read.
+        std::uint32_t shutdown_grace_ms = 5000;
 
         // Sleep after 2 seconds of inactivity
         // Liburing auto wakeup the kernel thread so no need to manually do it
@@ -167,10 +174,28 @@ namespace kio
         /// Background task or post job to an io in another thread
         void schedule(Task<void> task)
         {
+            // Admission gate. Once stop has been requested this IO accepts no
+            // new work: teardown escalates to IORING_ASYNC_CANCEL_ANY, and a
+            // task accepted during the drain could submit fresh I/O while
+            // unwinding and hang again. Dropping here (rather than in post())
+            // means the Task destructor owns the frame, as usual.
+            if (stopping()) [[unlikely]]
+            {
+                KIO_LOG_DEBUG("schedule() refused: worker {} is stopping", id_);
+                return;
+            }
+
             auto h = task.release();
             auto* p = static_cast<detail::TaskPromiseBase*>(&h.promise());
             p->self_handle = h;
             post(p);
+        }
+
+        /// @brief True once shutdown has been requested for this IO.
+        /// New operations are refused from this point on.
+        [[nodiscard]] bool stopping() const noexcept
+        {
+            return stop_requested_.load(std::memory_order_seq_cst);
         }
 
         [[nodiscard]] static auto schedule_on(IO& target) noexcept { return TransferTo{target}; }
@@ -533,6 +558,7 @@ namespace kio
 
     private:
         static constexpr uint64_t kWakeupSentinel = 0xDEAD'C0DE'DEAD'C0DEULL;
+        static constexpr uint64_t kCancelSentinel = 0xCACE'1ED0'CACE'1ED0ULL;
         static constexpr size_t kMaxResumesPerTick = 128;
 
         io_uring ring_{};
@@ -571,6 +597,16 @@ namespace kio
 
         std::optional<RegisteredBufferPool> buffer_pool_{std::nullopt};
         std::vector<iovec> registered_iovecs_{};
+        // CQEs consumed off the ring so far. Every SQE the user writes produces
+        // exactly one CQE, so (ktail - completed_count_) is the number of
+        // operations the kernel still owns -- including ones not yet submitted.
+        // Derived from ring state rather than a per-op counter, so quiescence
+        // costs one subtraction instead of a store on the I/O path.
+        std::uint64_t completed_count_{0};
+        // Wake reads currently in the ring. They are internal plumbing, not user
+        // work, so they must not count as outstanding or every shutdown would
+        // wait out the full grace period for a read that is supposed to hang.
+        std::uint32_t armed_wake_reads_{0};
 
         /// Creates the Ring in an uninitialized way
         void init(int wq_fd = -1);
@@ -579,8 +615,21 @@ namespace kio
         /// include run_blocking()/run_once(), where a throw would terminate the
         /// worker. Failure is logged and leaves the ring disabled.
         void activate() noexcept;
-        void tick() noexcept;
-        void submit_or_wait_for();
+        void tick(__kernel_timespec* park_timeout = nullptr) noexcept;
+        /// @param park_timeout If non-null, the blocking park is bounded by
+        ///        this timeout instead of waiting indefinitely. Teardown uses a
+        ///        bound so a stuck operation cannot wedge the worker forever.
+        void submit_or_wait_for(__kernel_timespec* park_timeout = nullptr);
+        /// Graceful drain bounded by opts_.shutdown_grace_ms, escalating to
+        /// IORING_ASYNC_CANCEL_ANY and then draining the cancellations.
+        void drain_until_quiescent() noexcept;
+        void submit_cancel_all() noexcept;
+        /// Operations the kernel still owns, excluding internal wake reads.
+        /// Owner-thread only; no atomics.
+        [[nodiscard]] std::uint64_t outstanding_ops() const noexcept
+        {
+            return static_cast<std::uint64_t>(*ring_.sq.ktail) - completed_count_ - armed_wake_reads_;
+        }
         void arm_wake_read() noexcept;
         void wake() const noexcept;
         io_uring_sqe* get_sqe() noexcept;
@@ -603,6 +652,15 @@ namespace kio
     template <typename Promise>
     std::coroutine_handle<> IoAwaiter<SetupFunc, MapperFunc>::await_suspend(std::coroutine_handle<Promise> h) noexcept
     {
+        // Admission gate: no new operations once stop has been requested.
+        // ECANCELED is the same result a cancelled in-flight op receives, so a
+        // coroutine unwinding through teardown sees one consistent error.
+        if (io_.stopping()) [[unlikely]]
+        {
+            ops_.res = -ECANCELED;
+            return h;
+        }
+
         io_uring_sqe* sqe = io_.get_sqe();
         if (sqe == nullptr)
         {

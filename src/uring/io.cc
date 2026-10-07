@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cerrno>
+#include <chrono>
 #include <cstddef>
 #include <cstring>
 #include <future>
@@ -163,7 +165,7 @@ namespace kio
         is_activated_ = true;
     }
 
-    void IO::submit_or_wait_for()
+    void IO::submit_or_wait_for(__kernel_timespec* park_timeout)
     {
         // Only block if we have no local work to do.
 
@@ -196,7 +198,22 @@ namespace kio
             if (io_uring_cq_ready(&ring_) == 0 && local_tasks_.empty() && queue_.empty()
                 && !stop_requested_.load(std::memory_order_seq_cst))
             {
-                if (const auto ret = io_uring_submit_and_wait(&ring_, 1); ret < 0 && ret != -EINTR)
+                // NOTE: liburing returns the count of SQEs the kernel consumed,
+                // so this is POSITIVE on success -- only negative is an error.
+                int ret = 0;
+                if (park_timeout != nullptr)
+                {
+                    // liburing writes through cqe_ptr unconditionally, so this
+                    // cannot be null even though we only care about the wait.
+                    io_uring_cqe* cqe = nullptr;
+                    ret = io_uring_submit_and_wait_timeout(&ring_, &cqe, 1, park_timeout, nullptr);
+                }
+                else
+                {
+                    ret = io_uring_submit_and_wait(&ring_, 1);
+                }
+
+                if (ret < 0 && ret != -EINTR)
                 {
                     KIO_LOG_ERROR("failed to submit and wait: {}", std::strerror(-ret));
                 }
@@ -204,7 +221,7 @@ namespace kio
         }
     }
 
-    void IO::tick() noexcept
+    void IO::tick(__kernel_timespec* park_timeout) noexcept
     {
         // Drain the cross-thread MPSC queue first.
         queue_.drain(
@@ -216,7 +233,7 @@ namespace kio
             opts_.batch_max_size);
 
         // wait for completion if needed
-        submit_or_wait_for();
+        submit_or_wait_for(park_timeout);
 
         // Batch process CQEs into the local queue
         io_uring_cqe* cqe = nullptr;
@@ -230,7 +247,16 @@ namespace kio
 
             if (user_data == kWakeupSentinel)
             {
+                if (armed_wake_reads_ > 0)
+                {
+                    --armed_wake_reads_;
+                }
                 arm_wake_read();
+            }
+            else if (user_data == kCancelSentinel)
+            {
+                // res is the number of requests the cancel matched.
+                KIO_LOG_INFO("Worker {} cancelled {} in-flight operation(s)", id_, cqe->res);
             }
             else
             {
@@ -240,6 +266,10 @@ namespace kio
                 local_tasks_.push_back(op->h);
             }
         }
+
+        // Every SQE produces exactly one CQE; this is what outstanding_ops()
+        // subtracts from the SQ tail to find work the kernel still owns.
+        completed_count_ += count;
 
         if (count > 0)
         {
@@ -292,6 +322,7 @@ namespace kio
 
         io_uring_prep_read(sqe, wake_fd_, &wake_value_, sizeof(wake_value_), 0);
         io_uring_sqe_set_data64(sqe, kWakeupSentinel);
+        ++armed_wake_reads_;
         io_uring_submit(&ring_);
     }
 
@@ -329,10 +360,92 @@ namespace kio
         }
 
         // Drain remaining tasks so cancelled coroutines can resume and clean up
-        while (!local_tasks_.empty() || !queue_.empty() || io_uring_cq_ready(&ring_) > 0)
+        drain_until_quiescent();
+    }
+
+    void IO::submit_cancel_all() noexcept
+    {
+        io_uring_sqe* sqe = get_sqe();
+        if (sqe == nullptr)
         {
-            tick();
+            // SQ is full: submit what we have and retry once. If it still
+            // fails there is nothing we can cancel with -- the ring teardown
+            // will reclaim the kernel side.
+            KIO_LOG_ERROR("Worker {}: no SQE available to submit cancel-all", id_);
+            return;
         }
+
+        // IORING_ASYNC_CANCEL_ANY matches every in-flight request regardless of
+        // user_data, so this needs no registry of outstanding operations. res
+        // on the resulting CQE is the number of requests matched.
+        io_uring_prep_cancel64(sqe, 0, IORING_ASYNC_CANCEL_ANY);
+        io_uring_sqe_set_data64(sqe, kCancelSentinel);
+
+        if (const int ret = io_uring_submit(&ring_); ret < 0)
+        {
+            KIO_LOG_ERROR("Worker {}: cancel-all submit failed: {}", id_, std::strerror(-ret));
+        }
+    }
+
+    void IO::drain_until_quiescent() noexcept
+    {
+        // Deliberately NOT using an IOSQE_IO_DRAIN barrier here. Measured on
+        // this kernel: a pending drain request serialises the submission
+        // pipeline, so the cancel SQE submitted behind it never executes and
+        // the escalation below becomes impossible. The bounded park plus the
+        // outstanding_ops() check is what actually detects a stuck operation.
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::milliseconds(opts_.shutdown_grace_ms);
+
+        // Phase 1 -- graceful. Resume anything runnable; when there is nothing
+        // runnable but the kernel still owns work, park (bounded) waiting for
+        // it to complete on its own.
+        while (outstanding_ops() > 0 || !local_tasks_.empty() || !queue_.empty() ||
+               io_uring_cq_ready(&ring_) > 0)
+        {
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline)
+            {
+                break;
+            }
+
+            const auto remaining = deadline - now;
+            const auto secs = std::chrono::duration_cast<std::chrono::seconds>(remaining);
+            const auto nsecs = remaining - secs;
+
+            __kernel_timespec ts{};
+            ts.tv_sec = secs.count();
+            ts.tv_nsec = static_cast<long long>(std::chrono::duration_cast<std::chrono::nanoseconds>(nsecs).count());
+
+            tick(&ts);
+        }
+
+        if (outstanding_ops() > 0)
+        {
+            KIO_LOG_WARN("Worker {}: {} operation(s) unfinished after {}ms grace; cancelling", id_,
+                         outstanding_ops(), opts_.shutdown_grace_ms);
+            submit_cancel_all();
+
+            // Phase 2 -- drain the cancellations. Cancelled operations complete
+            // with -ECANCELED, which resumes their coroutines so they unwind
+            // through the normal error path instead of being stranded.
+            const auto hard_deadline = std::chrono::steady_clock::now() +
+                                       std::chrono::milliseconds(opts_.shutdown_grace_ms);
+            while (outstanding_ops() > 0 || !local_tasks_.empty() || !queue_.empty() ||
+                   io_uring_cq_ready(&ring_) > 0)
+            {
+                if (std::chrono::steady_clock::now() >= hard_deadline)
+                {
+                    KIO_LOG_ERROR("Worker {}: {} operation(s) still outstanding after cancel; "
+                                  "abandoning drain",
+                                  id_, outstanding_ops());
+                    break;
+                }
+                tick();
+            }
+        }
+
+        KIO_LOG_INFO("Worker {} quiesced", id_);
     }
 
     io_uring_sqe* IO::get_sqe() noexcept

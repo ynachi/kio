@@ -61,11 +61,10 @@ public:
 
     bool stop() const
     {
-        // TODO: we need to do the following
-        // io_uring_prep_cancel(..., IORING_ASYNC_CANCEL_ANY);
-        // submit_and_wait_for_completions();
-        // resume tasks with ECANCELED;
-        // destroy remaining scheduled handles;
+        // The teardown itself lives in IO::drain_until_quiescent(): each worker
+        // drains for IoOptions::shutdown_grace_ms, then escalates to
+        // IORING_ASYNC_CANCEL_ANY and drains the cancellations so no coroutine
+        // is left suspended on an operation nobody will ever complete.
         if (stop_source_.stop_possible())
         {
             return stop_source_.request_stop();
