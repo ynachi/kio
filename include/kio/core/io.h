@@ -18,10 +18,10 @@
 
 #include "buffer_pool.hpp"
 #include "detail/queue.hpp"
-#include "uring/core/awaiter.hpp"
-#include "uring/core/task.hpp"
-#include "uring/fd.hpp"
-#include "uring/logger.hpp"
+#include "kio/core/awaiter.hpp"
+#include "kio/core/task.hpp"
+#include "kio/fd.hpp"
+#include "kio/logger.hpp"
 
 namespace kio
 {
@@ -400,7 +400,10 @@ namespace kio
         [[nodiscard]] auto remove(std::filesystem::path path)
         {
             return IoAwaiter(
-                *this, [path = std::move(path)](io_uring_sqe* sqe) { io_uring_prep_unlinkat(sqe, AT_FDCWD, path.c_str(), 0); },
+                *this, [path = std::move(path)](io_uring_sqe* sqe)
+                {
+                    io_uring_prep_unlinkat(sqe, AT_FDCWD, path.c_str(), 0);
+                },
                 detail::ResumeVoid{});
         }
 
@@ -456,7 +459,8 @@ namespace kio
             const auto secs = duration_cast<seconds>(dur);
             return __kernel_timespec{
                 .tv_sec = static_cast<__kernel_time64_t>(secs.count()),
-                .tv_nsec = static_cast<long long>(duration_cast<nanoseconds>(dur - secs).count())};
+                .tv_nsec = static_cast<long long>(duration_cast<nanoseconds>(dur - secs).count())
+            };
         }
 
         template <typename Rep, typename Period>
@@ -601,7 +605,6 @@ namespace kio
         // return. Producers consult it to decide whether post() must write the
         // eventfd. See post() for the handshake. Alone on its line because the
         // worker writes it at every park.
-        alignas(64) std::atomic<bool> sleeping_{false};
         // One-shot stop latch, set by the stop callback before wake(). The
         // pre-sleep recheck loads it so a stop landing between the loop's
         // stop_requested() test and the park cannot be lost.
@@ -674,6 +677,7 @@ namespace kio
         {
             return ring_.sq.sqe_tail - ring_.sq.sqe_head;
         }
+
         /// Operations in flight or queued, excluding internal wake reads: those
         /// flushed to the kernel and not yet completed, plus those still sitting
         /// unflushed in the SQ. Owner-thread only; no atomics.
@@ -686,6 +690,7 @@ namespace kio
                 static_cast<std::uint32_t>(*ring_.sq.ktail) - static_cast<std::uint32_t>(completed_count_);
             return std::uint64_t{submitted} + unflushed_sqes() - armed_wake_reads_;
         }
+
         /// Anything left for teardown to wait on or run.
         [[nodiscard]] bool has_pending_work() const noexcept;
         void arm_wake_read() noexcept;
@@ -698,24 +703,17 @@ namespace kio
 
         int ring_fd() const noexcept { return ring_.ring_fd; }
 
-        /// Cross-thread hand-off. The eventfd write is a syscall, so it is only
-        /// issued when the worker has announced it is about to park.
-        ///
-        /// This is a store-buffering handshake with submit_or_wait_for():
-        ///   producer: enqueue; fence(seq_cst); load sleeping_
-        ///   worker:   store sleeping_; fence(seq_cst); recheck the queue
-        /// The two fences guarantee that at least one side sees the other, so a
-        /// node is either noticed by the worker's recheck or triggers the wake.
-        /// Skipping the write when the worker is awake is safe: it is already
-        /// running and drains the queue at the top of its next tick.
+        /// Cross-thread hand-off. The eventfd write is issued unconditionally:
+        /// an unconsumed write only costs one extra loop iteration, whereas
+        /// gating it on a "worker is parking" flag risks losing the wake
+        /// entirely -- that is the store-buffering handshake, and it needs
+        /// seq_cst fences on both sides to be sound. The fences cannot be
+        /// verified under ThreadSanitizer, so the unconditional write is the
+        /// form that stays checkable.
         void post(detail::TaskPromiseBase* task)
         {
             queue_.enqueue(task);
-            std::atomic_thread_fence(std::memory_order_seq_cst);
-            if (sleeping_.load(std::memory_order_relaxed))
-            {
-                wake();
-            }
+            wake();
         }
     };
 
@@ -757,18 +755,18 @@ namespace kio
     //
     namespace detail
     {
-    /// Body of sync_wait, as a named coroutine rather than a lambda. A capturing
-    /// lambda would be a temporary destroyed at the end of the call expression,
-    /// while the coroutine it builds has not run yet (initial_suspend is
-    /// suspend_always) and still holds the dead closure's `this` -- ASan reported
-    /// stack-use-after-scope when it was finally resumed.
-    template <typename T>
-    Task<void> sync_wait_body(Task<T> t, std::optional<Result<T>>& out, bool& done)
-    {
-        out = co_await std::move(t);
-        done = true;
-        co_return {};
-    }
+        /// Body of sync_wait, as a named coroutine rather than a lambda. A capturing
+        /// lambda would be a temporary destroyed at the end of the call expression,
+        /// while the coroutine it builds has not run yet (initial_suspend is
+        /// suspend_always) and still holds the dead closure's `this` -- ASan reported
+        /// stack-use-after-scope when it was finally resumed.
+        template <typename T>
+        Task<void> sync_wait_body(Task<T> t, std::optional<Result<T>>& out, bool& done)
+        {
+            out = co_await std::move(t);
+            done = true;
+            co_return {};
+        }
     } // namespace detail
 
     /// Testing utility, block a coroutine until it is done

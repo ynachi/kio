@@ -70,11 +70,11 @@ include_directories(${CMAKE_SOURCE_DIR})
 #----------------------------------------------
 # Library definition
 add_library(uring
-        src/uring/logger.cpp
-        src/uring/io.cc
-        src/uring/net.cc
-        src/uring/tcp_listener.cc
-        src/uring/buffer_pool.cc
+        src/kio/logger.cpp
+        src/kio/io.cc
+        src/kio/net.cc
+        src/kio/tcp_listener.cc
+        src/kio/buffer_pool.cc
 )
 # Include directories
 target_include_directories(uring PUBLIC

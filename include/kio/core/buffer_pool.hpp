@@ -14,7 +14,7 @@
 #include <sys/mman.h>
 #include <sys/uio.h>
 
-#include "uring/error.hpp"
+#include "kio/error.hpp"
 
 namespace kio
 {
@@ -297,7 +297,7 @@ namespace kio
 
         RegisteredBufferPool(const RegisteredBufferPool&) = delete;
         RegisteredBufferPool& operator=(const RegisteredBufferPool&) = delete;
-        
+
         RegisteredBufferPool(RegisteredBufferPool&& other) noexcept
             : base_(std::exchange(other.base_, nullptr)),
               slot_size_(std::exchange(other.slot_size_, 0)),
@@ -319,7 +319,7 @@ namespace kio
             if (this != &other)
             {
                 this->~RegisteredBufferPool();
-                new (this) RegisteredBufferPool(std::move(other));
+                new(this) RegisteredBufferPool(std::move(other));
             }
             return *this;
         }

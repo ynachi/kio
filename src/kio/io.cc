@@ -1,4 +1,4 @@
-#include "uring/core/io.h"
+#include "kio/core/io.h"
 
 #include <algorithm>
 #include <cassert>
@@ -13,7 +13,7 @@
 
 #include <sys/eventfd.h>
 
-#include "uring/core/awaiter.hpp"
+#include "kio/core/awaiter.hpp"
 
 namespace kio
 {
@@ -176,8 +176,9 @@ namespace kio
         // deferred task work that actually posts completions.
         const auto flush = [this]
         {
-            const int ret = (opts_.flags & IORING_SETUP_DEFER_TASKRUN) ? io_uring_submit_and_get_events(&ring_)
-                                                                        : io_uring_submit(&ring_);
+            const int ret = (opts_.flags & IORING_SETUP_DEFER_TASKRUN)
+                                ? io_uring_submit_and_get_events(&ring_)
+                                : io_uring_submit(&ring_);
             if (ret < 0 && ret != -EINTR)
             {
                 KIO_LOG_ERROR("failed to submit: {}", std::strerror(-ret));
@@ -208,21 +209,18 @@ namespace kio
         // must actually park, or the drain would spin without ever entering the
         // kernel to reap completions.
         const bool may_park = park_timeout != nullptr ||
-                              (!stop_requested_.load(std::memory_order_seq_cst) && armed_wake_reads_ > 0);
+            (!stop_requested_.load(std::memory_order_seq_cst) && armed_wake_reads_ > 0);
         if (!may_park)
         {
             flush();
             return;
         }
 
-        // Announce the park, then recheck every source of work. Producers that
-        // enqueued before this point are seen by the recheck; producers after it
-        // see sleeping_ and write the eventfd (see IO::post()).
-        sleeping_.store(true, std::memory_order_seq_cst);
-        std::atomic_thread_fence(std::memory_order_seq_cst);
+        // Recheck every source of work before parking. Producers enqueue before
+        // wake(), and the armed eventfd read makes any write interrupt the park,
+        // so no cross-thread flag is needed here.
         if (io_uring_cq_ready(&ring_) > 0 || !local_tasks_.empty() || !queue_.empty())
         {
-            sleeping_.store(false, std::memory_order_relaxed);
             flush();
             return;
         }
@@ -241,8 +239,6 @@ namespace kio
         {
             ret = io_uring_submit_and_wait(&ring_, 1);
         }
-
-        sleeping_.store(false, std::memory_order_relaxed);
 
         // -ETIME is the bounded park expiring, which is the expected outcome.
         if (ret < 0 && ret != -EINTR && ret != -ETIME)
@@ -382,10 +378,13 @@ namespace kio
         activate();
 
         // Publish the flag before waking so the pre-sleep recheck cannot miss it.
-        std::stop_callback wake_on_stop{st, [this] {
-            stop_requested_.store(true, std::memory_order_seq_cst);
-            wake();
-        }};
+        std::stop_callback wake_on_stop{
+            st, [this]
+            {
+                stop_requested_.store(true, std::memory_order_seq_cst);
+                wake();
+            }
+        };
         while (!st.stop_requested())
         {
             tick();
@@ -456,7 +455,7 @@ namespace kio
         // the escalation below becomes impossible. The bounded park plus the
         // outstanding_ops() check is what actually detects a stuck operation.
         const auto deadline = std::chrono::steady_clock::now() +
-                              std::chrono::milliseconds(opts_.shutdown_grace_ms);
+            std::chrono::milliseconds(opts_.shutdown_grace_ms);
 
         // Phase 1 -- graceful. Resume anything runnable; when there is nothing
         // runnable but the kernel still owns work, park (bounded) waiting for
@@ -478,7 +477,7 @@ namespace kio
             // through the normal error path instead of being stranded. Parks are
             // bounded here too so the wait neither spins nor outlives the deadline.
             const auto hard_deadline = std::chrono::steady_clock::now() +
-                                       std::chrono::milliseconds(opts_.shutdown_grace_ms);
+                std::chrono::milliseconds(opts_.shutdown_grace_ms);
             while (has_pending_work())
             {
                 if (std::chrono::steady_clock::now() >= hard_deadline)
@@ -509,8 +508,8 @@ namespace kio
     {
         // IORING_SETUP_SINGLE_ISSUER: only the owner thread may produce SQEs.
         assert(std::this_thread::get_id() == owner_thread_ &&
-               "IO::get_sqe() called from a non-owner thread; the ring is SINGLE_ISSUER "
-               "(check for a missing co_await io.schedule_on(...))");
+            "IO::get_sqe() called from a non-owner thread; the ring is SINGLE_ISSUER "
+            "(check for a missing co_await io.schedule_on(...))");
 
         io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
         if (sqe == nullptr)
@@ -563,7 +562,7 @@ namespace kio
 
         cpu_set_t cpuset;
         CPU_ZERO(&cpuset);
-        CPU_SET(physical_core_id, &cpuset);
+        CPU_SET(static_cast<size_t>(physical_core_id), &cpuset);
 
         if (const int rc = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset); rc != 0)
         {
@@ -578,7 +577,9 @@ namespace kio
         // handle may be a child frame owned by its parent's frame, so destroying
         // it blindly could free it twice. This only happens when the IO is torn
         // down without being drained (run_blocking() drains before returning).
-        if (const auto abandoned = local_tasks_.size() + queue_.drain([](detail::TaskPromiseBase*) {});
+        if (const auto abandoned = local_tasks_.size() + queue_.drain([](detail::TaskPromiseBase*)
+            {
+            });
             abandoned > 0)
         {
             KIO_LOG_WARN("Worker {}: destroyed with {} task(s) never resumed; their frames are leaked", id_,
