@@ -6,8 +6,6 @@
 #include <cstdint>
 #include <expected>
 #include <span>
-#include <stdexcept>
-#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -218,7 +216,7 @@ namespace kio
     class RegisteredBufferPool
     {
     public:
-        static constexpr size_t kOneGiB = 1ULL << 30; // 1,073,741,824 bytes
+        static constexpr size_t kOneGiB = 1ULL << 30U; // 1,073,741,824 bytes
         static constexpr size_t kHugePageSize = 2ULL * 1024 * 1024; // 2 MiB THP alignment
         static constexpr size_t kPageSize = 4096; // 4 KiB page size
 
@@ -376,7 +374,8 @@ namespace kio
         [[nodiscard]] uint16_t registration_index(const std::byte* ptr) const noexcept
         {
             assert(ptr >= base_ && ptr < base_ + total_bytes_);
-            return first_index_ + static_cast<uint16_t>((ptr - base_) >> 30);
+            const auto offset = static_cast<size_t>(ptr - base_);
+            return first_index_ + static_cast<uint16_t>(offset >> 30U);
         }
 
         /// @brief Starting virtual address of the mapping.

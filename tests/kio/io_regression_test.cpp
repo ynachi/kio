@@ -1,4 +1,4 @@
-#include "uring/core/io.h"
+#include "kio/core/io.h"
 
 #include <atomic>
 #include <chrono>
@@ -9,8 +9,8 @@
 
 #include <unistd.h>
 
-#include "uring/core/detail/queue.hpp"
-#include "uring/tcp_listener.hpp"
+#include "kio/core/detail/queue.hpp"
+#include "kio/tcp_listener.hpp"
 #include <gtest/gtest.h>
 
 using namespace kio;
@@ -18,48 +18,48 @@ using namespace std::chrono_literals;
 
 namespace
 {
-Task<int> sleep_then_value(IO& io)
-{
-    // A negative duration must complete immediately instead of failing with EINVAL.
-    if (auto r = co_await io.sleep(-5ms); !r)
-        co_return std::unexpected(r.error());
-    if (auto r = co_await io.sleep(1ms); !r)
-        co_return std::unexpected(r.error());
-    co_return 7;
-}
+    Task<int> sleep_then_value(IO& io)
+    {
+        // A negative duration must complete immediately instead of failing with EINVAL.
+        if (auto r = co_await io.sleep(-5ms); !r)
+            co_return std::unexpected(r.error());
+        if (auto r = co_await io.sleep(1ms); !r)
+            co_return std::unexpected(r.error());
+        co_return 7;
+    }
 
-Task<int> read_fixed_with(IO& io, Fd& fd, BufferLease& lease)
-{
-    auto r = co_await io.read_fixed(fd, lease, std::size_t{16});
-    if (!r)
-        co_return std::unexpected(r.error());
-    co_return *r;
-}
+    Task<int> read_fixed_with(IO& io, Fd& fd, BufferLease& lease)
+    {
+        auto r = co_await io.read_fixed(fd, lease, std::size_t{16});
+        if (!r)
+            co_return std::unexpected(r.error());
+        co_return *r;
+    }
 
-Task<void> bump(std::atomic<int>& counter)
-{
-    counter.fetch_add(1, std::memory_order_release);
-    co_return {};
-}
+    Task<void> bump(std::atomic<int>& counter)
+    {
+        counter.fetch_add(1, std::memory_order_release);
+        co_return {};
+    }
 
-std::int64_t thread_cpu_ns()
-{
-    timespec ts{};
-    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
-    return std::int64_t{ts.tv_sec} * 1'000'000'000 + ts.tv_nsec;
-}
+    std::int64_t thread_cpu_ns()
+    {
+        timespec ts{};
+        clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+        return std::int64_t{ts.tv_sec} * 1'000'000'000 + ts.tv_nsec;
+    }
 
-Task<void> read_probe(IO& io, Fd& fd, std::span<std::byte> buf, std::atomic<int>& outcome)
-{
-    auto res = co_await io.read(fd, buf);
-    outcome.store(res ? 0 : res.error().value(), std::memory_order_relaxed);
-    co_return {};
-}
-}  // namespace
+    Task<void> read_probe(IO& io, Fd& fd, std::span<std::byte> buf, std::atomic<int>& outcome)
+    {
+        auto res = co_await io.read(fd, buf);
+        outcome.store(res ? 0 : res.error().value(), std::memory_order_relaxed);
+        co_return {};
+    }
+} // namespace
 
 // sync_wait drives the ring from the calling thread, so it must claim
 // SINGLE_ISSUER ownership like run_blocking()/run_once() do. Without that,
-// activate() -> arm_wake_read() -> get_sqe() trips the owner-thread assert.
+// activate() -> tick() -> get_sqe() trips the owner-thread assert.
 TEST(IoRegressionTest, SyncWaitClaimsRingOwnership)
 {
     IO io{0};
@@ -104,12 +104,14 @@ TEST(IoRegressionTest, DrainParksInsteadOfSpinning)
 
     std::atomic<std::int64_t> cpu_ns{-1};
     std::stop_source stop;
-    std::jthread worker{[&]
-                        {
-                            const auto before = thread_cpu_ns();
-                            io.run_blocking(stop.get_token());
-                            cpu_ns.store(thread_cpu_ns() - before);
-                        }};
+    std::jthread worker{
+        [&]
+        {
+            const auto before = thread_cpu_ns();
+            io.run_blocking(stop.get_token());
+            cpu_ns.store(thread_cpu_ns() - before);
+        }
+    };
     std::this_thread::sleep_for(100ms);
 
     const auto t0 = std::chrono::steady_clock::now();
@@ -127,10 +129,10 @@ TEST(IoRegressionTest, DrainParksInsteadOfSpinning)
     close(fds[1]);
 }
 
-// post() skips the eventfd write unless the worker announced it is parking. If
-// that handshake had a hole, a task would sit in the queue with the worker
-// asleep and this would time out. Producers pause at random so the worker
-// parks between hand-offs, which is where a lost wakeup would show.
+// A task handed over from another thread must always be resumed. The worker
+// picks it up on its next tick whether or not it was parked when the post
+// arrived, so this cannot lose one -- but it does bound the delivery time, and
+// producers pause at random so posts land while the worker is asleep and awake.
 TEST(IoRegressionTest, CrossThreadPostNeverLosesAWakeup)
 {
     IO io{0};
@@ -162,7 +164,7 @@ TEST(IoRegressionTest, CrossThreadPostNeverLosesAWakeup)
 
     const auto deadline = std::chrono::steady_clock::now() + 10s;
     while (done.load(std::memory_order_acquire) < kProducers * kPerProducer &&
-           std::chrono::steady_clock::now() < deadline)
+        std::chrono::steady_clock::now() < deadline)
     {
         std::this_thread::sleep_for(1ms);
     }
@@ -171,8 +173,10 @@ TEST(IoRegressionTest, CrossThreadPostNeverLosesAWakeup)
     stop.request_stop();
 }
 
-// One task in flight at a time: the worker is parked every time, so every post
-// must wake it.
+// One task in flight at a time: the worker is asleep before nearly every post,
+// so this is the round-trip latency case. Each post waits at most one heartbeat
+// interval, so this is effectively an assertion that heartbeat_interval_us is
+// small enough to keep hand-offs responsive.
 TEST(IoRegressionTest, SingleInFlightPostAlwaysWakesParkedWorker)
 {
     IO io{0};
@@ -246,9 +250,9 @@ TEST(IoRegressionDeathTest, MovingAnActivatedIoTerminates)
     GTEST_FLAG_SET(death_test_style, "threadsafe");
     EXPECT_DEATH(
         {
-            IO io{0};
-            (void)sync_wait(io, sleep_then_value(io)); // activates the ring
-            IO moved{std::move(io)};
+        IO io{0};
+        (void)sync_wait(io, sleep_then_value(io)); // activates the ring
+        IO moved{std::move(io)};
         },
         "IO move failed");
 }

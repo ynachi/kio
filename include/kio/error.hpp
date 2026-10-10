@@ -72,12 +72,14 @@ namespace kio
 
     template <typename T>
     using Result = std::expected<T, Error>;
-} // namespace URing
+} // namespace kio
 
 
 //
 // Rust style result unwrap macro
 //
+
+// TODO: retire and use KIO_TRY instead
 
 #define URING_DETAIL_CAT_(a, b) a##b
 #define URING_DETAIL_CAT(a, b)  URING_DETAIL_CAT_(a, b)

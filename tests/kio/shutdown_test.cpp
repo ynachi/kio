@@ -1,4 +1,4 @@
-#include "uring/core/io.h"
+#include "kio/core/io.h"
 
 #include <atomic>
 #include <cerrno>
@@ -10,40 +10,40 @@
 
 #include <unistd.h>
 
-#include "uring/extention/io_pool.hpp"
+#include "kio/extention/io_pool.hpp"
 #include <gtest/gtest.h>
 
 using namespace kio;
 
 namespace
 {
-// Records how the read ended: success, or the errno the caller observed.
-Task<void> read_probe(IO& io, Fd& fd, std::span<std::byte> buf, std::atomic<int>& outcome)
-{
-    auto res = co_await io.read(fd, buf);
-    outcome.store(res ? 0 : res.error().value(), std::memory_order_relaxed);
-    co_return {};
-}
+    // Records how the read ended: success, or the errno the caller observed.
+    Task<void> read_probe(IO& io, Fd& fd, std::span<std::byte> buf, std::atomic<int>& outcome)
+    {
+        auto res = co_await io.read(fd, buf);
+        outcome.store(res ? 0 : res.error().value(), std::memory_order_relaxed);
+        co_return {};
+    }
 
-// Cancelled mid-flight, then tries to issue a *new* operation while unwinding.
-// The admission gate must refuse it with ECANCELED rather than let it block.
-Task<void> read_then_retry(IO& io, Fd& fd, std::span<std::byte> first, std::span<std::byte> second,
-                           std::atomic<int>& first_outcome, std::atomic<int>& retry_outcome)
-{
-    auto r1 = co_await io.read(fd, first);
-    first_outcome.store(r1 ? 0 : r1.error().value(), std::memory_order_relaxed);
+    // Cancelled mid-flight, then tries to issue a *new* operation while unwinding.
+    // The admission gate must refuse it with ECANCELED rather than let it block.
+    Task<void> read_then_retry(IO& io, Fd& fd, std::span<std::byte> first, std::span<std::byte> second,
+                               std::atomic<int>& first_outcome, std::atomic<int>& retry_outcome)
+    {
+        auto r1 = co_await io.read(fd, first);
+        first_outcome.store(r1 ? 0 : r1.error().value(), std::memory_order_relaxed);
 
-    auto r2 = co_await io.read(fd, second);
-    retry_outcome.store(r2 ? 0 : r2.error().value(), std::memory_order_relaxed);
-    co_return {};
-}
+        auto r2 = co_await io.read(fd, second);
+        retry_outcome.store(r2 ? 0 : r2.error().value(), std::memory_order_relaxed);
+        co_return {};
+    }
 
-// Runs the IO on a worker thread, like IoContext does.
-std::jthread make_worker(IO& io, std::stop_source& stop)
-{
-    return std::jthread([&io, &stop] { io.run_blocking(stop.get_token()); });
-}
-}  // namespace
+    // Runs the IO on a worker thread, like IoContext does.
+    std::jthread make_worker(IO& io, std::stop_source& stop)
+    {
+        return std::jthread([&io, &stop] { io.run_blocking(stop.get_token()); });
+    }
+} // namespace
 
 // Teardown must not exit the moment the local queues look empty while the
 // kernel still owns a blocked operation -- the coroutine behind it would be
@@ -117,9 +117,10 @@ TEST(ShutdownTest, NewIoIsRefusedWhileUnwindingFromCancellation)
     close(fds[1]);
 }
 
-// Regression guard: the always-armed eventfd wake read is internal plumbing, not
-// user work. Counting it as outstanding made every shutdown sit out the whole
-// grace period (tests went from 11ms to 10s) even with nothing in flight.
+// A worker with nothing in flight must reach quiescence immediately rather than
+// sit out the grace period. This guards outstanding_ops(): with an internal SQE
+// left unaccounted for (there used to be an always-armed eventfd wake read here)
+// every shutdown waited out the full grace, turning an 11ms teardown into 10s.
 TEST(ShutdownTest, IdleShutdownDoesNotWaitOutTheGracePeriod)
 {
     IoOptions opts;

@@ -1,4 +1,134 @@
 #pragma once
+
+// ============================================================================
+// kio::IO -- one worker: one io_uring ring, one MPSC queue, one thread
+// ============================================================================
+//
+// THE SHAPE OF THE THING
+// ----------------------
+//
+//   IoContext builds N IO objects on the CALLER's thread, then hands each one
+//   to its own jthread running run_blocking(). Nothing is shared between
+//   workers except (optionally) the kernel workqueue. Each IO owns:
+//
+//     - an io_uring ring          (kernel-side async context)
+//     - a detail::CoroQueue      (intrusive MPSC inbound hand-off)
+//     - local_tasks_ / current_batch  (owner-thread resume staging)
+//
+//   No fds, no wake channel: another thread's only way in is queue_.enqueue(),
+//   and the worker picks it up on its next heartbeat tick. See I3.
+//
+//   Producers --> [ MPSC queue ] --> worker thread --> [ ring ] --> kernel
+//                      |                                    |
+//                      +--------- heartbeat park ----------+
+//                        (bounded deadline, see I3)
+//
+// TWO INVARIANTS THAT HOLD THE WHOLE DESIGN TOGETHER
+// ---------------------------------------------------
+//
+// I1. SINGLE_ISSUER -- one thread per IO produces SQEs.
+//     The ring is created with IORING_SETUP_SINGLE_ISSUER, so the kernel
+//     assumes (and may optimise for) a single thread calling into the ring.
+//     IO::get_sqe() asserts it on every SQE.
+//
+//     The consequence bites hard: `co_await io.read(...)` runs wherever the
+//     coroutine currently is, so after `co_await io.schedule_on(other)` the
+//     continuation is on `other` and a following io.read() would submit from
+//     the wrong thread. The fix is not a runtime check but a discipline: once
+//     you transfer, you transfer for good.
+//
+//     Note that post()/schedule() from ANY thread are still perfectly legal.
+//     They only push onto the lock-free queue, and never call get_sqe().
+//
+//     owner_thread_ is claimed by the thread that DRIVES the ring (set at the
+//     top of run_blocking()/run_once()/sync_wait), never in the constructor --
+//     because IoContext constructs every IO on the caller's thread, before any
+//     jthread exists. Capturing in the ctor named the wrong thread.
+//
+// I2. THE FRAME IS THE OPERATION TABLE.
+//     IoOps lives inside the coroutine frame that awaits the operation, and
+//     user_data == &ops_. There is therefore no in-flight registry, no
+//     cancellation map and no per-operation refcount. The full argument and its
+//     limits are in core/awaiter.hpp.
+//
+// I3. THE PARK IS BOUNDED, AND THAT IS THE WHOLE TRICK
+// --------------------------------------------------
+//
+// A worker with nothing to do sleeps inside io_uring_submit_and_wait_timeout()
+// with a deadline of opts_.heartbeat_interval_us. Nothing has to be able to
+// wake it, because it always comes back on its own:
+//
+//     producer:  queue_.enqueue(task)
+//     worker:    ... parks at most heartbeat_interval_us ... drains, resumes
+//
+// A post that races the park is not a LOST wakeup, it is at worst one tick of
+// latency. That distinction is the entire reason this loop is small. It is what
+// lets post() be a bare queue push with no syscall, no eventfd, and no handshake
+// with the worker.
+//
+// The alternative -- parking forever and interrupting -- was tried here first
+// and it cost all of the following, none of which the deadline makes necessary:
+//
+//   * an eventfd with a read armed in the ring at all times
+//   * a sentinel user_data, and a three-way branch in the CQ walk
+//   * an "at most one wake read in flight" induction, to prove two reads could
+//     never race on the same destination buffer
+//   * may_park(), which then forced TWO full rechecks of every work source
+//     before sleeping, to close the window the handshake opened
+//   * a seq_cst store/load pairing between the stop callback and the park
+//   * a third term in outstanding_ops(), whose omission bug made every shutdown
+//     sit out the full grace period (11ms -> 10s)
+//
+// All six existed to answer one question -- "what if a post arrives while the
+// worker is asleep?" -- which a deadline answers for free.
+//
+// IDLE COST. An idle worker wakes every opts_.max_idle_wait_us instead of
+// sleeping until the next post. That is the price, and it is the only one.
+// tick() backs off exponentially the longer it does nothing, so a busy worker
+// parks rarely and an idle one settles on the longest interval.
+//
+// THE LOOP
+// --------
+//
+//   run_blocking:
+//     claim owner_thread_ -> pin -> activate
+//     install stop_callback { stop_requested_ = true; }
+//     while (!stop.stop_requested()) tick();
+//     -> close buffer pool -> drain_until_quiescent()
+//
+//   tick():
+//     1. drain up to batch_max_size cross-thread tasks into local_tasks_
+//     2. submit + park for at most heartbeat_interval_us   <-- the only sleep
+//     3. harvest up to batch_max_size CQEs, advancing as we go, queueing the
+//        coroutine handle each one belongs to
+//     4. resume everything queued, then restore the heartbeat interval
+//
+//   Steps 2 and 4 bracket one heartbeat tick. The CQ is harvested before
+//   anything is resumed, so no user code ever runs with the ring's head
+//   un-advanced, and the harvest is capped: CQEs beyond the cap stay in the
+//   ring and are picked up next tick rather than being carried in a side
+//   vector.
+//
+// TEARDOWN
+// --------
+//
+//   drain_until_quiescent() is a two-phase bounded drain:
+//
+//     phase 1  tick(bounded) until has_pending_work() is false or the grace
+//              deadline passes. Operations finish on their own if they can.
+//     phase 2  if outstanding_ops() > 0, submit IORING_ASYNC_CANCEL_ANY and
+//              keep ticking until quiescent. Cancelled ops complete with
+//              -ECANCELED, which resumes their coroutines so they unwind
+//              through the ordinary error path.
+//
+//   The admission gate is the other half of this. Once stop_requested_ is set,
+//   schedule() refuses new tasks and IoAwaiter::await_suspend refuses new
+//   operations with -ECANCELED. Without the gate, a task accepted mid-drain
+//   could submit fresh I/O while teardown was unwinding, and the drain would
+//   never reach quiescence.
+//
+// ============================================================================
+
 #include <atomic>
 #include <cassert>
 #include <cerrno>
@@ -28,6 +158,15 @@ namespace kio
     //
     // Uring options
     //
+    // INVARIANT: read once, in init(), and thereafter treated as immutable.
+    // opts_ is a plain (non-atomic) member because nothing mutates it after
+    // construction -- including the CPU-pinning decision, which is applied by
+    // pin_to_cpu() from a copy that already exists by then.
+    //
+    // INVARIANT: worker_cpu_affinity is indexed by id_, so len(affinity) must be
+    // >= the highest id in use. Entries beyond that are simply never applied
+    // (pin_to_cpu() returns early) rather than being an error, which keeps a
+    // short affinity list usable with fewer workers.
     struct IoOptions
     {
         // SQ size. Operations in flight do not occupy SQ slots; it only has to hold
@@ -48,10 +187,24 @@ namespace kio
         // list of cpus, if empty, no pinning
         std::vector<int> worker_cpu_affinity{};
 
-        /// Max cross-thread tasks (schedule()/TransferTo) moved off the MPSC queue
-        /// per tick. Completion resumes per tick are capped separately by
-        /// kMaxResumesPerTick. Values below 1 are treated as 1.
+        /// Max work moved per tick. Applies to BOTH cross-thread tasks drained
+        /// from the MPSC queue and CQEs harvested off the ring; whatever
+        /// overflows is left for the next tick rather than carried in a side
+        /// vector. Bounds how long one tick can run without re-checking the stop
+        /// flag. Values below 1 are treated as 1.
         std::size_t batch_max_size = 128;
+
+        /// Park deadline while the worker has work flowing. This is the upper
+        /// bound on how long a cross-thread post() waits to be noticed, so it
+        /// is a latency knob first and an idle-CPU knob second. It only applies
+        /// when the tick actually had nothing to do -- a tick that found CQEs or
+        /// tasks never parks at all.
+        std::uint32_t heartbeat_interval_us = 50;
+
+        /// Ceiling the idle backoff doubles towards. An idle worker parks for
+        /// this long every time; a busy one never reaches it. Raise it to trade
+        /// idle CPU for cross-thread wake latency, lower it for the reverse.
+        std::uint32_t max_idle_wait_us = 2000;
 
         // How long teardown waits for in-flight operations to finish on their
         // own before escalating to IORING_ASYNC_CANCEL_ANY. Bounded by default:
@@ -84,6 +237,21 @@ namespace kio
     //   - Explicit orchestration
     //   IO io0();
     //   IO io1(..,io0.ring_fd())
+    //
+    // Corrections/additions to the above, in the light of how this actually
+    // behaves -- the original bullets were written before the invariants in
+    // the file header were pinned down:
+    //
+    //   - "TransferTo is the ONLY cross-thread mechanism" is true only for
+    //     moving a COROUTINE. Moving an IO object (the move ctor) is inert
+    //     only, and post()/schedule() are the runtime half of the same idea.
+    //   - "MPSC queue holds raw coroutine_handle<>" is a half-truth: the queue
+    //     is typed to TaskPromiseBase*, and the handle is stashed alongside it
+    //     in promise::self_handle because the queue needs no type erasure.
+    //   - h.resume() is safe not merely because handles are enqueued while
+    //     suspended, but because there is exactly ONE resume site per handle
+    //     (the owner thread) and exactly one enqueue (the queue), so no handle
+    //     can be resumed twice or concurrently.
     // ============================================================================
     class IO
     {
@@ -98,13 +266,43 @@ namespace kio
         template <typename T>
         friend Result<T> sync_wait(IO&, Task<T>&&);
 
+        // The awaitable behind IO::schedule_on(io): "run the rest of this
+        // coroutine on THAT worker instead".
+        //
+        //   co_await io.schedule_on(other);
+        //   co_await io2.read(...);   // now runs on `other`
+        //
+        // Combined with invariant I1, this is a one-way door. After the
+        // transfer, the coroutine lives on `other`'s thread, and any further
+        // submission through the ORIGINAL io would violate SINGLE_ISSUER.
+        // get_sqe() asserts rather than silently corrupting the ring.
         struct TransferTo
         {
             IO& target;
 
-            // Optimization: If we are already on the target thread, don't suspend at all.
+            // Always false. An earlier version intended to short-circuit when
+            // the caller already happened to be on the target's thread, but
+            // that test costs a thread-id comparison on every transfer to buy
+            // a case that is rare by construction (a worker transfers to
+            // another worker, not to itself). The comment above used to
+            // describe that abandoned optimisation; it does not describe this
+            // code. Suspending unconditionally is also the only correct
+            // option: await_suspend() must publish self_handle and enqueue
+            // before the target can possibly look for us, and returning true
+            // here would skip both.
             bool await_ready() const noexcept { return false; }
 
+            // Runs on the SOURCE thread, before control leaves it.
+            //
+            // ORDER MATTERS: self_handle must be stored BEFORE post(). The
+            // target's worker could dequeue and resume the node the instant
+            // post() links it, and it reads self_handle without any further
+            // synchronisation beyond the queue's own release/acquire pair.
+            // Publishing the handle first is what makes that safe.
+            //
+            // Note this is the cross-thread variant of I2's cousin: no SQE is
+            // created here, so there is no user_data to publish -- the queue
+            // link IS the hand-off.
             template <typename Promise>
             void await_suspend(std::coroutine_handle<Promise> h) noexcept
             {
@@ -118,6 +316,10 @@ namespace kio
                 target.post(p);
             }
 
+            // Returns nothing. A transfer has no failure mode: either the task
+            // was enqueued and will resume on the target, or post() was never
+            // reached. Errors belong to the operations performed after the
+            // transfer, not to the transfer itself.
             void await_resume() const noexcept
             {
             }
@@ -170,6 +372,15 @@ namespace kio
         void run_blocking(std::stop_token st) noexcept;
 
         /// Run until done, no loop
+        ///
+        /// One tick, no stop token, no teardown. This is the "drive this IO from
+        /// a thread that is already running its own loop" entry point (sync_wait
+        /// and the tests use it), not a replacement for run_blocking(): nothing
+        /// here installs a stop callback, and nothing here drains, so the caller
+        /// owns both.
+        ///
+        /// ORDER: owner_thread_ must be claimed BEFORE activate(), because
+        /// activate() enables the ring that the loop then drives.
         void run_once() noexcept
         {
             // Claim ring ownership before activate(), which submits SQEs.
@@ -181,6 +392,14 @@ namespace kio
         }
 
         /// Background task or post job to an io in another thread
+        ///
+        /// Callable from ANY thread -- this is one of the two legal cross-thread
+        /// entry points (the other is schedule_on / post). The task is moved,
+        /// released, and queued; the target worker resumes it on its next tick.
+        ///
+        /// INVARIANT: after this returns, `task` is empty and its frame is
+        /// owned by the scheduler (promise::detached == true). The caller must
+        /// not keep or touch the coroutine afterwards.
         void schedule(Task<void> task)
         {
             // Admission gate. Once stop has been requested this IO accepts no
@@ -188,6 +407,16 @@ namespace kio
             // task accepted during the drain could submit fresh I/O while
             // unwinding and hang again. Dropping here (rather than in post())
             // means the Task destructor owns the frame, as usual.
+            //
+            // Note the ordering: the gate is checked BEFORE release(). A refused
+            // task is simply destroyed by this parameter's destructor, so it is
+            // cleaned up rather than leaked. Checking after release() would
+            // strand the frame with nobody holding it.
+            //
+            // Measured: this gate is free. Deleting it entirely made the server
+            // measurably SLOWER in both build configurations (the load compiles
+            // to a plain mov on x86-64, and the branch is perfectly
+            // predicted), so there is no throughput argument for removing it.
             if (stopping()) [[unlikely]]
             {
                 KIO_LOG_DEBUG("schedule() refused: worker {} is stopping", id_);
@@ -202,13 +431,24 @@ namespace kio
 
         /// @brief True once shutdown has been requested for this IO.
         /// New operations are refused from this point on.
+        ///
+        /// Acquire, and deliberately no stronger. This latch publishes no data,
+        /// and the only thing the reader does with it is refuse work. The
+        /// ordering that once mattered -- store-then-wake paired with
+        /// check-then-park -- is gone with the wake channel, because the park is
+        /// bounded and the worker re-reads this on its own every tick.
         [[nodiscard]] bool stopping() const noexcept
         {
-            return stop_requested_.load(std::memory_order_seq_cst);
+            return stop_requested_.load(std::memory_order_acquire);
         }
 
+        /// Awaitable form of the transfer. See TransferTo above, and note the
+        /// one-way-door consequence under invariant I1.
         [[nodiscard]] static auto schedule_on(IO& target) noexcept { return TransferTo{target}; }
 
+        /// Pin this thread to the CPU named by opts_.worker_cpu_affinity[id_].
+        /// No-op when the list is empty or id_ is out of range. Called once by
+        /// whichever thread claims ownership, before activate().
         void pin_to_cpu() const;
 
         [[nodiscard]] std::uint32_t id() const noexcept { return static_cast<std::uint32_t>(id_); }
@@ -265,8 +505,36 @@ namespace kio
             return buffer_pool_;
         }
 
+        // ============================================================================
+        // Operation factories
+        // ============================================================================
         //
-        // IO Methods
+        // Every method below has the same three-part shape and returns the same
+        // IoAwaiter type; only the two lambdas differ:
+        //
+        //   setup   fills the SQE -- opcode, fd, buffers, flags
+        //   mapper  turns the CQE's int32_t into a Result<T>
+        //
+        // Two rules apply to all of them, and both are easy to get wrong:
+        //
+        // 1. CAPTURE BY VALUE OR BY REFERENCE-TO-OWNER, NEVER A TEMPORARY.
+        //    The lambda lives in the coroutine frame for as long as the
+        //    operation is outstanding, which is longer than the full
+        //    expression that created it. Catching `Fd&` by value (raw_fd) is
+        //    the pattern used everywhere below; the few that genuinely need to
+        //    reference the caller's object (accept's client_addr, connect's
+        //    addr) say so in their own comments, and those objects MUST
+        //    outlive the operation.
+        //
+        // 2. THE MAPPER OWNS THE SIGN CONVENTION.
+        //    io_uring reports errors as negative errno and results as a
+        //    non-negative value. detail::ResumeInt / detail::ResumeVoid /
+        //    detail::ResumeFd handle it; a per-operation mapper exists only
+        //    where the success value needs a different type (Fd, unsigned).
+        //
+        // [[nodiscard]] on all of them is deliberate and not decorative: the
+        // returned awaiter is where the result lives, so discarding it silently
+        // drops an I/O error.
         //
         [[nodiscard]] auto accept(Fd& server_fd, SocketAddress& client_addr, const int flags = kDefaultAcceptFlags)
         {
@@ -447,6 +715,23 @@ namespace kio
                 });
         }
 
+        // ============================================================================
+        // Timers
+        // ============================================================================
+        //
+        // These are KERNEL timers (IORING_OP_TIMEOUT), not userspace sleeps: the
+        // worker is not blocked while one is outstanding, so a timeout costs an
+        // SQE and a CQE like anything else.
+        //
+        // POLICY: timeouts belong in teardown, not in the steady-state loop.
+        // The worker already parks efficiently inside
+        // io_uring_submit_and_wait(); adding a wall-clock deadline to the hot
+        // path converts that efficient block into a poll-until-deadline, which
+        // is strictly worse. If you find yourself wanting a steady-state
+        // timeout, the thing you actually want is a state machine that
+        // co_awaits the operation and the timer in whichever order suits the
+        // protocol, not a shortened park.
+        //
         /// Relative duration to a kernel timespec. Negative durations clamp to zero
         /// (the kernel rejects a negative tv_nsec) and the nanosecond part is taken
         /// from the sub-second remainder, so huge durations cannot overflow.
@@ -519,7 +804,30 @@ namespace kio
         // ============================================================================
         // io.hpp extensions: Fixed-buffer I/O helpers
         // ============================================================================
-
+        //
+        // These wrap the low-level *_fixed overloads above with BufferLease
+        // convenience, and -- more importantly -- with the one safety check the
+        // raw versions cannot do: owns().
+        //
+        // INVARIANT: a fixed-buffer submission is only meaningful against a
+        // buffer registered with THIS ring. buf_index is an index into this
+        // IO's registration table; a lease from another worker's pool, or an
+        // empty lease, has no valid index here, and submitting one would read
+        // or write arbitrary memory inside the kernel.
+        //
+        // Rather than assert or throw, these helpers submit against fd -1 so
+        // the operation completes with -EBADF. The mistake is then reported
+        // through the normal Result<T> channel and the caller can handle it,
+        // instead of corrupting memory. This is deliberate: the fixed-buffer
+        // helpers exist precisely to avoid kernel copies, so failing loudly in
+        // userspace would defeat their purpose, and failing silently would be
+        // far worse.
+        //
+        // The BufferLease itself is captured as a raw pointer plus length, NOT
+        // as the lease. The lease is a handle with lifetime semantics; the
+        // kernel only needs the address, and the caller must keep the lease
+        // alive until the operation completes (same rule as any buffer passed
+        // to an async call).
         /// @brief Async read using a pre-registered fixed buffer
         [[nodiscard]] auto read_fixed(Fd& fd,
                                       BufferLease& buf,
@@ -592,34 +900,51 @@ namespace kio
             return lease && buffer_pool_.has_value() && lease.pool() == &*buffer_pool_;
         }
 
-        static constexpr uint64_t kWakeupSentinel = 0xDEAD'C0DE'DEAD'C0DEULL;
-        static constexpr uint64_t kCancelSentinel = 0xCACE'1ED0'CACE'1ED0ULL;
-        static constexpr size_t kMaxResumesPerTick = 128;
-
-        // ---- Producer-visible state: read by other threads on every post() and
-        // schedule(), so it must not share a cache line with anything the owner
-        // thread writes per tick (ring_, counters, the kernel-written wake_value_).
-        // Each group starts on its own line; the next alignas(64) member closes it.
-
-        // Set by the worker immediately before it parks in the kernel, cleared on
-        // return. Producers consult it to decide whether post() must write the
-        // eventfd. See post() for the handshake. Alone on its line because the
-        // worker writes it at every park.
-        // One-shot stop latch, set by the stop callback before wake(). The
-        // pre-sleep recheck loads it so a stop landing between the loop's
-        // stop_requested() test and the park cannot be lost.
+        // ------------------------------------------------------------------------
+        // Sentinel
+        // ------------------------------------------------------------------------
         //
-        // seq_cst on both sides is what makes that safe: the store and the load
-        // share one total order, so either the worker's load precedes the stop
-        // (and it parks only after wake() has already written the eventfd) or
-        // the load observes the flag and never parks. A weaker pairing here
-        // would reopen the lost-wakeup window that Option A closed.
-        alignas(64) std::atomic<bool> stop_requested_{false};
-        int wake_fd_{-1};
+        // The one internal SQE is told apart from user operations by its
+        // user_data. It is deliberately outside the range of any real &ops_
+        // pointer: an IoOps* is always 8-byte aligned and heap-allocated, so
+        // this unaligned, astronomically large value cannot collide with one.
+        // That is what lets the CQ walk branch on the raw integer with no
+        // registry.
+        //
+        // kCancelSentinel: our own IORING_ASYNC_CANCEL_ANY from teardown. Its
+        // res is the number of operations matched, not an error. The operations
+        // it cancelled have their own CQEs and resume their own coroutines.
+        static constexpr uint64_t kCancelSentinel = 0xCACE'1ED0'CACE'1ED0ULL;
+
+        // ---- Producer-visible state.
+        //
+        // The stop latch is the ONLY thing another thread writes. It sits on
+        // its own cache line so that write cannot invalidate a line the owner
+        // thread is cycling through every tick.
+        //
+        // One-shot stop latch, set by the stop callback installed in
+        // run_blocking(). It publishes nothing -- no data is handed over
+        // through it -- so it only has to be visible eventually, and acquire/
+        // release is more than that requires. There is deliberately no longer a
+        // handshake pairing it with the park: the park is bounded, so the
+        // worker comes back on its own and reads the flag within one heartbeat
+        // tick. seq_cst was only ever needed to make that handshake sound.
+        std::atomic<bool> stop_requested_{false};
 
         // ---- Owner-thread state.
+        //
+        // Everything from here down is touched by the owner thread and nobody
+        // else. That includes the kernel: io_uring_submit* and the CQ walk are
+        // all owner-thread calls, which is what makes the non-atomic ring_
+        // acceptable even though the kernel writes into its rings from the
+        // kernel side.
         alignas(64) io_uring ring_{};
-        uint64_t wake_value_{0};
+
+        // Rings are created with IORING_SETUP_R_DISABLED and enabled by
+        // activate(). Two flags, both owner-thread only:
+        //   is_activated_  the ring can accept SQEs
+        //   is_running_    a loop is currently driving it. Checked by the move
+        //                   ctor to reject moving a live IO.
         bool is_activated_{false};
         bool is_running_{false};
         IoOptions opts_;
@@ -634,11 +959,31 @@ namespace kio
         // This is claimed by the thread that *drives* the ring -- set at the top
         // of run_blocking()/run_once() -- because IoContext constructs every IO
         // on the caller's thread and only afterwards hands each to a jthread.
-        // Cross-thread schedule()/post() stay safe: they use a lock-free queue
-        // plus the eventfd, never get_sqe().
+        // Cross-thread schedule()/post() stay safe: they only touch the
+        // lock-free queue, never get_sqe().
+        //
+        // INVARIANT: non-atomic and owner-thread-only. It is written once at
+        // the top of each entry point and read only from get_sqe() and the
+        // move ctor, all of which run on the owning thread. There is no
+        // happens-before edge needed because ownership transfer is established
+        // by the thread creation/handoff that precedes the loop.
         std::thread::id owner_thread_{};
+
+        // Resume staging. local_tasks_ accumulates handles to resume this tick
+        // (drained from the MPSC queue, plus the coroutines woken by CQE
+        // completions); current_batch is the working set being resumed right
+        // now, so that iterating it stays valid while the resumes push new
+        // handles back onto local_tasks_.
+        //
+        // Both are owner-thread only. local_tasks_ is pre-reserved to
+        // opts_.entries in the constructor so steady-state pushes do not
+        // reallocate; current_batch is pre-reserved to batch_max_size, the
+        // most a single tick can ever stage.
         std::vector<std::coroutine_handle<>> local_tasks_{};
         std::vector<std::coroutine_handle<>> current_batch{};
+
+        // The single inbound cross-thread channel. See detail/queue.hpp for the
+        // algorithm and its stub-node invariant.
         detail::CoroQueue queue_{};
 
         std::optional<RegisteredBufferPool> buffer_pool_{std::nullopt};
@@ -649,12 +994,22 @@ namespace kio
         // outstanding_ops() adds them back via unflushed_sqes().
         // Derived from ring state rather than a per-op counter, so quiescence
         // costs one subtraction instead of a store on the I/O path.
+        //
+        // INVARIANT: non-atomic, owner-thread only, monotonically increasing.
+        // It counts CQEs, including the cancel sentinel -- the kernel produces a
+        // completion for the cancel-all just like any other SQE, so excluding it
+        // here would break the arithmetic that outstanding_ops() depends on.
         std::uint64_t completed_count_{0};
-        // Wake reads currently in the ring. They are internal plumbing, not user
-        // work, so they must not count as outstanding or every shutdown would
-        // wait out the full grace period for a read that is supposed to hang.
-        std::uint32_t armed_wake_reads_{0};
+
+        // SQ-full backpressure counter. Monotonic, never reset, and only read to
+        // decide when to log (first event, then every 4096th). Odometer, not a
+        // level.
         std::uint64_t sq_full_events_{0};
+
+        // Current park deadline in microseconds. Starts at the heartbeat
+        // interval and doubles towards max_idle_wait_us on ticks that find
+        // nothing; any tick that does work snaps it back. Owner-thread only.
+        std::uint32_t heartbeat_us_{0};
 
         /// Creates the Ring in an uninitialized way
         void init(int wq_fd = -1);
@@ -663,11 +1018,11 @@ namespace kio
         /// include run_blocking()/run_once(), where a throw would terminate the
         /// worker. Failure is logged FATAL (aborts): the ring is unusable.
         void activate() noexcept;
+        /// One iteration of the loop. @param park_timeout Overrides the
+        ///        heartbeat deadline when non-null; teardown passes the time left
+        ///        before its hard deadline so a stuck operation cannot wedge the
+        ///        worker.
         void tick(__kernel_timespec* park_timeout = nullptr) noexcept;
-        /// @param park_timeout If non-null, the blocking park is bounded by
-        ///        this timeout instead of waiting indefinitely. Teardown uses a
-        ///        bound so a stuck operation cannot wedge the worker forever.
-        void submit_or_wait_for(__kernel_timespec* park_timeout = nullptr);
         /// Graceful drain bounded by opts_.shutdown_grace_ms, escalating to
         /// IORING_ASYNC_CANCEL_ANY and then draining the cancellations.
         void drain_until_quiescent() noexcept;
@@ -678,24 +1033,46 @@ namespace kio
             return ring_.sq.sqe_tail - ring_.sq.sqe_head;
         }
 
-        /// Operations in flight or queued, excluding internal wake reads: those
-        /// flushed to the kernel and not yet completed, plus those still sitting
-        /// unflushed in the SQ. Owner-thread only; no atomics.
+        /// Operations in flight or queued: those flushed to the kernel and not
+        /// yet completed, plus those still sitting unflushed in the SQ.
+        /// Owner-thread only; no atomics.
         ///
         /// ktail is a free-running 32-bit counter that wraps, so the difference is
         /// taken in 32 bits; widening first would underflow after 2^32 operations.
+        ///
+        ///   outstanding = (ktail - completed_count_)   // the kernel's view
+        ///               + unflushed_sqes()            // not yet visible to it
+        ///
+        /// Why both terms are needed:
+        ///   * ktail - completed: every SQE yields exactly one CQE, so this is
+        ///     "submitted and not yet reaped". CQEs the harvest has not reached
+        ///     yet are counted here too, which is correct -- they are unreaped.
+        ///   * + unflushed: SQEs sitting in userspace have not moved ktail yet,
+        ///     but they are committed work and must be waited for.
+        ///
+        /// INVARIANT: this is the loop condition that makes teardown terminate.
+        /// It is a lower bound on real outstanding work (it never over-counts),
+        /// so reaching zero is sufficient -- though not necessary -- to conclude
+        /// quiescence, which is why the drain also checks local_tasks_ and the
+        /// CQ via has_pending_work().
         [[nodiscard]] std::uint64_t outstanding_ops() const noexcept
         {
             const auto submitted =
                 static_cast<std::uint32_t>(*ring_.sq.ktail) - static_cast<std::uint32_t>(completed_count_);
-            return std::uint64_t{submitted} + unflushed_sqes() - armed_wake_reads_;
+            return std::uint64_t{submitted} + unflushed_sqes();
         }
 
-        /// Anything left for teardown to wait on or run.
+        /// Anything left for teardown to wait on or run. Strictly a superset of
+        /// outstanding_ops(): the ring can be quiet while coroutines are still
+        /// waiting to be resumed, or while a producer's task is sitting in the
+        /// MPSC queue. All four terms must be clear before teardown is done.
         [[nodiscard]] bool has_pending_work() const noexcept;
-        void arm_wake_read() noexcept;
-        void wake() const noexcept;
+
+        /// Fetch an SQE, flushing once if the SQ is full.
+        ///
+        /// INVARIANT (I1): must be called on owner_thread_ only. Asserts.
         io_uring_sqe* get_sqe() noexcept;
+
         /// Count an SQ-full backpressure event. Logs the first and then every
         /// 4096th: a synchronous log write per event would stall the very loop
         /// that is already saturated.
@@ -703,24 +1080,51 @@ namespace kio
 
         int ring_fd() const noexcept { return ring_.ring_fd; }
 
-        /// Cross-thread hand-off. The eventfd write is issued unconditionally:
-        /// an unconsumed write only costs one extra loop iteration, whereas
-        /// gating it on a "worker is parking" flag risks losing the wake
-        /// entirely -- that is the store-buffering handshake, and it needs
-        /// seq_cst fences on both sides to be sound. The fences cannot be
-        /// verified under ThreadSanitizer, so the unconditional write is the
-        /// form that stays checkable.
-        void post(detail::TaskPromiseBase* task)
-        {
-            queue_.enqueue(task);
-            wake();
-        }
+        /// -------------------------------------------------------------------
+        /// The cross-thread hand-off.
+        /// -------------------------------------------------------------------
+        ///
+        ///   producer thread                worker thread
+        ///   ---------------                ------------
+        ///   queue_.enqueue(task)  ----.     (parked, bounded by heartbeat)
+        ///                            |
+        ///                            +------> park expires
+        ///                                     next tick(): drain() -> resume
+        ///
+        /// That is the entire protocol. There is no second channel and nothing
+        /// to keep in sync with the worker's state, because the worker cannot
+        /// sleep past its deadline. A task enqueued while the worker is parked is
+        /// simply picked up on the way back -- at worst one heartbeat tick late.
+        ///
+        /// queue_.enqueue()'s release store on prev->next is what makes the task
+        /// visible to the worker's acquire load; see detail/queue.hpp.
+        void post(detail::TaskPromiseBase* task) { queue_.enqueue(task); }
     };
 
     // ============================================================================
     // IoAwaiter Implementation
     // This must be defined after IO is fully defined to avoid incomplete type errors.
     // ============================================================================
+    //
+    // The submission half of the awaiter. Three exits, and the return value is
+    // what distinguishes them -- this is the standard awaiter's contract, and it
+    // is easy to misread here:
+    //
+    //   return h                  RESUME THE CALLER NOW. The coroutine never
+    //                              suspends: await_resume() runs inline, in this
+    //                              same stack frame, with ops_.res already set.
+    //                              Used for both failure paths.
+    //   return noop_coroutine()   SUSPEND. Control goes to the kernel; the CQE
+    //                              handler in tick() is what resumes `h`, later.
+    //
+    // So a failed submission and a successful one share ONE resume path at the
+    // await site: the caller sees a Result either way and has no idea which
+    // happened. There is no separate "did it suspend" branch anywhere.
+    //
+    // INVARIANT: get_sqe() asserts I1 (single issuer) before touching the
+    // ring. Every exit that reaches the ring is therefore owner-thread only --
+    // which is also why the admission-gate load below is safe to keep
+    // unguarded.
     template <typename SetupFunc, typename MapperFunc>
         requires std::invocable<SetupFunc, io_uring_sqe*> && std::invocable<MapperFunc, int32_t>
     template <typename Promise>
@@ -729,12 +1133,21 @@ namespace kio
         // Admission gate: no new operations once stop has been requested.
         // ECANCELED is the same result a cancelled in-flight op receives, so a
         // coroutine unwinding through teardown sees one consistent error.
+        //
+        // This is the second half of teardown's two-part gate (the first is in
+        // schedule()). Without it, a coroutine already queued for shutdown could
+        // submit fresh I/O after drain_until_quiescent() had decided it was
+        // quiescent, and the ring would never come back.
         if (io_.stopping()) [[unlikely]]
         {
             ops_.res = -ECANCELED;
             return h;
         }
 
+        // get_sqe() already tried one submit to make room, so a null here means
+        // the ring is genuinely saturated. Report EAGAIN rather than spinning:
+        // backpressure is the correct answer, and the caller's normal error
+        // handling is far better than a loop that burns the worker trying.
         io_uring_sqe* sqe = io_.get_sqe();
         if (sqe == nullptr)
         {
@@ -744,9 +1157,36 @@ namespace kio
         }
 
         this->ops_.h = h;
+
+        // Ordering: setup_ runs BEFORE user_data is set. Be aware this is
+        // defensive, not currently required -- verified against the liburing
+        // this tree fetches: there is no memset() anywhere in liburing.h, and
+        // none of the prep helpers kio uses (read/write/send/accept/close/
+        // timeout/poll_add/cancel64/read_fixed/write_fixed/readv/writev/
+        // openat/unlinkat/renameat/fsync/fallocate/ftruncate/connect) assign
+        // sqe->user_data. prep_cancel64 looks like the exception but stores its
+        // target in sqe->addr, not sqe->user_data.
+        //
+        // So the reverse order would happen to work today. It is still wrong,
+        // for two reasons:
+        //   * io_uring_get_sqe() returns a RECYCLED SQE -- fields the current
+        //     op does not set keep stale values from a previous one. Depending
+        //     on that is depending on undefined field content.
+        //   * the order silently requires every current AND future prep
+        //     helper to leave user_data alone. Writing it last makes the
+        //     publication correct by construction rather than by inspection of
+        //     a third-party header.
+        // INVARIANT: user_data is the LAST thing written to this SQE.
         setup_(sqe);
+
+        // THE PUBLICATION (invariant I2). This address points into the
+        // coroutine frame that is currently suspended on this very line. The
+        // frame cannot die while it is suspended here, so the kernel always has
+        // somewhere valid to write the result. No registry, no refcount.
         io_uring_sqe_set_data64(sqe, reinterpret_cast<uint64_t>(&ops_));
 
+        // Suspend: from here, this function does not run again until tick()
+        // harvests the CQE, writes ops_.res, and resumes h.
         return std::noop_coroutine();
     }
 
@@ -760,6 +1200,12 @@ namespace kio
         /// while the coroutine it builds has not run yet (initial_suspend is
         /// suspend_always) and still holds the dead closure's `this` -- ASan reported
         /// stack-use-after-scope when it was finally resumed.
+        ///
+        /// `out` and `done` are references into the CALLER's sync_wait frame, not
+        /// into this coroutine's. That is why they stay valid: sync_wait's frame
+        /// is a live stack frame that outlives the tick loop below, whereas a
+        /// capturing lambda's would not. The write of `done = true` is the
+        /// handshake that ends the loop.
         template <typename T>
         Task<void> sync_wait_body(Task<T> t, std::optional<Result<T>>& out, bool& done)
         {
@@ -770,6 +1216,21 @@ namespace kio
     } // namespace detail
 
     /// Testing utility, block a coroutine until it is done
+    ///
+    /// Drives `io` on the CALLING thread until `task` completes, then returns its
+    /// Result. There is no event loop behind this and no other thread: sync_wait
+    /// IS the tick() loop, inline.
+    ///
+    /// INVARIANT: this claims ring ownership for its duration, so it must not
+    /// run concurrently with run_blocking()/run_once() on the same IO. It is the
+    /// "main()" shape: construct the IO, sync_wait, done.
+    ///
+    /// Two subtleties worth naming:
+    ///   * schedule() is called BEFORE owner_thread_ is claimed. That is
+    ///     correct -- schedule() only enqueues, and never touches the ring
+    ///     (see I1).
+    ///   * owner_thread_ is claimed before activate(), because activate()
+    ///     enables the ring that the loop then drives.
     template <typename T>
     Result<T> sync_wait(IO& io, Task<T>&& task)
     {
@@ -784,11 +1245,16 @@ namespace kio
         io.pin_to_cpu();
         io.activate();
 
+        // No stop check and no timeout: this terminates because the coroutine
+        // completes, not because a deadline passes. sync_wait is a testing and
+        // bootstrap utility -- putting a clock on it would only hide a hang.
         while (!done)
         {
             io.tick();
         }
 
+        // INVARIANT: `done` is assigned only after `result` was, so the
+        // dereference cannot hit an empty optional.
         return std::move(*result);
     }
 } // namespace kio

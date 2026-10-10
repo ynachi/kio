@@ -1,4 +1,4 @@
-#include "uring/core/io.h"
+#include "kio/core/io.h"
 
 #include <array>
 #include <atomic>
@@ -11,28 +11,28 @@
 
 #include <unistd.h>
 
-#include "uring/extention/io_pool.hpp"
+#include "kio/extention/io_pool.hpp"
 #include <gtest/gtest.h>
 
 using namespace kio;
 
 namespace
 {
-template <std::size_t N>
-Task<void> record_worker(IO& target, std::array<std::atomic<int>, N>& observed, std::atomic<int>& ran)
-{
-    observed[target.id()].fetch_add(1, std::memory_order_relaxed);
-    ran.fetch_add(1, std::memory_order_acq_rel);
-    co_return {};
-}
+    template <std::size_t N>
+    Task<void> record_worker(IO& target, std::array<std::atomic<int>, N>& observed, std::atomic<int>& ran)
+    {
+        observed[target.id()].fetch_add(1, std::memory_order_relaxed);
+        ran.fetch_add(1, std::memory_order_acq_rel);
+        co_return {};
+    }
 
-template <std::size_t N>
-Task<void> schedule_record_on(IO& target, std::array<std::atomic<int>, N>& observed, std::atomic<int>& ran)
-{
-    target.schedule(record_worker(target, observed, ran));
-    co_return {};
-}
-}  // namespace
+    template <std::size_t N>
+    Task<void> schedule_record_on(IO& target, std::array<std::atomic<int>, N>& observed, std::atomic<int>& ran)
+    {
+        target.schedule(record_worker(target, observed, ran));
+        co_return {};
+    }
+} // namespace
 
 TEST(IoContextRemoteTest, ScheduleRunsOnTargetWorker)
 {
@@ -90,7 +90,7 @@ TEST(IoContextRemoteTest, WorkersCanScheduleOnAnotherWorker)
     // Wait for all tasks to complete
     auto start = std::chrono::steady_clock::now();
     while (ran.load() < static_cast<int>(kWorkers) &&
-           std::chrono::steady_clock::now() - start < std::chrono::seconds(2))
+        std::chrono::steady_clock::now() - start < std::chrono::seconds(2))
     {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
@@ -106,28 +106,28 @@ TEST(IoContextRemoteTest, WorkersCanScheduleOnAnotherWorker)
 
 namespace
 {
-Task<void> read_one(IO& io, Fd& fd, std::span<std::byte> buf, std::atomic<int>& completed)
-{
-    auto res = co_await io.read(fd, buf);
-    if (res)
+    Task<void> read_one(IO& io, Fd& fd, std::span<std::byte> buf, std::atomic<int>& completed)
     {
-        completed.fetch_add(1, std::memory_order_relaxed);
+        auto res = co_await io.read(fd, buf);
+        if (res)
+        {
+            completed.fetch_add(1, std::memory_order_relaxed);
+        }
+        co_return {};
     }
-    co_return {};
-}
-}  // namespace
+} // namespace
 
-// tick() resumes at most kMaxResumesPerTick (128) completions per tick and
-// carries the rest into the next tick. Only real CQ completions can overflow
-// that cap -- the MPSC drain is already bounded by batch_max_size -- so this
-// uses a burst of reads that all complete at once. Every one of them must
-// still run: a dropped remainder would strand those coroutines at final_suspend
-// forever, and a resumed-twice handle is a use-after-free.
-TEST(IOResumeCapTest, CompletionBurstLargerThanResumeCapRunsFully)
+// tick() harvests at most batch_max_size CQEs per pass and leaves the rest in
+// the ring for the next tick. Every one of them must still eventually run: a
+// dropped remainder would strand those coroutines at final_suspend forever, and
+// a resumed-twice handle is a use-after-free. The cap is on the HARVEST, not on
+// the resume loop, so this exercises multi-tick carry-over through the ring.
+TEST(IOResumeCapTest, CompletionBurstLargerThanHarvestCapRunsFully)
 {
     IoOptions opts;
-    // Let one drain hand over more than the resume cap.
-    opts.batch_max_size = 4096;
+    // Cap one harvest far below the burst size, so the surplus must round-trip
+    // through the ring over several ticks rather than all being resumed at once.
+    opts.batch_max_size = 64;
 
     IO io{0, nullptr, opts, std::nullopt};
     std::atomic<int> completed{0};
@@ -164,7 +164,7 @@ TEST(IOResumeCapTest, CompletionBurstLargerThanResumeCapRunsFully)
 
     auto start = std::chrono::steady_clock::now();
     while (completed.load(std::memory_order_relaxed) < static_cast<int>(kReads) &&
-           std::chrono::steady_clock::now() - start < std::chrono::seconds(10))
+        std::chrono::steady_clock::now() - start < std::chrono::seconds(10))
     {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
@@ -210,7 +210,7 @@ TEST(IOResumeCapTest, ConcurrentProducerBurstRunsFully)
 
     auto start = std::chrono::steady_clock::now();
     while (completed.load(std::memory_order_relaxed) < static_cast<int>(kReads) &&
-           std::chrono::steady_clock::now() - start < std::chrono::seconds(10))
+        std::chrono::steady_clock::now() - start < std::chrono::seconds(10))
     {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }

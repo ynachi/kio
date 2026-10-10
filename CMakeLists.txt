@@ -124,7 +124,7 @@ if (KIO_BUILD_DEMOS)
 endif ()
 
 # for benchmarks
-if (KIO_BUILD_BENCHMARK)
+if (KIO_BUILD_BENCH)
     add_subdirectory(benchmarks/cpp)
 endif ()
 

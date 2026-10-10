@@ -38,7 +38,7 @@ namespace kio
             free_slots_.push_back(i - 1);
         }
 
-        void* mapping = ::mmap(
+        void* mapping = mmap(
             nullptr,
             aligned_total_bytes_,
             PROT_READ | PROT_WRITE,
@@ -54,7 +54,7 @@ namespace kio
         base_ = static_cast<std::byte*>(mapping);
 
         // Advise kernel to back the mapping with huge pages
-        (void)::madvise(base_, aligned_total_bytes_, MADV_HUGEPAGE);
+        (void)madvise(base_, aligned_total_bytes_, MADV_HUGEPAGE);
     }
 
     RegisteredBufferPool::~RegisteredBufferPool() noexcept

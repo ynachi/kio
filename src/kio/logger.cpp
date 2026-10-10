@@ -143,4 +143,4 @@ namespace kio::ALOG
             }
         }
     } // namespace detail
-} // namespace URing::ALOG
+} // namespace kio::ALOG

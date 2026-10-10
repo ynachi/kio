@@ -1,7 +1,7 @@
-#include "uring/core/task.hpp"
-#include "uring/extention/io_pool.hpp"
-#include "uring/logger.hpp"
-#include "uring/tcp_listener.hpp"
+#include "kio/core/task.hpp"
+#include "kio/extention/io_pool.hpp"
+#include "kio/logger.hpp"
+#include "kio/tcp_listener.hpp"
 
 #include <atomic>
 #include <charconv>
@@ -86,7 +86,7 @@ Options parse_args(int argc, char** argv)
     return opts;
 }
 
-URing::Task<void> write_all(URing::IO& io, URing::Fd& fd, std::span<const std::byte> data)
+kio::Task<void> write_all(kio::IO& io, kio::Fd& fd, std::span<const std::byte> data)
 {
     while (!data.empty())
     {
@@ -97,14 +97,14 @@ URing::Task<void> write_all(URing::IO& io, URing::Fd& fd, std::span<const std::b
         }
         if (*write_res <= 0)
         {
-            co_return std::unexpected(URing::error_from_errc(std::errc::io_error));
+            co_return kio::Error::fail_errc(std::errc::io_error);
         }
         data = data.subspan(static_cast<size_t>(*write_res));
     }
     co_return {};
 }
 
-URing::Task<void> handle_client(URing::IO& worker, URing::Fd client_fd)
+kio::Task<void> handle_client(kio::IO& worker, kio::Fd client_fd)
 {
     std::byte buf[4096];
     const auto response = std::as_bytes(std::span{kHttpResponse.data(), kHttpResponse.size()});
@@ -130,17 +130,17 @@ URing::Task<void> handle_client(URing::IO& worker, URing::Fd client_fd)
     co_return {};
 }
 
-URing::Task<void> dispatch_accept_loop(URing::IoContext& ctx, URing::IO& dispatcher, uint16_t port,
+kio::Task<void> dispatch_accept_loop(kio::IoContext& ctx, kio::IO& dispatcher, uint16_t port,
                                        std::stop_token st)
 {
-    auto listener = URing::TcpListener::Bind(port, "0.0.0.0", 4096);
+    auto listener = kio::TcpListener::Bind(port, "0.0.0.0", 4096);
     if (!listener)
     {
         std::cerr << "bind failed: " << listener.error().message() << '\n';
         co_return std::unexpected(listener.error());
     }
 
-    URing::Fd server_fd = std::move(*listener);
+    kio::Fd server_fd = std::move(*listener);
     size_t next_worker = 1;
     while (!st.stop_requested())
     {
@@ -156,21 +156,21 @@ URing::Task<void> dispatch_accept_loop(URing::IoContext& ctx, URing::IO& dispatc
 
         const size_t worker_count = ctx.worker_count();
         const size_t target_idx = worker_count > 1 ? 1 + ((next_worker++ - 1) % (worker_count - 1)) : 0;
-        URing::IO& target = ctx.worker(target_idx);
+        kio::IO& target = ctx.worker(target_idx);
         target.schedule(handle_client(target, std::move(*client_res)));
     }
     co_return {};
 }
 
-URing::Task<void> reuseport_accept_loop(URing::IO& worker, uint16_t port, std::stop_token st)
+kio::Task<void> reuseport_accept_loop(kio::IO& worker, uint16_t port, std::stop_token st)
 {
-    auto listener = URing::TcpListener::Bind(port, "0.0.0.0", 4096);
+    auto listener = kio::TcpListener::Bind(port, "0.0.0.0", 4096);
     if (!listener)
     {
         co_return std::unexpected(listener.error());
     }
 
-    URing::Fd server_fd = std::move(*listener);
+    kio::Fd server_fd = std::move(*listener);
     while (!st.stop_requested())
     {
         auto client_res = co_await worker.accept(server_fd);
@@ -197,10 +197,10 @@ int main(int argc, char** argv)
         std::signal(SIGINT, signal_handler);
         std::signal(SIGTERM, signal_handler);
         std::signal(SIGPIPE, SIG_IGN);
-        URing::ALOG::set_level(URing::ALOG::Level::Disabled);
+        kio::ALOG::set_level(kio::ALOG::level::off);
 
         const size_t io_threads = opts.dispatch ? opts.workers + 1 : opts.workers;
-        URing::IoContext ctx(io_threads);
+        kio::IoContext ctx(io_threads);
         const auto st = ctx.stop_token();
 
         if (opts.dispatch)

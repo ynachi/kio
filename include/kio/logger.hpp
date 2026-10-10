@@ -31,7 +31,7 @@ namespace kio::ALOG
     {
         // Mirror of the logger's runtime level, so call sites can skip formatting a
         // message that would be filtered anyway. Written only by set_level().
-        inline std::atomic<std::uint8_t> g_runtime_level{static_cast<std::uint8_t>(level::info)};
+        inline std::atomic g_runtime_level{static_cast<std::uint8_t>(level::info)};
     } // namespace detail
 
     /// True if a message at `value` would currently be emitted. Fatal always is:
@@ -39,7 +39,7 @@ namespace kio::ALOG
     [[nodiscard]] inline bool enabled(const level value) noexcept
     {
         return value == level::fatal ||
-               static_cast<std::uint8_t>(value) >= detail::g_runtime_level.load(std::memory_order_relaxed);
+            static_cast<std::uint8_t>(value) >= detail::g_runtime_level.load(std::memory_order_relaxed);
     }
 
     void set_level(level value) noexcept;
@@ -71,7 +71,7 @@ namespace kio::ALOG
             }
         }
     } // namespace detail
-} // namespace URing::ALOG
+} // namespace kio::ALOG
 
 #define KIO_DETAIL_LOG(LEVEL, ...)                                                                          \
     do {                                                                                                     \

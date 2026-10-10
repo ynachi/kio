@@ -12,6 +12,8 @@
 #include "kio/extention/io_pool.hpp"
 #include "kio/logger.hpp"
 #include "kio/tcp_listener.hpp"
+#include "kio/error.hpp"
+#include "kio/try.hpp"
 
 using namespace kio;
 
@@ -42,13 +44,9 @@ static Task<void> handle_client(IO& worker, Fd client_fd)
 
     while (true)
     {
-        auto read_res = co_await worker.read(client_fd, std::span{buf});
-        if (!read_res)
-        {
-            co_return std::unexpected(read_res.error());
-        }
+        KIO_CO_TRY(read_res, co_await worker.read(client_fd, std::span{buf}));
 
-        if (*read_res == 0)
+        if (read_res == 0)
         {
             break;
         }

@@ -1,4 +1,4 @@
-#include "uring/logger.hpp"
+#include "kio/logger.hpp"
 
 #include <chrono>
 #include <thread>
@@ -56,11 +56,12 @@ int main(int argc, char** argv)
 
 namespace
 {
-int g_format_calls = 0;
-struct CountsFormatting
-{
-};
-}  // namespace
+    int g_format_calls = 0;
+
+    struct CountsFormatting
+    {
+    };
+} // namespace
 
 template <>
 struct std::formatter<CountsFormatting> : std::formatter<int>

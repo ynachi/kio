@@ -97,7 +97,7 @@ An `IO` object exists in three states:
 | State         | Transition             | Action                                                |
 |:--------------|:-----------------------|:------------------------------------------------------|
 | **Inert**     | Constructor / `init()` | `io_uring` created but disabled. **Move is allowed.** |
-| **Activated** | `activate()`           | Ring enabled, `eventfd` armed. **Move is forbidden.** |
+| **Activated** | `activate()`           | Ring enabled. **Move is forbidden.**                |
 | **Running**   | `run_blocking()`       | Loop entering `tick()`. Thread ownership registered.  |
 
 > **Warning**: Moving an `IO` object while it is in the **Running** state will trigger `std::terminate()`. This protects

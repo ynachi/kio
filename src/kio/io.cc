@@ -1,3 +1,27 @@
+// ============================================================================
+// kio::IO -- implementation
+// ============================================================================
+//
+// The invariants I1 (single issuer), I2 (the frame is the operation table) and
+// I3 (the park is bounded), the tick() phase list and the two-phase teardown
+// are all documented in include/kio/core/io.h. Read that header first; this
+// file does not repeat them, it points at them and covers only what is
+// specific to the implementation.
+//
+// INVARIANT ENFORCED THROUGHOUT: everything in here runs on the owner thread
+// EXCEPT the stop callback installed by run_blocking() and the producers that
+// call post(). That is why nearly every field touched below is non-atomic, and
+// why the only atomics in the file are stop_requested_ and the queue's head_.
+//
+// One implementation note worth stating up front, because it looks like a bug
+// otherwise: io_uring_submit_and_wait*() returns the NUMBER OF SQEs THE KERNEL
+// CONSUMED, which is positive on success. Code that writes `if (rc == 0) fail`
+// treats every successful park as an error. Only a negative return is a failure.
+//
+// Also: liburing writes through the cqe_ptr argument unconditionally, so the
+// out-parameter cannot be null even when the caller only cares about the wait.
+// ============================================================================
+
 #include "kio/core/io.h"
 
 #include <algorithm>
@@ -11,8 +35,6 @@
 
 #include <unistd.h>
 
-#include <sys/eventfd.h>
-
 #include "kio/core/awaiter.hpp"
 
 namespace kio
@@ -21,15 +43,29 @@ namespace kio
         : opts_(opts), id_(id)
     {
         opts_.batch_max_size = std::max<std::size_t>(1, opts_.batch_max_size);
+        opts_.heartbeat_interval_us = std::max<std::uint32_t>(1, opts_.heartbeat_interval_us);
+        opts_.max_idle_wait_us = std::max(opts_.max_idle_wait_us, opts_.heartbeat_interval_us);
         local_tasks_.reserve(opts_.entries);
-        current_batch.reserve(kMaxResumesPerTick);
+        current_batch.reserve(opts_.batch_max_size);
+        heartbeat_us_ = opts_.heartbeat_interval_us;
 
         if (pool_cfg.has_value())
         {
             buffer_pool_.emplace(pool_cfg->slot_size, pool_cfg->slots);
+
+            // The pool's backpressure queue has no idea which IO it belongs to,
+            // so it is handed a type-erased resume callback at construction:
+            // when a lease frees a slot, every coroutine waiting on that slot
+            // is queued to be resumed. The queue stores coroutine_handles
+            // rather than promises because the buffer pool is deliberately
+            // unaware of the coroutine machinery -- it only knows "something
+            // is waiting for this slot now".
+            //
+            // The hook is re-installed after a move, because it captures `this`
+            // and the moved-to IO is a different address.
             buffer_pool_->set_reschedule_hook(
                 this,
-                [](void* ctx, std::coroutine_handle<> h) noexcept
+                [](void* ctx, const std::coroutine_handle<> h) noexcept
                 {
                     static_cast<IO*>(ctx)->local_tasks_.push_back(h);
                 });
@@ -46,7 +82,7 @@ namespace kio
     }
 
     IO::IO(IO&& other) noexcept
-        : stop_requested_(other.stop_requested_.load(std::memory_order_seq_cst)),
+        : stop_requested_(other.stop_requested_.load(std::memory_order_acquire)),
           is_activated_(other.is_activated_),
           is_running_(other.is_running_),
           opts_(other.opts_),
@@ -55,8 +91,15 @@ namespace kio
           registered_iovecs_(std::move(other.registered_iovecs_))
     {
         // Safety check, we SHOULD not move a running IO. An activated one is not
-        // inert either: its wake read is still in flight against other.wake_value_,
-        // and completed_count_/armed_wake_reads_ would not travel with the ring.
+        // inert either: its ring has already been handed to the kernel, and any
+        // SQE prepared against it points at the SOURCE object's storage.
+        //
+        // completed_count_ and heartbeat_us_ are deliberately not copied: they
+        // describe a ring's history, and that history does not follow a
+        // byte-copy of the descriptor.
+        //
+        // Everything else here is a genuine transfer: the source is zeroed so
+        // its destructor cannot exit a ring this object now owns.
         if (is_running_ || is_activated_ || !other.queue_.empty() || !other.local_tasks_.empty())
         {
             KIO_LOG_FATAL("FATAL: IO move failed. IO must be inert (not activated, not running, empty) to move.");
@@ -78,12 +121,6 @@ namespace kio
         ring_ = other.ring_;
         std::memset(&other.ring_, 0, sizeof(io_uring));
         other.ring_.ring_fd = -1;
-
-        // Transfer FDs
-        wake_fd_ = std::exchange(other.wake_fd_, -1);
-
-        // Transfer state
-        wake_value_ = other.wake_value_;
     }
 
     void IO::init(const int wq_fd)
@@ -91,6 +128,14 @@ namespace kio
         io_uring_params params{};
 
         // disable the ring first
+        //
+        // IORING_SETUP_R_DISABLED creates a ring that exists but cannot submit.
+        // That gives us a fully-formed io_uring object -- including the wake
+        // fd and the registered buffer pool -- before the owner thread is known
+        // and before we are ready to have SQEs flow. activate() is what enables
+        // it. The buffer registration below is the reason this ordering is
+        // more than tidiness: registering against a live ring would open a
+        // window in which another thread could submit through it.
         params.flags = opts_.flags | IORING_SETUP_R_DISABLED;
 
         // attach WQ
@@ -116,13 +161,6 @@ namespace kio
             throw std::runtime_error(std::format("io_uring_queue_init_params failed: {}", std::strerror(-rc)));
         }
 
-        wake_fd_ = eventfd(0, EFD_CLOEXEC);
-        if (wake_fd_ < 0)
-        {
-            io_uring_queue_exit(&ring_);
-            throw std::runtime_error("eventfd failed");
-        }
-
         // register buffer pool if configured
         if (buffer_pool_.has_value())
         {
@@ -136,8 +174,6 @@ namespace kio
                 KIO_LOG_ERROR("failed to register buffer pool: {}", std::strerror(-ret));
                 io_uring_queue_exit(&ring_);
                 // The constructor is about to throw, so ~IO() will not run.
-                ::close(wake_fd_);
-                wake_fd_ = -1;
                 throw std::runtime_error("io_uring_register_buffers failed");
             }
             KIO_LOG_INFO("Worker {} registered {} MB buffer pool ({} x 1GB chunks)",
@@ -165,99 +201,12 @@ namespace kio
             KIO_LOG_FATAL("io_uring_register failed: {}", std::strerror(-ret));
         }
 
-        // we need to submit a first read, and this is a good place
-        arm_wake_read();
         is_activated_ = true;
-    }
-
-    void IO::submit_or_wait_for(__kernel_timespec* park_timeout)
-    {
-        // Non-blocking flush: push pending SQEs and, under DEFER_TASKRUN, run the
-        // deferred task work that actually posts completions.
-        const auto flush = [this]
-        {
-            const int ret = (opts_.flags & IORING_SETUP_DEFER_TASKRUN)
-                                ? io_uring_submit_and_get_events(&ring_)
-                                : io_uring_submit(&ring_);
-            if (ret < 0 && ret != -EINTR)
-            {
-                KIO_LOG_ERROR("failed to submit: {}", std::strerror(-ret));
-            }
-        };
-
-        // Only block if we have no local work to do.
-        if (io_uring_cq_ready(&ring_) > 0 || !local_tasks_.empty() || !queue_.empty())
-        {
-            flush();
-            return;
-        }
-
-        // Thundering herd mitigation: we recheck every source of work before
-        // parking. Because wake() writes the eventfd unconditionally, a producer
-        // that raced us either already left its token in the eventfd counter
-        // (level triggered, so the park returns at once) or writes it after we
-        // park.
-        //
-        // Two cases must not park without a deadline:
-        //  - stop_requested_: the loop's own stop test has already passed by the
-        //    time we get here, so a stop landing in that window would be slept
-        //    through.
-        //  - no wake read armed: nothing could interrupt the park.
-        // Both flush instead; the loop comes back around and re-evaluates.
-        //
-        // A bounded park (teardown) is always safe: it cannot sleep forever, and it
-        // must actually park, or the drain would spin without ever entering the
-        // kernel to reap completions.
-        const bool may_park = park_timeout != nullptr ||
-            (!stop_requested_.load(std::memory_order_seq_cst) && armed_wake_reads_ > 0);
-        if (!may_park)
-        {
-            flush();
-            return;
-        }
-
-        // Recheck every source of work before parking. Producers enqueue before
-        // wake(), and the armed eventfd read makes any write interrupt the park,
-        // so no cross-thread flag is needed here.
-        if (io_uring_cq_ready(&ring_) > 0 || !local_tasks_.empty() || !queue_.empty())
-        {
-            flush();
-            return;
-        }
-
-        // NOTE: liburing returns the count of SQEs the kernel consumed,
-        // so this is POSITIVE on success -- only negative is an error.
-        int ret = 0;
-        if (park_timeout != nullptr)
-        {
-            // liburing writes through cqe_ptr unconditionally, so this
-            // cannot be null even though we only care about the wait.
-            io_uring_cqe* cqe = nullptr;
-            ret = io_uring_submit_and_wait_timeout(&ring_, &cqe, 1, park_timeout, nullptr);
-        }
-        else
-        {
-            ret = io_uring_submit_and_wait(&ring_, 1);
-        }
-
-        // -ETIME is the bounded park expiring, which is the expected outcome.
-        if (ret < 0 && ret != -EINTR && ret != -ETIME)
-        {
-            KIO_LOG_ERROR("failed to submit and wait: {}", std::strerror(-ret));
-        }
     }
 
     void IO::tick(__kernel_timespec* park_timeout) noexcept
     {
-        // A re-arm skipped because the SQ was full is only retried here: with no
-        // wake read in flight nothing would ever re-arm it, and post()/stop could
-        // no longer interrupt a park.
-        if (armed_wake_reads_ == 0 && is_activated_)
-        {
-            arm_wake_read();
-        }
-
-        // Drain the cross-thread MPSC queue first.
+        // 1. Drain the cross-thread MPSC queue.
         queue_.drain(
             [this](detail::TaskPromiseBase* node)
             {
@@ -266,100 +215,139 @@ namespace kio
             },
             opts_.batch_max_size);
 
-        // wait for completion if needed
-        submit_or_wait_for(park_timeout);
+        // A tick that already has handles staged must not park: step 4 is going
+        // to resume them, and the buffer pool's reschedule hook can leave work
+        // staged there without any I/O in flight to make the wait return early.
+        // Sleeping through it would add a heartbeat of latency to every waiter.
+        // Submitting still has to happen (step 3 can free SQ entries), it just
+        // does not have to wait.
+        const bool has_staged_work = !local_tasks_.empty();
 
-        // Batch process CQEs into the local queue
-        io_uring_cqe* cqe = nullptr;
-        unsigned head = 0;
-        unsigned count = 0;
-
-        io_uring_for_each_cqe(&ring_, head, cqe)
+        // 2. Submit, then park for at most the heartbeat interval. This one
+        // call does both: flushing pushes the SQEs prepared by get_sqe() (under
+        // DEFER_TASKRUN the deferred task work runs here too), and the wait
+        // sleeps in the kernel when there is nothing to reap.
+        //
+        // The park is BOUNDED, and that is what makes this loop simple. A task
+        // enqueued by another thread while we sleep is not a lost wakeup -- the
+        // deadline brings us back and step 1 of the next tick finds it. There is
+        // no wake channel to keep in sync with the worker's state, and therefore
+        // no may_park() and no pre-sleep recheck of every work source.
+        //
+        // liburing returns the number of SQEs the kernel consumed, so this is
+        // POSITIVE on success -- only negative is an error. -ETIME just means
+        // the heartbeat expired with nothing to report, the normal idle path.
+        __kernel_timespec heartbeat{};
+        if (park_timeout == nullptr)
         {
-            count++;
-            auto user_data = io_uring_cqe_get_data64(cqe);
+            heartbeat.tv_sec = 0;
+            heartbeat.tv_nsec = static_cast<long long>(heartbeat_us_) * 1000;
+        }
 
-            if (user_data == kWakeupSentinel)
-            {
-                if (armed_wake_reads_ > 0)
-                {
-                    --armed_wake_reads_;
-                }
-                arm_wake_read();
-            }
-            else if (user_data == kCancelSentinel)
+        // liburing writes through cqe_ptr unconditionally, so it cannot be null
+        // even though we harvest the CQ ourselves below.
+        io_uring_cqe* cqe = nullptr;
+        const int ret =
+            (park_timeout != nullptr)
+                ? io_uring_submit_and_wait_timeout(&ring_, &cqe, 1, park_timeout, nullptr)
+                : (has_staged_work
+                       ? io_uring_submit_and_get_events(&ring_)
+                       : io_uring_submit_and_wait_timeout(&ring_, &cqe, 1, &heartbeat, nullptr));
+
+        // Submit paths return the number of SQEs consumed, positive on success.
+        // The non-blocking flush has no -ETIME of its own, but accepting it here
+        // keeps the one error check below valid for all three.
+        if (ret < 0 && ret != -EINTR && ret != -ETIME)
+        {
+            KIO_LOG_ERROR("failed to submit and wait: {}", std::strerror(-ret));
+        }
+
+        // 3. Harvest the CQ. Every CQE is one of two kinds, told apart purely
+        // by user_data: our own cancel-all, or a pointer into a live coroutine
+        // frame (invariant I2). No registry, no lookup table.
+        //
+        // Capped at batch_max_size. Anything beyond the cap is LEFT IN THE RING
+        // and picked up next tick -- not dropped, and not carried in a side
+        // vector. The CQ tail is sampled once, like io_uring_for_each_cqe()
+        // does, so completions arriving mid-walk are simply the next tick's
+        // business; the kernel fills the slots we release as we advance.
+        unsigned head = 0;
+        unsigned harvested = 0;
+        bool did_work = false;
+
+        const __u32 cq_tail = io_uring_smp_load_acquire(ring_.cq.ktail);
+
+        for (head = *ring_.cq.khead; harvested < opts_.batch_max_size && head != cq_tail; ++head, ++harvested)
+        {
+            cqe = &ring_.cq.cqes[io_uring_cqe_index(&ring_, head, ring_.cq.ring_mask)];
+
+            if (io_uring_cqe_get_data64(cqe) == kCancelSentinel)
             {
                 // res is the number of requests the cancel matched.
+                //
+                // Also not a resume: the operations it cancelled have their own
+                // CQEs, which arrive separately and resume their own coroutines.
                 KIO_LOG_INFO("Worker {} cancelled {} in-flight operation(s)", id_, cqe->res);
             }
             else
             {
-                auto* op = reinterpret_cast<IoOps*>(user_data);
+                // The user case. user_data IS &ops_ inside a coroutine frame
+                // that is suspended right now, so the write below cannot
+                // outlive the storage.
+                auto* op = reinterpret_cast<IoOps*>(io_uring_cqe_get_data64(cqe));
                 op->res = cqe->res;
 
+                // Queue the handle; do NOT resume it inline, because resuming
+                // here would run user code before io_uring_cq_advance() released
+                // these entries -- i.e. with the ring's head still pointing at
+                // them.
                 local_tasks_.push_back(op->h);
             }
+
+            did_work = true;
+        }
+
+        // Hand the harvested slots back to the kernel in one go.
+        if (harvested > 0)
+        {
+            io_uring_cq_advance(&ring_, harvested);
         }
 
         // Every SQE produces exactly one CQE; this is what outstanding_ops()
-        // subtracts from the SQ tail to find work the kernel still owns.
-        completed_count_ += count;
+        // subtracts from the SQ tail to find work the kernel still owns. CQEs we
+        // did not reach are still uncounted, so they correctly still count as
+        // outstanding.
+        completed_count_ += harvested;
 
-        if (count > 0)
-        {
-            // Free all the kernel slots at once
-            io_uring_cq_advance(&ring_, count);
-        }
-
-        // Execute completions, capped per tick. Resuming an unbounded batch let
-        // one large completion burst monopolise the worker: the stop check only
-        // runs between ticks. The remainder carries over instead of being
-        // dropped, so nothing is lost.
+        // 4. Resume. swap() first so local_tasks_ is genuinely empty for the
+        // duration: resuming a coroutine can push new handles onto it (the
+        // buffer pool's reschedule hook, a nested completion), and iterating a
+        // vector that is being appended to is undefined.
+        //
+        // There is no per-tick cap on this loop. The old kMaxResumesPerTick
+        // existed to bound how long one tick could run before the stop check;
+        // the harvest above already bounds that, at batch_max_size.
         if (!local_tasks_.empty())
         {
+            did_work = true;
+
             current_batch.swap(local_tasks_);
 
-            const size_t resume_count = std::min(current_batch.size(), kMaxResumesPerTick);
-            for (size_t i = 0; i < resume_count; ++i)
+            for (const auto handle : current_batch)
             {
-                current_batch[i].resume();
-            }
-
-            if (resume_count < current_batch.size())
-            {
-                // The resumes above consumed the FRONT of the batch, so the
-                // un-started tasks are current_batch[resume_count .. end).
-                // Tasks resumed above may have rescheduled themselves into
-                // local_tasks_, so append the leftovers after those.
-                const auto carried = current_batch.begin() + static_cast<std::ptrdiff_t>(resume_count);
-                local_tasks_.insert(
-                    local_tasks_.end(),
-                    std::make_move_iterator(carried),
-                    std::make_move_iterator(current_batch.end()));
+                handle.resume();
             }
 
             current_batch.clear();
         }
-    }
 
-    void IO::arm_wake_read() noexcept
-    {
-        io_uring_sqe* sqe = get_sqe();
-        if (sqe == nullptr)
-        {
-            // SQ is full. Do not dereference null: skip the re-arm. The eventfd
-            // is level-triggered and keeps its token, so the next completion that
-            // re-arms will pick it up -- the wake is delayed, never lost.
-            KIO_LOG_WARN("SQ ring full, deferring wake-read re-arm");
-            return;
-        }
-
-        io_uring_prep_read(sqe, wake_fd_, &wake_value_, sizeof(wake_value_), 0);
-        io_uring_sqe_set_data64(sqe, kWakeupSentinel);
-        ++armed_wake_reads_;
-        // No io_uring_submit() here: the next submit_or_wait_for() flushes this SQE,
-        // and it always runs before the worker can park. An inline submit cost one
-        // extra enter per wake.
+        // 5. Adaptive heartbeat. A tick that found work parks at the short
+        // interval next time, so cross-thread posts stay responsive under load;
+        // a tick that found nothing backs off towards max_idle_wait_us, so an
+        // idle worker settles into one wakeup per long interval instead of
+        // spinning at the short one.
+        heartbeat_us_ = did_work ? opts_.heartbeat_interval_us
+                                 : std::min(heartbeat_us_ * 2, opts_.max_idle_wait_us);
     }
 
     void IO::run_blocking(std::stop_token st) noexcept
@@ -377,13 +365,11 @@ namespace kio
 
         activate();
 
-        // Publish the flag before waking so the pre-sleep recheck cannot miss it.
-        std::stop_callback wake_on_stop{
-            st, [this]
-            {
-                stop_requested_.store(true, std::memory_order_seq_cst);
-                wake();
-            }
+        // Set the latch the admission gates read. Nothing else: the park is
+        // bounded, so the loop notices this within one heartbeat interval on its
+        // own and there is no wake to send.
+        std::stop_callback latch_on_stop{
+            st, [this] { stop_requested_.store(true, std::memory_order_release); }
         };
         while (!st.stop_requested())
         {
@@ -454,8 +440,25 @@ namespace kio
         // pipeline, so the cancel SQE submitted behind it never executes and
         // the escalation below becomes impossible. The bounded park plus the
         // outstanding_ops() check is what actually detects a stuck operation.
+        //
+        // (Confirmed twice, independently. The first probe was confounded by an
+        // incorrect assumption about what liburing's cancel helper returns, so
+        // it was redone with the return value read directly.)
         const auto deadline = std::chrono::steady_clock::now() +
             std::chrono::milliseconds(opts_.shutdown_grace_ms);
+
+        // WHY THIS TERMINATES, in both phases:
+        //   * phase 1 is bounded by the wall clock -- it cannot outlast the
+        //     deadline regardless of what the kernel is doing.
+        //   * phase 2 is bounded by its own hard_deadline, for the same reason.
+        // There is no unbounded loop anywhere in this function, which is the
+        // whole design constraint: teardown must never be able to wedge a
+        // worker forever on a single stuck read.
+        //
+        // Note both phases rely on the admission gate being closed. If tasks
+        // could still be accepted they could still submit operations, and the
+        // quiescence check would keep failing. See schedule() and
+        // IoAwaiter::await_suspend in io.h.
 
         // Phase 1 -- graceful. Resume anything runnable; when there is nothing
         // runnable but the kernel still owns work, park (bounded) waiting for
@@ -511,6 +514,16 @@ namespace kio
             "IO::get_sqe() called from a non-owner thread; the ring is SINGLE_ISSUER "
             "(check for a missing co_await io.schedule_on(...))");
 
+        // The assert is the real enforcement and it is debug-only. In release
+        // builds a stray non-owner call would not be caught here -- which is
+        // exactly why the transfer is a documented one-way door rather than
+        // something this function tries to detect and recover from. See I1.
+
+        // A full SQ gets exactly one eager submit, not a spin loop: the kernel
+        // may still be holding the SQEs we just flushed, so retrying
+        // immediately would busy-wait on the kernel instead of on our own
+        // progress. If this still returns null the ring is genuinely
+        // saturated and the caller reports EAGAIN as backpressure.
         io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
         if (sqe == nullptr)
         {
@@ -519,30 +532,6 @@ namespace kio
             sqe = io_uring_get_sqe(&ring_);
         }
         return sqe;
-    }
-
-    void IO::wake() const noexcept
-    {
-        // Write unconditionally. Gating this on a "worker is sleeping" flag lost
-        // any wake that arrived before the worker parked -- notably a stop
-        // request, which then wedged the worker in io_uring_submit_and_wait()
-        // forever. The eventfd is level-triggered and accumulates, so an
-        // unconsumed write only costs one extra loop iteration later.
-        constexpr uint64_t one = 1;
-        for (;;)
-        {
-            const ssize_t n = ::write(wake_fd_, &one, sizeof(one));
-            if (n == sizeof(one) || (n == -1 && errno == EAGAIN))
-            {
-                return;
-            }
-            if (n == -1 && errno == EINTR)
-            {
-                continue;
-            }
-            KIO_LOG_WARN("failed to wake io context with eventfd: {}", std::strerror(errno));
-            return;
-        }
     }
 
     void IO::pin_to_cpu() const
@@ -593,12 +582,6 @@ namespace kio
         {
             io_uring_queue_exit(&ring_);
             ring_.ring_fd = -1;
-        }
-
-        if (wake_fd_ >= 0)
-        {
-            ::close(wake_fd_);
-            wake_fd_ = -1;
         }
     }
 } // namespace kio

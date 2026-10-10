@@ -131,4 +131,4 @@ namespace kio
         freeaddrinfo(res);
         return out;
     }
-} // namespace URing
+} // namespace kio

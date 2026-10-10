@@ -42,7 +42,7 @@ t: ## Run tests matching a pattern in the dev build: make t T=context_remote
 
 bench: ## Build the optimized benchmark server (never benchmark a sanitizer build)
 	cmake --preset release && cmake --build --preset release --target kio_http_bench
-	@echo "run: taskset -c 0-3 build/release/kio_http_bench --workers=4 --no-dispatch"
+	@echo "run: taskset -c 0-3 build/release/benchmarks/cpp/kio_http_bench --workers=4 --no-dispatch"
 
 fmt: ## Format every tracked C++ file in place
 	git ls-files '*.cc' '*.cpp' '*.h' '*.hpp' ':!include/libs' ':!external_libraries' | xargs $(CLANG_FORMAT) -i

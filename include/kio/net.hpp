@@ -96,13 +96,13 @@ namespace kio
 
             [[nodiscard]] Result<void> Apply(const int fd) const noexcept
             {
-                int flags = ::fcntl(fd, F_GETFL, 0);
+                int flags = fcntl(fd, F_GETFL, 0);
                 if (flags == -1)
                 {
                     return Error::fail_errno(errno, "fcntl");
                 }
                 flags = enable ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK);
-                if (::fcntl(fd, F_SETFL, flags) == -1)
+                if (fcntl(fd, F_SETFL, flags) == -1)
                 {
                     return Error::fail_errno(errno, "fcntl");
                 }
@@ -180,4 +180,4 @@ namespace kio
     ///   auto addr = ResolveIp("database.local", 5432);
     /// @endcode
     Result<SocketAddress> ResolveIp(std::string_view host, uint16_t port);
-} // namespace URing
+} // namespace kio

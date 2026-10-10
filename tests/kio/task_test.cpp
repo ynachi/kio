@@ -1,4 +1,4 @@
-#include "../../include/uring/core/task.hpp"
+#include "kio/core/task.hpp"
 
 #include <cerrno>
 
@@ -8,56 +8,56 @@ using namespace kio;
 
 namespace
 {
-Task<int> value_task()
-{
-    co_return 42;
-}
-
-Task<int> error_task()
-{
-    co_return kio::Error::fail_errno(EINVAL);
-}
-
-Task<int> await_value_task()
-{
-    auto res = co_await value_task();
-    if (!res)
+    Task<int> value_task()
     {
-        co_return std::unexpected(res.error());
+        co_return 42;
     }
 
-    co_return *res + 1;
-}
-
-Task<int> await_error_task()
-{
-    auto res = co_await error_task();
-    if (!res)
+    Task<int> error_task()
     {
-        co_return std::unexpected(res.error());
+        co_return Error::fail_errno(EINVAL);
     }
 
-    co_return *res;
-}
-
-Task<void> void_error_task()
-{
-    co_return kio::Error::fail_errno(EINVAL);
-}
-
-Task<void> void_value_task()
-{
-    co_return {};
-}
-
-void run_to_completion(auto& task)
-{
-    while (!task.done())
+    Task<int> await_value_task()
     {
-        task.handle_.resume();
+        auto res = co_await value_task();
+        if (!res)
+        {
+            co_return std::unexpected(res.error());
+        }
+
+        co_return *res + 1;
     }
-}
-}  // namespace
+
+    Task<int> await_error_task()
+    {
+        auto res = co_await error_task();
+        if (!res)
+        {
+            co_return std::unexpected(res.error());
+        }
+
+        co_return *res;
+    }
+
+    Task<void> void_error_task()
+    {
+        co_return kio::Error::fail_errno(EINVAL);
+    }
+
+    Task<void> void_value_task()
+    {
+        co_return {};
+    }
+
+    void run_to_completion(auto& task)
+    {
+        while (!task.done())
+        {
+            task.handle_.resume();
+        }
+    }
+} // namespace
 
 TEST(TaskTest, GetReturnsResult)
 {

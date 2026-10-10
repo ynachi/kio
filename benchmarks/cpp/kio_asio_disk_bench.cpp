@@ -22,7 +22,7 @@
 #include <boost/asio/random_access_file.hpp>
 #include <boost/asio/write_at.hpp>
 
-#include "uring/core/io.h"
+#include "kio/core/io.h"
 
 namespace
 {
@@ -129,7 +129,7 @@ void print_result(const BenchResult& r)
     std::cout << r.seconds << "s  " << r.mib_per_sec << " MiB/s\n";
 }
 
-URing::Task<void> kio_write_all(URing::IO& io, URing::Fd& fd, std::span<const std::byte> block, std::uint64_t bytes)
+kio::Task<void> kio_write_all(kio::IO& io, kio::Fd& fd, std::span<const std::byte> block, std::uint64_t bytes)
 {
     std::uint64_t offset = 0;
     while (offset < bytes)
@@ -146,7 +146,7 @@ URing::Task<void> kio_write_all(URing::IO& io, URing::Fd& fd, std::span<const st
         }
         offset += len;
     }
-    co_return URing::Result<void>{};
+    co_return kio::Result<void>{};
 }
 
 BenchResult bench_kio(const Options& opts, const std::vector<std::byte>& block)
@@ -160,11 +160,11 @@ BenchResult bench_kio(const Options& opts, const std::vector<std::byte>& block)
         throw std::runtime_error("open kio file failed: " + std::string(std::strerror(errno)));
     }
 
-    URing::Fd fd{raw_fd};
-    URing::IO io{0};
+    kio::Fd fd{raw_fd};
+    kio::IO io{0};
 
     const auto start = Clock::now();
-    auto res = URing::sync_wait(io, kio_write_all(io, fd, block, opts.bytes));
+    auto res = kio::sync_wait(io, kio_write_all(io, fd, block, opts.bytes));
     const auto end = Clock::now();
     if (!res)
     {
