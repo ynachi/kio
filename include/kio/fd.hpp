@@ -1,5 +1,6 @@
 #pragma once
 #include <unistd.h>
+#include <utility>
 
 #include "error.hpp"
 #include "net.hpp"
@@ -150,14 +151,10 @@ namespace kio::io
         template <SocketOption... Opts>
         [[nodiscard]] Result<void> SetOptions(Opts&&... opts) const noexcept
         {
-            Result<void> r;
-            // Short-circuit on the first failing option. The result must be used,
-            // otherwise -Wunused-value fires under -Werror (clang 20).
-            if (((r = std::forward<Opts>(opts).Apply(fd), r.has_value()) && ...))
-            {
-                return r;
-            }
-            return r;
+            Result<void> result;
+            static_cast<void>(
+                ((result = std::forward<Opts>(opts).Apply(fd), result.has_value()) && ...));
+            return result;
         }
     };
 } // namespace kio::io

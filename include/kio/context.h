@@ -1,20 +1,20 @@
 #pragma once
 
-#include <cassert>
 #include <coroutine>
 #include <cstdlib>
 #include <cstring>
 #include <liburing.h>
-#include <print>
 #include <queue>
 
 #include "buffer_pool.hpp"
 #include "detail/awaitable.h"
+#include "absl/log/check.h"
+#include "absl/log/log.h"
 
 namespace kio
 {
     template <class T>
-    class Task_v2;
+    class Task;
 }
 
 namespace kio::io
@@ -60,17 +60,28 @@ namespace kio::io
 
         void init(const int wq_fd)
         {
+            // PORTABILITY NOTE on flag exclusivity, verified empirically on
+            // kernel 7.0.0-38 (raw io_uring_setup, all combos create and run
+            // ops): SQPOLL+DEFER_TASKRUN and DEFER_TASKRUN-without-
+            // SINGLE_ISSUER are rejected with EINVAL on kernels 5.19-6.x but
+            // accepted on 7.0+. Do not pre-validate these here -- the kernel
+            // is the authority and its error (with the flags printed below)
+            // is the diagnosis. If old-kernel support ever matters, probe at
+            // runtime instead of hardcoding version rules.
             io_uring_params params{};
 
             // disable the ring first
             //
-            // IORING_SETUP_R_DISABLED creates a ring that exists but cannot submit.
-            // That gives us a fully-formed io_uring object -- including the wake
-            // fd and the registered buffer pool -- before the owner thread is known
-            // and before we are ready to have SQEs flow. activate() is what enables
-            // it. The buffer registration below is the reason this ordering is
-            // more than tidiness: registering against a live ring would open a
-            // window in which another thread could submit through it.
+            // IORING_SETUP_R_DISABLED creates a ring that exists but cannot
+            // submit. The reason that matters is issuer identity: with
+            // SINGLE_ISSUER, submit rights are pinned to one thread, and for
+            // a live ring that thread is the one that CREATED it -- the
+            // constructor's thread. Construct-on-main, run-on-worker would
+            // fail on the first submit. A disabled ring instead records the
+            // issuer when it is enabled, which activate() does at the top of
+            // run(), on the thread that will actually drive the loop. It
+            // also gives us a fully-formed object -- wake fd, room for
+            // buffer registration -- before any SQE may flow.
             params.flags = opts_.flags | IORING_SETUP_R_DISABLED;
 
             // attach WQ
@@ -93,13 +104,20 @@ namespace kio::io
 
             if (const int rc = io_uring_queue_init_params(opts_.entries, &ring_, &params); rc < 0)
             {
-                throw std::runtime_error(std::format("io_uring_queue_init_params failed: {}", std::strerror(-rc)));
+                // Flags in hex: flag-pair rejections (e.g. SQPOLL+DEFER_TASKRUN
+                // on kernels 5.19-6.x) are kernel-version-dependent, and the
+                // bare "Invalid argument" names neither knob.
+                throw std::runtime_error(std::format(
+                    "io_uring_queue_init_params failed: {} (flags: {:#x}, entries: {})",
+                    std::strerror(-rc), opts_.flags, opts_.entries));
             }
 
             // TODO: register buffer
 
-            KIO_LOG_INFO("Initialized IO context with {} entries (SQPOLL: {})", opts_.entries,
-                         (opts_.flags & IORING_SETUP_SQPOLL) ? "enabled" : "disabled");
+            LOG(INFO) << "Initialized IO context with " << opts_.entries
+                      << " entries (SQPOLL: "
+                      << (opts_.flags & IORING_SETUP_SQPOLL ? "enabled" : "disabled")
+                      << ")";
         }
 
     public:
@@ -118,7 +136,14 @@ namespace kio::io
 
         ~Context()
         {
-            assert(inflight_ == 0 && "urco: IO destroyed with operations still in flight");
+            // CHECK, not assert: these are exactly the states where
+            // continuing would corrupt or leak, and assert compiles out of
+            // release builds -- this library aborts at the bug site.
+            CHECK(inflight_ == 0) << "Context destroyed with operations still in flight";
+            // run() drains ready_list_ before returning, so this is only
+            // reachable when spawn() was called and run() never ran (or is
+            // not running): the queued frames would leak without this.
+            CHECK(ready_list_.empty()) << "Context destroyed with unstarted work (spawn() without run())";
             io_uring_queue_exit(&ring_);
         }
 
@@ -128,13 +153,17 @@ namespace kio::io
         Context& operator=(Context&&) = delete;
 
         template <class T>
-        void spawn(Task_v2<T> task) noexcept;
+        void spawn(Task<T> task) noexcept;
 
         // Runs until there is no ready coroutine and no in-flight op.
         void run() noexcept
         {
+            // A previous session may have been cut short by cancel_all();
+            // a new run() is a fresh session, so linked-timeout ops report
+            // ETIMEDOUT again instead of cancellation.
+            canceling_all_ = false;
             activate();
-            
+
             for (;;)
             {
                 // Phase 1: resume everything that is ready.
@@ -167,6 +196,19 @@ namespace kio::io
             return buffer_pool_;
         }
 
+        // typically called on teardown
+        void cancel_all() noexcept
+        {
+            // Latched so ops completed by this cancel report cancellation
+            // instead of a bogus ETIMEDOUT (their await_resume cannot tell a
+            // teardown cancel from a fired linked timeout otherwise).
+            // Cleared at the top of the next run().
+            canceling_all_ = true;
+            io_uring_sqe* s = get_sqe();
+            io_uring_prep_cancel64(s, 0, IORING_ASYNC_CANCEL_ALL | IORING_ASYNC_CANCEL_ANY);
+            io_uring_sqe_set_data64(s, IGNORE_TAG);
+        }
+
     private:
         std::queue<std::coroutine_handle<>> ready_list_{}; // Classic data structure
         std::optional<RegisteredBufferPool> buffer_pool_{std::nullopt};
@@ -177,6 +219,13 @@ namespace kio::io
         IoOptions opts_;
         size_t id_;
         bool is_activated_{false};
+        // Set by cancel_all(), read by IoAwaitable::await_resume so ops
+        // canceled by a teardown report -ECANCELED instead of a fake
+        // ETIMEDOUT. Loop-thread contract applies to writes too: cancel_all()
+        // prepares an SQE, so calling it while run() is live on another
+        // thread is the same pre-existing cross-thread hazard as any
+        // submission.
+        bool canceling_all_{false};
 
         //
         // NEW METHODS, v2 migration
@@ -185,14 +234,25 @@ namespace kio::io
         {
             if (io_uring_sq_space_left(&ring_) < reserve)
             {
-                io_uring_submit(&ring_);
+                int r = io_uring_submit(&ring_);
+                if (r == -EBUSY)
+                {
+                    // The CQ ring overflowed: the kernel takes no new work
+                    // until completions are drained. reap() is loop-thread
+                    // state, and the coroutine calling get_sqe is running,
+                    // so its own op cannot appear in the drained batch.
+                    reap();
+                    io_uring_submit(&ring_);
+                }
             }
             io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
 
             if (sqe == nullptr)
             {
-                // queue full after submission is clearly a bug somewhere. Abort
-                std::println(stderr, "urco: submission queue full");
+                // Only reachable if the SQ is genuinely full after the
+                // drain above: reserve larger than the SQ, or a re-entrancy
+                // bug somewhere in the loop.
+                LOG(ERROR) << "urco: submission queue full";
                 std::abort();
             }
 
@@ -204,25 +264,46 @@ namespace kio::io
         void op_finished() noexcept { --inflight_; }
 
         // Queue a coroutine handle to be resumed by the run loop.
-        // Loop-thread only. A node must not be queued twice.
+        // Loop-thread only: ready_list_ is a plain member and every mutator
+        // (post, run, reap) executes on the run-loop thread.
+        //
+        // A node must not be queued twice, and by construction it cannot be:
+        // ops are one-shot and reap() CHECKs each CQE landed on an op still in
+        // flight, set_handle() rejects a second awaiter before any CQE exists,
+        // and spawn() posts a fresh frame every call. The two-op-one-handle
+        // case that WOULD break this (a future when_any handing one handle to
+        // two ops) belongs guarded in that combinator.
         void post(const std::coroutine_handle<> handle) noexcept
         {
+            CHECK(handle.address() != nullptr) << "post of a null coroutine handle";
             // Note: std::queue::push can theoretically throw std::bad_alloc.
-            // If it does, because we are in a noexcept context, it will call std::terminate()
-            // which matches this library's error handling philosophy.
+            // If it does, because we are in a noexcept context, it will call
+            // std::terminate() which matches this library's error handling
+            // philosophy.
             ready_list_.push(handle);
         }
 
         void reap() noexcept
         {
-            io_uring_cqe* cqe;
-            unsigned head, n = 0;
+            io_uring_cqe* cqe = nullptr;
+            unsigned head = 0;
+            unsigned n = 0;
             io_uring_for_each_cqe(&ring_, head, cqe)
             {
                 ++n;
                 const std::uint64_t ud = io_uring_cqe_get_data64(cqe);
                 if (ud & IGNORE_TAG) continue; // link-timeout / cancel CQE
                 auto* op = reinterpret_cast<IoAwaitableBase*>(ud);
+                // A CQE must correspond to an op that was submitted and not
+                // yet completed: Inflight, or Canceled while the cancel is
+                // still traveling. Anything else is a second CQE for an op
+                // that already completed -- ops are one-shot and there is no
+                // multishot, so that would resume the coroutine twice.
+                // Same-batch by construction: the op is alive until its
+                // coroutine resumes, and post() below only queues that.
+                CHECK(op->state == IoAwaitableState::Inflight ||
+                      op->state == IoAwaitableState::Canceled)
+                    << "CQE for an op that is not in flight";
                 op->res = cqe->res;
                 // TODO: I feel like done is not right here
                 if (op->state != IoAwaitableState::Canceled)
@@ -251,16 +332,20 @@ namespace kio::io
         {
             if (is_activated_)
             {
-                KIO_LOG_DEBUG("IO is already activated, this is a noop");
+                LOG(INFO) << "IO is already activated, this is a noop";
                 return;
             }
 
+            // Enables the ring and records THIS thread as the single issuer:
+            // after activate() every submit must come from this thread. It
+            // runs at the top of run(), so the binding is "the thread that
+            // called run() first" -- call run() from one thread only.
             // Not throwing: run_blocking() and run_once() are both noexcept. A ring that
             // cannot be enabled is unusable, so this is logged FATAL (which aborts).
             if (const int ret = io_uring_register(static_cast<unsigned>(ring_.ring_fd),
                                                   IORING_REGISTER_ENABLE_RINGS, nullptr, 0); ret < 0)
             {
-                KIO_LOG_FATAL("io_uring_register failed: {}", std::strerror(-ret));
+                LOG(FATAL) << "io_uring_register failed: " << std::strerror(-ret);
             }
 
             is_activated_ = true;
@@ -285,5 +370,35 @@ namespace kio::io
         }
 
         io_.op_started();
+    }
+
+    template <std::invocable<io_uring_sqe*, __kernel_timespec*> Prep>
+    Result<int> IoAwaitable<Prep>::await_resume() const noexcept
+    {
+        if (res >= 0)
+        {
+            return res;
+        }
+        // TODO: we pay for this if for each non time based ops. Something to do here ?
+        if (res == -ETIME && etime_is_success_)
+        {
+            return 0;
+        }
+        // A fired link-timeout cancels the primary op, which surfaces here as
+        // -ECANCELED with the op still in Done: that IS a timeout. An explicit
+        // cancel(op) marks the op Canceled, and a teardown-wide cancel_all()
+        // latches Context::canceling_all_ -- those are genuine cancellations
+        // and must not masquerade as ETIMEDOUT.
+        if (res == -ECANCELED && link_ts_ && state != IoAwaitableState::Canceled && !io_.canceling_all_)
+        {
+            return Error::fail_errno(ETIMEDOUT, "operation timed out");
+        }
+        if (res == -ECANCELED)
+        {
+            return Error::fail_errno(-res, "operation canceled");
+        }
+        // TODO: if we give a name to the operation, we can use it here. For instance write, read, ...
+        // To do this, we could add a member to the awaitable base and set it on construction
+        return Error::fail_errno(-res, "io operation failed");
     }
 } // namespace kio::io

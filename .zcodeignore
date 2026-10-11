@@ -1,0 +1,17 @@
+# ==========================================
+# JetBrains CLion & CMake Build Cache
+# ==========================================
+.idea/
+.clion.source.upload.marker
+cmake-build-debug/
+cmake-build-release/
+cmake-build-*/
+.cmake/
+CMakeCache.txt
+CMakeFiles/
+.github/
+build/
+.vscode/
+external_libraries/
+Makefile
+*.cbp

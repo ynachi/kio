@@ -201,82 +201,88 @@
 
 #include "kio/context.h"
 #include "kio/operations.h"
-#include "kio/task_v2.h"
+#include "kio/task.h"
 
 using namespace kio;
 using namespace std::chrono_literals;
 
-Task_v2<> handle_client(io::Context& io, io::UniqueFd fd)
+namespace
 {
-    char buf[4096]; // lives in the coroutine frame across every co_await
-    for (;;)
+    constexpr std::string_view kHttpResponse =
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/plain\r\n"
+        "Content-Length: 16\r\n"
+        "Connection: keep-alive\r\n"
+        "\r\n"
+        "Hello, io_uring!";
+
+    Task<> handle_client(io::Context& io, io::UniqueFd fd)
     {
-        auto n = co_await async_recv(io, fd, buf, sizeof buf).timeout(30s);
-        if (!n || *n == 0) break; // error, idle timeout (ETIMEDOUT) or EOF
-        int off = 0;
-        bool ok = true;
-        while (off < *n)
+        char buf[4096]; // lives in the coroutine frame across every co_await
+        for (;;)
         {
-            auto new_len = static_cast<size_t>(*n - off);
-            auto w = co_await async_send(io, fd, buf + off, new_len, MSG_NOSIGNAL);
-            if (!w || *w == 0)
+            auto n = co_await async_recv(io, fd, buf, sizeof buf).timeout(30s);
+            if (!n || *n == 0) break; // error, idle timeout (ETIMEDOUT) or EOF
+            // One response per received request: the loop this replaces was
+            // still bounded by bytes read (echo semantics), so a request
+            // larger than the 62-byte response was answered twice and
+            // desynced the keep-alive connection -- the client drops it and
+            // reconnects, turning steady traffic into ~1000 dials/s churn.
+            auto w = co_await async_send(io, fd, kHttpResponse.data(), kHttpResponse.size(), MSG_NOSIGNAL);
+            if (!w || *w == 0) break;
+        }
+        co_await async_close(io, std::move(fd)); // no op is pending on fd here, so closing is safe
+
+        co_return {};
+    }
+
+    Task<> acceptor(io::Context& io, io::UniqueFd& lfd)
+    {
+        for (;;)
+        {
+            auto c = co_await async_accept(io, lfd);
+            if (!c)
             {
-                ok = false;
-                break;
+                std::println(stderr, "accept: {}", c.error().message());
+                if (c.error().value() == EMFILE || c.error().value() == ENFILE) co_await async_sleep(io, 100ms);
+                continue;
             }
-            off += *w;
+            io.spawn(handle_client(io, io::UniqueFd(*c)));
         }
-        if (!ok) break;
     }
-    co_await async_close(io, std::move(fd)); // no op is pending on fd here, so closing is safe
-}
 
-Task_v2<void> acceptor(io::Context& io, io::UniqueFd& lfd)
-{
-    for (;;)
+    int make_listener(int port)
     {
-        auto c = co_await async_accept(io, lfd);
-        if (!c)
+        int lfd = socket(AF_INET, SOCK_STREAM, 0);
+        int one = 1;
+        setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+        setsockopt(lfd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one);
+        sockaddr_in a{};
+        a.sin_family = AF_INET;
+        a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        a.sin_port = htons(static_cast<uint16_t>(port));
+        if (bind(lfd, reinterpret_cast<sockaddr*>(&a), sizeof a) < 0 || listen(lfd, 128) < 0)
         {
-            std::println(stderr, "accept: {}", c.error().message());
-            if (c.error().value() == EMFILE || c.error().value() == ENFILE) co_await async_sleep(io, 100ms);
-            continue;
+            std::perror("bind/listen");
+            std::exit(1);
         }
-        io.spawn(handle_client(io, io::UniqueFd(*c)));
+        return lfd;
     }
-}
 
-static int make_listener(int port)
-{
-    int lfd = socket(AF_INET, SOCK_STREAM, 0);
-    int one = 1;
-    setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-    setsockopt(lfd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one);
-    sockaddr_in a{};
-    a.sin_family = AF_INET;
-    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    a.sin_port = htons(static_cast<uint16_t>(port));
-    if (bind(lfd, reinterpret_cast<sockaddr*>(&a), sizeof a) < 0 || listen(lfd, 128) < 0)
+    void serve(int port)
     {
-        std::perror("bind/listen");
-        std::exit(1);
+        io::Context io(0); // constructed on the thread that uses it
+        const auto srv_fd = make_listener(port);
+        io::UniqueFd fd(srv_fd);
+        io.spawn(acceptor(io, fd));
+        io.run();
     }
-    return lfd;
-}
-
-static void serve(int port)
-{
-    io::Context io(0); // constructed on the thread that uses it
-    auto srv_fd = make_listener(port);
-    io::UniqueFd fd(srv_fd);
-    io.spawn(acceptor(io, fd));
-    io.run();
-}
+} // namespace
 
 int main(int argc, char** argv)
 {
     int port = argc > 1 ? std::atoi(argv[1]) : 8080;
-    int threads = argc > 2 ? std::atoi(argv[2]) : 1;
+    int threads = argc > 2 ? std::atoi(argv[2]) : 4;
     std::println("echo listening on 127.0.0.1:{} with {} thread(s)", port, threads);
     std::fflush(stdout);
     std::vector<std::thread> ts;

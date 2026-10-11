@@ -7,6 +7,7 @@
 #include <linux/time_types.h>
 
 #include "kio/error.hpp"
+#include "absl/log/check.h"
 
 namespace kio::io
 {
@@ -29,7 +30,15 @@ namespace kio::io
         // TODO: maybe do have an enum for the state
         IoAwaitableState state{IoAwaitableState::Created};
 
-        void set_handle(const std::coroutine_handle<> h) noexcept { handle = h; }
+        // Ops are one-shot. A second await_suspend would overwrite the first
+        // waiter's continuation (a lost wakeup) and submit a second kernel op
+        // whose CQE posts the same handle again -- the double-post the Context
+        // queue guard aborts on. Fail here, at the await site, instead.
+        void set_handle(const std::coroutine_handle<> h) noexcept
+        {
+            CHECK(!handle) << "IoAwaitable awaited twice";
+            handle = h;
+        }
 
         void switch_state(const IoAwaitableState val) noexcept
         {
@@ -70,25 +79,8 @@ namespace kio::io
 
         void await_suspend(std::coroutine_handle<> h) noexcept;
 
-        Result<int> await_resume() const noexcept
-        {
-            if (res >= 0)
-            {
-                return res;
-            }
-            // TODO: we pay for this if for each non time based ops. Something to do here ?
-            if (res == -ETIME && etime_is_success_)
-            {
-                return 0;
-            }
-            if (res == -ECANCELED && link_ts_ && state != IoAwaitableState::Canceled)
-            {
-                return Error::fail_errno(ETIMEDOUT, "coroutine canceled");
-            }
-            // TODO: if we give a name to the operation, we can use it here. For instance write, read, ...
-            // To do this, we could add a member to the awaitable base and set it on construction
-            return Error::fail_errno(-res, "io operation failed");
-        }
+        // Defined in context.h: needs the complete Context (canceling_all_).
+        Result<int> await_resume() const noexcept;
 
     private:
         Context& io_;

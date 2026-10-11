@@ -8,13 +8,16 @@
 
 namespace kio::io
 {
-    inline auto async_read(Context& io, UniqueFd& fd, void* buf, const unsigned len)
+    inline auto async_read(Context& io, UniqueFd& fd, void* buf, const unsigned len,
+                           const std::uint64_t off = ~0ULL) noexcept
     {
         return IoAwaitable{
             io,
             [=, &fd](io_uring_sqe* sqe, __kernel_timespec*)
             {
-                io_uring_prep_read(sqe, fd.get(), buf, len, 0);
+                // ~0ULL means "current file position, then advance" -- same
+                // default as async_write, so sequential reads work.
+                io_uring_prep_read(sqe, fd.get(), buf, len, off);
             },
             false
         };

@@ -18,6 +18,7 @@ function(kio_configure_dependencies)
         set(MI_BUILD_SHARED OFF CACHE BOOL "" FORCE)
         set(MI_BUILD_OBJECT OFF CACHE BOOL "" FORCE)
         FetchContent_Declare(mimalloc
+                SYSTEM
                 GIT_REPOSITORY https://github.com/microsoft/mimalloc.git
                 GIT_TAG v3.3.2 GIT_SHALLOW ON)
         FetchContent_MakeAvailable(mimalloc)
@@ -62,20 +63,6 @@ function(kio_configure_dependencies)
     endif ()
 
     #
-    # SPDLOG
-    #
-    set(SPDLOG_BUILD_EXAMPLE OFF CACHE BOOL "" FORCE)
-    set(SPDLOG_BUILD_SHARED OFF CACHE BOOL "" FORCE)
-    set(SPDLOG_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-    set(SPDLOG_FMT_EXTERNAL OFF CACHE BOOL "" FORCE)
-    FetchContent_Declare(
-            spdlog
-            GIT_REPOSITORY https://github.com/gabime/spdlog.git
-            GIT_TAG v1.17.0
-            GIT_SHALLOW TRUE)
-    FetchContent_MakeAvailable(spdlog)
-
-    #
     # CRC32
     #
     if (KIO_BUILD_BITCASK)
@@ -84,6 +71,7 @@ function(kio_configure_dependencies)
         set(CRC32C_USE_GLOG OFF CACHE BOOL "" FORCE)
         FetchContent_Declare(
                 crc32c
+                SYSTEM
                 GIT_REPOSITORY https://github.com/google/crc32c.git
                 GIT_TAG 1.1.2
                 GIT_SHALLOW TRUE)
@@ -102,6 +90,7 @@ function(kio_configure_dependencies)
         set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
         FetchContent_Declare(
                 googletest
+                SYSTEM
                 GIT_REPOSITORY https://github.com/google/googletest.git
                 GIT_TAG v1.17.0
                 GIT_SHALLOW TRUE)
@@ -111,24 +100,23 @@ function(kio_configure_dependencies)
     #
     # ABSEIL
     #
-    if (KIO_BUILD_BITCASK)
-        message(STATUS "Setting up Google Abseil")
+    message(STATUS "Setting up Google Abseil")
 
-        FetchContent_Declare(
-                abseil-cpp
-                GIT_REPOSITORY https://github.com/abseil/abseil-cpp.git
-                GIT_TAG 20260107.1
-                EXCLUDE_FROM_ALL                  # Don't build Abseil's tests/docs by default
-        )
+    FetchContent_Declare(
+            abseil-cpp
+            SYSTEM
+            GIT_REPOSITORY https://github.com/abseil/abseil-cpp.git
+            GIT_TAG 20260107.1
+            EXCLUDE_FROM_ALL                  # Don't build Abseil's tests/docs by default
+    )
 
-        # Configure Abseil build options BEFORE MakeAvailable
-        set(ABSL_BUILD_TESTING OFF CACHE BOOL "Build Abseil tests" FORCE)
-        set(ABSL_BUILD_DOCS OFF CACHE BOOL "Build Abseil docs" FORCE)
-        set(ABSL_USE_EXTERNAL_GOOGLETEST ON CACHE BOOL "Use system googletest if needed" FORCE)
-        set(ABSL_ENABLE_INSTALL OFF CACHE BOOL "Don't install Abseil" FORCE)  # Optional
+    # Configure Abseil build options BEFORE MakeAvailable
+    set(ABSL_BUILD_TESTING OFF CACHE BOOL "Build Abseil tests" FORCE)
+    set(ABSL_BUILD_DOCS OFF CACHE BOOL "Build Abseil docs" FORCE)
+    set(ABSL_USE_EXTERNAL_GOOGLETEST ON CACHE BOOL "Use system googletest if needed" FORCE)
+    set(ABSL_ENABLE_INSTALL OFF CACHE BOOL "Don't install Abseil" FORCE)  # Optional
 
-        FetchContent_MakeAvailable(abseil-cpp)
-    endif ()
+    FetchContent_MakeAvailable(abseil-cpp)
 
     #
     # BENCHMARK
@@ -139,6 +127,7 @@ function(kio_configure_dependencies)
         set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
         FetchContent_Declare(
                 benchmark
+                SYSTEM
                 GIT_REPOSITORY https://github.com/google/benchmark.git
                 GIT_TAG v1.9.5
                 GIT_SHALLOW TRUE)
@@ -146,6 +135,7 @@ function(kio_configure_dependencies)
 
         FetchContent_Declare(
                 photon
+                SYSTEM
                 GIT_REPOSITORY https://github.com/ynachi/PhotonLibOS.git
                 GIT_TAG main
         )
