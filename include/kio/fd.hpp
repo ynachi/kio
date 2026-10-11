@@ -4,8 +4,75 @@
 #include "error.hpp"
 #include "net.hpp"
 
-namespace kio
+namespace kio::io
 {
+    class UniqueFd
+    {
+    public:
+        using Closer = void (*)(int) noexcept;
+
+        static void default_closer(const int fd) noexcept
+        {
+            if (fd >= 0) ::close(fd);
+        }
+
+        static void noop_closer(int) noexcept
+        {
+        }
+
+    private:
+        int fd_ = -1;
+        Closer closer_ = default_closer;
+
+    public:
+        UniqueFd() noexcept = default;
+
+        explicit UniqueFd(const int fd, const Closer closer = default_closer) noexcept
+            : fd_(fd), closer_(closer)
+        {
+        }
+
+        UniqueFd(const UniqueFd&) = delete;
+        UniqueFd& operator=(const UniqueFd&) = delete;
+
+        UniqueFd(UniqueFd&& other) noexcept
+            : fd_(std::exchange(other.fd_, -1)),
+              closer_(std::exchange(other.closer_, default_closer))
+        {
+        }
+
+        UniqueFd& operator=(UniqueFd&& other) noexcept
+        {
+            if (this != &other)
+            {
+                reset();
+                fd_ = std::exchange(other.fd_, -1);
+                closer_ = std::exchange(other.closer_, default_closer);
+            }
+            return *this;
+        }
+
+        ~UniqueFd() { reset(); }
+
+        [[nodiscard]] int get() const noexcept { return fd_; }
+
+        [[nodiscard]] bool valid() const noexcept { return fd_ >= 0; }
+
+        void reset(const int fd = -1, Closer closer = default_closer) noexcept
+        {
+            if (fd_ == fd && closer_ == closer) return;
+            if (fd_ >= 0 && closer_) closer_(fd_);
+            fd_ = fd;
+            closer_ = closer;
+        }
+
+        int release() noexcept
+        {
+            closer_ = default_closer;
+            return std::exchange(fd_, -1);
+        }
+    };
+
     struct Fd
     {
         int fd = -1;
@@ -93,4 +160,4 @@ namespace kio
             return r;
         }
     };
-} // namespace kio
+} // namespace kio::io

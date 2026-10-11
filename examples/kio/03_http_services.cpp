@@ -1,186 +1,286 @@
-// curl -v http://127.0.0.1:8080/
-// curl -v --http1.1 -H 'Connection: close' http://127.0.0.1:8080/
-//  printf 'GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n' | nc 127.0.0.1 8080
+// // curl -v http://127.0.0.1:8080/
+// // curl -v --http1.1 -H 'Connection: close' http://127.0.0.1:8080/
+// //  printf 'GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n' | nc 127.0.0.1 8080
+//
+// #include <chrono>
+// #include <csignal>
+// #include <iostream>
+// #include <string_view>
+// #include <thread>
+//
+// #include "kio/core/task.hpp"
+// #include "kio/extention/io_pool.hpp"
+// #include "kio/logger.hpp"
+// #include "kio/tcp_listener.hpp"
+// #include "kio/error.hpp"
+// #include "kio/try.hpp"
+//
+// using namespace kio;
+//
+// namespace
+// {
+//     constexpr bool kUseRemoteDispatch = true;
+//     volatile std::sig_atomic_t g_stop_requested = 0;
+//
+//     void signal_handler(int)
+//     {
+//         g_stop_requested = 1;
+//     }
+// } // namespace
+//
+// // A static, valid HTTP/1.1 response with keep-alive
+// constexpr std::string_view kHttpResponse =
+//     "HTTP/1.1 200 OK\r\n"
+//     "Content-Type: text/plain\r\n"
+//     "Content-Length: 16\r\n"
+//     "Connection: keep-alive\r\n"
+//     "\r\n"
+//     "Hello, io_uring!";
+//
+// // Handle a single client connection
+// static Task<void> handle_client(IO& worker, Fd client_fd)
+// {
+//     std::byte buf[1024];
+//
+//     while (true)
+//     {
+//         KIO_CO_TRY(read_res, co_await worker.read(client_fd, std::span{buf}));
+//
+//         if (read_res == 0)
+//         {
+//             break;
+//         }
+//
+//         std::span out_buf(reinterpret_cast<const std::byte*>(kHttpResponse.data()), kHttpResponse.size());
+//
+//         auto write_res = co_await worker.write(client_fd, out_buf);
+//         if (!write_res)
+//         {
+//             co_return std::unexpected(write_res.error());
+//         }
+//
+//         if (*write_res == 0)
+//         {
+//             break;
+//         }
+//     }
+//     co_return {};
+// }
+//
+// // Accept incoming connections on a single worker.
+// // Selected by kUseRemoteDispatch at compile time; the unused branch is kept
+// // readable but must not trip -Werror,-Wunneeded-internal-declaration.
+// [[maybe_unused]] static Task<void> server_loop(IO& worker, uint16_t port, std::stop_token st)
+// {
+//     auto listener = TcpListener::Bind(port, "0.0.0.0", 4096);
+//     if (!listener)
+//     {
+//         std::cerr << "[Worker " << worker.id() << "] Failed to bind: " << listener.error().message() << "\n";
+//         co_return std::unexpected(listener.error());
+//     }
+//
+//     std::cout << "[Worker " << worker.id() << "] Listening on http://0.0.0.0:" << port << "\n";
+//
+//     Fd server_fd = std::move(*listener);
+//
+//     while (!st.stop_requested())
+//     {
+//         auto client_res = co_await worker.accept(server_fd);
+//         if (!client_res)
+//         {
+//             co_return std::unexpected(client_res.error());
+//         }
+//
+//         // Schedule the client handler on the same worker
+//         worker.schedule(handle_client(worker, std::move(*client_res)));
+//     }
+//     co_return {};
+// }
+//
+// // Accept connections on one worker and dispatch to others
+// static Task<void> dispatching_server_loop(IoContext& ctx, IO& dispatcher, uint16_t port, std::stop_token st)
+// {
+//     auto listener = TcpListener::Bind(port, "0.0.0.0", 4096);
+//     if (!listener)
+//     {
+//         std::cerr << "[Dispatcher] Failed to bind: " << listener.error().message() << "\n";
+//         co_return std::unexpected(listener.error());
+//     }
+//
+//     std::cout << "[Dispatcher] Listening on http://0.0.0.0:" << port << " and dispatching to " << ctx.worker_count() - 1
+//         << " workers.\n";
+//
+//     Fd server_fd = std::move(*listener);
+//     std::size_t next_worker = 1;
+//
+//     while (!st.stop_requested())
+//     {
+//         auto client_res = co_await dispatcher.accept(server_fd);
+//         if (!client_res)
+//         {
+//             co_return std::unexpected(client_res.error());
+//         }
+//
+//         const std::size_t worker_count = ctx.worker_count();
+//         // Dispatch to workers 1..N (round-robin)
+//         const std::size_t target_idx = worker_count > 1 ? 1 + ((next_worker++ - 1) % (worker_count - 1)) : 0;
+//
+//         IO& target = ctx.worker(target_idx);
+//
+//         // Option 1: Direct scheduling on target worker (Thread-safe)
+//         target.schedule(handle_client(target, std::move(*client_res)));
+//
+//         /*
+//         // Option 2: Using TransferTo (Demonstration)
+//         usage: co_await io.schedule_on(other);
+//         */
+//     }
+//     co_return {};
+// }
+//
+// int main()
+// {
+//     kio::ALOG::set_level(ALOG::level::debug);
+//
+//     std::signal(SIGINT, signal_handler);
+//     std::signal(SIGTERM, signal_handler);
+//
+//     size_t num_threads = 4;
+//     if constexpr (kUseRemoteDispatch)
+//     {
+//         num_threads += 1; // 1 dispatcher + 4 workers
+//     }
+//
+//     // New decentralized architecture: workers start themselves in the constructor
+//     IoOptions opts;
+//     IoContext ctx(num_threads, opts);
+//     constexpr uint16_t port = 8080;
+//
+//     auto st = ctx.stop_token();
+//
+//     if constexpr (kUseRemoteDispatch)
+//     {
+//         // Start dispatcher on worker 0
+//         ctx.worker(0).schedule(dispatching_server_loop(ctx, ctx.worker(0), port, st));
+//     }
+//     else
+//     {
+//         // Parallel accept on all workers (SO_REUSEPORT)
+//         for (std::size_t i = 0; i < num_threads; ++i)
+//         {
+//             ctx.worker(i).schedule(server_loop(ctx.worker(i), port, st));
+//         }
+//     }
+//
+//     std::cout << "HTTP Server running. Press Ctrl+C to stop.\n";
+//
+//     while (g_stop_requested == 0)
+//     {
+//         std::this_thread::sleep_for(std::chrono::milliseconds(200));
+//     }
+//
+//     ctx.join();
+//
+//     std::cout << "Server shutdown complete. Goodbye!\n";
+//     return 0;
+// }
 
-#include <chrono>
-#include <csignal>
-#include <iostream>
-#include <string_view>
+// Echo server on uring_co.hpp. Usage: ./echo [port] [threads]   (defaults: 9000, 1)
+// Each thread owns its IO and its own SO_REUSEPORT listening socket; the kernel spreads
+// connections across them, so no state is shared between threads.
+// Idle connections are dropped after 30 s via a linked timeout.
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <unistd.h>
+
+#include <cerrno>
+#include <cstring>
+#include <print>
 #include <thread>
+#include <vector>
 
-#include "kio/core/task.hpp"
-#include "kio/extention/io_pool.hpp"
-#include "kio/logger.hpp"
-#include "kio/tcp_listener.hpp"
-#include "kio/error.hpp"
-#include "kio/try.hpp"
+#include "kio/context.h"
+#include "kio/operations.h"
+#include "kio/task_v2.h"
 
 using namespace kio;
+using namespace std::chrono_literals;
 
-namespace
+Task_v2<> handle_client(io::Context& io, io::UniqueFd fd)
 {
-    constexpr bool kUseRemoteDispatch = true;
-    volatile std::sig_atomic_t g_stop_requested = 0;
-
-    void signal_handler(int)
+    char buf[4096]; // lives in the coroutine frame across every co_await
+    for (;;)
     {
-        g_stop_requested = 1;
+        auto n = co_await async_recv(io, fd, buf, sizeof buf).timeout(30s);
+        if (!n || *n == 0) break; // error, idle timeout (ETIMEDOUT) or EOF
+        int off = 0;
+        bool ok = true;
+        while (off < *n)
+        {
+            auto new_len = static_cast<size_t>(*n - off);
+            auto w = co_await async_send(io, fd, buf + off, new_len, MSG_NOSIGNAL);
+            if (!w || *w == 0)
+            {
+                ok = false;
+                break;
+            }
+            off += *w;
+        }
+        if (!ok) break;
     }
-} // namespace
-
-// A static, valid HTTP/1.1 response with keep-alive
-constexpr std::string_view kHttpResponse =
-    "HTTP/1.1 200 OK\r\n"
-    "Content-Type: text/plain\r\n"
-    "Content-Length: 16\r\n"
-    "Connection: keep-alive\r\n"
-    "\r\n"
-    "Hello, io_uring!";
-
-// Handle a single client connection
-static Task<void> handle_client(IO& worker, Fd client_fd)
-{
-    std::byte buf[1024];
-
-    while (true)
-    {
-        KIO_CO_TRY(read_res, co_await worker.read(client_fd, std::span{buf}));
-
-        if (read_res == 0)
-        {
-            break;
-        }
-
-        std::span out_buf(reinterpret_cast<const std::byte*>(kHttpResponse.data()), kHttpResponse.size());
-
-        auto write_res = co_await worker.write(client_fd, out_buf);
-        if (!write_res)
-        {
-            co_return std::unexpected(write_res.error());
-        }
-
-        if (*write_res == 0)
-        {
-            break;
-        }
-    }
-    co_return {};
+    co_await async_close(io, std::move(fd)); // no op is pending on fd here, so closing is safe
 }
 
-// Accept incoming connections on a single worker.
-// Selected by kUseRemoteDispatch at compile time; the unused branch is kept
-// readable but must not trip -Werror,-Wunneeded-internal-declaration.
-[[maybe_unused]] static Task<void> server_loop(IO& worker, uint16_t port, std::stop_token st)
+Task_v2<void> acceptor(io::Context& io, io::UniqueFd& lfd)
 {
-    auto listener = TcpListener::Bind(port, "0.0.0.0", 4096);
-    if (!listener)
+    for (;;)
     {
-        std::cerr << "[Worker " << worker.id() << "] Failed to bind: " << listener.error().message() << "\n";
-        co_return std::unexpected(listener.error());
-    }
-
-    std::cout << "[Worker " << worker.id() << "] Listening on http://0.0.0.0:" << port << "\n";
-
-    Fd server_fd = std::move(*listener);
-
-    while (!st.stop_requested())
-    {
-        auto client_res = co_await worker.accept(server_fd);
-        if (!client_res)
+        auto c = co_await async_accept(io, lfd);
+        if (!c)
         {
-            co_return std::unexpected(client_res.error());
+            std::println(stderr, "accept: {}", c.error().message());
+            if (c.error().value() == EMFILE || c.error().value() == ENFILE) co_await async_sleep(io, 100ms);
+            continue;
         }
-
-        // Schedule the client handler on the same worker
-        worker.schedule(handle_client(worker, std::move(*client_res)));
+        io.spawn(handle_client(io, io::UniqueFd(*c)));
     }
-    co_return {};
 }
 
-// Accept connections on one worker and dispatch to others
-static Task<void> dispatching_server_loop(IoContext& ctx, IO& dispatcher, uint16_t port, std::stop_token st)
+static int make_listener(int port)
 {
-    auto listener = TcpListener::Bind(port, "0.0.0.0", 4096);
-    if (!listener)
+    int lfd = socket(AF_INET, SOCK_STREAM, 0);
+    int one = 1;
+    setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    setsockopt(lfd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one);
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    a.sin_port = htons(static_cast<uint16_t>(port));
+    if (bind(lfd, reinterpret_cast<sockaddr*>(&a), sizeof a) < 0 || listen(lfd, 128) < 0)
     {
-        std::cerr << "[Dispatcher] Failed to bind: " << listener.error().message() << "\n";
-        co_return std::unexpected(listener.error());
+        std::perror("bind/listen");
+        std::exit(1);
     }
-
-    std::cout << "[Dispatcher] Listening on http://0.0.0.0:" << port << " and dispatching to " << ctx.worker_count() - 1
-        << " workers.\n";
-
-    Fd server_fd = std::move(*listener);
-    std::size_t next_worker = 1;
-
-    while (!st.stop_requested())
-    {
-        auto client_res = co_await dispatcher.accept(server_fd);
-        if (!client_res)
-        {
-            co_return std::unexpected(client_res.error());
-        }
-
-        const std::size_t worker_count = ctx.worker_count();
-        // Dispatch to workers 1..N (round-robin)
-        const std::size_t target_idx = worker_count > 1 ? 1 + ((next_worker++ - 1) % (worker_count - 1)) : 0;
-
-        IO& target = ctx.worker(target_idx);
-
-        // Option 1: Direct scheduling on target worker (Thread-safe)
-        target.schedule(handle_client(target, std::move(*client_res)));
-
-        /*
-        // Option 2: Using TransferTo (Demonstration)
-        usage: co_await io.schedule_on(other);
-        */
-    }
-    co_return {};
+    return lfd;
 }
 
-int main()
+static void serve(int port)
 {
-    kio::ALOG::set_level(ALOG::level::debug);
+    io::Context io(0); // constructed on the thread that uses it
+    auto srv_fd = make_listener(port);
+    io::UniqueFd fd(srv_fd);
+    io.spawn(acceptor(io, fd));
+    io.run();
+}
 
-    std::signal(SIGINT, signal_handler);
-    std::signal(SIGTERM, signal_handler);
-
-    size_t num_threads = 4;
-    if constexpr (kUseRemoteDispatch)
-    {
-        num_threads += 1; // 1 dispatcher + 4 workers
-    }
-
-    // New decentralized architecture: workers start themselves in the constructor
-    IoOptions opts;
-    IoContext ctx(num_threads, opts);
-    constexpr uint16_t port = 8080;
-
-    auto st = ctx.stop_token();
-
-    if constexpr (kUseRemoteDispatch)
-    {
-        // Start dispatcher on worker 0
-        ctx.worker(0).schedule(dispatching_server_loop(ctx, ctx.worker(0), port, st));
-    }
-    else
-    {
-        // Parallel accept on all workers (SO_REUSEPORT)
-        for (std::size_t i = 0; i < num_threads; ++i)
-        {
-            ctx.worker(i).schedule(server_loop(ctx.worker(i), port, st));
-        }
-    }
-
-    std::cout << "HTTP Server running. Press Ctrl+C to stop.\n";
-
-    while (g_stop_requested == 0)
-    {
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    }
-
-    ctx.join();
-
-    std::cout << "Server shutdown complete. Goodbye!\n";
-    return 0;
+int main(int argc, char** argv)
+{
+    int port = argc > 1 ? std::atoi(argv[1]) : 8080;
+    int threads = argc > 2 ? std::atoi(argv[2]) : 1;
+    std::println("echo listening on 127.0.0.1:{} with {} thread(s)", port, threads);
+    std::fflush(stdout);
+    std::vector<std::thread> ts;
+    for (int i = 1; i < threads; ++i) ts.emplace_back(serve, port);
+    serve(port);
+    for (auto& t : ts) t.join();
 }

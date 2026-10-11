@@ -71,7 +71,7 @@ include_directories(${CMAKE_SOURCE_DIR})
 # Library definition
 add_library(uring
         src/kio/logger.cpp
-        src/kio/io.cc
+        #        src/kio/io.cc
         src/kio/net.cc
         src/kio/tcp_listener.cc
         src/kio/buffer_pool.cc

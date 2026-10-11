@@ -4,7 +4,7 @@
 
 namespace kio
 {
-    Result<Fd> TcpListener::Bind(const SocketAddress& addr, int backlog)
+    Result<io::Fd> TcpListener::Bind(const SocketAddress& addr, int backlog)
     {
         // Create the raw socket
         const int raw_fd = ::socket(addr.addr.ss_family, SOCK_STREAM | SOCK_CLOEXEC, 0);
@@ -14,7 +14,7 @@ namespace kio
         }
 
         // Immediately wrap in your RAII Fd primitive
-        Fd sock{raw_fd};
+        io::Fd sock{raw_fd};
 
         // Reuse your variadic SetOptions!
         // Note: TCP_NODELAY set on a listening socket is inherited by accepted clients in Linux.
@@ -40,7 +40,7 @@ namespace kio
         return sock;
     }
 
-    Result<Fd> TcpListener::Bind(const uint16_t port, const char* ip, const int backlog)
+    Result<io::Fd> TcpListener::Bind(const uint16_t port, const char* ip, const int backlog)
     {
         const bool v6 = ip != nullptr && std::string_view(ip).find(':') != std::string_view::npos;
         auto addr = v6 ? SocketAddress::V6(port, ip) : SocketAddress::V4(port, ip);
@@ -51,4 +51,4 @@ namespace kio
 
         return Bind(*addr, backlog);
     }
-} // namespace URing
+} // namespace kio

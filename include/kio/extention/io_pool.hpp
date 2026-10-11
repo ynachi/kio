@@ -31,7 +31,7 @@
 //                     destroyed while a thread is still running its loop.
 // ============================================================================
 
-#include "kio/core/io.h"
+#include "../core/io.h"
 
 namespace kio
 {
