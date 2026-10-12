@@ -114,7 +114,7 @@ namespace kio::io
     // EPIPE completion the caller can handle. No offset: sockets are not
     // written positionally.
     inline auto async_send(Context& io, UniqueFd& fd, std::span<const std::byte> buf,
-                           int flags = 0) noexcept
+                           const int flags = 0) noexcept
     {
         return IoAwaitable{
             io,

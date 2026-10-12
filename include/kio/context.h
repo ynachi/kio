@@ -18,6 +18,12 @@ namespace kio
     class Task;
 }
 
+namespace kio
+{
+    class Baton;
+    class Semaphore;
+}
+
 namespace kio::io
 {
     struct IoAwaitableBase;
@@ -56,6 +62,9 @@ namespace kio::io
         friend class IoAwaitable;
 
         friend void cancel(Context&, IoAwaitableBase&) noexcept;
+
+        friend class kio::Baton;
+        friend class kio::Semaphore;
 
 
         int ring_fd() const noexcept { return ring_.ring_fd; }
@@ -220,20 +229,30 @@ namespace kio::io
                     // A parked pool waiter with nothing runnable and nothing
                     // in flight can never be woken (its releaser must be
                     // either runnable or in flight) -- a leaked-lease bug.
-                    // Fail fast instead of spinning forever.
-                    CHECK(!buffer_pool_ || buffer_pool_->waiting() == 0)
-                        << "pool exhausted with waiters and no in-flight ops (leases leaked?)";
+                    // Fail fast instead of spinning forever. The same
+                    // argument covers Baton/Semaphore waiters counted in
+                    // external_parks_: their poster/releaser must be
+                    // runnable, in flight, or itself parked (a cycle).
+                    CHECK((!buffer_pool_ || buffer_pool_->waiting() == 0) && external_parks_ == 0)
+                        << "parked waiter with no one left to wake it "
+                           "(pool leases leaked? baton never posted? semaphore never released?)";
                     io_uring_submit(&ring_); // flush stray SQEs
                     return;
                 }
 
                 // Phase 2: submit, and block for a CQE only when nothing is
                 // runnable. Parking a non-empty ready list behind a wait would
-                // invert the point of the epoch cap; with an empty SQ, submit
-                // is a ring check without a syscall, so the busy path is free.
+                // invert the point of the epoch cap -- but the busy path must
+                // still enter WITH GETEVENTS: DEFER_TASKRUN posts completions
+                // (deferred task work) only when the loop asks for events, so
+                // a plain submit never runs them, and an empty-SQ submit does
+                // not enter the kernel at all. A busy, self-refilling ready
+                // list would starve completions unboundedly. Verified on
+                // kernel 7.0.0-38: submit+nop posts nothing;
+                // submit_and_get_events posts the deferred CQE, non-blocking.
                 const int r = ready_list_.empty()
                                   ? io_uring_submit_and_wait(&ring_, 1)
-                                  : io_uring_submit(&ring_);
+                                  : io_uring_submit_and_get_events(&ring_);
                 if (r < 0 && r != -EINTR && r != -EBUSY)
                 {
                     LOG(FATAL) << "fatal, io submit failed: " << r;
@@ -284,6 +303,7 @@ namespace kio::io
         detail::ReadyRing ready_list_{}; // Growing pow2 ring; the loop's runnable queue (see detail/ready_ring.h)
         io_uring ring_{};
         uint64_t inflight_{};
+        std::size_t external_parks_ = 0;
         bool is_activated_{false};
         // Set by cancel_all(), read by IoAwaitable::await_resume so ops
         // canceled by a teardown report -ECANCELED instead of a fake
@@ -355,6 +375,22 @@ namespace kio::io
             // std::terminate(), which matches this library's error handling
             // philosophy.
             ready_list_.push(handle);
+        }
+
+        // Coroutines parked on non-ring primitives (Baton/Semaphore -- and
+        // any future parking awaiter): they are invisible to inflight_ and
+        // ready_list_, so they must teach run() about themselves. Parked
+        // increments in await_suspend; the woken await_resume consumes it;
+        // between wake and resume the handle sits in ready_list_ (keeping
+        // the exit condition blocked), so there is no gap.
+        void note_park() noexcept
+        {
+            ++external_parks_;
+        }
+
+        void note_unpark() noexcept
+        {
+            --external_parks_;
         }
 
         void reap() noexcept

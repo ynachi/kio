@@ -17,6 +17,10 @@ kio_add_test(buffer_pool_tests kio/buffer_pool_test.cpp
         TAGS uring unit
 )
 
+kio_add_test(baton_semaphore_tests kio/baton_semaphore_test.cpp
+        TAGS uring unit
+)
+
 # Stale v1 tests: target the deleted core/io.h API (IO, run_blocking,
 # schedule()). Restore each one as its v2 counterpart lands.
 #  - context_remote_tests  (v1: IoContext workers, shared work queues)
