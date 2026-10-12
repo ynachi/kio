@@ -1,4 +1,6 @@
 #pragma once
+#include <algorithm>
+
 #include "context.h"
 #include "fd.hpp"
 #include "detail/awaitable.h"
@@ -117,6 +119,57 @@ namespace kio::io
                 io_uring_prep_timeout(sqe, ts, 0, 0);
             },
             /*etime_is_success=*/true
+        };
+    }
+
+    // ---- Registered (fixed) buffer I/O: lease-first ----
+    // buf_index is derived from the lease via the pool's branchless region
+    // math; it is never a user parameter. The lease must outlive the
+    // co_await (pass it as an lvalue): the SQE borrows ptr/len/index by
+    // value while the caller's lease keeps the slot held. Deliberately NO
+    // whole-lease convenience overload: a 4th integer argument would be
+    // ambiguous between len and off (v1 lesson) -- pass buf.size() for len.
+    inline auto async_read_fixed(Context& io, UniqueFd& fd, BufferLease& buf, const size_t len,
+                                 const size_t buffer_offset, const std::uint64_t off) noexcept
+    {
+        CHECK(io.buffer_pool().has_value() && buf.pool() == &*io.buffer_pool())
+            << "async_read_fixed: empty or foreign lease (not registered with this Context)";
+        CHECK(buffer_offset < buf.size() && len > 0)
+            << "async_read_fixed: empty range (buffer_offset past end or zero length)";
+        const size_t safe_len = std::min(len, buf.size() - buffer_offset);
+        std::byte* ptr = buf.data() + buffer_offset;
+        const int buf_index = buf.pool()->registration_index(ptr);
+        const int raw_fd = fd.get();
+        return IoAwaitable{
+            io,
+            [raw_fd, ptr, safe_len, off, buf_index](io_uring_sqe* sqe, __kernel_timespec*)
+            {
+                io_uring_prep_read_fixed(sqe, raw_fd, ptr, static_cast<unsigned>(safe_len), off,
+                                         buf_index);
+            },
+            false
+        };
+    }
+
+    inline auto async_write_fixed(Context& io, UniqueFd& fd, const BufferLease& buf, const size_t len,
+                                  const size_t buffer_offset, const std::uint64_t off) noexcept
+    {
+        CHECK(io.buffer_pool().has_value() && buf.pool() == &*io.buffer_pool())
+            << "async_write_fixed: empty or foreign lease (not registered with this Context)";
+        CHECK(buffer_offset < buf.size() && len > 0)
+            << "async_write_fixed: empty range (buffer_offset past end or zero length)";
+        const size_t safe_len = std::min(len, buf.size() - buffer_offset);
+        const std::byte* ptr = buf.data() + buffer_offset;
+        const int buf_index = buf.pool()->registration_index(ptr);
+        const int raw_fd = fd.get();
+        return IoAwaitable{
+            io,
+            [raw_fd, ptr, safe_len, off, buf_index](io_uring_sqe* sqe, __kernel_timespec*)
+            {
+                io_uring_prep_write_fixed(sqe, raw_fd, ptr, static_cast<unsigned>(safe_len), off,
+                                          buf_index);
+            },
+            false
         };
     }
 

@@ -1,7 +1,6 @@
 #include "../../include/kio/buffer_pool.hpp"
 
 #include <algorithm>
-#include <cassert>
 #include <cerrno>
 #include <system_error>
 
@@ -10,7 +9,7 @@ namespace kio
     RegisteredBufferPool::RegisteredBufferPool(const size_t slot_size, const uint32_t slots)
         : slot_size_(slot_size), slots_(slots)
     {
-        // Invariant 2: slot_size must be a power of two >= 4096 and divide 1 GiB evenly
+        // Invariant 2: slot_size must be a power of two >= 4096 dividing 1 GiB
         if (slot_size < kPageSize || (slot_size & (slot_size - 1)) != 0 || (kOneGiB % slot_size) != 0)
         {
             throw std::invalid_argument(
@@ -22,38 +21,38 @@ namespace kio
             throw std::invalid_argument("slots must be > 0");
         }
 
-        // Invariant 1: Check for multiplication overflow
         if (__builtin_mul_overflow(slot_size_, size_t{slots_}, &total_bytes_))
         {
             throw std::overflow_error("Total buffer pool size overflows size_t");
         }
 
-        // Invariant 1: Round up to 2 MiB boundary for Transparent Huge Pages (THP)
+        // Invariant 1: align BOTH length and base to 2 MiB for THP. Map one
+        // extra 2 MiB, carve an aligned base out of the mapping, and return
+        // the head and tail slivers so the final mapping is exactly
+        // [base_, base_ + aligned_total_bytes_) on a 2 MiB boundary.
         aligned_total_bytes_ = (total_bytes_ + kHugePageSize - 1) & ~(kHugePageSize - 1);
 
-        // Pre-reserve free-list to guarantee that release() and try_acquire() are strictly noexcept
+        // Pre-reserve the free list so release()/try_acquire() are noexcept.
         free_slots_.reserve(slots_);
         for (uint32_t i = slots_; i != 0; --i)
         {
             free_slots_.push_back(i - 1);
         }
 
-        void* mapping = mmap(
-            nullptr,
-            aligned_total_bytes_,
-            PROT_READ | PROT_WRITE,
-            MAP_PRIVATE | MAP_ANONYMOUS,
-            -1,
-            0);
-
+        const size_t map_bytes = aligned_total_bytes_ + kHugePageSize;
+        void* mapping =
+            mmap(nullptr, map_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (mapping == MAP_FAILED)
         {
             throw std::system_error(errno, std::system_category(), "mmap buffer pool failed");
         }
 
-        base_ = static_cast<std::byte*>(mapping);
+        const auto raw = reinterpret_cast<uintptr_t>(mapping);
+        const auto aligned = (raw + kHugePageSize - 1) & ~(kHugePageSize - 1);
+        base_ = reinterpret_cast<std::byte*>(aligned);
+        (void)::munmap(mapping, aligned - raw);
+        (void)::munmap(base_ + aligned_total_bytes_, (raw + map_bytes) - (aligned + aligned_total_bytes_));
 
-        // Advise kernel to back the mapping with huge pages
         (void)madvise(base_, aligned_total_bytes_, MADV_HUGEPAGE);
     }
 
@@ -70,7 +69,10 @@ namespace kio
 
     BufferLease RegisteredBufferPool::try_acquire() noexcept
     {
-        if (closed_ || free_slots_.empty())
+        // Surplus rule (Invariants 4 & 5): free-list entries covered by
+        // reserved_ are spoken for by already-woken waiters. A single
+        // comparison covers closed, exhausted, and all-reserved.
+        if (closed_ || free_slots_.size() <= reserved_)
         {
             return {};
         }
@@ -84,19 +86,23 @@ namespace kio
 
     void RegisteredBufferPool::release(const uint32_t ordinal) noexcept
     {
-        assert(ordinal < slots_);
+        CHECK(ordinal < slots_) << "release of ordinal " << ordinal << " outside the pool";
 
-        if (!closed_ && wait_head_ != nullptr)
-        {
-            // Direct handoff to the oldest FIFO waiter without passing through free_slots_
-            auto* waiter = pop_waiter();
-            waiter->result = make_lease(ordinal);
-            resume_waiter(waiter);
-            return;
-        }
-
-        // LIFO push: keeps recently freed memory warm in cache
+        // LIFO push first; the woken waiter consumes it from the free list
+        // (wake-and-retry), so release() stays branch-simple.
         free_slots_.push_back(ordinal);
+
+        if (!closed_ && !waiters_.empty())
+        {
+            std::coroutine_handle<> h;
+            if (waiters_.pop_batch(&h, 1) == 1)
+            {
+                // The surplus slot is spoken for until the waiter resumes.
+                ++reserved_;
+                CHECK(wake_fn_ != nullptr) << "pool wake with no wake callback installed";
+                wake_fn_(wake_ctx_, h);
+            }
+        }
     }
 
     void RegisteredBufferPool::close() noexcept
@@ -105,22 +111,28 @@ namespace kio
         {
             return;
         }
-
         closed_ = true;
 
-        // Wake all pending FIFO waiters with operation_canceled
-        while (auto* waiter = pop_waiter())
+        // Waiters already woken were popped at wake time and resume into
+        // the closed_ branch of await_resume on their own; only still-parked
+        // handles need a wake.
+        std::coroutine_handle<> h;
+        while (waiters_.pop_batch(&h, 1) == 1)
         {
-            waiter->result = Error::fail_errc(std::errc::operation_canceled, "pool closed");
-            resume_waiter(waiter);
+            CHECK(wake_fn_ != nullptr) << "pool close with waiters but no wake callback";
+            wake_fn_(wake_ctx_, h);
         }
     }
 
     uint16_t RegisteredBufferPool::append_regions(std::vector<iovec>& table)
     {
+        const size_t regions = (total_bytes_ + kOneGiB - 1) / kOneGiB;
+        CHECK(table.size() + regions <= 65535)
+            << "io_uring registered-buffer index space exhausted (SQE buf_index is uint16)";
+
         first_index_ = static_cast<uint16_t>(table.size());
 
-        // Invariant 2 & 3: Slice contiguous mapping into <= 1 GiB iovec chunks
+        // Invariants 2 & 3: slice the contiguous mapping into <= 1 GiB chunks
         for (size_t offset = 0; offset < total_bytes_; offset += kOneGiB)
         {
             const size_t len = std::min(kOneGiB, total_bytes_ - offset);
@@ -131,93 +143,5 @@ namespace kio
         }
 
         return first_index_;
-    }
-
-    void RegisteredBufferPool::enqueue_waiter(Waiter* w) noexcept
-    {
-        assert(w != nullptr);
-        w->next = nullptr;
-        w->prev = wait_tail_;
-
-        if (wait_tail_ != nullptr)
-        {
-            wait_tail_->next = w;
-        }
-        else
-        {
-            wait_head_ = w;
-        }
-        wait_tail_ = w;
-    }
-
-    RegisteredBufferPool::Waiter* RegisteredBufferPool::pop_waiter() noexcept
-    {
-        if (wait_head_ == nullptr)
-        {
-            return nullptr;
-        }
-
-        auto* w = wait_head_;
-        wait_head_ = w->next;
-
-        if (wait_head_ != nullptr)
-        {
-            wait_head_->prev = nullptr;
-        }
-        else
-        {
-            wait_tail_ = nullptr;
-        }
-
-        w->next = nullptr;
-        w->prev = nullptr;
-        return w;
-    }
-
-    void RegisteredBufferPool::remove_waiter(Waiter* w) noexcept
-    {
-        assert(w != nullptr);
-
-        if (w->prev != nullptr)
-        {
-            w->prev->next = w->next;
-        }
-        else if (wait_head_ == w)
-        {
-            wait_head_ = w->next;
-        }
-
-        if (w->next != nullptr)
-        {
-            w->next->prev = w->prev;
-        }
-        else if (wait_tail_ == w)
-        {
-            wait_tail_ = w->prev;
-        }
-
-        w->next = nullptr;
-        w->prev = nullptr;
-        w->handle = {};
-    }
-
-    void RegisteredBufferPool::resume_waiter(Waiter* w) const noexcept
-    {
-        assert(w != nullptr);
-        const auto h = w->handle;
-        w->handle = {}; // Mark unlinked/consumed
-
-        if (h)
-        {
-            if (reschedule_fn_ != nullptr)
-            {
-                // Invariant 6: Reschedule through IO worker to prevent stack overflow
-                reschedule_fn_(reschedule_ctx_, h);
-            }
-            else
-            {
-                h.resume();
-            }
-        }
     }
 } // namespace kio

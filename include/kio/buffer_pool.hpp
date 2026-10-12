@@ -1,6 +1,5 @@
 #pragma once
 
-#include <cassert>
 #include <coroutine>
 #include <cstddef>
 #include <cstdint>
@@ -12,6 +11,8 @@
 #include <sys/mman.h>
 #include <sys/uio.h>
 
+#include "detail/ready_ring.h"
+#include "absl/log/check.h"
 #include "kio/error.hpp"
 
 namespace kio
@@ -21,20 +22,9 @@ namespace kio
     // ============================================================================
     // BufferLease: Movable, non-copyable RAII handle to a pooled buffer slot
     // ============================================================================
-    /**
-     * @brief An indivisible RAII lease representing exclusive ownership of one slot
-     *        in a RegisteredBufferPool.
-     *
-     * Invariants:
-     *  1. Exclusive Ownership: While a BufferLease is valid, its slot ordinal is
-     *     guaranteed not to be held by any other lease or free list in the pool.
-     *  2. Stable Memory: The memory range [data(), data() + size()) resides inside
-     *     a pinned/registered mmap region that remains alive for the lifetime of
-     *     the owning RegisteredBufferPool.
-     *  3. Automatic Return: Upon destruction or explicit reset(), the slot ordinal
-     *     is returned to the pool (or handed off directly to the oldest FIFO waiter).
-     *  4. Move-Only: Copying is disabled to prevent double-return of the underlying slot.
-     */
+    // An indivisible RAII lease representing exclusive ownership of one slot in
+    // a RegisteredBufferPool. Usable like a normal buffer: bytes()/first()/
+    // subspan()/span conversions, so ordinary span code works on it.
     class BufferLease
     {
     public:
@@ -78,6 +68,27 @@ namespace kio
         /// @brief View the leased memory as a const byte span.
         [[nodiscard]] std::span<const std::byte> bytes() const noexcept { return {data_, size_}; }
 
+        /// @brief First n bytes of the slot (clamped like std::span::first).
+        [[nodiscard]] std::span<std::byte> first(const size_t n) noexcept { return bytes().first(n); }
+        [[nodiscard]] std::span<const std::byte> first(const size_t n) const noexcept
+        {
+            return bytes().first(n);
+        }
+
+        /// @brief Sub-range of the slot (clamped like std::span::subspan).
+        [[nodiscard]] std::span<std::byte> subspan(const size_t off, const size_t n) noexcept
+        {
+            return bytes().subspan(off, n);
+        }
+        [[nodiscard]] std::span<const std::byte> subspan(const size_t off, const size_t n) const noexcept
+        {
+            return bytes().subspan(off, n);
+        }
+
+        /// @brief Explicit span conversions for span-taking APIs.
+        [[nodiscard]] explicit operator std::span<std::byte>() noexcept { return bytes(); }
+        [[nodiscard]] explicit operator std::span<const std::byte>() const noexcept { return bytes(); }
+
         /// @brief Raw pointer to the start of the leased slot.
         [[nodiscard]] std::byte* data() noexcept { return data_; }
         [[nodiscard]] const std::byte* data() const noexcept { return data_; }
@@ -105,9 +116,6 @@ namespace kio
         uint32_t ordinal_ = 0;
     };
 
-    // Backward-compatibility alias during migration
-    using FixedBuffer = BufferLease;
-
     // ============================================================================
     // BufferPoolConfig: Declarative configuration for pool initialization
     // ============================================================================
@@ -120,99 +128,79 @@ namespace kio
     // ============================================================================
     // RegisteredBufferPool
     // ============================================================================
-    /**
-     * @brief High-performance, single-threaded buffer pool registered with io_uring.
-     *
-     * Memory Layout & 1 GiB Registration Slicing:
-     *
-     * base_
-     *   │
-     *   ▼ 0                   1 GiB                 2 GiB               2.5 GiB       aligned (2 MiB)
-     *   ┌─────────────────────┬─────────────────────┬─────────────────────┬──────────────┬───┐
-     *   │      Chunk 0        │      Chunk 1        │      Chunk 2        │   Chunk 3    │PAD│
-     *   │     (1024 MiB)      │     (1024 MiB)      │     (1024 MiB)      │  (512 MiB)   │   │
-     *   └─────────────────────┴─────────────────────┴─────────────────────┴──────────────┴───┘
-     *   ▲                     ▲                     ▲                     ▲
-     *   │ iovec[0]            │ iovec[1]            │ iovec[2]            │ iovec[3]
-     *   │ buf_index = 0       │ buf_index = 1       │ buf_index = 2       │ buf_index = 3
-     *
-     * Fast branchless lookup:
-     *   buf_index = first_index_ + ((ptr - base_) >> 30)
-     *
-     * Core Architectural Invariants:
-     *
-     * 1. Single Contiguous Mapping & 2 MiB THP Alignment:
-     *    -------------------------------------------------
-     *    All slots reside within a single contiguous virtual memory region mapped
-     *    via ::mmap(MAP_PRIVATE | MAP_ANONYMOUS).
-     *    The total mapping size is rounded up to the nearest 2 MiB boundary, and
-     *    ::madvise(..., MADV_HUGEPAGE) is applied.
-     *    WHY IT HOLDS & MATTERS:
-     *    The Linux kernel's Transparent Huge Page (THP) subsystem only collapses
-     *    contiguous ranges that naturally align with 2 MiB physical compound pages.
-     *    Aligning the mapping reduces kernel page-table overhead and minimizes TLB
-     *    misses during direct DMA transfers (O_DIRECT).
-     *
-     * 2. Power-of-Two Divisibility (Chunk Boundary Guarantee):
-     *    ------------------------------------------------------
-     *    The slot size MUST be a power of two >= 4096 that evenly divides 1 GiB:
-     *        (slot_size >= 4096) && ((slot_size & (slot_size - 1)) == 0) && ((1 GiB % slot_size) == 0)
-     *    WHY IT HOLDS & MATTERS:
-     *    io_uring's kernel buffer registration (io_uring_register_buffers) enforces
-     *    a hard limit of 1 GiB (1ULL << 30 bytes) per registered iovec entry.
-     *    To satisfy this kernel constraint on pools > 1 GiB, the contiguous mmap
-     *    is chunked into 1 GiB iovecs during registration.
-     *    Because 1 GiB is an exact multiple of slot_size, EVERY 1 GiB CHUNK BOUNDARY
-     *    FALLS PRECISELY ON A SLOT BOUNDARY. No slot ever straddles two 1 GiB chunks.
-     *    Therefore, any sub-slice [ptr, ptr + len] within a leased slot is 100%
-     *    guaranteed to reside within a single registered kernel buffer entry.
-     *
-     * 3. Branchless Registered Index Resolution:
-     *    ----------------------------------------
-     *    Because the virtual mapping is contiguous and registration chunks are
-     *    strictly 1 GiB (except possibly the final chunk), the registered table index
-     *    for any pointer `ptr` inside the pool is computed as:
-     *        buf_index = first_index_ + ((ptr - base_) >> 30)
-     *    WHY IT HOLDS & MATTERS:
-     *    Dividing by 1 GiB (2^30) is a single bitshift (`>> 30`). This eliminates
-     *    interval trees, binary searches, or per-slot index metadata. Resolving the
-     *    registration index during I/O submission is O(1) and branchless.
-     *
-     * 4. Intrusive Zero-Allocation Wait Queue:
-     *    -------------------------------------
-     *    When the pool is exhausted, acquiring coroutines suspend asynchronously.
-     *    The wait node (Waiter) is embedded directly inside AcquireAwaiter, which
-     *    resides in the coroutine's stack frame.
-     *    WHY IT HOLDS & MATTERS:
-     *    - Zero Heap Allocations: Suspending a coroutine never allocates memory.
-     *    - Cancellation Safety: The wait queue is an intrusive doubly-linked list.
-     *      If an awaiting coroutine is cancelled or destroyed before resumption
-     *      (e.g., timeout or structured concurrency cancellation), ~AcquireAwaiter()
-     *      removes itself from the queue in O(1) without memory leaks or dangling pointers.
-     *
-     * 5. LIFO Cache Warmth vs. FIFO Waiter Fairness:
-     *    -------------------------------------------
-     *    - Free slots are returned and popped via LIFO stack semantics (vector back).
-     *      Slots that were recently returned remain hot in CPU L1/L2 caches when
-     *      re-acquired by active tasks.
-     *    - Waiting coroutines are serviced strictly FIFO (head pop).
-     *      No coroutine can be starved by newly arriving acquisitions.
-     *
-     * 6. Non-Reentrant Resumption Hook:
-     *    ------------------------------
-     *    When a slot is released inside a destructor (~BufferLease()), resuming a
-     *    waiting coroutine inline (h.resume()) would execute arbitrary user code
-     *    directly on top of the destructor's stack frame.
-     *    RegisteredBufferPool provides `set_reschedule_hook` so the IO event loop
-     *    can defer waiter execution to its local task queue, preventing stack overflow.
-     *
-     * 7. Clean, Idempotent Shutdown:
-     *    ---------------------------
-     *    Calling `close()` drains the wait queue immediately, resuming all pending
-     *    waiters with Error::fail_errc(std::errc::operation_canceled).
-     *    Subsequent acquisitions fail immediately. Outstanding leases can still be
-     *    safely destroyed after close() without errors.
-     */
+    // High-performance, single-threaded buffer pool registered with io_uring.
+    //
+    // Memory Layout & 1 GiB Registration Slicing:
+    //
+    // base_
+    //   |
+    //   v 0                   1 GiB                 2 GiB               2.5 GiB       aligned (2 MiB)
+    //   +---------------------+---------------------+---------------------+--------------+---+
+    //   |      Chunk 0        |      Chunk 1        |      Chunk 2        |   Chunk 3    |PAD|
+    //   |     (1024 MiB)      |     (1024 MiB)      |     (1024 MiB)      |  (512 MiB)   |   |
+    //   +---------------------+---------------------+---------------------+--------------+---+
+    //   ^                     ^                     ^                     ^
+    //   | iovec[0]            | iovec[1]            | iovec[2]            | iovec[3]
+    //   | buf_index = 0       | buf_index = 1       | buf_index = 2       | buf_index = 3
+    //
+    // Fast branchless lookup:
+    //   buf_index = first_index_ + ((ptr - base_) >> 30)
+    //
+    // Core Architectural Invariants:
+    //
+    // 1. Single Contiguous Mapping, 2 MiB-aligned Base AND Length (THP):
+    //    The mapping is placed so base_ itself sits on a 2 MiB boundary (one
+    //    guard 2 MiB is mapped, the base rounded up inside it, head/tail
+    //    slivers returned), and the length is rounded up to 2 MiB. Then
+    //    MADV_HUGEPAGE lets THP collapse the region into 2 MiB compound
+    //    pages -- fewer page-table walks and TLB misses during DMA.
+    //
+    // 2. Power-of-Two Divisibility (Chunk Boundary Guarantee):
+    //    slot_size must be a power of two >= 4096 that divides 1 GiB.
+    //    io_uring caps each registered iovec at 1 GiB, so pools larger than
+    //    that are registered as consecutive 1 GiB iovecs; because 1 GiB is a
+    //    multiple of slot_size, every chunk boundary falls exactly on a slot
+    //    boundary -- no slot ever straddles two registered entries, so any
+    //    sub-slice of a lease lives in exactly one registered buffer.
+    //
+    // 3. Branchless Registered Index Resolution:
+    //    buf_index = first_index_ + ((ptr - base_) >> 30) -- one shift, no
+    //    interval trees, no per-slot metadata.
+    //
+    // 4. Coroutine-Thin Wait Queue (reserved-wake protocol):
+    //    When exhausted, acquire() parks the caller's handle in a plain FIFO
+    //    (detail::ReadyRing) and nothing else -- no intrusive nodes, no
+    //    result channel into parked frames, no unlink-on-destroy. release()
+    //    pushes the slot to the free list and, if waiters exist, pops the
+    //    oldest handle, counts it in reserved_, and wakes it through the
+    //    callback the owning Context installed (Context::post -- Phase 1 of
+    //    the run loop, NEVER inline on the releaser's stack). The woken
+    //    coroutine consumes its reservation in await_resume and retries
+    //    try_acquire. Free-list slots covered by reserved_ are not available
+    //    to new arrivals (the surplus rule in try_acquire), so the woken
+    //    waiter's retry always succeeds and wakes are issued strictly FIFO.
+    //    Handles in the queue cannot dangle: kio Tasks CHECK-abort when
+    //    destroyed while suspended, and detached tasks run to completion.
+    //    This pool RELIES on that Task-lifetime invariant.
+    //
+    // 5. LIFO Cache Warmth vs FIFO Waiter Fairness:
+    //    Free slots recycle via a LIFO stack (recently returned slots stay
+    //    hot in cache); waiters are serviced strictly FIFO. Both hold under
+    //    the reserved-wake protocol: surplus slots (beyond reserved_) go to
+    //    new arrivals via the LIFO stack, reserved slots to woken waiters in
+    //    wake order.
+    //
+    // 6. Non-Reentrant Resumption:
+    //    Wakes go exclusively through the installed callback, so no user
+    //    coroutine ever runs on top of ~BufferLease()/release(). Parking on a
+    //    pool with no callback installed is a CHECK failure at the bug site
+    //    (park()), not a silent inline resume.
+    //
+    // 7. Clean, Idempotent Shutdown:
+    //    close() wakes every still-parked waiter; each resumes into a
+    //    std::errc::operation_canceled Result. Waiters already woken (popped
+    //    at wake time) resume into the same branch on their own. Outstanding
+    //    leases remain safe to destroy after close().
     class RegisteredBufferPool
     {
     public:
@@ -220,22 +208,15 @@ namespace kio
         static constexpr size_t kHugePageSize = 2ULL * 1024 * 1024; // 2 MiB THP alignment
         static constexpr size_t kPageSize = 4096; // 4 KiB page size
 
-        using RescheduleFn = void (*)(void* ctx, std::coroutine_handle<> h) noexcept;
+        using WakeFn = void (*)(void* ctx, std::coroutine_handle<> h) noexcept;
 
-        // Intrusive wait node embedded in AcquireAwaiter's frame
-        struct Waiter
-        {
-            std::coroutine_handle<> handle{};
-            Waiter* prev = nullptr;
-            Waiter* next = nullptr;
-            Result<BufferLease> result{Error::fail_errc(std::errc::operation_canceled, "pool closed")};
-        };
-
-        // Zero-allocation coroutine awaiter for pool acquisitions
+        // Coroutine-thin awaiter: the fast path fills fast_; the parking path
+        // pushes a plain handle; the woken path consumes its reservation and
+        // retries try_acquire (Invariants 4 & 5).
         struct AcquireAwaiter
         {
             RegisteredBufferPool& pool;
-            Waiter waiter{};
+            BufferLease fast_{}; // set only on the await_ready fast path
 
             explicit AcquireAwaiter(RegisteredBufferPool& p) noexcept : pool(p)
             {
@@ -246,157 +227,111 @@ namespace kio
             AcquireAwaiter(AcquireAwaiter&&) = delete;
             AcquireAwaiter& operator=(AcquireAwaiter&&) = delete;
 
-            ~AcquireAwaiter() noexcept
-            {
-                // O(1) clean removal if coroutine frame is destroyed before resumption
-                if (waiter.handle)
-                {
-                    pool.remove_waiter(&waiter);
-                }
-            }
+            // No destructor: there is no node to unlink. A parked coroutine
+            // cannot be destroyed while suspended (Task-lifetime invariant).
 
             bool await_ready() noexcept
             {
                 if (pool.closed_)
-                    return true;
-
-                auto lease = pool.try_acquire();
-                if (lease)
                 {
-                    waiter.result = std::move(lease);
                     return true;
                 }
-                return false;
+                fast_ = pool.try_acquire();
+                return static_cast<bool>(fast_);
             }
 
-            void await_suspend(std::coroutine_handle<> h) noexcept
-            {
-                waiter.handle = h;
-                pool.enqueue_waiter(&waiter);
-            }
+            void await_suspend(std::coroutine_handle<> h) noexcept { pool.park(h); }
 
             Result<BufferLease> await_resume() noexcept
             {
-                return std::move(waiter.result);
+                if (fast_)
+                {
+                    return std::move(fast_);
+                }
+                if (pool.closed_)
+                {
+                    return Error::fail_errc(std::errc::operation_canceled, "pool closed");
+                }
+                // Woken path: consume the reservation release() made for us,
+                // then take the slot it backed. Both CHECKs are invariants,
+                // not error paths.
+                CHECK(pool.reserved_ > 0) << "woken pool waiter without a reservation";
+                --pool.reserved_;
+                auto lease = pool.try_acquire();
+                CHECK(lease) << "woken pool waiter found no free slot";
+                return lease;
             }
         };
 
-        /**
-         * @brief Construct and map a registered buffer pool.
-         * @param slot_size Size of each slot in bytes. Must be a power of two >= 4096 and divide 1 GiB.
-         * @param slots Total number of slots. Must be > 0.
-         * @throws std::invalid_argument if parameters violate alignment/divisibility invariants.
-         * @throws std::overflow_error if total size exceeds size_t.
-         * @throws std::system_error if mmap fails.
-         */
         RegisteredBufferPool(size_t slot_size, uint32_t slots);
-
         ~RegisteredBufferPool() noexcept;
 
         RegisteredBufferPool(const RegisteredBufferPool&) = delete;
         RegisteredBufferPool& operator=(const RegisteredBufferPool&) = delete;
+        // Pinned, registered memory plus parked waiters make the pool
+        // address-fixed: moving is meaningless (and was unsound with
+        // waiters). Construct it where it will live.
+        RegisteredBufferPool(RegisteredBufferPool&&) = delete;
+        RegisteredBufferPool& operator=(RegisteredBufferPool&&) = delete;
 
-        RegisteredBufferPool(RegisteredBufferPool&& other) noexcept
-            : base_(std::exchange(other.base_, nullptr)),
-              slot_size_(std::exchange(other.slot_size_, 0)),
-              slots_(std::exchange(other.slots_, 0)),
-              total_bytes_(std::exchange(other.total_bytes_, 0)),
-              aligned_total_bytes_(std::exchange(other.aligned_total_bytes_, 0)),
-              first_index_(std::exchange(other.first_index_, 0)),
-              closed_(std::exchange(other.closed_, true)),
-              free_slots_(std::move(other.free_slots_)),
-              wait_head_(std::exchange(other.wait_head_, nullptr)),
-              wait_tail_(std::exchange(other.wait_tail_, nullptr)),
-              reschedule_ctx_(std::exchange(other.reschedule_ctx_, nullptr)),
-              reschedule_fn_(std::exchange(other.reschedule_fn_, nullptr))
+        /// @brief Install the wake callback (the owning Context at setup).
+        ///        The ONLY resume path for parked waiters: Context::post,
+        ///        i.e. Phase 1 of the run loop.
+        void set_wake(void* ctx, WakeFn fn) noexcept
         {
+            wake_ctx_ = ctx;
+            wake_fn_ = fn;
         }
 
-        RegisteredBufferPool& operator=(RegisteredBufferPool&& other) noexcept
-        {
-            if (this != &other)
-            {
-                this->~RegisteredBufferPool();
-                new(this) RegisteredBufferPool(std::move(other));
-            }
-            return *this;
-        }
-
-
-        /**
-         * @brief Configure a deferred resumption hook for the owning IO worker.
-         * @param ctx Opaque pointer passed to the callback (typically `this` pointer of IO).
-         * @param fn Callback that enqueues the coroutine handle onto the IO worker's local task batch.
-         */
-        void set_reschedule_hook(void* ctx, RescheduleFn fn) noexcept
-        {
-            reschedule_ctx_ = ctx;
-            reschedule_fn_ = fn;
-        }
-
-        /**
-         * @brief Non-blocking buffer acquisition.
-         * @return A valid BufferLease if available, or an empty BufferLease if exhausted/closed.
-         */
+        /// @brief Non-blocking acquisition. New arrivals may only take the
+        ///        SURPLUS free slots (those not reserved for woken waiters).
+        /// @return A valid BufferLease, or an empty one when exhausted,
+        ///         closed, or every free slot is reserved for a waiter.
         [[nodiscard]] BufferLease try_acquire() noexcept;
 
-        /**
-         * @brief Asynchronous coroutine buffer acquisition with FIFO queueing.
-         * @return AcquireAwaiter yielding Result<BufferLease> upon completion.
-         */
+        /// @brief Asynchronous acquisition with FIFO queueing.
         [[nodiscard]] AcquireAwaiter acquire() noexcept { return AcquireAwaiter{*this}; }
 
-        /**
-         * @brief Return a slot back to the pool.
-         *        Hands off directly to the oldest FIFO waiter if one exists,
-         *        or recycles the slot into the LIFO free list.
-         */
+        /// @brief Return a slot: LIFO-push, then wake the oldest waiter if
+        ///        one is parked (reserved-wake protocol, Invariant 4).
         void release(uint32_t ordinal) noexcept;
 
-        /**
-         * @brief Permanently shut down the pool.
-         *        Resumes all queued waiters with std::errc::operation_canceled.
-         */
+        /// @brief Permanently shut down: wake all parked waiters with
+        ///        operation_canceled. Idempotent; leases stay releasable.
         void close() noexcept;
 
-        /**
-         * @brief Append this pool's 1 GiB chunks to an io_uring registration table.
-         * @param table Target vector of iovec structures for io_uring_register_buffers.
-         * @return The starting table index assigned to this pool.
-         */
+        /// @brief Append this pool's <= 1 GiB chunks to a registration table.
+        /// @return The starting table index assigned to this pool.
         uint16_t append_regions(std::vector<iovec>& table);
 
-        /**
-         * @brief Fast, branchless calculation of the io_uring registered buffer index.
-         * @param ptr Target pointer within the pool.
-         * @return The io_uring buffer table index.
-         */
+        /// @brief Branchless registered-buffer index for a pointer in the pool.
         [[nodiscard]] uint16_t registration_index(const std::byte* ptr) const noexcept
         {
-            assert(ptr >= base_ && ptr < base_ + total_bytes_);
+            CHECK(ptr >= base_ && ptr < base_ + total_bytes_)
+                << "registration_index on a pointer outside the pool mapping";
             const auto offset = static_cast<size_t>(ptr - base_);
-            return first_index_ + static_cast<uint16_t>(offset >> 30U);
+            const size_t index = size_t{first_index_} + (offset >> 30U);
+            CHECK(index <= 65535) << "registered buffer index overflows the SQE buf_index field";
+            return static_cast<uint16_t>(index);
         }
 
-        /// @brief Starting virtual address of the mapping.
+        /// @brief Coroutines currently parked on acquire(). Feeds run()'s
+        ///        quiescence check: parked waiters keep the loop alive.
+        [[nodiscard]] size_t waiting() const noexcept { return waiters_.size(); }
+
         [[nodiscard]] std::byte* base() const noexcept { return base_; }
-
-        /// @brief Uniform size of each buffer slot in bytes.
         [[nodiscard]] size_t slot_size() const noexcept { return slot_size_; }
-
-        /// @brief Total slot capacity of the pool.
         [[nodiscard]] uint32_t capacity() const noexcept { return slots_; }
 
-        /// @brief Currently available slots not held by any lease or waiter.
-        [[nodiscard]] uint32_t available() const noexcept { return static_cast<uint32_t>(free_slots_.size()); }
+        /// @brief Slots in the free list (some may be reserved for woken
+        ///        waiters -- see try_acquire's surplus rule).
+        [[nodiscard]] uint32_t available() const noexcept
+        {
+            return static_cast<uint32_t>(free_slots_.size());
+        }
 
-        /// @brief Total mapped bytes usable for slots (excluding 2 MiB THP padding).
         [[nodiscard]] size_t total_bytes() const noexcept { return total_bytes_; }
-
-        /// @brief Total memory allocated via mmap (rounded to 2 MiB).
         [[nodiscard]] size_t allocated_bytes() const noexcept { return aligned_total_bytes_; }
-
-        /// @brief Check if the pool is closed.
         [[nodiscard]] bool closed() const noexcept { return closed_; }
 
     private:
@@ -408,10 +343,12 @@ namespace kio
             return BufferLease{*this, base_ + size_t{ordinal} * slot_size_, slot_size_, ordinal};
         }
 
-        void enqueue_waiter(Waiter* w) noexcept;
-        Waiter* pop_waiter() noexcept;
-        void remove_waiter(Waiter* w) noexcept;
-        void resume_waiter(Waiter* w) const noexcept;
+        void park(std::coroutine_handle<> h) noexcept
+        {
+            CHECK(wake_fn_ != nullptr)
+                << "coroutine parked on a pool with no wake callback installed";
+            waiters_.push(h);
+        }
 
         std::byte* base_ = nullptr;
         size_t slot_size_ = 0;
@@ -421,16 +358,19 @@ namespace kio
         uint16_t first_index_ = 0;
         bool closed_ = false;
 
-        // Free slots stack (LIFO for CPU cache locality)
+        // Free slots stack (LIFO for CPU cache locality). Pre-reserved so
+        // release()/try_acquire() stay noexcept in steady state.
         std::vector<uint32_t> free_slots_;
 
-        // Waiters queue (intrusive doubly-linked FIFO list)
-        Waiter* wait_head_ = nullptr;
-        Waiter* wait_tail_ = nullptr;
+        // Parked acquire() handles, FIFO. Woken-but-not-yet-resumed waiters
+        // have already left this queue and are counted in reserved_ instead.
+        detail::ReadyRing waiters_{};
+        size_t reserved_ = 0;
 
-        // Resumption hook
-        void* reschedule_ctx_ = nullptr;
-        RescheduleFn reschedule_fn_ = nullptr;
+        // Wake callback: installed by the owning Context (Context::post) --
+        // the ONLY resume path, never inline on the releaser's stack.
+        void* wake_ctx_ = nullptr;
+        WakeFn wake_fn_ = nullptr;
     };
 
     inline void BufferLease::reset() noexcept

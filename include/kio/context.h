@@ -60,7 +60,7 @@ namespace kio::io
 
         int ring_fd() const noexcept { return ring_.ring_fd; }
 
-        void init(const int wq_fd)
+        void init(const int wq_fd, const std::optional<BufferPoolConfig>& pool_cfg)
         {
             // PORTABILITY NOTE on flag exclusivity, verified empirically on
             // kernel 7.0.0-38 (raw io_uring_setup, all combos create and run
@@ -114,7 +114,19 @@ namespace kio::io
                     std::strerror(-rc), opts_.flags, opts_.entries));
             }
 
-            // TODO: register buffer
+            // Registered buffer pool: mapped now; the iovec table is built
+            // now; the io_uring registration itself happens in activate()
+            // once the ring is enabled. Wakes route through post() so a
+            // woken waiter resumes in Phase 1, never on the releaser's
+            // stack.
+            if (pool_cfg.has_value())
+            {
+                buffer_pool_.emplace(pool_cfg->slot_size, pool_cfg->slots);
+                buffer_pool_->set_wake(
+                    this, [](void* ctx, std::coroutine_handle<> h) noexcept
+                    { static_cast<Context*>(ctx)->post(h); });
+                buffer_pool_->append_regions(registered_iovecs_);
+            }
 
             LOG(INFO) << "Initialized IO context with " << opts_.entries
                       << " entries (SQPOLL: "
@@ -124,7 +136,9 @@ namespace kio::io
 
     public:
         explicit Context(const size_t id, const Context* leader = nullptr,
-                         const IoOptions& opts = {}) : opts_(opts), id_(id)
+                         const IoOptions& opts = {},
+                         const std::optional<BufferPoolConfig>& pool_cfg = std::nullopt)
+            : opts_(opts), id_(id)
         {
             CHECK(opts_.batch_max_size > 0) << "batch_max_size must be positive";
             // init. When share_work_queues is false, every worker builds a fully
@@ -134,7 +148,7 @@ namespace kio::io
             {
                 leader_fd = leader->ring_fd();
             }
-            init(leader_fd);
+            init(leader_fd, pool_cfg);
         }
 
         ~Context()
@@ -203,6 +217,12 @@ namespace kio::io
 
                 if (ready_list_.empty() && inflight_ == 0)
                 {
+                    // A parked pool waiter with nothing runnable and nothing
+                    // in flight can never be woken (its releaser must be
+                    // either runnable or in flight) -- a leaked-lease bug.
+                    // Fail fast instead of spinning forever.
+                    CHECK(!buffer_pool_ || buffer_pool_->waiting() == 0)
+                        << "pool exhausted with waiters and no in-flight ops (leases leaked?)";
                     io_uring_submit(&ring_); // flush stray SQEs
                     return;
                 }
@@ -228,6 +248,19 @@ namespace kio::io
         [[nodiscard]] const std::optional<RegisteredBufferPool>& buffer_pool() const noexcept
         {
             return buffer_pool_;
+        }
+
+        /// @brief Try to take a slot without parking (empty lease if none).
+        [[nodiscard]] BufferLease try_acquire_buffer() noexcept
+        {
+            return buffer_pool_ ? buffer_pool_->try_acquire() : BufferLease{};
+        }
+
+        /// @brief Asynchronous FIFO acquisition of a pooled slot.
+        [[nodiscard]] RegisteredBufferPool::AcquireAwaiter acquire_buffer() noexcept
+        {
+            CHECK(buffer_pool_.has_value()) << "acquire_buffer: no buffer pool configured";
+            return buffer_pool_->acquire();
         }
 
         // typically called on teardown
@@ -382,6 +415,21 @@ namespace kio::io
                                                   IORING_REGISTER_ENABLE_RINGS, nullptr, 0); ret < 0)
             {
                 LOG(FATAL) << "io_uring_register failed: " << std::strerror(-ret);
+            }
+
+            // Register the buffer pool table now that the ring is live.
+            // Fixed-buffer SQEs are unusable before this; nothing can submit
+            // before activate() returns.
+            if (!registered_iovecs_.empty())
+            {
+                if (const int rc = io_uring_register_buffers(
+                        &ring_, registered_iovecs_.data(),
+                        static_cast<unsigned>(registered_iovecs_.size()));
+                    rc < 0)
+                {
+                    LOG(FATAL) << "io_uring_register_buffers failed: " << std::strerror(-rc)
+                               << " (" << registered_iovecs_.size() << " regions)";
+                }
             }
 
             is_activated_ = true;
