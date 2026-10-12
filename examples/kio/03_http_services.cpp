@@ -194,8 +194,10 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <cstddef>
 #include <cstring>
 #include <print>
+#include <span>
 #include <thread>
 #include <vector>
 
@@ -218,17 +220,21 @@ namespace
 
     Task<> handle_client(io::Context& io, io::UniqueFd fd)
     {
-        char buf[4096]; // lives in the coroutine frame across every co_await
+        std::byte buf[4096]; // lives in the coroutine frame across every co_await
         for (;;)
         {
-            auto n = co_await async_recv(io, fd, buf, sizeof buf).timeout(30s);
+            auto n = co_await async_recv(io, fd, std::span{buf}).timeout(30s);
             if (!n || *n == 0) break; // error, idle timeout (ETIMEDOUT) or EOF
             // One response per received request: the loop this replaces was
             // still bounded by bytes read (echo semantics), so a request
             // larger than the 62-byte response was answered twice and
             // desynced the keep-alive connection -- the client drops it and
             // reconnects, turning steady traffic into ~1000 dials/s churn.
-            auto w = co_await async_send(io, fd, kHttpResponse.data(), kHttpResponse.size(), MSG_NOSIGNAL);
+            auto w = co_await async_send(
+                io, fd,
+                std::span{reinterpret_cast<const std::byte*>(kHttpResponse.data()),
+                          kHttpResponse.size()},
+                MSG_NOSIGNAL);
             if (!w || *w == 0) break;
         }
         co_await async_close(io, std::move(fd)); // no op is pending on fd here, so closing is safe
