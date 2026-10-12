@@ -3,8 +3,10 @@
 #include "fd.hpp"
 #include "detail/awaitable.h"
 
-// TODO: we are paying for etime_is_success in many places we don't need them
-// There should be something to do at compile time about this
+// The etime_is_success flag is folded into IoAwaitableBase::state (a spare
+// bit), so it no longer costs a byte per awaiter -- but every non-timeout op
+// still pays the -ETIME branch in await_resume. A compile-time split
+// (TimeSuccessOp tag) would remove that too if it ever shows in a profile.
 
 namespace kio::io
 {
@@ -122,4 +124,4 @@ namespace kio::io
     {
         io.cancel(op);
     }
-}
+} // namespace kio::io

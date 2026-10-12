@@ -1,13 +1,14 @@
 #pragma once
 
+#include <algorithm>
 #include <coroutine>
 #include <cstdlib>
 #include <cstring>
 #include <liburing.h>
-#include <queue>
 
 #include "buffer_pool.hpp"
 #include "detail/awaitable.h"
+#include "detail/ready_ring.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 
@@ -35,6 +36,7 @@ namespace kio::io
         // list of cpus, if empty, no pinning
         std::vector<int> worker_cpu_affinity{};
 
+        // Max coroutine resumes per run-loop epoch (the Phase 1 batch cap).
         std::size_t batch_max_size = 128;
 
         std::uint32_t heartbeat_interval_us = 50;
@@ -124,6 +126,7 @@ namespace kio::io
         explicit Context(const size_t id, const Context* leader = nullptr,
                          const IoOptions& opts = {}) : opts_(opts), id_(id)
         {
+            CHECK(opts_.batch_max_size > 0) << "batch_max_size must be positive";
             // init. When share_work_queues is false, every worker builds a fully
             // independent ring instead of attaching to the leader's worker pool.
             int leader_fd = -1;
@@ -164,25 +167,56 @@ namespace kio::io
             canceling_all_ = false;
             activate();
 
+            // Phase 1 pops through this fixed stack buffer so the epoch cap
+            // never costs a variable-size frame, and the batch is owned
+            // memory: resumes run user code that may push (spawn, nested
+            // reap) and even grow-and-rebase the ring underneath us.
+            constexpr std::uint64_t kChunk = 256;
+            std::coroutine_handle<> chunk[kChunk];
+
             for (;;)
             {
-                // Phase 1: resume everything that is ready.
-                while (!ready_list_.empty())
+                // Phase 1: at most batch_max_size resumes this epoch. The cap
+                // bounds the time between kernel submits when the ready list
+                // keeps refilling (spawn storms, nested reaps); a backlog is
+                // drained over successive epochs, FIFO.
+                std::uint64_t remaining = opts_.batch_max_size;
+                while (remaining > 0)
                 {
-                    std::coroutine_handle<> h = ready_list_.front();
-                    ready_list_.pop();
-                    h.resume(); // Coroutine resumes and may queue more work
+                    const std::uint64_t n = ready_list_.pop_batch(chunk, std::min(kChunk, remaining));
+                    if (n == 0)
+                    {
+                        break;
+                    }
+                    remaining -= n;
+                    for (std::uint64_t i = 0; i < n; ++i)
+                    {
+                        if (i + 2 < n)
+                        {
+                            // Warm the next frame's header line (resume/destroy
+                            // fn pointers, promise) while this body runs.
+                            __builtin_prefetch(chunk[i + 2].address(), 0, 3);
+                        }
+                        chunk[i].resume(); // may spawn / nested-reap -> next epoch
+                    }
                 }
-                if (inflight_ == 0)
+
+                if (ready_list_.empty() && inflight_ == 0)
                 {
                     io_uring_submit(&ring_); // flush stray SQEs
                     return;
                 }
-                // Phase 2: one syscall submits everything queued and waits for a CQE.
-                int r = io_uring_submit_and_wait(&ring_, 1);
+
+                // Phase 2: submit, and block for a CQE only when nothing is
+                // runnable. Parking a non-empty ready list behind a wait would
+                // invert the point of the epoch cap; with an empty SQ, submit
+                // is a ring check without a syscall, so the busy path is free.
+                const int r = ready_list_.empty()
+                                  ? io_uring_submit_and_wait(&ring_, 1)
+                                  : io_uring_submit(&ring_);
                 if (r < 0 && r != -EINTR && r != -EBUSY)
                 {
-                    std::fprintf(stderr, "urco: submit_and_wait failed: %d\n", r);
+                    LOG(FATAL) << "fatal, io submit failed: " << r;
                     std::abort();
                 }
                 // Phase 3: reap. Only queues handles into the ready list, never resumes.
@@ -210,14 +244,13 @@ namespace kio::io
         }
 
     private:
-        std::queue<std::coroutine_handle<>> ready_list_{}; // Classic data structure
-        std::optional<RegisteredBufferPool> buffer_pool_{std::nullopt};
+        // ---- Hot: touched by post/reap/resume on every completion. Kept
+        // adjacent so the loop's working set covers as few cache lines as
+        // possible; everything configuration-shaped lives below the cold
+        // marker. ----
+        detail::ReadyRing ready_list_{}; // Growing pow2 ring; the loop's runnable queue (see detail/ready_ring.h)
         io_uring ring_{};
-        unsigned setup_flags_ = 0;
-        std::vector<iovec> registered_iovecs_{};
         uint64_t inflight_{};
-        IoOptions opts_;
-        size_t id_;
         bool is_activated_{false};
         // Set by cancel_all(), read by IoAwaitable::await_resume so ops
         // canceled by a teardown report -ECANCELED instead of a fake
@@ -227,6 +260,13 @@ namespace kio::io
         // submission.
         bool canceling_all_{false};
 
+        // ---- Cold: construction config and rare accessors. ----
+        std::optional<RegisteredBufferPool> buffer_pool_{std::nullopt};
+        unsigned setup_flags_ = 0;
+        std::vector<iovec> registered_iovecs_{};
+        IoOptions opts_;
+        size_t id_;
+
         //
         // NEW METHODS, v2 migration
         //
@@ -234,8 +274,7 @@ namespace kio::io
         {
             if (io_uring_sq_space_left(&ring_) < reserve)
             {
-                int r = io_uring_submit(&ring_);
-                if (r == -EBUSY)
+                if (const int r = io_uring_submit(&ring_); r == -EBUSY)
                 {
                     // The CQ ring overflowed: the kernel takes no new work
                     // until completions are drained. reap() is loop-thread
@@ -268,17 +307,19 @@ namespace kio::io
         // (post, run, reap) executes on the run-loop thread.
         //
         // A node must not be queued twice, and by construction it cannot be:
-        // ops are one-shot and reap() CHECKs each CQE landed on an op still in
-        // flight, set_handle() rejects a second awaiter before any CQE exists,
-        // and spawn() posts a fresh frame every call. The two-op-one-handle
-        // case that WOULD break this (a future when_any handing one handle to
-        // two ops) belongs guarded in that combinator.
+        // ops are one-shot and reap() CHECKs each CQE landed on an op still
+        // in flight, await_suspend() rejects a second awaiter before any CQE
+        // exists, and spawn() posts a fresh frame every call. The two-op-one-
+        // handle case that WOULD break this (a future when_any handing one
+        // handle to two ops) belongs guarded in that combinator.
         void post(const std::coroutine_handle<> handle) noexcept
         {
             CHECK(handle.address() != nullptr) << "post of a null coroutine handle";
-            // Note: std::queue::push can theoretically throw std::bad_alloc.
-            // If it does, because we are in a noexcept context, it will call
-            // std::terminate() which matches this library's error handling
+            // Note: ReadyRing::push allocates only when it grows; steady
+            // state never allocates (the ring drains to empty at every phase
+            // boundary, so capacity stays warm). A grow that throws
+            // std::bad_alloc inside this noexcept context calls
+            // std::terminate(), which matches this library's error handling
             // philosophy.
             ready_list_.push(handle);
         }
@@ -294,22 +335,15 @@ namespace kio::io
                 const std::uint64_t ud = io_uring_cqe_get_data64(cqe);
                 if (ud & IGNORE_TAG) continue; // link-timeout / cancel CQE
                 auto* op = reinterpret_cast<IoAwaitableBase*>(ud);
-                // A CQE must correspond to an op that was submitted and not
-                // yet completed: Inflight, or Canceled while the cancel is
-                // still traveling. Anything else is a second CQE for an op
-                // that already completed -- ops are one-shot and there is no
-                // multishot, so that would resume the coroutine twice.
-                // Same-batch by construction: the op is alive until its
-                // coroutine resumes, and post() below only queues that.
-                CHECK(op->state == IoAwaitableState::Inflight ||
-                      op->state == IoAwaitableState::Canceled)
+                // One-shot ops produce exactly one CQE; a second one here
+                // would resume the coroutine twice. Inflight is the only
+                // state a CQE may legally arrive in -- a canceled op is still
+                // Inflight (cancel is a flag, not a state), so this CHECK is
+                // airtight for re-reaped batches too.
+                CHECK(op->lifecycle() == IoAwaitableState::Inflight)
                     << "CQE for an op that is not in flight";
                 op->res = cqe->res;
-                // TODO: I feel like done is not right here
-                if (op->state != IoAwaitableState::Canceled)
-                {
-                    op->switch_state(IoAwaitableState::Done);
-                }
+                op->set_lifecycle(IoAwaitableState::Done);
                 op_finished();
                 post(op->handle);
                 // `op` may be destroyed as soon as its coroutine runs: don't touch it again.
@@ -319,11 +353,13 @@ namespace kio::io
 
         void cancel(IoAwaitableBase& op) noexcept
         {
-            if (op.state != IoAwaitableState::Inflight)
+            // One cancel SQE per op: a repeat would submit a second
+            // IGNORE_TAG SQE for nothing, and re-flagging is meaningless.
+            if (op.lifecycle() != IoAwaitableState::Inflight || op.cancel_requested())
                 return;
 
+            op.set_cancel_requested();
             io_uring_sqe* sqe = get_sqe();
-            op.switch_state(IoAwaitableState::Canceled);
             io_uring_prep_cancel(sqe, &op, 0);
             io_uring_sqe_set_data64(sqe, IGNORE_TAG);
         }
@@ -356,16 +392,20 @@ namespace kio::io
     void IoAwaitable<Prep>::await_suspend(
         const std::coroutine_handle<> h) noexcept
     {
-        set_handle(h);
-        switch_state(IoAwaitableState::Inflight);
-        io_uring_sqe* sqe = io_.get_sqe(link_ts_ ? 2 : 1);
+        // One await per op: state leaves Created exactly once, and a second
+        // co_await (state Inflight or Done) would strand the first waiter or
+        // double-consume the result.
+        CHECK(lifecycle() == IoAwaitableState::Created) << "IoAwaitable awaited twice";
+        set_lifecycle(IoAwaitableState::Inflight);
+        handle = h;
+        io_uring_sqe* sqe = io_.get_sqe(has_link_timeout() ? 2 : 1);
         prep_(sqe, &scratch_);
         io_uring_sqe_set_data(sqe, static_cast<IoAwaitableBase*>(this));
-        if (link_ts_)
+        if (has_link_timeout())
         {
             sqe->flags |= IOSQE_IO_LINK;
             io_uring_sqe* t = io_.get_sqe(1);
-            io_uring_prep_link_timeout(t, &*link_ts_, 0);
+            io_uring_prep_link_timeout(t, &link_ts_, 0);
             io_uring_sqe_set_data64(t, IGNORE_TAG);
         }
 
@@ -380,16 +420,16 @@ namespace kio::io
             return res;
         }
         // TODO: we pay for this if for each non time based ops. Something to do here ?
-        if (res == -ETIME && etime_is_success_)
+        if (res == -ETIME && etime_is_success())
         {
             return 0;
         }
         // A fired link-timeout cancels the primary op, which surfaces here as
-        // -ECANCELED with the op still in Done: that IS a timeout. An explicit
-        // cancel(op) marks the op Canceled, and a teardown-wide cancel_all()
-        // latches Context::canceling_all_ -- those are genuine cancellations
-        // and must not masquerade as ETIMEDOUT.
-        if (res == -ECANCELED && link_ts_ && state != IoAwaitableState::Canceled && !io_.canceling_all_)
+        // -ECANCELED while the op is Done and unflagged: that IS a timeout.
+        // An explicit cancel(op) sets cancel_requested, and a teardown-wide
+        // cancel_all() latches Context::canceling_all_ -- those are genuine
+        // cancellations and must not masquerade as ETIMEDOUT.
+        if (res == -ECANCELED && has_link_timeout() && !cancel_requested() && !io_.canceling_all_)
         {
             return Error::fail_errno(ETIMEDOUT, "operation timed out");
         }

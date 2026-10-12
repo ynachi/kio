@@ -5,6 +5,14 @@ kio_add_test(task_tests kio/task_test.cpp
         LIBS uring GTest::gtest GTest::gtest_main
 )
 
+kio_add_test(ready_ring_tests kio/ready_ring_test.cpp
+        TAGS unit
+)
+
+kio_add_test(run_loop_tests kio/run_loop_test.cpp
+        TAGS uring unit
+)
+
 # Stale v1 tests: target the deleted core/io.h API (IO, run_blocking,
 # schedule()). Restore each one as its v2 counterpart lands.
 #  - context_remote_tests  (v1: IoContext workers, shared work queues)
