@@ -1,6 +1,7 @@
 #pragma once
-#include <unistd.h>
 #include <utility>
+
+#include <unistd.h>
 
 #include "error.hpp"
 #include "net.hpp"
@@ -14,7 +15,8 @@ namespace kio::io
 
         static void default_closer(const int fd) noexcept
         {
-            if (fd >= 0) ::close(fd);
+            if (fd >= 0)
+                ::close(fd);
         }
 
         static void noop_closer(int) noexcept
@@ -28,8 +30,7 @@ namespace kio::io
     public:
         UniqueFd() noexcept = default;
 
-        explicit UniqueFd(const int fd, const Closer closer = default_closer) noexcept
-            : fd_(fd), closer_(closer)
+        explicit UniqueFd(const int fd, const Closer closer = default_closer) noexcept : fd_(fd), closer_(closer)
         {
         }
 
@@ -37,8 +38,7 @@ namespace kio::io
         UniqueFd& operator=(const UniqueFd&) = delete;
 
         UniqueFd(UniqueFd&& other) noexcept
-            : fd_(std::exchange(other.fd_, -1)),
-              closer_(std::exchange(other.closer_, default_closer))
+            : fd_(std::exchange(other.fd_, -1)), closer_(std::exchange(other.closer_, default_closer))
         {
         }
 
@@ -61,8 +61,17 @@ namespace kio::io
 
         void reset(const int fd = -1, Closer closer = default_closer) noexcept
         {
-            if (fd_ == fd && closer_ == closer) return;
-            if (fd_ >= 0 && closer_) closer_(fd_);
+            // Same fd: never close-and-rehold (that would store a closed fd
+            // and double-close it later); just install the closer.
+            if (fd_ == fd)
+            {
+                closer_ = closer;
+                return;
+            }
+            if (fd_ >= 0 && closer_)
+            {
+                closer_(fd_);
+            }
             fd_ = fd;
             closer_ = closer;
         }
@@ -72,75 +81,22 @@ namespace kio::io
             closer_ = default_closer;
             return std::exchange(fd_, -1);
         }
-    };
-
-    struct Fd
-    {
-        int fd = -1;
-
-        Fd() = default;
-
-        explicit Fd(const int f) : fd(f)
-        {
-        }
-
-        ~Fd()
-        {
-            if (fd >= 0)
-            {
-                ::close(fd);
-                fd = -1;
-            }
-        }
-
-        Fd(Fd&& other) noexcept : fd(other.fd) { other.fd = -1; }
-
-        Fd& operator=(Fd&& other) noexcept
-        {
-            if (this != &other)
-            {
-                if (fd >= 0)
-                {
-                    ::close(fd);
-                }
-                fd = other.fd;
-                other.fd = -1;
-            }
-            return *this;
-        }
-
-        Fd(const Fd&) = delete;
-        Fd& operator=(const Fd&) = delete;
-
-        /// @brief Get the raw file descriptor.
-        [[nodiscard]] int Get() const noexcept { return fd; }
-
-        /// @brief Check if the descriptor is valid.
-        [[nodiscard]] bool IsValid() const noexcept { return fd >= 0; }
-
-        /// @brief Release ownership to the caller.
-        [[nodiscard]] int Release() noexcept
-        {
-            const int out = fd;
-            fd = -1;
-            return out;
-        }
 
         /// Single option
         /// @code
-        /// URing::Fd sock{raw_fd};
-        /// if (auto r = sock.SetOption(SockOpt::NoDelay{}); !r)
+        /// io::UniqueFd sock{raw_fd};
+        /// if (auto r = sock.set_option(SockOpt::NoDelay{}); !r)
         ///    return r;
         /// @endcode
         template <SocketOption Opt>
-        [[nodiscard]] Result<void> SetOption(const Opt& opt) const noexcept
+        [[nodiscard]] Result<void> set_option(const Opt& opt) const noexcept
         {
-            return opt.Apply(fd);
+            return opt.Apply(fd_);
         }
 
         /// Variadic — short-circuits on first error
         /// @code
-        /// if (auto r = sock.SetOptions(
+        /// if (auto r = sock.set_options(
         ///     SockOpt::ReuseAddr{},
         ///     SockOpt::ReusePort{},
         ///     SockOpt::NonBlocking{},
@@ -149,11 +105,10 @@ namespace kio::io
         /// return r;
         /// @endcode
         template <SocketOption... Opts>
-        [[nodiscard]] Result<void> SetOptions(Opts&&... opts) const noexcept
+        [[nodiscard]] Result<void> set_options(Opts&&... opts) const noexcept
         {
             Result<void> result;
-            static_cast<void>(
-                ((result = std::forward<Opts>(opts).Apply(fd), result.has_value()) && ...));
+            static_cast<void>(((result = std::forward<Opts>(opts).Apply(fd_), result.has_value()) && ...));
             return result;
         }
     };

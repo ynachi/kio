@@ -175,5 +175,12 @@ plus the buffer pool and `when_all` (pending) for concurrent reads.
   token-aware clients. This fixes the routing design.
 - Is the few-heavy-flows skew case in scope, or is the workload
   many-small-connections?
-- Enforcement of rule 5: keep as contract, or add the debug-mode
-  thread-identity CHECK?
+- ~~Enforcement of rule 5: keep as contract, or add the debug-mode
+  thread-identity CHECK?~~ **ANSWERED 2026-10-12: CHECK added.**
+  `Context::check_loop_thread()` stamps `owner_tid_` on the first
+  loop-thread call (top of `run()`) and aborts on any other thread's
+  `post()`/`run()` — `NDEBUG`-gated, free in release. Pinned by
+  `TimingCancelTest.CrossThreadSpawnAbortsInDebug`. The `leader`
+  (ATTACH_WQ follower) construction path is also now exercised:
+  `SharedWorkQueueFollowerAttachesToLeader` (green on kernel 6.8 docker
+  and 7.0 remote — the R_DISABLED leader concern did not materialize).

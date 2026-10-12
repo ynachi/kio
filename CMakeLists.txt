@@ -92,30 +92,6 @@ if (KIO_USE_MIMALLOC)
     target_link_libraries(uring PUBLIC mimalloc-static)
 endif ()
 
-#-----------------------------------------------
-# bitcask lib
-#----------------------------------------------
-# Library definition
-#if (KIO_BUILD_BITCASK)
-#    add_library(bitcask
-#            src/bitcask/cache.cc
-#            src/bitcask/segment.cc
-#    )
-#
-#    # Include directories
-#    target_include_directories(bitcask PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR})
-#    # Link dependencies
-#    target_link_libraries(bitcask
-#            PUBLIC
-#            uring
-#            absl::flat_hash_map
-#            absl::flat_hash_set
-#            absl::inlined_vector
-#            PRIVATE
-#            crc32c
-#    )
-#endif ()
-
 
 if (KIO_BUILD_DEMOS)
     add_subdirectory(examples)

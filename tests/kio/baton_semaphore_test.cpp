@@ -298,3 +298,13 @@ TEST(SemaphoreTest, NeverReleasedAborts)
         },
         "semaphore never released");
 }
+
+// Baton/Semaphore are built per locked resource / per bridge (the Mutex and
+// one-shot-channel use cases in baton.md), so their waiter queue must stay
+// lazy: an eager 1024-slot ring would be 8 KiB + one malloc per instance.
+// The parking path pays one allocation on first park; the fast path none.
+TEST(BatonTest, PrimitiveFootprintStaysSmall)
+{
+    EXPECT_LE(sizeof(Baton), 24u);
+    EXPECT_LE(sizeof(Semaphore), 32u);
+}

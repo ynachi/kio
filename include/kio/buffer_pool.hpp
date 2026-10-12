@@ -1,5 +1,11 @@
 #pragma once
 
+#include "absl/log/check.h"
+#include "detail/trivial_ring_buffer.h"
+
+#include "kio/error.hpp"
+
+#include <algorithm>
 #include <coroutine>
 #include <cstddef>
 #include <cstdint>
@@ -10,10 +16,6 @@
 
 #include <sys/mman.h>
 #include <sys/uio.h>
-
-#include "detail/ready_ring.h"
-#include "absl/log/check.h"
-#include "kio/error.hpp"
 
 namespace kio
 {
@@ -68,20 +70,32 @@ namespace kio
         /// @brief View the leased memory as a const byte span.
         [[nodiscard]] std::span<const std::byte> bytes() const noexcept { return {data_, size_}; }
 
-        /// @brief First n bytes of the slot (clamped like std::span::first).
-        [[nodiscard]] std::span<std::byte> first(const size_t n) noexcept { return bytes().first(n); }
-        [[nodiscard]] std::span<const std::byte> first(const size_t n) const noexcept
+        /// @brief First n bytes of the slot. Same contract as std::span::first: n <= size().
+        [[nodiscard]] std::span<std::byte> first(const size_t n) noexcept
         {
+            CHECK(n <= size_) << "BufferLease::first: n=" << n << " exceeds slot size " << size_;
             return bytes().first(n);
         }
 
-        /// @brief Sub-range of the slot (clamped like std::span::subspan).
+        /// @brief First n bytes of the slot. Same contract as std::span::first: n <= size().
+        [[nodiscard]] std::span<const std::byte> first(const size_t n) const noexcept
+        {
+            CHECK(n <= size_) << "BufferLease::first: n=" << n << " exceeds slot size " << size_;
+            return bytes().first(n);
+        }
+
+        /// @brief Sub-range [off, off+n) of the slot. Same contract as std::span::subspan.
         [[nodiscard]] std::span<std::byte> subspan(const size_t off, const size_t n) noexcept
         {
+            CHECK(off <= size_ && n <= size_ - off)
+                << "BufferLease::subspan: [" << off << ", " << off << "+" << n << ") outside slot of " << size_;
             return bytes().subspan(off, n);
         }
+
         [[nodiscard]] std::span<const std::byte> subspan(const size_t off, const size_t n) const noexcept
         {
+            CHECK(off <= size_ && n <= size_ - off)
+                << "BufferLease::subspan: [" << off << ", " << off << "+" << n << ") outside slot of " << size_;
             return bytes().subspan(off, n);
         }
 
@@ -292,10 +306,6 @@ namespace kio
         /// @brief Asynchronous acquisition with FIFO queueing.
         [[nodiscard]] AcquireAwaiter acquire() noexcept { return AcquireAwaiter{*this}; }
 
-        /// @brief Return a slot: LIFO-push, then wake the oldest waiter if
-        ///        one is parked (reserved-wake protocol, Invariant 4).
-        void release(uint32_t ordinal) noexcept;
-
         /// @brief Permanently shut down: wake all parked waiters with
         ///        operation_canceled. Idempotent; leases stay releasable.
         void close() noexcept;
@@ -307,8 +317,7 @@ namespace kio
         /// @brief Branchless registered-buffer index for a pointer in the pool.
         [[nodiscard]] uint16_t registration_index(const std::byte* ptr) const noexcept
         {
-            CHECK(ptr >= base_ && ptr < base_ + total_bytes_)
-                << "registration_index on a pointer outside the pool mapping";
+            CHECK(ptr >= base_ && ptr < base_ + total_bytes_) << "registration_index on a pointer outside the pool mapping";
             const auto offset = static_cast<size_t>(ptr - base_);
             const size_t index = size_t{first_index_} + (offset >> 30U);
             CHECK(index <= 65535) << "registered buffer index overflows the SQE buf_index field";
@@ -325,10 +334,7 @@ namespace kio
 
         /// @brief Slots in the free list (some may be reserved for woken
         ///        waiters -- see try_acquire's surplus rule).
-        [[nodiscard]] uint32_t available() const noexcept
-        {
-            return static_cast<uint32_t>(free_slots_.size());
-        }
+        [[nodiscard]] uint32_t available() const noexcept { return static_cast<uint32_t>(free_slots_.size()); }
 
         [[nodiscard]] size_t total_bytes() const noexcept { return total_bytes_; }
         [[nodiscard]] size_t allocated_bytes() const noexcept { return aligned_total_bytes_; }
@@ -338,6 +344,17 @@ namespace kio
         friend class BufferLease;
         friend struct AcquireAwaiter;
 
+        // The ONLY legal release path is BufferLease::reset() (a friend).
+        // Private because a public release would let a caller return the
+        // same ordinal twice: two leases on one slot (silent corruption)
+        // and a free-list push past its reserve (realloc inside a noexcept
+        // function -> terminate). If a manual return is ever wanted, it
+        // must be a consuming operation, not a raw ordinal.
+        //
+        /// @brief Return a slot: LIFO-push, then wake the oldest waiter if
+        ///        one is parked (reserved-wake protocol, Invariant 4).
+        void release(uint32_t ordinal) noexcept;
+
         BufferLease make_lease(uint32_t ordinal) noexcept
         {
             return BufferLease{*this, base_ + size_t{ordinal} * slot_size_, slot_size_, ordinal};
@@ -345,8 +362,7 @@ namespace kio
 
         void park(std::coroutine_handle<> h) noexcept
         {
-            CHECK(wake_fn_ != nullptr)
-                << "coroutine parked on a pool with no wake callback installed";
+            CHECK(wake_fn_ != nullptr) << "coroutine parked on a pool with no wake callback installed";
             waiters_.push(h);
         }
 

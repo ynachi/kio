@@ -90,6 +90,15 @@ The awaiter is a prvalue slotted into the awaiting frame (guaranteed copy
 elision — same pattern as the pool's `AcquireAwaiter`), so a wait costs
 zero allocations. The fast path costs one load.
 
+**The waiter ring is lazy** (2026-10-12, review finding): both Baton and
+Semaphore allocate their `ReadyRing` only on the first park, at initial
+capacity 16. An eager ring cost 8 KiB + one malloc per instance — fatal
+for the per-locked-resource / per-bridge use cases this primitive exists
+for (folly's Baton is 8 bytes). The fast path stays allocation-free by
+construction; a genuine broadcast-many still grows. `waiting()` reads 0
+through the null pointer, so quiescence accounting is unchanged. The pool
+keeps its eager ring: one instance, waiters genuinely reach thousands.
+
 No reserved-wake accounting is needed (contrast `buffer-pool.md` §3):
 accounting exists because a released *slot* can be stolen by a new
 arrival; a posted Baton's `ready_` is sticky, so an arrival during the

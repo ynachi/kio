@@ -1,11 +1,15 @@
-#include "kio/net.hpp"
-
-#include <cerrno>
-#include <cstring>
-
+// <netdb.h> deliberately precedes the kio headers (breaking the own-header-
+// first convention): libstdc++ defines the EAI-derived errc enumerators
+// (host_not_found, no_data, ...) in <system_error> ONLY when the EAI_* macros
+// are already visible. Include netdb first and those std::errc members exist;
+// include it second and ResolveIp's EAI_NONAME mapping does not compile.
 #include <netdb.h>
 
+#include "kio/net.hpp"
+
 #include <arpa/inet.h>
+#include <cerrno>
+#include <cstring>
 
 namespace kio
 {
@@ -90,6 +94,10 @@ namespace kio
         return std::nullopt;
     }
 
+    // Note: returns the FIRST addrinfo result only (no fallback iteration
+    // to later families/addresses). For dual-stack names this may not be the
+    // address you wanted; an all-results overload can be added when a caller
+    // needs it.
     Result<SocketAddress> ResolveIp(const std::string_view host, const uint16_t port)
     {
         addrinfo hints{}, *res = nullptr;
@@ -111,6 +119,12 @@ namespace kio
                 return Error::fail_errc(std::errc::resource_unavailable_try_again, "getaddrinfo");
             case EAI_MEMORY:
                 return Error::fail_errc(std::errc::not_enough_memory, "getaddrinfo");
+#ifdef EAI_NONAME
+            case EAI_NONAME:
+                // The common "no such host" -- must not collapse into the
+                // generic fallback below.
+                return Error::fail_errc(std::errc::no_such_device, "getaddrinfo");
+#endif
             default:
                 return Error::fail_errc(std::errc::address_not_available, "getaddrinfo");
             }

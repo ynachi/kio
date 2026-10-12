@@ -1,4 +1,5 @@
 #include "kio/task.h"
+#include "kio/try.hpp"
 
 #include <gtest/gtest.h>
 
@@ -183,4 +184,68 @@ TEST(TaskTest, DropUnstartedTaskIsLegal)
 {
     Task<int> abandoned = value_task();
     (void)abandoned; // scope ends, ~Task destroys the unstarted frame
+}
+
+// ---- KIO_CO_TRY / KIO_CO_TRY_VOID / KIO_TRY / KIO_TRY_VOID ----
+//
+// The _VOID forms exist because KIO_CO_TRY ends in `auto var = <unwrap>`,
+// which is ill-formed for a Result<void> expression -- exactly the shape of
+// every void op (fsync/close/rename/...).
+
+Task<int> try_value()
+{
+    KIO_CO_TRY(v, co_await value_task());
+    co_return v + 1;
+}
+
+Task<> try_void_ok()
+{
+    KIO_CO_TRY_VOID(co_await void_value_task());
+    co_return {};
+}
+
+Task<> try_void_error()
+{
+    KIO_CO_TRY_VOID(co_await void_error_task());
+    co_return {};  // unreachable: the macro returned the error
+}
+
+Result<int> plain_try()
+{
+    KIO_TRY(v, Result<int>{42});
+    return v + 1;
+}
+
+Result<void> plain_try_void_error()
+{
+    KIO_TRY_VOID(Result<void>{std::unexpect, Error::from_errc(std::errc::invalid_argument)});
+    return {};
+}
+
+TEST(TaskTest, CoTryUnwrapsValue)
+{
+    const auto res = run_to_result(try_value());
+    ASSERT_TRUE(res.has_value());
+    EXPECT_EQ(*res, 43);
+}
+
+TEST(TaskTest, CoTryVoidAcceptsSuccess)
+{
+    const auto res = run_to_result(try_void_ok());
+    ASSERT_TRUE(res.has_value());
+}
+
+TEST(TaskTest, CoTryVoidPropagatesError)
+{
+    auto res = run_to_result(try_void_error());
+    ASSERT_FALSE(res.has_value());
+    EXPECT_EQ(res.error().value(), EINVAL);
+}
+
+TEST(TaskTest, TryVoidPropagatesErrorOutsideCoroutines)
+{
+    auto res = plain_try_void_error();
+    ASSERT_FALSE(res.has_value());
+    EXPECT_EQ(res.error().value(), EINVAL);
+    EXPECT_EQ(plain_try().value(), 43);
 }

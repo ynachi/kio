@@ -1,11 +1,13 @@
 #pragma once
 
 #include "absl/log/check.h"
-#include "detail/ready_ring.h"
+#include "detail/trivial_ring_buffer.h"
 #include "kio/context.h"
 
 #include <coroutine>
 #include <cstddef>
+#include <cstdint>
+#include <memory>
 
 namespace kio
 {
@@ -31,6 +33,11 @@ public:
     Semaphore(const Semaphore&) = delete;
     Semaphore& operator=(const Semaphore&) = delete;
 
+    // Destroying a Semaphore with parked waiters leaves their handles
+    // dangling: run()'s quiescence CHECK would catch it later, but only here
+    // can the abort name the culprit object.
+    ~Semaphore() { CHECK(!waiters_ || waiters_->empty()) << "Semaphore destroyed with parked waiters"; }
+
     /// Non-blocking acquire. Newcomers may only take surplus permits.
     [[nodiscard]] bool try_acquire() noexcept
     {
@@ -48,10 +55,10 @@ public:
     void release() noexcept
     {
         ++count_;
-        if (!waiters_.empty())
+        if (waiters_ && !waiters_->empty())
         {
             std::coroutine_handle<> h;
-            if (waiters_.pop_batch(&h, 1) == 1)
+            if (waiters_->pop_batch(&h, 1) == 1)
             {
                 // The surplus permit is spoken for until the waiter
                 // resumes and consumes the reservation.
@@ -80,7 +87,7 @@ public:
         void await_suspend(std::coroutine_handle<> h) noexcept
         {
             sem.io_.note_park();
-            sem.waiters_.push(h);
+            sem.wait_queue().push(h);
         }
 
         void await_resume() noexcept
@@ -104,14 +111,29 @@ public:
     /// Free permits (including those reserved for woken waiters).
     [[nodiscard]] std::size_t available() const noexcept { return count_; }
 
-    [[nodiscard]] std::size_t waiting() const noexcept { return waiters_.size(); }
+    /// @brief Coroutines currently parked on acquire() (0 on the fast path).
+    [[nodiscard]] std::size_t waiting() const noexcept { return waiters_ ? waiters_->size() : 0; }
 
 private:
     friend struct AcquireAwaiter;
 
+    static constexpr std::uint64_t kWaitersInitialCap = 16;
+
+    // The queue exists only once a waiter has parked (lazily allocated):
+    // Semaphores are built per locked resource where waiters are the rare
+    // case, so an eager ring would cost 8 KiB + one malloc per instance.
+    detail::ReadyRing& wait_queue() noexcept
+    {
+        if (!waiters_)
+        {
+            waiters_ = std::make_unique<detail::ReadyRing>(kWaitersInitialCap);
+        }
+        return *waiters_;
+    }
+
     io::Context& io_;
     std::size_t count_ = 0;
     std::size_t reserved_ = 0;
-    detail::ReadyRing waiters_{};
+    std::unique_ptr<detail::ReadyRing> waiters_;
 };
 }  // namespace kio

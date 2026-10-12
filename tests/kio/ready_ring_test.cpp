@@ -1,144 +1,125 @@
-#include "kio/detail/ready_ring.h"
+#include "kio/detail/trivial_ring_buffer.h"
 
-#include <coroutine>
 #include <cstdint>
-#include <vector>
-
 #include <gtest/gtest.h>
 
-using kio::detail::ReadyRing;
 
-namespace
-{
-// Fake handles carry a tag in the address bits and are NEVER resumed or
-// destroyed -- there is no frame behind them. ReadyRing is tested here as
-// pure storage: only push/pop_batch/size/empty are exercised.
-std::coroutine_handle<> fake(const std::uint64_t v)
-{
-    return std::coroutine_handle<>::from_address(reinterpret_cast<void*>(static_cast<std::uintptr_t>(v)));
-}
+using kio::detail::TrivialRingBuffer;
 
-std::uint64_t tag(const std::coroutine_handle<> h)
-{
-    return reinterpret_cast<std::uintptr_t>(h.address());
-}
-}  // namespace
+// ===========================================================================
+// PART 1: FUNCTIONAL TESTS (The "Happy Path" & Edge Cases)
+// ===========================================================================
 
-TEST(ReadyRingTest, FifoAcrossWraparoundWithoutGrow)
+TEST(TrivialRingBufferTest, FifoAcrossWraparoundWithoutGrow)
 {
-    ReadyRing r(4);
-    for (std::uint64_t i = 1; i <= 4; ++i)
-    {
-        r.push(fake(i));
-    }
-    std::coroutine_handle<> buf[4];
+    TrivialRingBuffer<std::uint64_t> r(4);
+
+    r.push(1);
+    r.push(2);
+    r.push(3);
+    r.push(4);
+
+    std::uint64_t buf[4];
     ASSERT_EQ(r.pop_batch(buf, 2), 2u);
-    EXPECT_EQ(tag(buf[0]), 1u);
-    EXPECT_EQ(tag(buf[1]), 2u);
-    // These two wrap onto the slots freed by the first pop.
-    r.push(fake(5));
-    r.push(fake(6));
+    EXPECT_EQ(buf[0], 1u);
+    EXPECT_EQ(buf[1], 2u);
+
+    // Wrap around
+    r.push(5);
+    r.push(6);
+
     ASSERT_EQ(r.pop_batch(buf, 4), 4u);
-    EXPECT_EQ(tag(buf[0]), 3u);
-    EXPECT_EQ(tag(buf[1]), 4u);
-    EXPECT_EQ(tag(buf[2]), 5u);
-    EXPECT_EQ(tag(buf[3]), 6u);
+    EXPECT_EQ(buf[0], 3u);
+    EXPECT_EQ(buf[1], 4u);
+    EXPECT_EQ(buf[2], 5u);
+    EXPECT_EQ(buf[3], 6u);
     EXPECT_TRUE(r.empty());
 }
 
-TEST(ReadyRingTest, GrowPreservesFifoOrder)
+TEST(TrivialRingBufferTest, GrowPreservesFifoOrder)
 {
-    ReadyRing r(4);
-    for (std::uint64_t i = 1; i <= 10; ++i)
-    {
-        r.push(fake(i));  // fills at 4, grows 4->8->16
-    }
-    EXPECT_EQ(r.size(), 10u);
-    std::coroutine_handle<> buf[3];
+    TrivialRingBuffer<std::uint64_t> r(4);
+    for (std::uint64_t i = 1; i <= 10; ++i) r.push(i); // Forces 4 -> 8 -> 16
+
+    std::uint64_t buf[3];
     std::uint64_t next = 1;
     while (!r.empty())
     {
         const std::uint64_t n = r.pop_batch(buf, 3);
         ASSERT_GT(n, 0u);
         for (std::uint64_t i = 0; i < n; ++i)
-        {
-            EXPECT_EQ(tag(buf[i]), next);
-            ++next;
-        }
+            EXPECT_EQ(buf[i], next++);
     }
     EXPECT_EQ(next, 11u);
 }
 
-TEST(ReadyRingTest, PopBatchPartialThenEmpty)
+TEST(TrivialRingBufferTest, PopBatchPartialThenEmpty)
 {
-    ReadyRing r(8);
-    for (std::uint64_t i = 1; i <= 5; ++i)
-    {
-        r.push(fake(i));
-    }
-    std::coroutine_handle<> buf[3];
-    ASSERT_EQ(r.pop_batch(buf, 3), 3u);
-    EXPECT_EQ(tag(buf[0]), 1u);
-    EXPECT_EQ(tag(buf[1]), 2u);
-    EXPECT_EQ(tag(buf[2]), 3u);
-    ASSERT_EQ(r.pop_batch(buf, 3), 2u);  // short tail batch
-    EXPECT_EQ(tag(buf[0]), 4u);
-    EXPECT_EQ(tag(buf[1]), 5u);
-    ASSERT_EQ(r.pop_batch(buf, 3), 0u);
+    TrivialRingBuffer<std::uint64_t> r(8);
+    for (std::uint64_t i = 1; i <= 5; ++i) r.push(i);
+
+    std::uint64_t buf[3];
+    ASSERT_EQ(r.pop_batch(buf, 3), 3u); // Full batch
+    ASSERT_EQ(r.pop_batch(buf, 3), 2u); // Partial batch
+    ASSERT_EQ(r.pop_batch(buf, 3), 0u); // Empty
 }
 
-TEST(ReadyRingTest, PushDuringDrainInterleaving)
+// ===========================================================================
+// PART 2: DEATH TESTS (Testing the CHECK() fatal assertions)
+// ===========================================================================
+
+// 1. Name the suite with "DeathTest" so gtest runs it first and isolates it.
+class TrivialRingBufferDeathTest : public ::testing::Test
 {
-    ReadyRing r(8);
-    r.push(fake(1));
-    r.push(fake(2));
-    r.push(fake(3));
-    std::coroutine_handle<> buf[3];
-    ASSERT_EQ(r.pop_batch(buf, 2), 2u);
-    EXPECT_EQ(tag(buf[0]), 1u);
-    EXPECT_EQ(tag(buf[1]), 2u);
-    // Interleave: the pushed handles continue the same FIFO order.
-    r.push(fake(4));
-    r.push(fake(5));
-    ASSERT_EQ(r.pop_batch(buf, 3), 3u);
-    EXPECT_EQ(tag(buf[0]), 3u);
-    EXPECT_EQ(tag(buf[1]), 4u);
-    EXPECT_EQ(tag(buf[2]), 5u);
-    EXPECT_TRUE(r.empty());
+protected:
+    void SetUp() override
+    {
+        // 2. Set the threadsafe flag.
+        // (Can also be done globally in main(), but doing it here ensures
+        // it applies even if this specific test file is run in isolation).
+        GTEST_FLAG_SET(death_test_style, "threadsafe");
+    }
+};
+
+// 3. Name the test case with "DeathTest"
+TEST_F(TrivialRingBufferDeathTest, RejectsZeroCapacity)
+{
+    // 4. Construct INSIDE the macro.
+    // 5. Provide a regex that matches the CHECK failure message.
+    EXPECT_DEATH(
+        {
+        TrivialRingBuffer<std::uint64_t> bad_ring(0);
+        },
+        "positive power of two" // Matches: "Capacity must be a positive power of two..."
+    );
 }
 
-// Documents that exactly kMaxCapacity entries fit without tripping the fence
-// CHECK: the ring grows 1024 -> 1<<20, and only a push onto a FULL max ring
-// would abort. Tags start at 1, not 0: fake(0) is a null-address handle and
-// push() CHECK-rejects those (same contract as Context::post), so the fence
-// here is exercised on capacity alone.
-TEST(ReadyRingTest, GrowsToCapacityFence)
+TEST_F(TrivialRingBufferDeathTest, RejectsNonPowerOfTwoCapacity)
 {
-    ReadyRing r{};
-    constexpr std::uint64_t kMax = 1ULL << 20;
-    for (std::uint64_t i = 0; i < kMax; ++i)
-    {
-        r.push(fake(i + 1));
-    }
-    EXPECT_EQ(r.size(), kMax);
+    EXPECT_DEATH(
+        {
+        TrivialRingBuffer<std::uint64_t> bad_ring(3);
+        },
+        "positive power of two"
+    );
+}
 
-    std::coroutine_handle<> head[4];
-    ASSERT_EQ(r.pop_batch(head, 4), 4u);
-    EXPECT_EQ(tag(head[0]), 1u);
-    EXPECT_EQ(tag(head[1]), 2u);
-    EXPECT_EQ(tag(head[2]), 3u);
-    EXPECT_EQ(tag(head[3]), 4u);
+TEST_F(TrivialRingBufferDeathTest, RefusesToGrowPastMaxCapacity)
+{
+    EXPECT_DEATH(
+        {
+        // Start at max capacity to avoid massive memory allocation during test setup
+        constexpr auto kMax = TrivialRingBuffer<std::uint64_t>::kMaxCapacity;
+        TrivialRingBuffer<std::uint64_t> r(kMax);
 
-    std::vector<std::coroutine_handle<>> buf(70000);
-    std::uint64_t next = 5;
-    while (!r.empty())
-    {
-        const std::uint64_t n = r.pop_batch(buf.data(), buf.size());
-        ASSERT_GT(n, 0u);
-        // Each chunk's first tag continues the global sequence.
-        EXPECT_EQ(tag(buf[0]), next);
-        next += n;
-    }
-    EXPECT_EQ(next, kMax + 1);
-    EXPECT_TRUE(r.empty());
+        // Fill it to the absolute brim
+        for (std::uint64_t i = 0; i < kMax; ++i) {
+        r.push(i);
+        }
+
+        // This push forces a grow(), which should trigger the CHECK and abort
+        r.push(999);
+        },
+        "refuses to grow past" // Matches: "TrivialRingBuffer refuses to grow past..."
+    );
 }

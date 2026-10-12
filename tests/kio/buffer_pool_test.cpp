@@ -20,132 +20,133 @@ using namespace kio;
 
 namespace
 {
-// Pools here are deliberately tiny (1-16 slots) so every handoff is
-// observable, and the one two-region pool never touches its pages: the
-// mapping is lazy and the test registers the iovecs without any I/O.
+    // Pools here are deliberately tiny (1-16 slots) so every handoff is
+    // observable, and the one two-region pool never touches its pages: the
+    // mapping is lazy and the test registers the iovecs without any I/O.
 
-constexpr std::chrono::milliseconds kHoldMs{10};
+    constexpr std::chrono::milliseconds kHoldMs{10};
 
-// fd.hpp intake: UniqueFd wraps the raw fd from open() (explicit ctor)
-// and closes it on scope exit.
-io::UniqueFd open_temp_file(const char* path)
-{
-    return io::UniqueFd{::open(path, O_CREAT | O_RDWR | O_TRUNC, 0600)};
-}
-
-// ---- task bodies for the scenario tests ----
-//
-// EXPECT (not ASSERT) inside coroutines: ASSERT_* expands to a plain
-// `return`, which is ill-formed in a coroutine body.
-
-// Takes the single slot, sleeps, then releases mid-task -- the release
-// is what wakes waiter #1; waiter #1's own lease destruction chains the
-// wake to #2, then #3.
-Task<> holder_task(io::Context& io)
-{
-    auto lease = co_await io.acquire_buffer();
-    EXPECT_TRUE(lease.has_value());
-    co_await async_sleep(io, kHoldMs);
-    lease->reset();
-    co_return {};
-}
-
-Task<> waiter_task(io::Context& io, const int id, std::vector<int>& order)
-{
-    auto res = co_await io.acquire_buffer();
-    EXPECT_TRUE(res.has_value());
-    order.push_back(id);
-    co_return {};
-}
-
-// The releaser itself must not steal the slot it just reserved for the
-// woken waiter (surplus rule): try_acquire right after reset() finds
-// every free slot spoken for.
-Task<> thief_task(io::Context& io, bool& thief_blocked)
-{
-    auto lease = co_await io.acquire_buffer();
-    EXPECT_TRUE(lease.has_value());
-    co_await async_sleep(io, kHoldMs);
-    lease->reset();
-    auto stolen = io.try_acquire_buffer();
-    thief_blocked = !static_cast<bool>(stolen);
-    co_return {};
-}
-
-Task<> parked_waiter(io::Context& io, bool& ok)
-{
-    auto res = co_await io.acquire_buffer();
-    ok = res.has_value();
-    co_return {};
-}
-
-// Records the cancellation shape close() must produce.
-Task<> canceled_waiter(io::Context& io, bool& was_canceled, bool& message_ok)
-{
-    auto res = co_await io.acquire_buffer();
-    was_canceled = !res.has_value();
-    if (!res.has_value())
+    // fd.hpp intake: UniqueFd wraps the raw fd from open() (explicit ctor)
+    // and closes it on scope exit.
+    io::UniqueFd open_temp_file(const char* path)
     {
-        message_ok = res.error().context() == "pool closed" &&
-                     res.error().value() == static_cast<int>(std::errc::operation_canceled);
+        return io::UniqueFd{::open(path, O_CREAT | O_RDWR | O_TRUNC, 0600)};
     }
-    co_return {};
-}
 
-Task<> holder_with_record(io::Context& io, bool& ok)
-{
-    auto lease = co_await io.acquire_buffer();
-    ok = lease.has_value();
-    co_await async_sleep(io, std::chrono::milliseconds(5));
-    lease->reset();
-    co_return {};
-}
+    // ---- task bodies for the scenario tests ----
+    //
+    // EXPECT (not ASSERT) inside coroutines: ASSERT_* expands to a plain
+    // `return`, which is ill-formed in a coroutine body.
 
-Task<> close_after_delay(io::Context& io, RegisteredBufferPool* pool, const std::chrono::milliseconds delay)
-{
-    co_await async_sleep(io, delay);
-    pool->close();
-    co_return {};
-}
+    // Takes the single slot, sleeps, then releases mid-task -- the release
+    // is what wakes waiter #1; waiter #1's own lease destruction chains the
+    // wake to #2, then #3.
+    Task<> holder_task(io::Context& io)
+    {
+        auto lease = co_await io.acquire_buffer();
+        EXPECT_TRUE(lease.has_value());
+        co_await async_sleep(io, kHoldMs);
+        lease->reset();
+        co_return {};
+    }
 
-// Lease-first fixed I/O: write a pattern from one slot, read it back
-// into a second slot, compare against the caller's pattern.
-Task<> fixed_io_task(io::Context& io, io::UniqueFd& fd, const std::array<std::byte, 1000>& pattern, Result<int>& read_n,
-                     bool& bytes_match)
-{
-    auto l1 = co_await io.acquire_buffer();
-    EXPECT_TRUE(l1.has_value());
-    std::memcpy(l1->data(), pattern.data(), pattern.size());
+    Task<> waiter_task(io::Context& io, const int id, std::vector<int>& order)
+    {
+        auto res = co_await io.acquire_buffer();
+        EXPECT_TRUE(res.has_value());
+        order.push_back(id);
+        co_return {};
+    }
 
-    const auto w = co_await async_write_fixed(io, fd, *l1, pattern.size(), 0, 0);
-    EXPECT_TRUE(w.has_value());
+    // The releaser itself must not steal the slot it just reserved for the
+    // woken waiter (surplus rule): try_acquire right after reset() finds
+    // every free slot spoken for.
+    Task<> thief_task(io::Context& io, bool& thief_blocked)
+    {
+        auto lease = co_await io.acquire_buffer();
+        EXPECT_TRUE(lease.has_value());
+        co_await async_sleep(io, kHoldMs);
+        lease->reset();
+        auto stolen = io.try_acquire_buffer();
+        thief_blocked = !static_cast<bool>(stolen);
+        co_return {};
+    }
 
-    auto l2 = co_await io.acquire_buffer();
-    EXPECT_TRUE(l2.has_value());
-    auto r = co_await async_read_fixed(io, fd, *l2, pattern.size(), 0, 0);
-    read_n = std::move(r);
-    bytes_match = std::memcmp(l2->data(), pattern.data(), pattern.size()) == 0;
-    co_return {};
-}
+    Task<> parked_waiter(io::Context& io, bool& ok)
+    {
+        auto res = co_await io.acquire_buffer();
+        ok = res.has_value();
+        co_return {};
+    }
 
-Task<> foreign_read_task(io::Context& io, io::UniqueFd& fd, BufferLease& lease)
-{
-    auto res = co_await async_read_fixed(io, fd, lease, 16, 0, 0);
-    (void)res;
-    co_return {};
-}
+    // Records the cancellation shape close() must produce.
+    Task<> canceled_waiter(io::Context& io, bool& was_canceled, bool& message_ok)
+    {
+        auto res = co_await io.acquire_buffer();
+        was_canceled = !res.has_value();
+        if (!res.has_value())
+        {
+            message_ok = res.error().context() == "pool closed" &&
+                res.error().value() == static_cast<int>(std::errc::operation_canceled);
+        }
+        co_return {};
+    }
 
-// Second acquire parks forever (single-slot pool, nothing ever
-// releases): the first lease is the leak run() must detect.
-Task<> leak_two(io::Context& io)
-{
-    auto a = co_await io.acquire_buffer();
-    EXPECT_TRUE(a.has_value());
-    auto b = co_await io.acquire_buffer();
-    (void)b;
-    co_return {};
-}
-}  // namespace
+    Task<> holder_with_record(io::Context& io, bool& ok)
+    {
+        auto lease = co_await io.acquire_buffer();
+        ok = lease.has_value();
+        co_await async_sleep(io, std::chrono::milliseconds(5));
+        lease->reset();
+        co_return {};
+    }
+
+    Task<> close_after_delay(io::Context& io, RegisteredBufferPool* pool, const std::chrono::milliseconds delay)
+    {
+        co_await async_sleep(io, delay);
+        pool->close();
+        co_return {};
+    }
+
+    // Lease-first fixed I/O: write a pattern from one slot, read it back
+    // into a second slot, compare against the caller's pattern.
+    Task<> fixed_io_task(io::Context& io, io::UniqueFd& fd, const std::array<std::byte, 1000>& pattern,
+                         Result<int>& read_n,
+                         bool& bytes_match)
+    {
+        auto l1 = co_await io.acquire_buffer();
+        EXPECT_TRUE(l1.has_value());
+        std::memcpy(l1->data(), pattern.data(), pattern.size());
+
+        const auto w = co_await async_write_fixed(io, fd, *l1, pattern.size(), 0, 0);
+        EXPECT_TRUE(w.has_value());
+
+        auto l2 = co_await io.acquire_buffer();
+        EXPECT_TRUE(l2.has_value());
+        auto r = co_await async_read_fixed(io, fd, *l2, pattern.size(), 0, 0);
+        read_n = std::move(r);
+        bytes_match = std::memcmp(l2->data(), pattern.data(), pattern.size()) == 0;
+        co_return {};
+    }
+
+    Task<> foreign_read_task(io::Context& io, const io::UniqueFd& fd, BufferLease& lease)
+    {
+        const auto res = co_await async_read_fixed(io, fd, lease, 16, 0, 0);
+        (void)res;
+        co_return {};
+    }
+
+    // Second acquire parks forever (single-slot pool, nothing ever
+    // releases): the first lease is the leak run() must detect.
+    Task<> leak_two(io::Context& io)
+    {
+        auto a = co_await io.acquire_buffer();
+        EXPECT_TRUE(a.has_value());
+        auto b = co_await io.acquire_buffer();
+        (void)b;
+        co_return {};
+    }
+} // namespace
 
 TEST(BufferPoolTest, SlotMathTwoRegions)
 {
@@ -216,7 +217,7 @@ TEST(BufferPoolTest, FifoWakeChainedOrder)
 
     // Each waiter's lease destruction releases the slot and wakes the next
     // one, so completions come out in spawn order despite the single slot.
-    EXPECT_EQ(order, (std::vector<int>{1, 2, 3}));
+    EXPECT_EQ(order, (std::vector{1, 2, 3}));
 }
 
 TEST(BufferPoolTest, NoBypassSurplusRule)
@@ -253,9 +254,9 @@ TEST(BufferPoolTest, CloseCancelsWaiters)
     bool w1_canceled = false, w1_msg = false;
     bool w2_canceled = false, w2_msg = false;
 
-    ctx.spawn(holder_with_record(ctx, holder_ok));         // takes the slot, sleeps 5ms
-    ctx.spawn(canceled_waiter(ctx, w1_canceled, w1_msg));  // parks
-    ctx.spawn(canceled_waiter(ctx, w2_canceled, w2_msg));  // parks
+    ctx.spawn(holder_with_record(ctx, holder_ok)); // takes the slot, sleeps 5ms
+    ctx.spawn(canceled_waiter(ctx, w1_canceled, w1_msg)); // parks
+    ctx.spawn(canceled_waiter(ctx, w2_canceled, w2_msg)); // parks
     ctx.spawn(close_after_delay(ctx, pool, std::chrono::milliseconds(2)));
     ctx.run();
 
@@ -268,7 +269,7 @@ TEST(BufferPoolTest, CloseCancelsWaiters)
 
 TEST(BufferPoolTest, FixedIoRoundtrip)
 {
-    constexpr const char* kPath = "/tmp/kio_fixed_io_test";
+    constexpr auto kPath = "/tmp/kio_fixed_io_test";
     io::IoOptions opts;
     opts.entries = 64;
     io::Context ctx(0, nullptr, opts, kio::BufferPoolConfig{.slot_size = 4096, .slots = 4});
@@ -310,8 +311,8 @@ TEST(BufferPoolTest, ForeignLeaseDies)
     // (its destructor CHECK-aborts on exactly that).
     EXPECT_DEATH(
         {
-            b.spawn(foreign_read_task(b, fd, lease));
-            b.run();
+        b.spawn(foreign_read_task(b, fd, lease));
+        b.run();
         },
         "empty or foreign lease");
     EXPECT_EQ(::unlink("/tmp/kio_foreign_lease_test"), 0);
@@ -327,8 +328,8 @@ TEST(BufferPoolTest, RunDeadlockAborts)
     // child.
     EXPECT_DEATH(
         {
-            ctx.spawn(leak_two(ctx));
-            ctx.run();
+        ctx.spawn(leak_two(ctx));
+        ctx.run();
         },
         "leases leaked");
 }

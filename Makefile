@@ -37,8 +37,8 @@ test: dev ## Same as `make dev`
 
 check: asan tsan ## What CI runs before a merge: both sanitizer builds
 
-t: ## Run tests matching a pattern in the dev build: make t T=context_remote
-	cmake --build --preset dev && ctest --preset dev -R '$(T)'
+t: ## Run tests matching a pattern in the dev build: make t T=Baton
+	cmake --build --preset dev && ctest --preset dev -R '$(or $(T),.)'
 
 bench: ## Build the optimized benchmark server (never benchmark a sanitizer build)
 	cmake --preset release && cmake --build --preset release --target kio_http_bench
@@ -68,4 +68,4 @@ docker-shell: docker-image ## Open a shell in the toolchain container
 
 docker-%: docker-image ## Run any target above inside the container: make docker-tsan
 	@mkdir -p build-docker $(CCACHE_HOST)
-	$(DOCKER_RUN) make $*
+	$(DOCKER_RUN) make $* $(if $(T),T='$(T)')
