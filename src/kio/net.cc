@@ -3,116 +3,125 @@
 // (host_not_found, no_data, ...) in <system_error> ONLY when the EAI_* macros
 // are already visible. Include netdb first and those std::errc members exist;
 // include it second and ResolveIp's EAI_NONAME mapping does not compile.
-#include <netdb.h>
-
 #include "kio/net.hpp"
 
-#include <arpa/inet.h>
 #include <cerrno>
 #include <cstring>
 
+#include <netdb.h>
+
+#include <arpa/inet.h>
+
 namespace kio
 {
-    Result<SocketAddress> SocketAddress::V4(const uint16_t port, const char* ip)
+Result<SocketAddress> SocketAddress::V4(const uint16_t port, const char* ip)
+{
+    SocketAddress sa;
+    auto* in = reinterpret_cast<sockaddr_in*>(&sa.addr);
+    in->sin_family = AF_INET;
+    in->sin_port = htons(port);
+    if (ip && *ip)
     {
-        SocketAddress sa;
-        auto* in = reinterpret_cast<sockaddr_in*>(&sa.addr);
-        in->sin_family = AF_INET;
-        in->sin_port = htons(port);
-        if (ip && *ip)
+        // A malformed literal must not fall through to INADDR_ANY: a typo would
+        // silently widen a bind to every interface.
+        if (inet_pton(AF_INET, ip, &in->sin_addr) != 1)
         {
-            // A malformed literal must not fall through to INADDR_ANY: a typo would
-            // silently widen a bind to every interface.
-            if (inet_pton(AF_INET, ip, &in->sin_addr) != 1)
-            {
-                return Error::fail_errc(std::errc::invalid_argument, "inet_pton(AF_INET)");
-            }
+            return Error::fail_errc(std::errc::invalid_argument, "inet_pton(AF_INET)");
         }
-        else
+    }
+    else
+    {
+        in->sin_addr.s_addr = INADDR_ANY;
+    }
+    sa.addrlen = sizeof(sockaddr_in);
+    return sa;
+}
+
+Result<SocketAddress> SocketAddress::V6(const uint16_t port, const char* ip)
+{
+    SocketAddress sa;
+    auto* in6 = reinterpret_cast<sockaddr_in6*>(&sa.addr);
+    in6->sin6_family = AF_INET6;
+    in6->sin6_port = htons(port);
+    if (ip && *ip)
+    {
+        if (inet_pton(AF_INET6, ip, &in6->sin6_addr) != 1)
         {
-            in->sin_addr.s_addr = INADDR_ANY;
+            return Error::fail_errc(std::errc::invalid_argument, "inet_pton(AF_INET6)");
         }
-        sa.addrlen = sizeof(sockaddr_in);
-        return sa;
+    }
+    else
+    {
+        in6->sin6_addr = in6addr_any;
+    }
+    sa.addrlen = sizeof(sockaddr_in6);
+    return sa;
+}
+
+[[nodiscard]] std::optional<std::string> SocketAddress::GetIp() const
+{
+    char buffer[INET6_ADDRSTRLEN];
+    if (addr.ss_family == AF_INET)
+    {
+        const auto* in = reinterpret_cast<const sockaddr_in*>(&addr);
+        if (inet_ntop(AF_INET, &in->sin_addr, buffer, sizeof(buffer)))
+        {
+            return std::string(buffer);
+        }
+    }
+    else if (addr.ss_family == AF_INET6)
+    {
+        const auto* in6 = reinterpret_cast<const sockaddr_in6*>(&addr);
+        if (inet_ntop(AF_INET6, &in6->sin6_addr, buffer, sizeof(buffer)))
+        {
+            return std::string(buffer);
+        }
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] std::optional<uint16_t> SocketAddress::GetPort() const
+{
+    if (addr.ss_family == AF_INET)
+    {
+        const auto* in = reinterpret_cast<const sockaddr_in*>(&addr);
+        return ntohs(in->sin_port);
+    }
+    if (addr.ss_family == AF_INET6)
+    {
+        const auto* in6 = reinterpret_cast<const sockaddr_in6*>(&addr);
+        return ntohs(in6->sin6_port);
+    }
+    return std::nullopt;
+}
+
+// Note: returns the FIRST addrinfo result only (no fallback iteration
+// to later families/addresses). For dual-stack names this may not be the
+// address you wanted; an all-results overload can be added when a caller
+// needs it.
+Result<SocketAddress> ResolveIp(const std::string_view host, const uint16_t port)
+{
+    // getaddrinfo takes a NUL-terminated C string: anything after an
+    // embedded NUL would be silently dropped and the truncated name
+    // resolved instead of the caller's input.
+    if (host.find('\0') != std::string_view::npos)
+    {
+        return Error::fail_errc(std::errc::invalid_argument, "ResolveIp");
     }
 
-    Result<SocketAddress> SocketAddress::V6(const uint16_t port, const char* ip)
+    addrinfo hints{}, *res = nullptr;
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    const std::string service = std::to_string(port);
+    const std::string hostname(host);
+
+    if (const int rc = getaddrinfo(hostname.c_str(), service.c_str(), &hints, &res); rc != 0)
     {
-        SocketAddress sa;
-        auto* in6 = reinterpret_cast<sockaddr_in6*>(&sa.addr);
-        in6->sin6_family = AF_INET6;
-        in6->sin6_port = htons(port);
-        if (ip && *ip)
+        // getaddrinfo returns EAI_* codes, not errno; map the ones with a clear
+        // errc equivalent and fall back to address_not_available.
+        switch (rc)
         {
-            if (inet_pton(AF_INET6, ip, &in6->sin6_addr) != 1)
-            {
-                return Error::fail_errc(std::errc::invalid_argument, "inet_pton(AF_INET6)");
-            }
-        }
-        else
-        {
-            in6->sin6_addr = in6addr_any;
-        }
-        sa.addrlen = sizeof(sockaddr_in6);
-        return sa;
-    }
-
-    [[nodiscard]] std::optional<std::string> SocketAddress::GetIp() const
-    {
-        char buffer[INET6_ADDRSTRLEN];
-        if (addr.ss_family == AF_INET)
-        {
-            const auto* in = reinterpret_cast<const sockaddr_in*>(&addr);
-            if (inet_ntop(AF_INET, &in->sin_addr, buffer, sizeof(buffer)))
-            {
-                return std::string(buffer);
-            }
-        }
-        else if (addr.ss_family == AF_INET6)
-        {
-            const auto* in6 = reinterpret_cast<const sockaddr_in6*>(&addr);
-            if (inet_ntop(AF_INET6, &in6->sin6_addr, buffer, sizeof(buffer)))
-            {
-                return std::string(buffer);
-            }
-        }
-        return std::nullopt;
-    }
-
-    [[nodiscard]] std::optional<uint16_t> SocketAddress::GetPort() const
-    {
-        if (addr.ss_family == AF_INET)
-        {
-            const auto* in = reinterpret_cast<const sockaddr_in*>(&addr);
-            return ntohs(in->sin_port);
-        }
-        if (addr.ss_family == AF_INET6)
-        {
-            const auto* in6 = reinterpret_cast<const sockaddr_in6*>(&addr);
-            return ntohs(in6->sin6_port);
-        }
-        return std::nullopt;
-    }
-
-    // Note: returns the FIRST addrinfo result only (no fallback iteration
-    // to later families/addresses). For dual-stack names this may not be the
-    // address you wanted; an all-results overload can be added when a caller
-    // needs it.
-    Result<SocketAddress> ResolveIp(const std::string_view host, const uint16_t port)
-    {
-        addrinfo hints{}, *res = nullptr;
-        hints.ai_family = AF_UNSPEC;
-        hints.ai_socktype = SOCK_STREAM;
-
-        const std::string service = std::to_string(port);
-        const std::string hostname(host);
-
-        if (const int rc = getaddrinfo(hostname.c_str(), service.c_str(), &hints, &res); rc != 0)
-        {
-            // getaddrinfo returns EAI_* codes, not errno; map the ones with a clear
-            // errc equivalent and fall back to address_not_available.
-            switch (rc)
-            {
             case EAI_SYSTEM:
                 return Error::fail_errno(errno, "getaddrinfo");
             case EAI_AGAIN:
@@ -127,22 +136,22 @@ namespace kio
 #endif
             default:
                 return Error::fail_errc(std::errc::address_not_available, "getaddrinfo");
-            }
         }
-
-        if (res == nullptr || res->ai_addrlen > sizeof(sockaddr_storage))
-        {
-            if (res != nullptr)
-            {
-                freeaddrinfo(res);
-            }
-            return Error::fail_errc(std::errc::address_not_available, "getaddrinfo");
-        }
-
-        SocketAddress out;
-        std::memcpy(&out.addr, res->ai_addr, res->ai_addrlen);
-        out.addrlen = res->ai_addrlen;
-        freeaddrinfo(res);
-        return out;
     }
-} // namespace kio
+
+    if (res == nullptr || res->ai_addrlen > sizeof(sockaddr_storage))
+    {
+        if (res != nullptr)
+        {
+            freeaddrinfo(res);
+        }
+        return Error::fail_errc(std::errc::address_not_available, "getaddrinfo");
+    }
+
+    SocketAddress out;
+    std::memcpy(&out.addr, res->ai_addr, res->ai_addrlen);
+    out.addrlen = res->ai_addrlen;
+    freeaddrinfo(res);
+    return out;
+}
+}  // namespace kio

@@ -25,6 +25,30 @@ kio_add_test(timing_cancel_tests kio/timing_cancel_test.cpp
         TAGS uring unit
 )
 
+kio_add_test(error_tests kio/error_test.cpp
+        TAGS uring unit
+)
+
+kio_add_test(fd_tests kio/fd_test.cpp
+        TAGS unit
+)
+
+kio_add_test(net_tests kio/net_test.cpp
+        TAGS unit
+)
+
+kio_add_test(awaitable_tests kio/awaitable_test.cpp
+        TAGS uring unit
+)
+
+kio_add_test(operations_tests kio/operations_test.cpp
+        TAGS uring unit
+)
+
+kio_add_test(echo_tests kio/echo_test.cpp
+        TAGS uring integration
+)
+
 # Stale v1 tests: target the deleted core/io.h API (IO, run_blocking,
 # schedule()). Restore each one as its v2 counterpart lands.
 #  - context_remote_tests  (v1: IoContext workers, shared work queues)

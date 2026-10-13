@@ -310,3 +310,186 @@ TEST(TimingCancelTest, CrossThreadSpawnAbortsInDebug)
         "loop-thread contract");
 }
 #endif
+
+// ===========================================================================
+// cancel_all semantics
+// ===========================================================================
+
+// Teardown with armed link timeouts: every canceled op must report
+// ECANCELED ("operation canceled") because canceling_all_ is latched --
+// never a fake ETIMEDOUT, even though each op carried a .timeout().
+TEST(TimingCancelTest, CancelAllWithArmedTimeoutsReportsCanceledNotTimeout)
+{
+    int sv[2];
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+    io::UniqueFd peer{sv[1]};
+
+    io::Context ctx(0, nullptr, test_opts());
+    Result<int> out1{0};
+    Result<int> out2{0};
+    Result<int> out3{0};
+    io::IoAwaitableBase* s1 = nullptr;
+    io::IoAwaitableBase* s2 = nullptr;
+    io::IoAwaitableBase* s3 = nullptr;
+    ctx.spawn(recv_hold_op(ctx, io::UniqueFd{sv[0]}, &s1, out1, 5s));
+    ctx.spawn(recv_hold_op(ctx, io::UniqueFd{sv[0]}, &s2, out2, 5s));
+    ctx.spawn(recv_hold_op(ctx, io::UniqueFd{sv[0]}, &s3, out3, 5s));
+    ctx.spawn(cancel_all_after(ctx, 10ms));
+    ctx.run();  // must return
+
+    for (const auto* out : {&out1, &out2, &out3})
+    {
+        ASSERT_FALSE(out->has_value());
+        EXPECT_EQ(out->error().value(), ECANCELED);
+        EXPECT_EQ(out->error().context(), "operation canceled");
+    }
+}
+
+// canceling_all_ resets at the TOP of run(): a second session must again
+// classify a fired link timeout as ETIMEDOUT (not inherit the teardown
+// latch from session one).
+TEST(TimingCancelTest, SecondRunClassifiesTimeoutsAgain)
+{
+    int sv1[2];
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv1), 0);
+    io::UniqueFd p1{sv1[1]};
+
+    io::Context ctx(0, nullptr, test_opts());
+
+    // Session one: teardown cancel -> ECANCELED.
+    Result<int> first{0};
+    ctx.spawn(recv_hold_op_forever(ctx, io::UniqueFd{sv1[0]}, first));
+    ctx.spawn(cancel_all_after(ctx, 10ms));
+    ctx.run();
+    ASSERT_FALSE(first.has_value());
+    EXPECT_EQ(first.error().context(), "operation canceled");
+
+    // Session two, same Context: a fresh recv under a real timeout fires
+    // ETIMEDOUT again.
+    int sv2[2];
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv2), 0);
+    io::UniqueFd p2{sv2[1]};
+    Result<int> second{0};
+    io::IoAwaitableBase* slot = nullptr;
+    ctx.spawn(recv_hold_op(ctx, io::UniqueFd{sv2[0]}, &slot, second, 50ms));
+    ctx.run();
+    ASSERT_FALSE(second.has_value());
+    EXPECT_EQ(second.error().value(), ETIMEDOUT);
+    EXPECT_EQ(second.error().context(), "operation timed out");
+}
+
+TEST(TimingCancelTest, CancelAllBeforeAnyRunIsHarmless)
+{
+    io::Context ctx(0, nullptr, test_opts());
+    ctx.cancel_all();  // SQE queued, never yet submitted
+
+    int v = 0;
+    ctx.spawn(bump(v));
+    ctx.run();  // must complete normally
+    EXPECT_EQ(v, 1);
+}
+
+// ===========================================================================
+// cancel races
+// ===========================================================================
+
+// Deterministic lost race: the data is queued BEFORE run(), so the recv
+// completes as soon as it is submitted -- while the cancel task is still
+// sleeping. The late cancel finds the op Done and must no-op: A sees
+// success, not cancellation. The frame parks on a Baton afterwards so the
+// slot stays valid until both cancels are long done.
+TEST(TimingCancelTest, CancelThatLosesTheRaceLeavesTheOpSuccessful)
+{
+    int sv[2];
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+    const char c = 'x';
+    ASSERT_EQ(::write(sv[1], &c, 1), 1);  // queued BEFORE run: race is decided early
+
+    io::Context ctx(0, nullptr, test_opts());
+    Baton done(ctx);
+    Result<int> out{0};
+    io::IoAwaitableBase* slot = nullptr;
+    ctx.spawn(recv_hold_op_then_park(ctx, io::UniqueFd{sv[0]}, &slot, out, done));
+    ctx.spawn(cancel_op_after(ctx, &slot, 1ms));
+    ctx.spawn(post_baton_after(ctx, done, 30ms));
+    ctx.run();
+
+    ASSERT_TRUE(out.has_value()) << "recv with pre-queued data must win the race";
+    EXPECT_EQ(*out, 1);
+    EXPECT_EQ(::close(sv[1]), 0);
+}
+
+// Two cancels on the same op: the second sees cancel_requested (or Done)
+// and submits nothing. Harmless, and the op reports one clean ECANCELED.
+// The frame parks on a Baton after the op completes so the slot stays
+// valid for the second cancel.
+TEST(TimingCancelTest, DoubleCancelIsHarmless)
+{
+    int sv[2];
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+    io::UniqueFd peer{sv[1]};
+
+    io::Context ctx(0, nullptr, test_opts());
+    Baton done(ctx);
+    Result<int> out{0};
+    io::IoAwaitableBase* slot = nullptr;
+    ctx.spawn(recv_hold_op_then_park(ctx, io::UniqueFd{sv[0]}, &slot, out, done));
+    ctx.spawn(cancel_op_after(ctx, &slot, 10ms));
+    ctx.spawn(cancel_op_after(ctx, &slot, 20ms));
+    ctx.spawn(post_baton_after(ctx, done, 50ms));
+    ctx.run();
+
+    ASSERT_FALSE(out.has_value());
+    EXPECT_EQ(out.error().value(), ECANCELED);
+    EXPECT_EQ(out.error().context(), "operation canceled");
+}
+
+// The stray link-timeout CQE from a completed op is tagged IGNORE_TAG and
+// must be skipped by reap(), never misread as an op completion.
+TEST(TimingCancelTest, StrayTimeoutCqeIsSwallowed)
+{
+    int sv[2];
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+
+    io::Context ctx(0, nullptr, test_opts());
+    Result<int> out{0};
+    io::IoAwaitableBase* slot = nullptr;
+    ctx.spawn(recv_hold_op(ctx, io::UniqueFd{sv[0]}, &slot, out, 20ms));
+    ctx.spawn(write_byte_after(ctx, io::UniqueFd{sv[1]}, 5ms));
+    ctx.run();
+
+    ASSERT_TRUE(out.has_value());
+    EXPECT_EQ(*out, 1);
+
+    // A second session reaps whatever stray timeout CQEs are still queued;
+    // the IGNORE_TAG skip must make this a no-op, not a crash.
+    int v = 0;
+    ctx.spawn(bump(v));
+    ctx.run();
+    EXPECT_EQ(v, 1);
+}
+
+// A 1h sleep under a 10ms link timeout must return ETIMEDOUT promptly.
+// This is the scratch_/link_ts_ non-union pin: if the two timespecs shared
+// storage, the sleep's prep would overwrite the link timeout and the test
+// would hang until the ctest TIMEOUT.
+TEST(TimingCancelTest, LongSleepUnderShortTimeoutReportsEtimedout)
+{
+    io::Context ctx(0, nullptr, test_opts());
+
+    Result<int> out{0};
+    const auto start = std::chrono::steady_clock::now();
+    auto long_sleeper = [&out](io::Context& io) -> Task<>
+    {
+        out = co_await async_sleep(io, 1h).timeout(10ms);
+        co_return {};
+    };
+    ctx.spawn(long_sleeper(ctx));
+    ctx.run();
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+
+    ASSERT_FALSE(out.has_value());
+    EXPECT_EQ(out.error().value(), ETIMEDOUT);
+    EXPECT_EQ(out.error().context(), "operation timed out");
+    EXPECT_LE(elapsed, std::chrono::seconds(10)) << "the 1h sleep must have been cut short";
+}
