@@ -473,18 +473,22 @@ TEST(TimingCancelTest, StrayTimeoutCqeIsSwallowed)
 // This is the scratch_/link_ts_ non-union pin: if the two timespecs shared
 // storage, the sleep's prep would overwrite the link timeout and the test
 // would hang until the ctest TIMEOUT.
+namespace
+{
+Task<> long_sleep_under_short_timeout(io::Context& io, Result<int>& out)
+{
+    out = co_await async_sleep(io, 1h).timeout(10ms);
+    co_return {};
+}
+} // namespace
+
 TEST(TimingCancelTest, LongSleepUnderShortTimeoutReportsEtimedout)
 {
     io::Context ctx(0, nullptr, test_opts());
 
     Result<int> out{0};
     const auto start = std::chrono::steady_clock::now();
-    auto long_sleeper = [&out](io::Context& io) -> Task<>
-    {
-        out = co_await async_sleep(io, 1h).timeout(10ms);
-        co_return {};
-    };
-    ctx.spawn(long_sleeper(ctx));
+    ctx.spawn(long_sleep_under_short_timeout(ctx, out));
     ctx.run();
     const auto elapsed = std::chrono::steady_clock::now() - start;
 

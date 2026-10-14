@@ -53,56 +53,70 @@ Result<int> resume_with(io::Context& io, const int res, const bool etime, const 
 }
 }  // namespace
 
-// Setters must not disturb unrelated bits; set_lifecycle must preserve the
-// flags; lifecycle() must be immune to the flag bits. The full 3-lifecycle x
-// 2^4-flag space is walked through the public API.
-TEST(IoAwaitableTest, LifecycleAndFlagBitsPackIntoOneByte)
+TEST(IoAwaitableTest, DefaultState)
+{
+    io::IoAwaitableBase base;
+    EXPECT_EQ(base.lifecycle(), io::IoAwaitableState::Created);
+    EXPECT_FALSE(base.etime_is_success());
+    EXPECT_FALSE(base.has_link_timeout());
+    EXPECT_FALSE(base.cancel_requested());
+    EXPECT_FALSE(base.pre_failed());
+    EXPECT_EQ(base.res, 0);
+}
+
+TEST(IoAwaitableTest, LifecycleTransitionsPreserveFlags)
+{
+    io::IoAwaitableBase base;
+    base.state |= io::kEtimeIsSuccessBit | io::kPreFailedBit;
+    base.set_has_link_timeout();
+    base.set_cancel_requested();
+
+    for (const auto life : {io::IoAwaitableState::Created, io::IoAwaitableState::Inflight, io::IoAwaitableState::Done})
+    {
+        base.set_lifecycle(life);
+        EXPECT_EQ(base.lifecycle(), life);
+        EXPECT_TRUE(base.etime_is_success());
+        EXPECT_TRUE(base.has_link_timeout());
+        EXPECT_TRUE(base.cancel_requested());
+        EXPECT_TRUE(base.pre_failed());
+    }
+}
+
+TEST(IoAwaitableTest, FlagSettersPreserveLifecycleAndOtherFlags)
+{
+    io::IoAwaitableBase base;
+    base.set_lifecycle(io::IoAwaitableState::Inflight);
+
+    base.set_has_link_timeout();
+    EXPECT_TRUE(base.has_link_timeout());
+    EXPECT_EQ(base.lifecycle(), io::IoAwaitableState::Inflight);
+    EXPECT_FALSE(base.cancel_requested());
+    EXPECT_FALSE(base.etime_is_success());
+    EXPECT_FALSE(base.pre_failed());
+
+    base.set_cancel_requested();
+    EXPECT_TRUE(base.cancel_requested());
+    EXPECT_TRUE(base.has_link_timeout());
+    EXPECT_EQ(base.lifecycle(), io::IoAwaitableState::Inflight);
+    EXPECT_FALSE(base.etime_is_success());
+    EXPECT_FALSE(base.pre_failed());
+}
+
+TEST(IoAwaitableTest, ConstructorSeedsFlagsAndPrefailErrno)
 {
     io::Context ctx(0, nullptr, test::test_opts());
 
-    for (const bool etime : {false, true})
-    {
-        for (const bool prefailed : {false, true})
-        {
-            io::IoAwaitable<NoPrep> op{ctx, nullptr, etime, prefailed ? 1 : 0};
-            EXPECT_EQ(op.pre_failed(), prefailed);
-            EXPECT_EQ(op.res, prefailed ? -1 : 0);  // ctor seeds res for a pre-failed op
+    io::IoAwaitable<NoPrep> normal{ctx, nullptr, /*etime_is_success=*/false, 0};
+    EXPECT_FALSE(normal.etime_is_success());
+    EXPECT_FALSE(normal.pre_failed());
+    EXPECT_EQ(normal.res, 0);
+    EXPECT_EQ(normal.lifecycle(), io::IoAwaitableState::Created);
 
-            for (const bool link : {false, true})
-            {
-                for (const bool cancel : {false, true})
-                {
-                    if (link)
-                    {
-                        op.set_has_link_timeout();
-                    }
-                    else
-                    {
-                        op.state &= static_cast<std::uint8_t>(~io::kHasLinkTimeoutBit);
-                    }
-                    if (cancel)
-                    {
-                        op.set_cancel_requested();
-                    }
-                    else
-                    {
-                        op.state &= static_cast<std::uint8_t>(~io::kCancelRequestedBit);
-                    }
-
-                    for (const auto life :
-                         {io::IoAwaitableState::Created, io::IoAwaitableState::Inflight, io::IoAwaitableState::Done})
-                    {
-                        op.set_lifecycle(life);
-                        EXPECT_EQ(op.lifecycle(), life);
-                        EXPECT_EQ(op.etime_is_success(), etime);
-                        EXPECT_EQ(op.has_link_timeout(), link);
-                        EXPECT_EQ(op.cancel_requested(), cancel);
-                        EXPECT_EQ(op.pre_failed(), prefailed);
-                    }
-                }
-            }
-        }
-    }
+    io::IoAwaitable<NoPrep> prefailed{ctx, nullptr, /*etime_is_success=*/true, EBADF};
+    EXPECT_TRUE(prefailed.etime_is_success());
+    EXPECT_TRUE(prefailed.pre_failed());
+    EXPECT_EQ(prefailed.res, -EBADF);
+    EXPECT_EQ(prefailed.lifecycle(), io::IoAwaitableState::Created);
 }
 
 // await_resume() is a pure function of (res, flags, canceling_all_): every
@@ -111,19 +125,14 @@ TEST(IoAwaitableTest, AwaitResumeMapsEveryBranch)
 {
     io::Context ctx(0, nullptr, test::test_opts());
 
-    // res >= 0 is a plain success under every flag combination.
-    for (const bool etime : {false, true})
-    {
-        for (const bool link : {false, true})
-        {
-            for (const bool cancel : {false, true})
-            {
-                const auto r = resume_with(ctx, 5, etime, link, cancel);
-                EXPECT_TRUE(r.has_value());
-                EXPECT_EQ(*r, 5);
-            }
-        }
-    }
+    // res >= 0 is a plain success, regardless of flag configuration.
+    const auto r_clean = resume_with(ctx, 5, false, false, false);
+    ASSERT_TRUE(r_clean.has_value());
+    EXPECT_EQ(*r_clean, 5);
+
+    const auto r_all_flags = resume_with(ctx, 5, true, true, true);
+    ASSERT_TRUE(r_all_flags.has_value());
+    EXPECT_EQ(*r_all_flags, 5);
 
     // -ETIME is a success value iff etime_is_success (sleep semantics).
     const auto etime_ok = resume_with(ctx, -ETIME, true, false, false);

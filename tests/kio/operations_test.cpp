@@ -39,87 +39,87 @@ using namespace std::chrono_literals;
 
 namespace
 {
-// ---- driving ----
+    // ---- driving ----
 
-template <typename F>
-Task<> op_task(io::Context& io, F make, Result<int>& out)
-{
-    out = co_await make(io);
-    co_return {};
-}
-
-// Runs one awaitable-producing lambda to completion on a fresh Context.
-// Lambdas capture by reference: the captured objects must outlive run(),
-// which this helper guarantees by scope.
-template <typename F>
-Result<int> run_io_op(F&& make)
-{
-    io::Context ctx(0, nullptr, test::test_opts());
-    Result<int> out{std::unexpect, Error::from_errc(std::errc::operation_canceled)};
-    ctx.spawn(op_task(ctx, std::forward<F>(make), out));
-    ctx.run();
-    return out;
-}
-
-io::UniqueFd make_temp_file(const std::filesystem::path& dir, const char* name, const std::string& payload = "")
-{
-    const auto path = (dir / name).string();
-    io::UniqueFd fd{::open(path.c_str(), O_CREAT | O_RDWR | O_TRUNC | O_CLOEXEC, 0600)};
-    if (!payload.empty() && fd.valid())
+    template <typename F>
+    Task<> op_task(io::Context& io, F make, Result<int>& out)
     {
-        (void)::write(fd.get(), payload.data(), payload.size());
-        (void)::lseek(fd.get(), 0, SEEK_SET);
+        out = co_await make(io);
+        co_return {};
     }
-    return fd;
-}
 
-// A loopback listener plus its resolved address (port filled in).
-struct LocalListener
-{
-    io::UniqueFd fd;
-    SocketAddress addr{};
-};
+    // Runs one awaitable-producing lambda to completion on a fresh Context.
+    // Lambdas capture by reference: the captured objects must outlive run(),
+    // which this helper guarantees by scope.
+    template <typename F>
+    Result<int> run_io_op(F&& make)
+    {
+        io::Context ctx(0, nullptr, test::test_opts());
+        Result<int> out{std::unexpect, Error::from_errc(std::errc::operation_canceled)};
+        ctx.spawn(op_task(ctx, std::forward<F>(make), out));
+        ctx.run();
+        return out;
+    }
 
-Result<LocalListener> bind_local_listener()
-{
-    auto l = TcpListener::Bind(0, "127.0.0.1");
-    if (!l)
+    io::UniqueFd make_temp_file(const std::filesystem::path& dir, const char* name, const std::string& payload = "")
     {
-        return std::unexpected(l.error());
+        const auto path = (dir / name).string();
+        io::UniqueFd fd{::open(path.c_str(), O_CREAT | O_RDWR | O_TRUNC | O_CLOEXEC, 0600)};
+        if (!payload.empty() && fd.valid())
+        {
+            (void)::write(fd.get(), payload.data(), payload.size());
+            (void)::lseek(fd.get(), 0, SEEK_SET);
+        }
+        return fd;
     }
-    sockaddr_storage ss{};
-    socklen_t len = sizeof(ss);
-    if (::getsockname(l->get(), reinterpret_cast<sockaddr*>(&ss), &len) != 0)
-    {
-        return std::unexpected(Error::fail_errno(errno, "getsockname"));
-    }
-    SocketAddress a{};
-    a.addr = ss;
-    a.addrlen = len;
-    return LocalListener{std::move(*l), a};
-}
 
-int connect_blocking(const SocketAddress& addr)
-{
-    const int c = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (c == -1)
+    // A loopback listener plus its resolved address (port filled in).
+    struct LocalListener
     {
-        return -1;
-    }
-    if (::connect(c, addr.Get(), addr.addrlen) != 0)
-    {
-        ::close(c);
-        return -1;
-    }
-    return c;
-}
+        io::UniqueFd fd;
+        SocketAddress addr{};
+    };
 
-// clamp_len is a pure constexpr function: pin it at compile time.
-static_assert(detail::clamp_len(0x7ffff000u) == 0x7ffff000u);
-static_assert(detail::clamp_len(0x7ffff001u) == 0x7ffff000u);
-static_assert(detail::clamp_len((size_t{1} << 32) + 10) == 0x7ffff000u);
-static_assert(detail::clamp_len(0) == 0);
-}  // namespace
+    Result<LocalListener> bind_local_listener()
+    {
+        auto l = TcpListener::Bind(0, "127.0.0.1");
+        if (!l)
+        {
+            return std::unexpected(l.error());
+        }
+        sockaddr_storage ss{};
+        socklen_t len = sizeof(ss);
+        if (::getsockname(l->get(), reinterpret_cast<sockaddr*>(&ss), &len) != 0)
+        {
+            return std::unexpected(Error::fail_errno(errno, "getsockname"));
+        }
+        SocketAddress a{};
+        a.addr = ss;
+        a.addrlen = len;
+        return LocalListener{std::move(*l), a};
+    }
+
+    int connect_blocking(const SocketAddress& addr)
+    {
+        const int c = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (c == -1)
+        {
+            return -1;
+        }
+        if (::connect(c, addr.Get(), addr.addrlen) != 0)
+        {
+            ::close(c);
+            return -1;
+        }
+        return c;
+    }
+
+    // clamp_len is a pure constexpr function: pin it at compile time.
+    static_assert(detail::clamp_len(0x7ffff000u) == 0x7ffff000u);
+    static_assert(detail::clamp_len(0x7ffff001u) == 0x7ffff000u);
+    static_assert(detail::clamp_len((size_t{1} << 32) + 10) == 0x7ffff000u);
+    static_assert(detail::clamp_len(0) == 0);
+} // namespace
 
 // ---- read / write ----
 
@@ -166,7 +166,7 @@ TEST(OperationsTest, ReadAdvancesPositionAndExplicitOffsetIsPositional)
         [&](io::Context& io)
         {
             std::byte buf[16]{};
-            return async_read(io, fd, std::span{buf, 5});  // pos 0 -> 5
+            return async_read(io, fd, std::span{buf, 5}); // pos 0 -> 5
         });
     ASSERT_TRUE(res.has_value());
     EXPECT_EQ(*res, 5);
@@ -175,7 +175,7 @@ TEST(OperationsTest, ReadAdvancesPositionAndExplicitOffsetIsPositional)
         [&](io::Context& io)
         {
             std::byte buf[16]{};
-            return async_read(io, fd, std::span{buf, 5});  // pos 5 -> 10
+            return async_read(io, fd, std::span{buf, 5}); // pos 5 -> 10
         });
     ASSERT_TRUE(res.has_value());
     EXPECT_EQ(*res, 5);
@@ -242,7 +242,7 @@ TEST(OperationsTest, WritevThenReadvScatterGather)
 
     char got[9]{};
     ASSERT_EQ(::pread(fd.get(), got, 9, 0), 9);
-    EXPECT_EQ((std::string_view{got, 9}), "abcdefghi");  // parens: the braces' comma would split the macro args
+    EXPECT_EQ((std::string_view{got, 9}), "abcdefghi"); // parens: the braces' comma would split the macro args
     EXPECT_EQ(std::memcmp(x, "abcd", 4), 0);
     EXPECT_EQ(std::memcmp(y, "efghi", 5), 0);
 }
@@ -288,7 +288,7 @@ TEST(OperationsTest, SendToDeadPeerGivesEpipeWithoutSigpipe)
     int sv[2];
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
     const io::UniqueFd a{sv[0]};
-    ::close(sv[1]);  // the peer dies before the send
+    ::close(sv[1]); // the peer dies before the send
 
     static sig_atomic_t g_sigpipe_caught = 0;
     struct sigaction sa{};
@@ -403,8 +403,8 @@ TEST(OperationsTest, AcceptOverloadFillsClientAddressAndResetsAddrlen)
     const uint16_t client_port = ntohs(cin->sin_port);
 
     io::Context ctx(0, nullptr, test::test_opts());
-    SocketAddress client_addr{};  // must outlive the operation: captured by reference
-    client_addr.addrlen = 3;      // garbage: the op resets it per attempt
+    SocketAddress client_addr{}; // must outlive the operation: captured by reference
+    client_addr.addrlen = 3; // garbage: the op resets it per attempt
     bool addr_ok = false;
     bool accepted = false;
 
@@ -448,7 +448,7 @@ TEST(OperationsTest, ConnectSucceedsToAListener)
 
 TEST(OperationsTest, ConnectToAClosedPortGivesEconnrefused)
 {
-    auto closed_addr = SocketAddress::V4(1, "127.0.0.1");  // nothing listens on 1
+    auto closed_addr = SocketAddress::V4(1, "127.0.0.1"); // nothing listens on 1
     ASSERT_TRUE(closed_addr.has_value());
     io::UniqueFd c{::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0)};
 
@@ -485,7 +485,9 @@ TEST(OperationsTest, OpenWithCreateHonorsTheMode)
 
     const auto r =
         run_io_op([&](io::Context& io)
-                  { return async_open(io, std::filesystem::path{target}, O_CREAT | O_WRONLY | O_CLOEXEC, 0640); });
+        {
+            return async_open(io, std::filesystem::path{target}, O_CREAT | O_WRONLY | O_CLOEXEC, 0640);
+        });
     ASSERT_TRUE(r.has_value());
 
     struct stat st{};
@@ -501,12 +503,14 @@ TEST(OperationsTest, RenameMovesAndRemoveDeletes)
     ASSERT_EQ(::close(::open(from.c_str(), O_CREAT | O_RDWR, 0600)), 0);
 
     auto r = run_io_op([&](io::Context& io)
-                       { return async_rename(io, std::filesystem::path{from}, std::filesystem::path{to}); });
+    {
+        return async_rename(io, std::filesystem::path{from}, std::filesystem::path{to});
+    });
     ASSERT_TRUE(r.has_value()) << r.error().message();
 
     struct stat st{};
-    EXPECT_EQ(::stat(from.c_str(), &st), -1);  // source gone
-    EXPECT_EQ(::stat(to.c_str(), &st), 0);     // target exists
+    EXPECT_EQ(::stat(from.c_str(), &st), -1); // source gone
+    EXPECT_EQ(::stat(to.c_str(), &st), 0); // target exists
 
     r = run_io_op([&](io::Context& io) { return async_remove(io, std::filesystem::path{to}); });
     ASSERT_TRUE(r.has_value()) << r.error().message();
@@ -542,8 +546,7 @@ TEST(OperationsTest, FsyncFallocateFtruncateResizeTheFile)
 
     // fallocate: some filesystems refuse; skip-on-EINVAL/EOPNOTSUPP per the
     // review's instruction.
-    auto fal = run_io_op([&](io::Context& io) { return async_fallocate(io, fd, 0, 0, 8192); });
-    if (fal.has_value())
+    if (auto fal = run_io_op([&](io::Context& io) { return async_fallocate(io, fd, 0, 0, 8192); }); fal.has_value())
     {
         struct stat st{};
         ASSERT_EQ(::fstat(fd.get(), &st), 0);
@@ -575,7 +578,7 @@ TEST(OperationsTest, PollReportsReadableAndWritableMasks)
     ASSERT_EQ(::pipe(fds), 0);
     const io::UniqueFd r{fds[0]};
     const io::UniqueFd w{fds[1]};
-    ASSERT_EQ(::write(fds[1], "q", 1), 1);  // readable immediately
+    ASSERT_EQ(::write(fds[1], "q", 1), 1); // readable immediately
 
     auto readable = run_io_op([&](io::Context& io) { return async_poll(io, r, POLLIN); });
     ASSERT_TRUE(readable.has_value());

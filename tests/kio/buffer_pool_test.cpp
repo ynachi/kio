@@ -19,6 +19,7 @@
 
 #include <sys/uio.h>
 
+#include "test_util.hpp"
 #include <gtest/gtest.h>
 
 using namespace kio;
@@ -33,9 +34,9 @@ constexpr std::chrono::milliseconds kHoldMs{10};
 
 // fd.hpp intake: UniqueFd wraps the raw fd from open() (explicit ctor)
 // and closes it on scope exit.
-io::UniqueFd open_temp_file(const char* path)
+io::UniqueFd open_temp_file(const std::filesystem::path& path)
 {
-    return io::UniqueFd{::open(path, O_CREAT | O_RDWR | O_TRUNC, 0600)};
+    return io::UniqueFd{::open(path.c_str(), O_CREAT | O_RDWR | O_TRUNC, 0600)};
 }
 
 // ---- task bodies for the scenario tests ----
@@ -273,11 +274,12 @@ TEST(BufferPoolTest, CloseCancelsWaiters)
 
 TEST(BufferPoolTest, FixedIoRoundtrip)
 {
-    constexpr auto kPath = "/tmp/kio_fixed_io_test";
+    test::TempDir dir;
+    const auto file_path = dir.path() / "fixed_io_test.bin";
     io::IoOptions opts;
     opts.entries = 64;
     io::Context ctx(0, nullptr, opts, kio::BufferPoolConfig{.slot_size = 4096, .slots = 4});
-    io::UniqueFd fd = open_temp_file(kPath);
+    io::UniqueFd fd = open_temp_file(file_path);
     ASSERT_TRUE(fd.valid());
 
     std::array<std::byte, 1000> pattern{};
@@ -294,16 +296,17 @@ TEST(BufferPoolTest, FixedIoRoundtrip)
     ASSERT_TRUE(read_n.has_value());
     EXPECT_EQ(*read_n, 1000);
     EXPECT_TRUE(bytes_match);
-    EXPECT_EQ(::unlink(kPath), 0);
 }
 
 TEST(BufferPoolTest, ForeignLeaseDies)
 {
+    test::TempDir dir;
+    const auto file_path = dir.path() / "foreign_lease_test.bin";
     io::IoOptions opts;
     opts.entries = 64;
     io::Context a(0, nullptr, opts, kio::BufferPoolConfig{.slot_size = 4096, .slots = 4});
     io::Context b(0, nullptr, opts, kio::BufferPoolConfig{.slot_size = 4096, .slots = 4});
-    io::UniqueFd fd = open_temp_file("/tmp/kio_foreign_lease_test");
+    io::UniqueFd fd = open_temp_file(file_path);
     ASSERT_TRUE(fd.valid());
 
     BufferLease lease = a.try_acquire_buffer();
@@ -319,7 +322,6 @@ TEST(BufferPoolTest, ForeignLeaseDies)
             b.run();
         },
         "empty or foreign lease");
-    EXPECT_EQ(::unlink("/tmp/kio_foreign_lease_test"), 0);
 }
 
 TEST(BufferPoolTest, RunDeadlockAborts)
@@ -349,7 +351,7 @@ TEST(BufferPoolTest, ConstructorRejectsBadSlotGeometry)
     // below one page
     EXPECT_THROW(RegisteredBufferPool(2048, 4), std::invalid_argument);
     // 2 GiB slots: cannot slice into 1 GiB registration chunks
-    EXPECT_THROW(RegisteredBufferPool(size_t{1} << 31, 4), std::invalid_argument);
+    EXPECT_THROW(RegisteredBufferPool(size_t{1} << 31u, 4), std::invalid_argument);
     // zero slots
     EXPECT_THROW(RegisteredBufferPool(4096, 0), std::invalid_argument);
 }
@@ -477,7 +479,9 @@ TEST(BufferPoolTest, ThreeRegionAppendAndBoundaryIndexes)
     EXPECT_EQ(pool.registration_index(pool.base() + pool.total_bytes() - 1), 4u);
 
     // No slot may straddle a 1 GiB registration boundary (Invariant 2).
-    for (uint32_t ord = 0; ord < 40960; ++ord)
+    // The slot size (64 KiB = 2^16) evenly divides 1 GiB (2^30), giving exactly 16384 slots per GiB.
+    static_assert((RegisteredBufferPool::kOneGiB % 65536) == 0);
+    for (const uint32_t ord : {0u, 16383u, 16384u, 32767u, 32768u, 40959u})
     {
         const size_t off = size_t{ord} * 65536;
         EXPECT_EQ(off >> 30, (off + 65535) >> 30) << "slot " << ord << " straddles a chunk boundary";
@@ -764,10 +768,12 @@ Task<> write_fixed_expect(io::Context& io, const io::UniqueFd& fd, BufferLease& 
 // still quiesces (inflight_ never moved).
 TEST(BufferPoolTest, ReadFixedBadRangePrefailsEinval)
 {
+    test::TempDir dir;
+    const auto file_path = dir.path() / "fixed_prefail.bin";
     io::IoOptions opts;
     opts.entries = 64;
     io::Context ctx(0, nullptr, opts, BufferPoolConfig{.slot_size = 4096, .slots = 4});
-    io::UniqueFd fd = open_temp_file("/tmp/kio_fixed_prefail");
+    io::UniqueFd fd = open_temp_file(file_path);
     ASSERT_TRUE(fd.valid());
 
     auto lease = ctx.try_acquire_buffer();
@@ -785,8 +791,6 @@ TEST(BufferPoolTest, ReadFixedBadRangePrefailsEinval)
     ctx.run();
     ASSERT_FALSE(bad_offset.has_value());
     EXPECT_EQ(bad_offset.error().value(), EINVAL);
-
-    EXPECT_EQ(::unlink("/tmp/kio_fixed_prefail"), 0);
 }
 
 // write_fixed mirrors read_fixed's pre-fail: a zero length or an offset at
@@ -795,10 +799,12 @@ TEST(BufferPoolTest, ReadFixedBadRangePrefailsEinval)
 // instead).
 TEST(BufferPoolTest, WriteFixedBadRangePrefailsEinval)
 {
+    test::TempDir dir;
+    const auto file_path = dir.path() / "fixed_w_prefail.bin";
     io::IoOptions opts;
     opts.entries = 64;
     io::Context ctx(0, nullptr, opts, BufferPoolConfig{.slot_size = 4096, .slots = 4});
-    io::UniqueFd fd = open_temp_file("/tmp/kio_fixed_w_prefail");
+    io::UniqueFd fd = open_temp_file(file_path);
     ASSERT_TRUE(fd.valid());
 
     auto lease = ctx.try_acquire_buffer();
@@ -815,18 +821,18 @@ TEST(BufferPoolTest, WriteFixedBadRangePrefailsEinval)
     ctx.run();
     ASSERT_FALSE(zero_len.has_value());
     EXPECT_EQ(zero_len.error().value(), EINVAL);
-
-    EXPECT_EQ(::unlink("/tmp/kio_fixed_w_prefail"), 0);
 }
 
 // A len beyond the remaining slot is clamped to the slot: a SHORT write of
 // exactly slot_size bytes, which the caller loops on.
 TEST(BufferPoolTest, WriteFixedLenClampsToTheSlot)
 {
+    test::TempDir dir;
+    const auto file_path = dir.path() / "fixed_clamp.bin";
     io::IoOptions opts;
     opts.entries = 64;
     io::Context ctx(0, nullptr, opts, BufferPoolConfig{.slot_size = 4096, .slots = 4});
-    io::UniqueFd fd = open_temp_file("/tmp/kio_fixed_clamp");
+    io::UniqueFd fd = open_temp_file(file_path);
     ASSERT_TRUE(fd.valid());
 
     Result<int> out{0};
@@ -839,6 +845,4 @@ TEST(BufferPoolTest, WriteFixedLenClampsToTheSlot)
     struct stat st{};
     ASSERT_EQ(::fstat(fd.get(), &st), 0);
     EXPECT_EQ(st.st_size, 4096);
-
-    EXPECT_EQ(::unlink("/tmp/kio_fixed_clamp"), 0);
 }

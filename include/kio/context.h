@@ -281,7 +281,7 @@ public:
         canceling_all_ = true;
         io_uring_sqe* s = get_sqe();
         io_uring_prep_cancel64(s, 0, IORING_ASYNC_CANCEL_ALL | IORING_ASYNC_CANCEL_ANY);
-        io_uring_sqe_set_data64(s, IGNORE_TAG);
+        io_uring_sqe_set_data64(s, kIgnoreTag);
     }
 
 private:
@@ -377,7 +377,7 @@ private:
         {
             ++n;
             const std::uint64_t ud = io_uring_cqe_get_data64(cqe);
-            if (ud & IGNORE_TAG)
+            if (ud & kIgnoreTag)
             {
                 continue;
             }
@@ -403,7 +403,7 @@ private:
         op.set_cancel_requested();
         io_uring_sqe* sqe = get_sqe();
         io_uring_prep_cancel(sqe, &op, 0);
-        io_uring_sqe_set_data64(sqe, IGNORE_TAG);
+        io_uring_sqe_set_data64(sqe, kIgnoreTag);
     }
 
     void activate() noexcept
@@ -462,7 +462,7 @@ void IoAwaitable<Prep>::await_suspend(const std::coroutine_handle<> h) noexcept
         sqe->flags |= IOSQE_IO_LINK;
         io_uring_sqe* t = io_.get_sqe(1);
         io_uring_prep_link_timeout(t, &link_ts_, 0);
-        io_uring_sqe_set_data64(t, IGNORE_TAG);
+        io_uring_sqe_set_data64(t, kIgnoreTag);
     }
 
     io_.op_started();

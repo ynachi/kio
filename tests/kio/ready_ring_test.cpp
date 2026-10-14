@@ -285,11 +285,8 @@ TEST_F(TrivialRingBufferDeathTest, RefusesToGrowPastMaxCapacity)
             constexpr auto kMax = TrivialRingBuffer<std::uint64_t>::kMaxCapacity;
             TrivialRingBuffer<std::uint64_t> r(kMax);
 
-            // Fill it to the absolute brim
-            for (std::uint64_t i = 0; i < kMax; ++i)
-            {
-                r.push(i);
-            }
+            // Set counters directly to max capacity instead of running 1M pushes in a forked process
+            kio::detail::ReadyRingTestPeer::set_counters(r, 0, kMax);
 
             // This push forces a grow(), which should trigger the CHECK and abort
             r.push(999);
