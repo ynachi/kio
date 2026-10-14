@@ -13,91 +13,94 @@
 
 #include <gtest/gtest.h>
 
+#include "include/kio/operations.h"
+#include "include/kio/task.h"
+
 using namespace kio;
 
 namespace
 {
-// Rings here are deliberately tiny (64 entries, epoch cap 8) like the
-// run-loop tests: nothing needs queue depth, and the small cap proves the
-// handoffs survive epoch boundaries.
-//
-// EXPECT (not ASSERT) inside coroutines: ASSERT_* expands to a plain
-// `return`, which is ill-formed in a coroutine body.
-//
-// Death tests spawn INSIDE the EXPECT_DEATH statement: only the forked
-// child then holds the never-run task (the parent's ~Context would
-// otherwise CHECK-abort on spawned-but-never-run work). Same idiom as
-// BufferPoolTest.ForeignLeaseDies / RunDeadlockAborts.
+    // Rings here are deliberately tiny (64 entries, epoch cap 8) like the
+    // run-loop tests: nothing needs queue depth, and the small cap proves the
+    // handoffs survive epoch boundaries.
+    //
+    // EXPECT (not ASSERT) inside coroutines: ASSERT_* expands to a plain
+    // `return`, which is ill-formed in a coroutine body.
+    //
+    // Death tests spawn INSIDE the EXPECT_DEATH statement: only the forked
+    // child then holds the never-run task (the parent's ~Context would
+    // otherwise CHECK-abort on spawned-but-never-run work). Same idiom as
+    // BufferPoolTest.ForeignLeaseDies / RunDeadlockAborts.
 
-// ---- Baton task bodies ----
+    // ---- Baton task bodies ----
 
-Task<> baton_waiter(Baton& baton, bool& done)
-{
-    co_await baton.wait();
-    done = true;
-    co_return {};
-}
+    Task<> baton_waiter(Baton& baton, bool& done)
+    {
+        co_await baton.wait();
+        done = true;
+        co_return {};
+    }
 
-Task<> baton_recorder(Baton& baton, const int id, std::vector<int>& order)
-{
-    co_await baton.wait();
-    order.push_back(id);
-    co_return {};
-}
+    Task<> baton_recorder(Baton& baton, const int id, std::vector<int>& order)
+    {
+        co_await baton.wait();
+        order.push_back(id);
+        co_return {};
+    }
 
-Task<> delayed_post(io::Context& io, Baton& baton, const std::chrono::milliseconds delay)
-{
-    co_await async_sleep(io, delay);
-    baton.post();
-    co_return {};
-}
+    Task<> delayed_post(io::Context& io, Baton& baton, const std::chrono::milliseconds delay)
+    {
+        co_await async_sleep(io, delay);
+        baton.post();
+        co_return {};
+    }
 
-// ---- Semaphore task bodies ----
+    // ---- Semaphore task bodies ----
 
-Task<> sem_holder(io::Context& io, Semaphore& sem, const std::chrono::milliseconds hold)
-{
-    co_await sem.acquire();
-    co_await async_sleep(io, hold);
-    sem.release();
-    co_return {};
-}
+    Task<> sem_holder(io::Context& io, Semaphore& sem, const std::chrono::milliseconds hold)
+    {
+        co_await sem.acquire();
+        co_await async_sleep(io, hold);
+        sem.release();
+        co_return {};
+    }
 
-Task<> sem_recorder(Semaphore& sem, const int id, std::vector<int>& order)
-{
-    co_await sem.acquire();
-    order.push_back(id);
-    sem.release();
-    co_return {};
-}
+    Task<> sem_recorder(Semaphore& sem, const int id, std::vector<int>& order)
+    {
+        co_await sem.acquire();
+        order.push_back(id);
+        sem.release();
+        co_return {};
+    }
 
-// Takes the only permit, sleeps, then releases mid-task -- the release is
-// what wakes waiter #1; waiter #1's own release() chains the wake to #2,
-// then #3. Right after releasing it probes try_acquire(): the freed permit
-// is already reserved for the woken waiter, so the releaser must NOT be
-// able to take it back (surplus rule).
-Task<> sem_thief(io::Context& io, Semaphore& sem, bool& thief_blocked)
-{
-    co_await sem.acquire();
-    co_await async_sleep(io, std::chrono::milliseconds(10));
-    sem.release();
-    thief_blocked = !sem.try_acquire();
-    co_return {};
-}
+    // Takes the only permit, sleeps, then releases mid-task -- the release is
+    // what wakes waiter #1; waiter #1's own release() chains the wake to #2,
+    // then #3. Right after releasing it probes try_acquire(): the freed permit
+    // is already reserved for the woken waiter, so the releaser must NOT be
+    // able to take it back (surplus rule).
+    Task<> sem_thief(io::Context& io, Semaphore& sem, bool& thief_blocked)
+    {
+        co_await sem.acquire();
+        co_await async_sleep(io, std::chrono::milliseconds(10));
+        sem.release();
+        thief_blocked = !sem.try_acquire();
+        co_return {};
+    }
 
-Task<> sem_taker(Semaphore& sem, bool& ok)
-{
-    co_await sem.acquire();
-    ok = true;
-    co_return {};
-}
+    Task<> sem_taker(Semaphore& sem, bool& ok)
+    {
+        co_await sem.acquire();
+        ok = true;
+        co_return {};
+    }
 
-Task<> delayed_release(io::Context& io, Semaphore& sem, const std::chrono::milliseconds delay)
-{
-    co_await async_sleep(io, delay);
-    sem.release();
-    co_return {};
-}
-}  // namespace
+    Task<> delayed_release(io::Context& io, Semaphore& sem, const std::chrono::milliseconds delay)
+    {
+        co_await async_sleep(io, delay);
+        sem.release();
+        co_return {};
+    }
+} // namespace
 
 // ---- Baton: one-shot sticky broadcast event ----
 
@@ -136,7 +139,7 @@ TEST(BatonTest, BroadcastWakesAllInParkOrder)
     ctx.spawn(delayed_post(ctx, baton, std::chrono::milliseconds(10)));
     ctx.run();
 
-    EXPECT_EQ(order, (std::vector<int>{1, 2, 3}));
+    EXPECT_EQ(order, (std::vector{1, 2, 3}));
 }
 
 // Same observable outcome as PostThenWaitIsFast, but read as stickiness:
@@ -175,7 +178,7 @@ TEST(BatonTest, QuiescenceWaitsForParkedWaiter)
     Baton baton(ctx);
 
     bool done = false;
-    ctx.spawn(baton_waiter(baton, done));  // parks immediately
+    ctx.spawn(baton_waiter(baton, done)); // parks immediately
     ctx.spawn(delayed_post(ctx, baton, std::chrono::milliseconds(50)));
     ctx.run();
 
@@ -195,8 +198,8 @@ TEST(BatonTest, NeverPostedAborts)
     bool done = false;
     EXPECT_DEATH(
         {
-            ctx.spawn(baton_waiter(baton, done));
-            ctx.run();
+        ctx.spawn(baton_waiter(baton, done));
+        ctx.run();
         },
         "never posted");
 }
@@ -218,7 +221,7 @@ TEST(SemaphoreTest, TryAcquireSurplusOnly)
     EXPECT_TRUE(sem.try_acquire());
     EXPECT_FALSE(sem.try_acquire());
 
-    sem.release();  // no waiters: nobody to wake, nobody to reserve for
+    sem.release(); // no waiters: nobody to wake, nobody to reserve for
     EXPECT_TRUE(sem.try_acquire());
 }
 
@@ -240,7 +243,7 @@ TEST(SemaphoreTest, WakeOneFifoChained)
     ctx.spawn(sem_recorder(sem, 3, order));
     ctx.run();
 
-    EXPECT_EQ(order, (std::vector<int>{1, 2, 3}));
+    EXPECT_EQ(order, (std::vector{1, 2, 3}));
 }
 
 // Mirrors BufferPoolTest.NoBypassSurplusRule: the moment release() pops a
@@ -258,7 +261,7 @@ TEST(SemaphoreTest, ReleaserCannotStealReservedPermit)
     bool thief_blocked = false;
     bool waiter_ok = false;
     ctx.spawn(sem_thief(ctx, sem, thief_blocked));
-    ctx.spawn(sem_taker(sem, waiter_ok));  // parks while the permit is held
+    ctx.spawn(sem_taker(sem, waiter_ok)); // parks while the permit is held
     ctx.run();
 
     EXPECT_TRUE(thief_blocked);
@@ -276,7 +279,7 @@ TEST(SemaphoreTest, QuiescenceWaitsForParkedAcquirer)
     Semaphore sem(ctx, 0);
 
     bool done = false;
-    ctx.spawn(sem_taker(sem, done));  // parks: zero permits
+    ctx.spawn(sem_taker(sem, done)); // parks: zero permits
     ctx.spawn(delayed_release(ctx, sem, std::chrono::milliseconds(50)));
     ctx.run();
 
@@ -297,8 +300,8 @@ TEST(SemaphoreTest, NeverReleasedAborts)
     bool done = false;
     EXPECT_DEATH(
         {
-            ctx.spawn(sem_taker(sem, done));
-            ctx.run();
+        ctx.spawn(sem_taker(sem, done));
+        ctx.run();
         },
         "semaphore never released");
 }
@@ -319,14 +322,14 @@ TEST(BatonTest, PrimitiveFootprintStaysSmall)
 
 namespace
 {
-// Manual-drive bodies: the caller parks/resumes the task by hand, so
-// interleavings the run loop cannot produce become observable.
-Task<> baton_parker(Baton& baton)
-{
-    co_await baton.wait();
-    co_return {};
-}
-}  // namespace
+    // Manual-drive bodies: the caller parks/resumes the task by hand, so
+    // interleavings the run loop cannot produce become observable.
+    Task<> baton_parker(Baton& baton)
+    {
+        co_await baton.wait();
+        co_return {};
+    }
+} // namespace
 
 // post() is idempotent: the second call finds an empty waiter ring and a
 // ready_ already latched. Late waiters keep completing inline.
@@ -340,7 +343,7 @@ TEST(BatonTest, PostTwiceIsANoop)
 
     baton.post();
     EXPECT_TRUE(baton.try_wait());
-    baton.post();  // must be harmless
+    baton.post(); // must be harmless
 
     bool done = false;
     ctx.spawn(baton_waiter(baton, done));
@@ -360,15 +363,15 @@ TEST(BatonTest, NewcomerBetweenWakeAndResumeCompletesInline)
     Baton baton(ctx);
 
     auto first = baton_parker(baton);
-    first.await_suspend(std::noop_coroutine()).resume();  // parks
+    first.await_suspend(std::noop_coroutine()).resume(); // parks
     EXPECT_EQ(baton.waiting(), 1u);
 
-    baton.post();  // first is now woken: its handle sits in the ready list
+    baton.post(); // first is now woken: its handle sits in the ready list
     EXPECT_EQ(baton.waiting(), 0u);
 
     bool late_done = false;
-    ctx.spawn(baton_waiter(baton, late_done));  // completes inline during run
-    ctx.run();                                  // resumes the first waiter and the newcomer
+    ctx.spawn(baton_waiter(baton, late_done)); // completes inline during run
+    ctx.run(); // resumes the first waiter and the newcomer
 
     EXPECT_TRUE(late_done);
     EXPECT_TRUE(baton.try_wait());
@@ -384,14 +387,14 @@ TEST(BatonTest, WaitingAccessorTracksTheParkLifecycle)
     io::Context ctx(0, nullptr, opts);
     Baton baton(ctx);
 
-    EXPECT_EQ(baton.waiting(), 0u);  // ring not even allocated yet
+    EXPECT_EQ(baton.waiting(), 0u); // ring not even allocated yet
 
     auto t = baton_parker(baton);
     t.await_suspend(std::noop_coroutine()).resume();
     EXPECT_EQ(baton.waiting(), 1u);
 
     baton.post();
-    EXPECT_EQ(baton.waiting(), 0u);  // popped from the ring at wake time
+    EXPECT_EQ(baton.waiting(), 0u); // popped from the ring at wake time
 
     ctx.run();
 }
@@ -430,11 +433,11 @@ TEST(BatonDeathTest, DestroyedWithParkedWaitersTerminates)
     opts.entries = 64;
     EXPECT_DEATH(
         {
-            io::Context ctx(0, nullptr, opts);
-            auto baton = std::make_unique<Baton>(ctx);
-            auto t = baton_parker(*baton);
-            t.await_suspend(std::noop_coroutine()).resume();
-            baton.reset();  // ~Baton sees a non-empty waiter ring
+        io::Context ctx(0, nullptr, opts);
+        auto baton = std::make_unique<Baton>(ctx);
+        auto t = baton_parker(*baton);
+        t.await_suspend(std::noop_coroutine()).resume();
+        baton.reset(); // ~Baton sees a non-empty waiter ring
         },
         "parked waiters");
 }
@@ -454,7 +457,7 @@ TEST(SemaphoreTest, NPlusOnethTryAcquireFails)
     EXPECT_TRUE(sem.try_acquire());
     EXPECT_TRUE(sem.try_acquire());
     EXPECT_TRUE(sem.try_acquire());
-    EXPECT_FALSE(sem.try_acquire());  // the N+1th
+    EXPECT_FALSE(sem.try_acquire()); // the N+1th
     EXPECT_EQ(sem.available(), 0u);
 }
 
@@ -468,7 +471,7 @@ TEST(SemaphoreTest, OverReleaseRaisesTheFloor)
     io::Context ctx(0, nullptr, opts);
     Semaphore sem(ctx, 1);
 
-    sem.release();  // no waiters: pure count bumps
+    sem.release(); // no waiters: pure count bumps
     sem.release();
     EXPECT_EQ(sem.available(), 3u);
 
@@ -490,19 +493,19 @@ TEST(SemaphoreTest, NewcomerParksBehindAReservedPermit)
 
     bool first_ok = false;
     auto first = sem_taker(sem, first_ok);
-    first.await_suspend(std::noop_coroutine()).resume();  // parks: zero permits
+    first.await_suspend(std::noop_coroutine()).resume(); // parks: zero permits
     EXPECT_EQ(sem.waiting(), 1u);
 
-    sem.release();  // permit reserved for the woken first waiter
+    sem.release(); // permit reserved for the woken first waiter
     EXPECT_EQ(sem.waiting(), 0u);
-    EXPECT_FALSE(sem.try_acquire());  // reserved: no surplus
+    EXPECT_FALSE(sem.try_acquire()); // reserved: no surplus
 
     bool second_ok = false;
     auto second = sem_taker(sem, second_ok);
-    second.await_suspend(std::noop_coroutine()).resume();  // parks behind the reservation
+    second.await_suspend(std::noop_coroutine()).resume(); // parks behind the reservation
     EXPECT_EQ(sem.waiting(), 1u);
 
-    sem.release();  // second release: wakes the newcomer
+    sem.release(); // second release: wakes the newcomer
     EXPECT_EQ(sem.waiting(), 0u);
 
     // Both reservations are now consumed: drive the rest to completion.
@@ -530,7 +533,7 @@ TEST(SemaphoreTest, TwoReleasesWakeTwoWaitersEachConsumesItsOwn)
     ASSERT_EQ(sem.waiting(), 2u);
 
     sem.release();
-    sem.release();  // both woken, both reserved -- nobody has resumed yet
+    sem.release(); // both woken, both reserved -- nobody has resumed yet
     EXPECT_EQ(sem.available(), 2u);
     EXPECT_EQ(sem.waiting(), 0u);
 

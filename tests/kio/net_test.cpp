@@ -190,7 +190,7 @@ TEST(ResolveIpTest, InvalidHostFails)
 
 TEST(TcpListenerTest, BindLoopbackEphemeralPort)
 {
-    auto l = TcpListener::Bind(0, "127.0.0.1");
+    auto l = TcpListener::bind(0, "127.0.0.1");
     ASSERT_TRUE(l.has_value());
     ASSERT_TRUE(l->valid());
 
@@ -200,7 +200,7 @@ TEST(TcpListenerTest, BindLoopbackEphemeralPort)
 
 TEST(TcpListenerTest, BindSetsTheDocumentedFlags)
 {
-    auto l = TcpListener::Bind(0, "127.0.0.1");
+    auto l = TcpListener::bind(0, "127.0.0.1");
     ASSERT_TRUE(l.has_value());
 
     const int flags = ::fcntl(l->get(), F_GETFL);
@@ -221,11 +221,11 @@ TEST(TcpListenerTest, BindSetsTheDocumentedFlags)
 // reuse_port ever becomes opt-out, this test must change.
 TEST(TcpListenerTest, SecondBindToTheSamePortSucceedsViaReusePort)
 {
-    auto first = TcpListener::Bind(0, "127.0.0.1");
+    auto first = TcpListener::bind(0, "127.0.0.1");
     ASSERT_TRUE(first.has_value());
     const auto port = read_bound_port(first->get());
 
-    auto second = TcpListener::Bind(port, "127.0.0.1");
+    auto second = TcpListener::bind(port, "127.0.0.1");
     ASSERT_TRUE(second.has_value()) << "Bind hardcodes SO_REUSEPORT; duplicate bind must succeed";
     EXPECT_EQ(read_bound_port(second->get()), port);
 }
@@ -238,7 +238,7 @@ TEST(TcpListenerTest, FailedBindsDoNotLeakFds)
     for (int i = 0; i < 1000; ++i)
     {
         // TEST-NET-3: never assigned, never local -- bind fails EADDRNOTAVAIL.
-        auto r = TcpListener::Bind(0, "203.0.113.1");
+        auto r = TcpListener::bind(0, "203.0.113.1");
         ASSERT_FALSE(r.has_value());
         EXPECT_EQ(r.error().value(), EADDRNOTAVAIL);
     }
@@ -247,7 +247,7 @@ TEST(TcpListenerTest, FailedBindsDoNotLeakFds)
 
 TEST(TcpListenerTest, InvalidIpStringIsRejected)
 {
-    auto r = TcpListener::Bind(80, "not-an-ip");
+    auto r = TcpListener::bind(80, "not-an-ip");
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().value(), EINVAL);
     EXPECT_EQ(r.error().context(), "inet_pton(AF_INET)");
@@ -257,7 +257,7 @@ TEST(TcpListenerTest, InvalidIpStringIsRejected)
 // succeed in the container; only assert the EACCES shape when they don't.
 TEST(TcpListenerTest, BindPort80NeedsRoot)
 {
-    auto r = TcpListener::Bind(80, "127.0.0.1");
+    auto r = TcpListener::bind(80, "127.0.0.1");
     if (r.has_value())
     {
         GTEST_SKIP() << "CAP_NET_BIND_SERVICE present (docker default capability set)";
@@ -271,7 +271,7 @@ TEST(TcpListenerTest, V6PathServesAnIpv6Socket)
     {
         GTEST_SKIP() << "no IPv6 support";
     }
-    auto l = TcpListener::Bind(0, "::1");
+    auto l = TcpListener::bind(0, "::1");
     ASSERT_TRUE(l.has_value());
 
     sockaddr_storage ss{};

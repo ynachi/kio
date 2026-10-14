@@ -2,17 +2,18 @@
 # Examples
 # ============================================================================
 
-#kio_add_demo(02_echo_server kio/02_echo_server_dispatch.cpp TAGS core LIBS gflags::gflags uring)
-#kio_add_sanitizers(02_echo_server)
+add_executable(01_tick kio/01_tick.cpp)
+target_link_libraries(01_tick PRIVATE uring kio_warnings)
+target_compile_definitions(01_tick PRIVATE DAIO_STATS=1)
 
 add_executable(03_http_services kio/03_http_services.cpp)
-target_link_libraries(03_http_services PRIVATE uring kio_warnings)
+target_link_libraries(03_http_services PRIVATE uring kio_warnings absl::flags absl::flags_parse)
 target_compile_definitions(03_http_services PRIVATE DAIO_STATS=1)
 
 # Create a custom target to build all examples
 add_custom_target(examples
         DEPENDS
-        #02_echo_server
+        01_tick
         03_http_services
 )
 

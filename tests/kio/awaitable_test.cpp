@@ -21,14 +21,14 @@ using namespace kio;
 
 // The four flag bits must be disjoint from each other and from the
 // lifecycle field they share the byte with.
-static_assert((io::kLifecycleMask &
-               (io::kEtimeIsSuccessBit | io::kHasLinkTimeoutBit | io::kCancelRequestedBit | io::kPreFailedBit)) == 0);
-static_assert((io::kEtimeIsSuccessBit & io::kHasLinkTimeoutBit) == 0);
-static_assert((io::kEtimeIsSuccessBit & io::kCancelRequestedBit) == 0);
-static_assert((io::kEtimeIsSuccessBit & io::kPreFailedBit) == 0);
-static_assert((io::kHasLinkTimeoutBit & io::kCancelRequestedBit) == 0);
-static_assert((io::kHasLinkTimeoutBit & io::kPreFailedBit) == 0);
-static_assert((io::kCancelRequestedBit & io::kPreFailedBit) == 0);
+static_assert((detail::kLifecycleMask & (detail::kEtimeIsSuccessBit | detail::kHasLinkTimeoutBit |
+                                         detail::kCancelRequestedBit | detail::kPreFailedBit)) == 0);
+static_assert((detail::kEtimeIsSuccessBit & detail::kHasLinkTimeoutBit) == 0);
+static_assert((detail::kEtimeIsSuccessBit & detail::kCancelRequestedBit) == 0);
+static_assert((detail::kEtimeIsSuccessBit & detail::kPreFailedBit) == 0);
+static_assert((detail::kHasLinkTimeoutBit & detail::kCancelRequestedBit) == 0);
+static_assert((detail::kHasLinkTimeoutBit & detail::kPreFailedBit) == 0);
+static_assert((detail::kCancelRequestedBit & detail::kPreFailedBit) == 0);
 
 namespace
 {
@@ -39,7 +39,7 @@ using NoPrep = void (*)(io_uring_sqe*, __kernel_timespec*);
 Result<int> resume_with(io::Context& io, const int res, const bool etime, const bool link, const bool cancel_req,
                         const int pre_errno = 0)
 {
-    io::IoAwaitable<NoPrep> op{io, nullptr, etime, pre_errno};
+    detail::IoAwaitable<NoPrep> op{io, nullptr, etime, pre_errno};
     op.res = res;
     if (link)
     {
@@ -55,8 +55,8 @@ Result<int> resume_with(io::Context& io, const int res, const bool etime, const 
 
 TEST(IoAwaitableTest, DefaultState)
 {
-    io::IoAwaitableBase base;
-    EXPECT_EQ(base.lifecycle(), io::IoAwaitableState::Created);
+    detail::IoAwaitableBase base;
+    EXPECT_EQ(base.lifecycle(), detail::IoAwaitableState::Created);
     EXPECT_FALSE(base.etime_is_success());
     EXPECT_FALSE(base.has_link_timeout());
     EXPECT_FALSE(base.cancel_requested());
@@ -66,12 +66,13 @@ TEST(IoAwaitableTest, DefaultState)
 
 TEST(IoAwaitableTest, LifecycleTransitionsPreserveFlags)
 {
-    io::IoAwaitableBase base;
-    base.state |= io::kEtimeIsSuccessBit | io::kPreFailedBit;
+    detail::IoAwaitableBase base;
+    base.state |= detail::kEtimeIsSuccessBit | detail::kPreFailedBit;
     base.set_has_link_timeout();
     base.set_cancel_requested();
 
-    for (const auto life : {io::IoAwaitableState::Created, io::IoAwaitableState::Inflight, io::IoAwaitableState::Done})
+    for (const auto life :
+         {detail::IoAwaitableState::Created, detail::IoAwaitableState::Inflight, detail::IoAwaitableState::Done})
     {
         base.set_lifecycle(life);
         EXPECT_EQ(base.lifecycle(), life);
@@ -84,12 +85,12 @@ TEST(IoAwaitableTest, LifecycleTransitionsPreserveFlags)
 
 TEST(IoAwaitableTest, FlagSettersPreserveLifecycleAndOtherFlags)
 {
-    io::IoAwaitableBase base;
-    base.set_lifecycle(io::IoAwaitableState::Inflight);
+    detail::IoAwaitableBase base;
+    base.set_lifecycle(detail::IoAwaitableState::Inflight);
 
     base.set_has_link_timeout();
     EXPECT_TRUE(base.has_link_timeout());
-    EXPECT_EQ(base.lifecycle(), io::IoAwaitableState::Inflight);
+    EXPECT_EQ(base.lifecycle(), detail::IoAwaitableState::Inflight);
     EXPECT_FALSE(base.cancel_requested());
     EXPECT_FALSE(base.etime_is_success());
     EXPECT_FALSE(base.pre_failed());
@@ -97,7 +98,7 @@ TEST(IoAwaitableTest, FlagSettersPreserveLifecycleAndOtherFlags)
     base.set_cancel_requested();
     EXPECT_TRUE(base.cancel_requested());
     EXPECT_TRUE(base.has_link_timeout());
-    EXPECT_EQ(base.lifecycle(), io::IoAwaitableState::Inflight);
+    EXPECT_EQ(base.lifecycle(), detail::IoAwaitableState::Inflight);
     EXPECT_FALSE(base.etime_is_success());
     EXPECT_FALSE(base.pre_failed());
 }
@@ -106,17 +107,17 @@ TEST(IoAwaitableTest, ConstructorSeedsFlagsAndPrefailErrno)
 {
     io::Context ctx(0, nullptr, test::test_opts());
 
-    io::IoAwaitable<NoPrep> normal{ctx, nullptr, /*etime_is_success=*/false, 0};
+    detail::IoAwaitable<NoPrep> normal{ctx, nullptr, /*etime_is_success=*/false, 0};
     EXPECT_FALSE(normal.etime_is_success());
     EXPECT_FALSE(normal.pre_failed());
     EXPECT_EQ(normal.res, 0);
-    EXPECT_EQ(normal.lifecycle(), io::IoAwaitableState::Created);
+    EXPECT_EQ(normal.lifecycle(), detail::IoAwaitableState::Created);
 
-    io::IoAwaitable<NoPrep> prefailed{ctx, nullptr, /*etime_is_success=*/true, EBADF};
+    detail::IoAwaitable<NoPrep> prefailed{ctx, nullptr, /*etime_is_success=*/true, EBADF};
     EXPECT_TRUE(prefailed.etime_is_success());
     EXPECT_TRUE(prefailed.pre_failed());
     EXPECT_EQ(prefailed.res, -EBADF);
-    EXPECT_EQ(prefailed.lifecycle(), io::IoAwaitableState::Created);
+    EXPECT_EQ(prefailed.lifecycle(), detail::IoAwaitableState::Created);
 }
 
 // await_resume() is a pure function of (res, flags, canceling_all_): every

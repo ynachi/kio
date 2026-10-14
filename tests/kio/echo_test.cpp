@@ -45,7 +45,7 @@ constexpr auto kIoTimeout = 5s;
 
 Result<io::UniqueFd> bind_local_listener(SocketAddress& out)
 {
-    auto l = TcpListener::Bind(0, "127.0.0.1");
+    auto l = TcpListener::bind(0, "127.0.0.1");
     if (!l)
     {
         return l;
@@ -226,9 +226,9 @@ TEST(EchoTest, FiftyConcurrentClientsMoveOneMiBEach)
     // per-connection fd without counting the ring's own descriptors.
     const auto fd_baseline = test::OpenFdCount();
 
-    std::atomic<int> done{0};
-    std::atomic<int> io_failures{0};
-    std::atomic<int> connect_failures{0};
+    std::atomic done{0};
+    std::atomic io_failures{0};
+    std::atomic connect_failures{0};
     std::vector<char> verified(kClients, 0);  // char, not vector<bool>: no shared-word races
 
     ctx.spawn(accept_loop(ctx, permits, *listener, io_failures));

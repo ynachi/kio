@@ -73,6 +73,7 @@ add_library(uring
         src/kio/net.cc
         src/kio/tcp_listener.cc
         src/kio/buffer_pool.cc
+        src/kio/context.cpp
 )
 # Include directories
 target_include_directories(uring PUBLIC

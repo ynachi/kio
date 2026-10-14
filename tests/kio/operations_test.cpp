@@ -82,7 +82,7 @@ namespace
 
     Result<LocalListener> bind_local_listener()
     {
-        auto l = TcpListener::Bind(0, "127.0.0.1");
+        auto l = TcpListener::bind(0, "127.0.0.1");
         if (!l)
         {
             return std::unexpected(l.error());

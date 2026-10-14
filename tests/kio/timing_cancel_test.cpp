@@ -55,7 +55,7 @@ Task<> write_byte_after(io::Context& io, io::UniqueFd fd, const std::chrono::mil
 // non-movable IoAwaitable ever happens), publishes its address, then awaits
 // it. The timer task cancels through that address: the pattern the free
 // io::cancel(io, op) requires.
-Task<> recv_hold_op(io::Context& io, io::UniqueFd fd, io::IoAwaitableBase** slot, Result<int>& out,
+Task<> recv_hold_op(io::Context& io, io::UniqueFd fd, detail::IoAwaitableBase** slot, Result<int>& out,
                     const std::chrono::nanoseconds timeout)
 {
     std::byte b{};
@@ -83,7 +83,7 @@ Task<> recv_hold_op_forever(io::Context& io, io::UniqueFd fd, Result<int>& out)
 // Park after the recv completes, with the awaiter still frame-resident: a
 // late cancel(io, op) must be a guarded no-op, not a write into an op whose
 // result was already consumed.
-Task<> recv_hold_op_then_park(io::Context& io, io::UniqueFd fd, io::IoAwaitableBase** slot, Result<int>& out,
+Task<> recv_hold_op_then_park(io::Context& io, io::UniqueFd fd, detail::IoAwaitableBase** slot, Result<int>& out,
                               Baton& done)
 {
     std::byte b{};
@@ -94,7 +94,7 @@ Task<> recv_hold_op_then_park(io::Context& io, io::UniqueFd fd, io::IoAwaitableB
     co_return {};
 }
 
-Task<> cancel_op_after(io::Context& io, io::IoAwaitableBase** slot, const std::chrono::milliseconds delay)
+Task<> cancel_op_after(io::Context& io, detail::IoAwaitableBase** slot, const std::chrono::milliseconds delay)
 {
     co_await async_sleep(io, delay);
     io::cancel(io, **slot);
@@ -142,7 +142,7 @@ TEST(TimingCancelTest, LinkedTimeoutReportsEtimedout)
 
     io::Context ctx(0, nullptr, test_opts());
     Result<int> out{0};
-    io::IoAwaitableBase* slot = nullptr;
+    detail::IoAwaitableBase* slot = nullptr;
     ctx.spawn(recv_hold_op(ctx, io::UniqueFd{sv[0]}, &slot, out, 50ms));
     ctx.run();
 
@@ -160,7 +160,7 @@ TEST(TimingCancelTest, CompletesUnderGenerousTimeout)
 
     io::Context ctx(0, nullptr, test_opts());
     Result<int> out{0};
-    io::IoAwaitableBase* slot = nullptr;
+    detail::IoAwaitableBase* slot = nullptr;
     ctx.spawn(recv_hold_op(ctx, io::UniqueFd{sv[0]}, &slot, out, 1s));
     ctx.spawn(write_byte_after(ctx, io::UniqueFd{sv[1]}, 10ms));
     ctx.run();
@@ -208,7 +208,7 @@ TEST(TimingCancelTest, ExplicitCancelReportsCanceledNotTimeout)
 
     io::Context ctx(0, nullptr, test_opts());
     Result<int> out{0};
-    io::IoAwaitableBase* slot = nullptr;
+    detail::IoAwaitableBase* slot = nullptr;
     ctx.spawn(recv_hold_op(ctx, io::UniqueFd{sv[0]}, &slot, out, 5s));
     ctx.spawn(cancel_op_after(ctx, &slot, 10ms));
     ctx.run();
@@ -228,7 +228,7 @@ TEST(TimingCancelTest, CancelAfterCompletionIsNoop)
     io::Context ctx(0, nullptr, test_opts());
     Baton done(ctx);
     Result<int> out{0};
-    io::IoAwaitableBase* slot = nullptr;
+    detail::IoAwaitableBase* slot = nullptr;
     ctx.spawn(recv_hold_op_then_park(ctx, io::UniqueFd{sv[0]}, &slot, out, done));
     ctx.spawn(write_byte_after(ctx, io::UniqueFd{sv[1]}, 10ms));
     ctx.spawn(cancel_op_after(ctx, &slot, 50ms));
@@ -328,9 +328,9 @@ TEST(TimingCancelTest, CancelAllWithArmedTimeoutsReportsCanceledNotTimeout)
     Result<int> out1{0};
     Result<int> out2{0};
     Result<int> out3{0};
-    io::IoAwaitableBase* s1 = nullptr;
-    io::IoAwaitableBase* s2 = nullptr;
-    io::IoAwaitableBase* s3 = nullptr;
+    detail::IoAwaitableBase* s1 = nullptr;
+    detail::IoAwaitableBase* s2 = nullptr;
+    detail::IoAwaitableBase* s3 = nullptr;
     ctx.spawn(recv_hold_op(ctx, io::UniqueFd{sv[0]}, &s1, out1, 5s));
     ctx.spawn(recv_hold_op(ctx, io::UniqueFd{sv[0]}, &s2, out2, 5s));
     ctx.spawn(recv_hold_op(ctx, io::UniqueFd{sv[0]}, &s3, out3, 5s));
@@ -370,7 +370,7 @@ TEST(TimingCancelTest, SecondRunClassifiesTimeoutsAgain)
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv2), 0);
     io::UniqueFd p2{sv2[1]};
     Result<int> second{0};
-    io::IoAwaitableBase* slot = nullptr;
+    detail::IoAwaitableBase* slot = nullptr;
     ctx.spawn(recv_hold_op(ctx, io::UniqueFd{sv2[0]}, &slot, second, 50ms));
     ctx.run();
     ASSERT_FALSE(second.has_value());
@@ -408,7 +408,7 @@ TEST(TimingCancelTest, CancelThatLosesTheRaceLeavesTheOpSuccessful)
     io::Context ctx(0, nullptr, test_opts());
     Baton done(ctx);
     Result<int> out{0};
-    io::IoAwaitableBase* slot = nullptr;
+    detail::IoAwaitableBase* slot = nullptr;
     ctx.spawn(recv_hold_op_then_park(ctx, io::UniqueFd{sv[0]}, &slot, out, done));
     ctx.spawn(cancel_op_after(ctx, &slot, 1ms));
     ctx.spawn(post_baton_after(ctx, done, 30ms));
@@ -432,7 +432,7 @@ TEST(TimingCancelTest, DoubleCancelIsHarmless)
     io::Context ctx(0, nullptr, test_opts());
     Baton done(ctx);
     Result<int> out{0};
-    io::IoAwaitableBase* slot = nullptr;
+    detail::IoAwaitableBase* slot = nullptr;
     ctx.spawn(recv_hold_op_then_park(ctx, io::UniqueFd{sv[0]}, &slot, out, done));
     ctx.spawn(cancel_op_after(ctx, &slot, 10ms));
     ctx.spawn(cancel_op_after(ctx, &slot, 20ms));
@@ -453,7 +453,7 @@ TEST(TimingCancelTest, StrayTimeoutCqeIsSwallowed)
 
     io::Context ctx(0, nullptr, test_opts());
     Result<int> out{0};
-    io::IoAwaitableBase* slot = nullptr;
+    detail::IoAwaitableBase* slot = nullptr;
     ctx.spawn(recv_hold_op(ctx, io::UniqueFd{sv[0]}, &slot, out, 20ms));
     ctx.spawn(write_byte_after(ctx, io::UniqueFd{sv[1]}, 5ms));
     ctx.run();
@@ -480,7 +480,7 @@ Task<> long_sleep_under_short_timeout(io::Context& io, Result<int>& out)
     out = co_await async_sleep(io, 1h).timeout(10ms);
     co_return {};
 }
-} // namespace
+}  // namespace
 
 TEST(TimingCancelTest, LongSleepUnderShortTimeoutReportsEtimedout)
 {

@@ -2,8 +2,11 @@
 #include "kio/operations.h"
 #include "kio/task.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <stop_token>
+#include <thread>
 
 #include <unistd.h>
 
@@ -340,4 +343,151 @@ TEST(RunLoopTest, LinkTimeoutBatchNeverSplitsOnTinyRing)
     ctx.run();
 
     EXPECT_EQ(ok_sleeps, 100);
+}
+
+// ===========================================================================
+// Stop semantics: the one force-drain mode (design-notes/shutdown.md)
+// ===========================================================================
+//
+// The token is the force channel ONLY: read at the loop's arming check, it
+// arms cancel_all() + fail-fast staging, and run() still returns only when
+// quiesced. The tick constant (50ms) and the -ETIME convention of
+// io_uring_submit_and_wait_timeout are pinned behaviorally by these tests.
+
+namespace
+{
+// Drives ctx.run(st) on a worker thread and waits up to `budget` for it to
+// return. A regression that hangs run() fires the caller's failing EXPECT
+// first, then blocks in join -- the hang IS the loud signal.
+bool run_with_stop(io::Context& ctx, std::stop_token st, const std::chrono::milliseconds budget)
+{
+    std::atomic<bool> returned{false};
+    std::jthread driver(
+        [&ctx, st = std::move(st), &returned]
+        {
+            ctx.run(st);
+            returned = true;
+        });
+    for (auto start = std::chrono::steady_clock::now();
+         !returned.load() && std::chrono::steady_clock::now() - start < budget;)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    const bool ok = returned.load();
+    driver.join();
+    return ok;
+}
+
+Task<> recv_hold_forever(io::Context& io, io::UniqueFd fd, Result<int>& out)
+{
+    std::byte b{};
+    out = co_await async_recv(io, fd, std::span{&b, 1});
+    co_return {};
+}
+}  // namespace
+
+// The old loop's `while (!st.stop_requested())` hung forever when the
+// request landed with everything already drained: the stop-suppressed
+// quiesce exit fell into submit_and_wait for a CQE nothing could produce.
+// A task whose LAST act is request_stop is the deterministic repro.
+TEST(RunLoopTest, StopAsLastActStillReturns)
+{
+    io::IoOptions opts;
+    opts.entries = 64;
+    opts.batch_max_size = 8;
+    io::Context ctx(0, nullptr, opts);
+    std::stop_source src;
+    bool ran = false;
+    auto stopper = [&src, &ran]() -> Task<>
+    {
+        ran = true;
+        src.request_stop();
+        co_return {};
+    };
+    ctx.spawn(stopper());
+
+    ctx.run(src.get_token());
+
+    EXPECT_TRUE(ran);
+}
+
+// Stop landing while the loop is BLOCKED on a pending op: the deadline tick
+// is the only sanctioned wake. A mis-handled -ETIME aborts in the FATAL
+// check; an unbounded wait hangs. Either way this test fails loudly.
+TEST(RunLoopTest, StopDuringBlockedWaitDrainsBounded)
+{
+    int sv[2];
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+    io::IoOptions opts;
+    opts.entries = 64;
+    opts.batch_max_size = 8;
+    io::Context ctx(0, nullptr, opts);
+    std::stop_source src;
+    Result<int> out;
+    ctx.spawn(recv_hold_forever(ctx, io::UniqueFd{sv[0]}, out));
+
+    EXPECT_TRUE(run_with_stop(ctx, src.get_token(), std::chrono::seconds(5)));
+
+    // The parked recv was force-cancelled by the drain, not left hanging.
+    EXPECT_EQ(out.error().value(), ECANCELED);
+    EXPECT_EQ(out.error().context(), "operation canceled");
+}
+
+// A task that retries forever on success must not defeat the drain: the
+// fail-fast latch makes inflight_ monotone, so the retry's next await
+// completes inline with -ECANCELED (no SQE ever staged again) and the loop
+// exits. A one-shot cancel + re-stage design livelocks here instead.
+TEST(RunLoopTest, RetryLoopDrainsInsteadOfLivelocking)
+{
+    io::IoOptions opts;
+    opts.entries = 64;
+    opts.batch_max_size = 8;
+    io::Context ctx(0, nullptr, opts);
+    std::stop_source src;
+    int retries = 0;
+    bool canceled = false;
+    auto retrier = [&ctx, &retries, &canceled]() -> Task<>
+    {
+        for (;;)
+        {
+            auto r = co_await async_sleep(ctx, std::chrono::milliseconds(5));
+            if (!r)
+            {
+                canceled = r.error().value() == ECANCELED;
+                co_return {};
+            }
+            ++retries;
+        }
+    };
+    ctx.spawn(retrier());
+
+    EXPECT_TRUE(run_with_stop(ctx, src.get_token(), std::chrono::seconds(5)));
+
+    EXPECT_GE(retries, 5);  // it really was looping before the stop
+    EXPECT_TRUE(canceled);
+}
+
+// Row 3 of the token state machine: destroying every stop_source WITHOUT
+// requesting leaves stop_possible() == false -- the loop becomes
+// un-stoppable (nobody can ever signal it). Correct, but the opposite of
+// an ownership-transfer intuition; the dead-source session still quiesces.
+TEST(RunLoopTest, SourceDestroyedWithoutRequestStillQuiesces)
+{
+    io::IoOptions opts;
+    opts.entries = 64;
+    opts.batch_max_size = 8;
+    io::Context ctx(0, nullptr, opts);
+    std::stop_token st;
+    {
+        std::stop_source src;
+        st = src.get_token();
+    }
+    EXPECT_FALSE(st.stop_possible());
+    EXPECT_FALSE(st.stop_requested());
+
+    g_completed = 0;
+    ctx.spawn(counting_noop());
+    ctx.run(st);
+
+    EXPECT_EQ(g_completed, 1);
 }

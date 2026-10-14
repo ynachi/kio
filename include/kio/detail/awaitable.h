@@ -16,8 +16,13 @@
 namespace kio::io
 {
     class Context;
+    class UniqueFd;
+} // namespace kio::io
 
+namespace kio::detail
+{
     inline constexpr std::uint64_t kIgnoreTag = 1;
+    inline constexpr std::uint64_t kWakeTag = 3;
 
     // Lifecycle only, and terminal: Created -> Inflight -> Done. Cancel intent
     // is a separate flag bit, NOT a lifecycle state.  Canceled-as-a-state
@@ -72,11 +77,11 @@ namespace kio::io
 
     static_assert(alignof(IoAwaitableBase) >= 2, "Op address low bit must be free for tagging");
 
-    template <std::invocable<io_uring_sqe*, __kernel_timespec*> Prep>
+    template <std::invocable<io_uring_sqe*, __kernel_timespec*> Prep, typename T = int>
     class IoAwaitable : public IoAwaitableBase
     {
     public:
-        IoAwaitable(Context& io, Prep p, const bool etime_is_success, const int pre_errno = 0) noexcept
+        IoAwaitable(io::Context& io, Prep p, const bool etime_is_success = false, const int pre_errno = 0) noexcept
             : io_(io), prep_(std::move(p))
         {
             if (etime_is_success)
@@ -110,11 +115,14 @@ namespace kio::io
             // afterwards would flag an op whose result is already being
             // classified, so a real -ECANCELED could misreport as ETIMEDOUT.
             CHECK(lifecycle() == IoAwaitableState::Created) << "timeout() set after the op was awaited";
-            const auto d = std::max(duration_ns, std::chrono::nanoseconds{});
-            const auto s = std::chrono::duration_cast<std::chrono::seconds>(d);
+            // Zero or negative means "no timeout": skip the linked SQE entirely
+            // so the kernel doesn't fire it immediately and cancel the parent op.
+            if (duration_ns <= std::chrono::nanoseconds{})
+                return *this;
+            const auto s = std::chrono::duration_cast<std::chrono::seconds>(duration_ns);
             link_ts_ = __kernel_timespec{
                 .tv_sec = static_cast<long long>(s.count()),
-                .tv_nsec = static_cast<long long>((d - s).count())
+                .tv_nsec = static_cast<long long>((duration_ns - s).count())
             };
             set_has_link_timeout();
             return *this;
@@ -122,13 +130,15 @@ namespace kio::io
 
         bool await_ready() const noexcept { return pre_failed(); }
 
-        void await_suspend(std::coroutine_handle<> h) noexcept;
+        // Returns false when the op was refused by a force-drain (never staged,
+        // never suspended): the coroutine resumes inline with -ECANCELED.
+        bool await_suspend(std::coroutine_handle<> h) noexcept;
 
         // Defined in context.h: needs the complete Context (canceling_all_).
-        Result<int> await_resume() const noexcept;
+        Result<T> await_resume() const noexcept;
 
     private:
-        Context& io_;
+        io::Context& io_;
         [[no_unique_address]] Prep prep_;
         // Scratch for the value prep_ hands to the kernel (sleep durations)
         // and the timespec of a chained .timeout() (link_ts_). They are
@@ -140,4 +150,7 @@ namespace kio::io
         __kernel_timespec scratch_{};
         __kernel_timespec link_ts_{};
     };
-} // namespace kio::io
+
+    template <typename Prep>
+    IoAwaitable(io::Context&, Prep, bool = false, int = 0) -> IoAwaitable<Prep, int>;
+} // namespace kio::detail

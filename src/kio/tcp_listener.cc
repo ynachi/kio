@@ -4,7 +4,7 @@
 
 namespace kio
 {
-    Result<io::UniqueFd> TcpListener::Bind(const SocketAddress& addr, const int backlog)
+    Result<io::UniqueFd> TcpListener::bind(const SocketAddress& addr, const int backlog)
     {
         // Create the raw socket
         const int raw_fd = ::socket(addr.addr.ss_family, SOCK_STREAM | SOCK_CLOEXEC, 0);
@@ -40,7 +40,7 @@ namespace kio
         return sock;
     }
 
-    Result<io::UniqueFd> TcpListener::Bind(const uint16_t port, const char* ip, const int backlog)
+    Result<io::UniqueFd> TcpListener::bind(const uint16_t port, const char* ip, const int backlog)
     {
         const bool v6 = ip != nullptr && std::string_view(ip).find(':') != std::string_view::npos;
         auto addr = v6 ? SocketAddress::V6(port, ip) : SocketAddress::V4(port, ip);
@@ -49,6 +49,6 @@ namespace kio
             return std::unexpected(addr.error());
         }
 
-        return Bind(*addr, backlog);
+        return bind(*addr, backlog);
     }
 } // namespace kio
