@@ -60,13 +60,8 @@ namespace kio::io
         : opts_(opts), id_(id)
     {
         CHECK(opts_.batch_max_size > 0) << "batch_max_size must be positive";
-        if (pool_cfg.has_value())
-        {
-            CHECK(pool_cfg->slot_size >= 4096 && (pool_cfg->slot_size & (pool_cfg->slot_size - 1)) == 0 &&
-                (RegisteredBufferPool::kOneGiB % pool_cfg->slot_size) == 0)
-            << "BufferPoolConfig.slot_size must be a power of two >= 4096 dividing 1 GiB, got "
-            << pool_cfg->slot_size;
-        }
+        // BufferPoolConfig is validated by RegisteredBufferPool's constructor
+        // (std::invalid_argument), the single owner of that invariant.
         // When share_work_queues is false, every worker builds a fully
         // independent ring instead of attaching to the leader's worker pool.
         int leader_fd = -1;
@@ -83,7 +78,12 @@ namespace kio::io
         // a new run() is a fresh session, so linked-timeout ops report
         // ETIMEDOUT again instead of cancellation.
         canceling_all_ = false;
-        activate();
+        // run() is re-callable (one session per call); only the first
+        // session enables the ring and pins the issuer thread.
+        if (!is_activated_)
+        {
+            activate();
+        }
         // Bind/debug-CHECK the loop-thread contract: everything below
         // (and every post/note_park from primitives) assumes one driver.
         check_loop_thread();
@@ -105,11 +105,12 @@ namespace kio::io
 
         constexpr std::uint64_t kChunk = 256;
         std::coroutine_handle<> chunk[kChunk];
-        // Stop-observation tick: how often a blocked wait re-arms. The
-        // in-kernel deadline is the ONLY sanctioned cross-thread wake --
-        // no waker fd, ever (sharding.md §6). Pinned by the shutdown tests;
-        // deliberately not a knob: one stop mode, no knobs. Non-const: the
-        // pinned liburing's wait_timeout takes a plain __kernel_timespec*.
+        // Drain tick: once a stop has latched the force-drain, the loop waits
+        // with this deadline instead of unbounded, so it re-checks quiesce
+        // even if a cancelled op's CQE is slow to land. The cross-thread stop
+        // wake itself is the eventfd above (wake_on_stop + arm_wake), not
+        // this tick. Deliberately not a knob. Non-const: the pinned
+        // liburing's wait_timeout takes a plain __kernel_timespec*.
         static __kernel_timespec kStopPoll{.tv_sec = 0, .tv_nsec = 50'000'000};
 
         for (;;)
@@ -180,7 +181,11 @@ namespace kio::io
                 {
                     arm_wake();
                 }
-                r = io_uring_submit_and_wait(&ring_, 1);
+                // arm_wake() takes an SQE via get_sqe(); on a full SQ whose
+                // submit hits -EBUSY/-EAGAIN, submit_or_die() reaps nested
+                // and may have just posted runnable work. Never block on it.
+                r = ready_list_.empty() ? io_uring_submit_and_wait(&ring_, 1)
+                                        : io_uring_submit_and_get_events(&ring_);
             }
             else
             {
@@ -193,7 +198,10 @@ namespace kio::io
                     r = 0;
                 }
             }
-            if (r < 0 && r != -EINTR && r != -EBUSY)
+            // EBUSY/EAGAIN are transient (CQ overflow backpressure, request
+            // allocation failure): the reap below makes progress and the
+            // loop retries, exactly as submit_or_die() treats them.
+            if (r < 0 && r != -EINTR && r != -EBUSY && r != -EAGAIN)
             {
                 LOG(FATAL) << "fatal, io submit failed: " << r;
             }
@@ -228,6 +236,18 @@ namespace kio::io
         if (io_uring_sq_space_left(&ring_) < reserve)
         {
             submit_or_die();
+            // SQPOLL: submit only publishes the tail and wakes the poller;
+            // the kernel thread frees SQ slots asynchronously, so space may
+            // still be short here. Block until the poller has consumed
+            // enough (IORING_ENTER_SQ_WAIT). Without SQPOLL the submit above
+            // consumed the SQ synchronously and this loop never runs.
+            while ((ring_.flags & IORING_SETUP_SQPOLL) != 0 && io_uring_sq_space_left(&ring_) < reserve)
+            {
+                if (const int r = io_uring_sqring_wait(&ring_); r < 0 && r != -EINTR)
+                {
+                    LOG(FATAL) << "io_uring_sqring_wait failed: " << std::strerror(-r) << " (" << r << ")";
+                }
+            }
         }
         io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
         CHECK(sqe != nullptr) << "SQ still full after submit: reserve=" << reserve

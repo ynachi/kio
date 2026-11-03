@@ -68,12 +68,17 @@ public:
     /// @brief Coroutines currently parked on wait() (0 on the fast path).
     [[nodiscard]] std::size_t waiting() const noexcept { return waiters_ ? waiters_->size() : 0; }
 
+    // The awaiter captures the Context at construction and never touches the
+    // Baton after waking: post() is one-shot and sticky, so "post, then
+    // destroy the Baton" is a legal poster pattern even while woken waiters
+    // still sit in the ready list.
     struct WaitAwaiter
     {
         Baton& baton;
+        io::Context& io;
         bool parked_ = false;  // guards note_unpark on the fast path
 
-        explicit WaitAwaiter(Baton& b) noexcept : baton(b) {}
+        explicit WaitAwaiter(Baton& b) noexcept : baton(b), io(b.io_) {}
 
         WaitAwaiter(const WaitAwaiter&) = delete;
         WaitAwaiter& operator=(const WaitAwaiter&) = delete;
@@ -82,16 +87,17 @@ public:
 
         void await_suspend(std::coroutine_handle<> h) noexcept
         {
-            baton.io_.note_park();
+            io.note_park();
             parked_ = true;
             baton.wait_queue().push(h);
         }
 
         void await_resume() noexcept
         {
+            // Must not touch `baton`: it may already be destroyed.
             if (parked_)
             {
-                baton.io_.note_unpark();
+                io.note_unpark();
             }
         }
     };

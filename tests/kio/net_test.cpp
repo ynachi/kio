@@ -13,6 +13,7 @@
 #include <cstdint>
 
 #include <fcntl.h>
+#include <netdb.h>
 #include <unistd.h>
 
 #include <sys/socket.h>
@@ -186,6 +187,15 @@ TEST(ResolveIpTest, InvalidHostFails)
     EXPECT_FALSE(r.has_value());
 }
 
+// EAI_* codes keep their own category: the message is gai_strerror's text,
+// not an unrelated errno string (EAI_NONAME used to read "No such device").
+TEST(ResolveIpTest, GaiCategoryCarriesGaiStrerror)
+{
+    const std::error_code ec{EAI_NONAME, gai_category()};
+    EXPECT_STREQ(ec.category().name(), "getaddrinfo");
+    EXPECT_EQ(ec.message(), ::gai_strerror(EAI_NONAME));
+}
+
 // ---- TcpListener ----
 
 TEST(TcpListenerTest, BindLoopbackEphemeralPort)
@@ -215,18 +225,32 @@ TEST(TcpListenerTest, BindSetsTheDocumentedFlags)
     EXPECT_EQ(test::read_int_option(l->get(), IPPROTO_TCP, TCP_NODELAY), 1);
 }
 
-// Bind() hardcodes ReusePort{true} (tcp_listener.cc), so a second listener
-// on the same port succeeds: the review's "EADDRINUSE by default" scenario
-// cannot happen through this API. Pinned as the actual contract -- if
-// reuse_port ever becomes opt-out, this test must change.
-TEST(TcpListenerTest, SecondBindToTheSamePortSucceedsViaReusePort)
+// SO_REUSEPORT is opt-in: by default a second listener on a port already
+// in use fails loudly with EADDRINUSE instead of silently splitting the
+// accept stream with whoever got there first.
+TEST(TcpListenerTest, SecondBindToTheSamePortFailsByDefault)
 {
     auto first = TcpListener::bind(0, "127.0.0.1");
     ASSERT_TRUE(first.has_value());
     const auto port = read_bound_port(first->get());
+    EXPECT_EQ(test::read_int_option(first->get(), SOL_SOCKET, SO_REUSEPORT), 0);
 
     auto second = TcpListener::bind(port, "127.0.0.1");
-    ASSERT_TRUE(second.has_value()) << "Bind hardcodes SO_REUSEPORT; duplicate bind must succeed";
+    ASSERT_FALSE(second.has_value());
+    EXPECT_EQ(second.error().value(), EADDRINUSE);
+}
+
+// Sharded servers opt in: every listener that sets reuse_port may share the
+// port, and the kernel balances accepts across them.
+TEST(TcpListenerTest, ReusePortOptInAllowsSharedPort)
+{
+    auto first = TcpListener::bind(0, "127.0.0.1", 4096, /*reuse_port=*/true);
+    ASSERT_TRUE(first.has_value());
+    const auto port = read_bound_port(first->get());
+    EXPECT_EQ(test::read_int_option(first->get(), SOL_SOCKET, SO_REUSEPORT), 1);
+
+    auto second = TcpListener::bind(port, "127.0.0.1", 4096, /*reuse_port=*/true);
+    ASSERT_TRUE(second.has_value()) << second.error().message();
     EXPECT_EQ(read_bound_port(second->get()), port);
 }
 

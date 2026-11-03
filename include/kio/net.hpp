@@ -5,6 +5,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <system_error>
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -152,6 +153,10 @@ struct SocketAddress
     /// @brief Retrieves the port number (host byte order).
     [[nodiscard]] std::optional<uint16_t> GetPort() const;
 };
+
+/// @brief Error category for getaddrinfo's EAI_* codes, as returned by
+///        ResolveIp: `err.code == std::error_code{EAI_NONAME, gai_category()}`.
+const std::error_category& gai_category() noexcept;
 
 /// @brief Synchronously resolves a hostname to an address (BLOCKING).
 /// @param host Hostname to resolve (e.g., "example.com")

@@ -5,9 +5,12 @@
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <optional>
 #include <stop_token>
 #include <thread>
 
+#include <fcntl.h>
+#include <poll.h>
 #include <unistd.h>
 
 #include <sys/socket.h>
@@ -104,7 +107,7 @@ Task<> write_one_byte_after(io::Context& io, io::UniqueFd fd)
 {
     co_await async_sleep(io, std::chrono::milliseconds(10));
     const char c = 'x';
-    (void)::write(fd.get(), &c, 1);  // completes the recv via deferred task work
+    (void)!::write(fd.get(), &c, 1);  // completes the recv via deferred task work
     co_return {};
 }
 
@@ -356,14 +359,42 @@ TEST(RunLoopTest, LinkTimeoutBatchNeverSplitsOnTinyRing)
 
 namespace
 {
-// Drives ctx.run(st) on a worker thread and waits up to `budget` for it to
-// return. A regression that hangs run() fires the caller's failing EXPECT
-// first, then blocks in join -- the hang IS the loud signal.
-bool run_with_stop(io::Context& ctx, std::stop_token st, const std::chrono::milliseconds budget)
+// Drives ctx.run(src's token) on a worker thread, lets the session run for
+// `lead`, requests stop, then waits up to `budget` for run() to return.
+// Returns whether it did. If run() never returns, the request was the last
+// lever: the caller's EXPECT fails and join blocks -- the hang IS the loud
+// signal.
+bool run_with_stop(io::Context& ctx, std::stop_source& src, const std::chrono::milliseconds budget,
+                   const std::chrono::milliseconds lead = std::chrono::milliseconds(100))
 {
     std::atomic<bool> returned{false};
     std::jthread driver(
-        [&ctx, st = std::move(st), &returned]
+        [&ctx, st = src.get_token(), &returned]
+        {
+            ctx.run(st);
+            returned = true;
+        });
+    std::this_thread::sleep_for(lead);
+    src.request_stop();
+    for (auto start = std::chrono::steady_clock::now();
+         !returned.load() && std::chrono::steady_clock::now() - start < budget;)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    const bool ok = returned.load();
+    driver.join();
+    return ok;
+}
+
+// Drives ctx.run(token) WITHOUT requesting stop, waiting up to `budget` for
+// a natural quiesce. Returns whether run() returned on its own; if not, stop
+// is requested as a rescue so the test can report instead of hanging.
+bool quiesces_within(io::Context& ctx, const std::chrono::milliseconds budget)
+{
+    std::stop_source src;
+    std::atomic<bool> returned{false};
+    std::jthread driver(
+        [&ctx, st = src.get_token(), &returned]
         {
             ctx.run(st);
             returned = true;
@@ -374,6 +405,7 @@ bool run_with_stop(io::Context& ctx, std::stop_token st, const std::chrono::mill
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     const bool ok = returned.load();
+    src.request_stop();
     driver.join();
     return ok;
 }
@@ -426,7 +458,7 @@ TEST(RunLoopTest, StopDuringBlockedWaitDrainsBounded)
     Result<int> out;
     ctx.spawn(recv_hold_forever(ctx, io::UniqueFd{sv[0]}, out));
 
-    EXPECT_TRUE(run_with_stop(ctx, src.get_token(), std::chrono::seconds(5)));
+    EXPECT_TRUE(run_with_stop(ctx, src, std::chrono::seconds(5)));
 
     // The parked recv was force-cancelled by the drain, not left hanging.
     EXPECT_EQ(out.error().value(), ECANCELED);
@@ -461,7 +493,7 @@ TEST(RunLoopTest, RetryLoopDrainsInsteadOfLivelocking)
     };
     ctx.spawn(retrier());
 
-    EXPECT_TRUE(run_with_stop(ctx, src.get_token(), std::chrono::seconds(5)));
+    EXPECT_TRUE(run_with_stop(ctx, src, std::chrono::seconds(5)));
 
     EXPECT_GE(retries, 5);  // it really was looping before the stop
     EXPECT_TRUE(canceled);
@@ -490,4 +522,86 @@ TEST(RunLoopTest, SourceDestroyedWithoutRequestStillQuiesces)
     ctx.run(st);
 
     EXPECT_EQ(g_completed, 1);
+}
+
+// Pin: arm_wake() takes an SQE through get_sqe(); on a full SQ that
+// submits from inside the arming. The completions it produces must still
+// be reaped and resumed -- run() must not block in submit_and_wait with
+// runnable work. An 8-entry ring, 8 already-ready polls (they complete
+// while being armed), stop possible so arm_wake runs on the full SQ. Uses
+// a ring without DEFER_TASKRUN so those completions land in the CQ during
+// the nested submit itself.
+TEST(RunLoopTest, WakeArmOnFullSqDoesNotStrandReapedWork)
+{
+    io::IoOptions opts;
+    opts.entries = 8;
+    opts.batch_max_size = 8;
+    opts.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_COOP_TASKRUN;
+    io::Context ctx(0, nullptr, opts);
+    int p[2];
+    ASSERT_EQ(::pipe2(p, O_CLOEXEC), 0);
+    io::UniqueFd rfd{p[0]};
+    io::UniqueFd wfd{p[1]};
+
+    int ok_writes = 0;
+    auto writer = [&ok_writes](io::Context& io, const io::UniqueFd& fd) -> Task<>
+    {
+        // An already-writable pipe: the poll completes while being armed.
+        if (auto m = co_await async_poll(io, fd, POLLOUT); m.has_value() && (*m & POLLOUT))
+        {
+            ++ok_writes;
+        }
+        co_return {};
+    };
+    for (int i = 0; i < 8; ++i)
+    {
+        ctx.spawn(writer(ctx, wfd));
+    }
+
+    EXPECT_TRUE(quiesces_within(ctx, std::chrono::seconds(2)));
+    EXPECT_EQ(ok_writes, 8);
+}
+
+// Regression: with SQPOLL, io_uring_submit() only publishes the tail and
+// wakes the poller; the kernel frees SQ slots asynchronously, so get_sqe()
+// must wait for space instead of CHECK-failing on a still-full ring.
+TEST(RunLoopTest, SqpollTinyRingNeverAbortsOnFullSq)
+{
+    io::IoOptions opts;
+    opts.entries = 4;
+    opts.batch_max_size = 256;
+    opts.flags = IORING_SETUP_SQPOLL | IORING_SETUP_SINGLE_ISSUER;
+    opts.sq_thread_idle_ms = 1;  // let the poller go idle often: worst case
+    std::optional<io::Context> ctx;
+    try
+    {
+        ctx.emplace(0, nullptr, opts);
+    }
+    catch (const std::runtime_error& e)
+    {
+        GTEST_SKIP() << "SQPOLL unavailable: " << e.what();
+    }
+    io::UniqueFd devnull{::open("/dev/null", O_WRONLY | O_CLOEXEC)};
+    ASSERT_TRUE(devnull.valid());
+
+    int ok_writes = 0;
+    auto writer = [&ok_writes](io::Context& io, const io::UniqueFd& fd) -> Task<>
+    {
+        const std::byte payload[4]{};
+        for (int i = 0; i < 50; ++i)
+        {
+            if (auto n = co_await async_write(io, fd, std::span{payload, 4}); n.has_value() && *n == 4)
+            {
+                ++ok_writes;
+            }
+        }
+        co_return {};
+    };
+    for (int i = 0; i < 200; ++i)
+    {
+        ctx->spawn(writer(*ctx, devnull));
+    }
+    ctx->run();
+
+    EXPECT_EQ(ok_writes, 200 * 50);
 }

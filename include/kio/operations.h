@@ -3,6 +3,7 @@
 #include "detail/awaitable.h"
 
 #include <algorithm>
+#include <climits>
 #include <cstddef>
 #include <filesystem>
 #include <span>
@@ -22,6 +23,16 @@ inline constexpr std::size_t kMaxRwLen = 0x7ffff000;
 [[nodiscard]] constexpr unsigned clamp_len(const std::size_t n) noexcept
 {
     return static_cast<unsigned>(std::min(n, kMaxRwLen));
+}
+
+// readv/writev take at most IOV_MAX iovecs; more is EINVAL from the kernel.
+// Pre-failed here so a count above UINT_MAX can never wrap into a small,
+// "valid" nr_vecs that silently drops buffers.
+inline constexpr std::size_t kMaxIovecs = IOV_MAX;
+
+[[nodiscard]] constexpr int iov_count_errno(const std::size_t n) noexcept
+{
+    return n > kMaxIovecs ? EINVAL : 0;
 }
 }  // namespace kio::detail
 
@@ -51,13 +62,15 @@ inline auto async_write(Context& io, const UniqueFd& fd, std::span<const std::by
 }
 
 // Vectorized read: the span is captured by value, so the caller's iovec
-// array must stay alive until the operation completes
+// array must stay alive until the operation completes. More than IOV_MAX
+// iovecs completes inline with EINVAL (nothing is submitted).
 inline auto async_readv(Context& io, const UniqueFd& fd, std::span<const iovec> iovecs,
                         const std::uint64_t off = ~0ULL) noexcept
 {
     return detail::IoAwaitable{
         io, [raw_fd = fd.get(), iovecs, off](io_uring_sqe* sqe, __kernel_timespec*)
-        { io_uring_prep_readv(sqe, raw_fd, iovecs.data(), detail::clamp_len(iovecs.size()), off); }, false};
+        { io_uring_prep_readv(sqe, raw_fd, iovecs.data(), static_cast<unsigned>(iovecs.size()), off); }, false,
+        detail::iov_count_errno(iovecs.size())};
 }
 
 inline auto async_writev(Context& io, const UniqueFd& fd, std::span<const iovec> iovecs,
@@ -65,7 +78,8 @@ inline auto async_writev(Context& io, const UniqueFd& fd, std::span<const iovec>
 {
     return detail::IoAwaitable{
         io, [raw_fd = fd.get(), iovecs, off](io_uring_sqe* sqe, __kernel_timespec*)
-        { io_uring_prep_writev(sqe, raw_fd, iovecs.data(), detail::clamp_len(iovecs.size()), off); }, false};
+        { io_uring_prep_writev(sqe, raw_fd, iovecs.data(), static_cast<unsigned>(iovecs.size()), off); }, false,
+        detail::iov_count_errno(iovecs.size())};
 }
 
 inline auto async_recv(Context& io, const UniqueFd& fd, std::span<std::byte> buf, int flags = 0) noexcept

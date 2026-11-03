@@ -9,6 +9,12 @@
 // uses it -- an awaitable only captures the raw fd number. EXPECT (not
 // ASSERT) inside coroutine bodies.
 
+// Captureless task lambdas deliberately name their parameters after the
+// test-scope variables they are handed; GCC's -Wshadow flags that (clang's
+// does not), so it is silenced for this file only.
+#if defined(__GNUC__) && !defined(__clang__)
+    #pragma GCC diagnostic ignored "-Wshadow"
+#endif
 #include "kio/operations.h"
 
 #include "kio/context.h"
@@ -18,6 +24,7 @@
 #include "kio/net.hpp"
 #include "kio/tcp_listener.hpp"
 
+#include <climits>
 #include <cerrno>
 #include <chrono>
 #include <csignal>
@@ -67,7 +74,7 @@ namespace
         io::UniqueFd fd{::open(path.c_str(), O_CREAT | O_RDWR | O_TRUNC | O_CLOEXEC, 0600)};
         if (!payload.empty() && fd.valid())
         {
-            (void)::write(fd.get(), payload.data(), payload.size());
+            (void)!::write(fd.get(), payload.data(), payload.size());
             (void)::lseek(fd.get(), 0, SEEK_SET);
         }
         return fd;
@@ -245,6 +252,25 @@ TEST(OperationsTest, WritevThenReadvScatterGather)
     EXPECT_EQ((std::string_view{got, 9}), "abcdefghi"); // parens: the braces' comma would split the macro args
     EXPECT_EQ(std::memcmp(x, "abcd", 4), 0);
     EXPECT_EQ(std::memcmp(y, "efghi", 5), 0);
+}
+
+// More than IOV_MAX iovecs is pre-failed with EINVAL (completes inline,
+// nothing submitted) instead of handing the kernel a truncated or wrapped
+// nr_vecs.
+TEST(OperationsTest, ReadvWritevRejectMoreThanIovMax)
+{
+    test::TempDir dir;
+    const io::UniqueFd fd = make_temp_file(dir.path(), "toomany.bin");
+    std::byte one{};
+    const std::vector<iovec> iov(static_cast<std::size_t>(IOV_MAX) + 1, iovec{&one, 1});
+
+    const auto w = run_io_op([&](io::Context& io) { return async_writev(io, fd, iov, 0); });
+    ASSERT_FALSE(w.has_value());
+    EXPECT_EQ(w.error().value(), EINVAL);
+
+    const auto r = run_io_op([&](io::Context& io) { return async_readv(io, fd, iov, 0); });
+    ASSERT_FALSE(r.has_value());
+    EXPECT_EQ(r.error().value(), EINVAL);
 }
 
 // ---- send / recv ----

@@ -35,8 +35,16 @@ public:
 
     // Destroying a Semaphore with parked waiters leaves their handles
     // dangling: run()'s quiescence CHECK would catch it later, but only here
-    // can the abort name the culprit object.
-    ~Semaphore() { CHECK(!waiters_ || waiters_->empty()) << "Semaphore destroyed with parked waiters"; }
+    // can the abort name the culprit object. A woken-but-not-yet-resumed
+    // waiter (reserved_ > 0) is just as fatal: its await_resume consumes the
+    // reservation from this object, so destruction in that window would be
+    // a use-after-free. Unlike Baton (whose waiters never touch it after
+    // waking), a Semaphore must outlive the resume of every waiter it woke.
+    ~Semaphore()
+    {
+        CHECK(!waiters_ || waiters_->empty()) << "Semaphore destroyed with parked waiters";
+        CHECK(reserved_ == 0) << "Semaphore destroyed with a woken waiter that has not resumed yet";
+    }
 
     /// Non-blocking acquire. Newcomers may only take surplus permits.
     [[nodiscard]] bool try_acquire() noexcept

@@ -154,6 +154,9 @@ Task<int> consume_lvalue(Result<std::unique_ptr<int>>& src)
 #if defined(__clang__)
     #pragma clang diagnostic push
     #pragma clang diagnostic ignored "-Wdangling-else"
+#elif defined(__GNUC__)
+    #pragma GCC diagnostic push
+    #pragma GCC diagnostic ignored "-Wdangling-else"
 #endif
 Result<void> dangling_else(const bool cond, bool& else_ran)
 {
@@ -165,6 +168,8 @@ Result<void> dangling_else(const bool cond, bool& else_ran)
 }
 #if defined(__clang__)
     #pragma clang diagnostic pop
+#elif defined(__GNUC__)
+    #pragma GCC diagnostic pop
 #endif
 }  // namespace
 

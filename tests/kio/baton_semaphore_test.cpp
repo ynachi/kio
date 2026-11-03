@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <chrono>
 #include <coroutine>
+#include <cstring>
+#include <new>
 #include <memory>
 #include <random>
 #include <vector>
@@ -616,4 +618,64 @@ TEST(SemaphoreTest, ConservationFuzzAgainstCountModel)
         }
         EXPECT_EQ(static_cast<long>(sem.available()), model) << "step " << step;
     }
+}
+
+// ===========================================================================
+// Lifetime: woken-but-not-yet-resumed waiters
+// ===========================================================================
+
+// Regression: post() is a one-shot, sticky event, so "post, then drop the
+// Baton" is a legitimate poster pattern (the waiter never touches the Baton
+// again after its co_await). The woken waiter's await_resume used to read
+// `baton.io_` -- after the poster had already destroyed the Baton. The
+// storage is scribbled after destruction so the stale read faults
+// deterministically instead of silently reading freed memory.
+TEST(BatonTest, PosterMayDestroyBatonBeforeWokenWaiterResumes)
+{
+    io::IoOptions opts;
+    opts.entries = 64;
+    opts.batch_max_size = 8;
+    io::Context ctx(0, nullptr, opts);
+
+    alignas(Baton) std::byte storage[sizeof(Baton)];
+    auto* baton = new (storage) Baton(ctx);
+    bool done = false;
+    ctx.spawn(baton_waiter(*baton, done));
+
+    auto poster = [](Baton* b, std::byte* raw) -> Task<>
+    {
+        b->post();
+        b->~Baton();
+        std::memset(raw, 0xA5, sizeof(Baton));
+        co_return {};
+    };
+    ctx.spawn(poster(baton, storage));
+    ctx.run();
+
+    EXPECT_TRUE(done);
+}
+
+// A Semaphore, unlike a Baton, hands its woken waiter a RESERVED permit that
+// the waiter consumes from the Semaphore on resume, so the Semaphore must
+// outlive that resume. Destroying it in that window is caught at the bug
+// site instead of becoming a use-after-free in await_resume.
+TEST(SemaphoreDeathTest, DestroyedWithWokenUnresumedWaiterTerminates)
+{
+    io::IoOptions opts;
+    opts.entries = 64;
+    EXPECT_DEATH(
+        {
+        io::Context ctx(0, nullptr, opts);
+        auto sem = std::make_unique<Semaphore>(ctx, 0);
+        auto acquirer = [](Semaphore& s) -> Task<>
+        {
+            co_await s.acquire();
+            co_return {};
+        };
+        auto t = acquirer(*sem);
+        t.await_suspend(std::noop_coroutine()).resume(); // parks
+        sem->release(); // wakes + reserves; the waiter has not resumed
+        sem.reset();
+        },
+        "woken waiter");
 }

@@ -1,12 +1,9 @@
-// <netdb.h> deliberately precedes the kio headers (breaking the own-header-
-// first convention): libstdc++ defines the EAI-derived errc enumerators
-// (host_not_found, no_data, ...) in <system_error> ONLY when the EAI_* macros
-// are already visible. Include netdb first and those std::errc members exist;
-// include it second and ResolveIp's EAI_NONAME mapping does not compile.
 #include "kio/net.hpp"
 
 #include <cerrno>
 #include <cstring>
+#include <string>
+#include <system_error>
 
 #include <netdb.h>
 
@@ -14,6 +11,25 @@
 
 namespace kio
 {
+namespace
+{
+// EAI_* codes are not errno values and std::errc has no equivalents for
+// most of them, so they keep their own category: value() is the EAI code
+// and message() is gai_strerror's text ("Name or service not known", ...).
+class GaiErrorCategory final : public std::error_category
+{
+public:
+    [[nodiscard]] const char* name() const noexcept override { return "getaddrinfo"; }
+    [[nodiscard]] std::string message(const int ev) const override { return ::gai_strerror(ev); }
+};
+}  // namespace
+
+const std::error_category& gai_category() noexcept
+{
+    static const GaiErrorCategory category;
+    return category;
+}
+
 Result<SocketAddress> SocketAddress::V4(const uint16_t port, const char* ip)
 {
     SocketAddress sa;
@@ -118,8 +134,11 @@ Result<SocketAddress> ResolveIp(const std::string_view host, const uint16_t port
 
     if (const int rc = getaddrinfo(hostname.c_str(), service.c_str(), &hints, &res); rc != 0)
     {
-        // getaddrinfo returns EAI_* codes, not errno; map the ones with a clear
-        // errc equivalent and fall back to address_not_available.
+        // getaddrinfo returns EAI_* codes, not errno. The two with a real
+        // errno meaning map onto it (so `== std::errc::...` retry checks
+        // work); everything else -- EAI_NONAME "no such host" included --
+        // keeps its EAI code under gai_category() instead of being forced
+        // into a misleading errno.
         switch (rc)
         {
             case EAI_SYSTEM:
@@ -128,14 +147,11 @@ Result<SocketAddress> ResolveIp(const std::string_view host, const uint16_t port
                 return Error::fail_errc(std::errc::resource_unavailable_try_again, "getaddrinfo");
             case EAI_MEMORY:
                 return Error::fail_errc(std::errc::not_enough_memory, "getaddrinfo");
-#ifdef EAI_NONAME
-            case EAI_NONAME:
-                // The common "no such host" -- must not collapse into the
-                // generic fallback below.
-                return Error::fail_errc(std::errc::no_such_device, "getaddrinfo");
-#endif
             default:
-                return Error::fail_errc(std::errc::address_not_available, "getaddrinfo");
+                return std::unexpected(Error{
+                    .code = {rc, gai_category()},
+                      .operation = "getaddrinfo"
+                });
         }
     }
 

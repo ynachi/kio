@@ -280,12 +280,14 @@ TEST(TimingCancelTest, SharedWorkQueueFollowerAttachesToLeader)
     EXPECT_EQ(b, 1);
 }
 
-// A malformed pool config must abort at the Context constructor -- naming
-// the config -- before the pool maps anything.
-TEST(TimingCancelTest, BadPoolSlotSizeAbortsAtConstruction)
+// A malformed pool config fails the Context constructor with
+// std::invalid_argument (the pool's own validation, same as slots == 0)
+// before the pool maps anything.
+TEST(TimingCancelTest, BadPoolSlotSizeThrowsAtConstruction)
 {
-    EXPECT_DEATH(
-        { io::Context ctx(0, nullptr, test_opts(), BufferPoolConfig{.slot_size = 3000, .slots = 4}); }, "power of two");
+    EXPECT_THROW(
+        { io::Context ctx(0, nullptr, test_opts(), BufferPoolConfig{.slot_size = 3000, .slots = 4}); },
+        std::invalid_argument);
 }
 
 // ---- loop-thread contract (debug builds only: check_loop_thread is
