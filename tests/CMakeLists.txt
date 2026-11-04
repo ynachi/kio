@@ -1,60 +1,71 @@
 # kio tests
 
-# -----------------------------------------------------------------------------
-# Unit Tests (fast, no I/O)
-# -----------------------------------------------------------------------------
-
-kio_add_test(101_kio_pipe_pool_tests kio/101_pipe_pool_tests.cpp
-        TAGS kio unit
-        LIBS kio GTest::gtest GTest::gtest_main
+kio_add_test(task_tests kio/task_test.cpp
+        TAGS uring unit
+        LIBS uring GTest::gtest GTest::gtest_main
 )
 
-kio_add_test(102_io_context kio/102_io_context.cpp
-        TAGS kio unit
-        LIBS kio GTest::gtest GTest::gtest_main
+kio_add_test(ready_ring_tests kio/ready_ring_test.cpp
+        TAGS unit
 )
 
-# -----------------------------------------------------------------------------
-# Integration Tests (real I/O)
-# -----------------------------------------------------------------------------
-
-kio_add_test(200_kio_io_ops_tests kio/200_io_ops_tests.cpp
-        TAGS kio integration
-        LIBS kio GTest::gtest GTest::gtest_main
+kio_add_test(run_loop_tests kio/run_loop_test.cpp
+        TAGS uring unit
 )
 
-kio_add_test(201_kio_io_helpers_tests kio/201_io_helpers_tests.cpp
-        TAGS kio integration
-        LIBS kio GTest::gtest GTest::gtest_main
+kio_add_test(buffer_pool_tests kio/buffer_pool_test.cpp
+        TAGS uring unit
 )
 
-kio_add_test(202_kio_timeout_tests kio/202_timeout_tests.cpp
-        TAGS kio integration
-        LIBS kio GTest::gtest GTest::gtest_main
+kio_add_test(baton_semaphore_tests kio/baton_semaphore_test.cpp
+        TAGS uring unit
 )
 
-kio_add_test(203_kio_net_tests kio/203_net_tests.cpp
-        TAGS kio integration
-        LIBS kio GTest::gtest GTest::gtest_main
+kio_add_test(timing_cancel_tests kio/timing_cancel_test.cpp
+        TAGS uring unit
 )
 
-kio_add_test(301_http_tests kio/301_http_test.cpp
-        TAGS kio http unit
-        LIBS kio GTest::gtest GTest::gtest_main
+kio_add_test(error_tests kio/error_test.cpp
+        TAGS uring unit
 )
 
-kio_add_test(401_io_buffer kio/401_io_buffer_tests.cpp
-        TAGS kio buffer unit
-        LIBS kio GTest::gtest GTest::gtest_main
+kio_add_test(fd_tests kio/fd_test.cpp
+        TAGS unit
 )
 
-
-kio_add_test(501_resp_parser kio/resp/501_resp_parser.cpp
-        TAGS kio resp unit
-        LIBS kio GTest::gtest GTest::gtest_main
-)
-kio_add_test(502_resp_writer kio/resp/502_resp_writer.cpp
-        TAGS kio resp unit
-        LIBS kio GTest::gtest GTest::gtest_main
+kio_add_test(net_tests kio/net_test.cpp
+        TAGS unit
 )
 
+kio_add_test(awaitable_tests kio/awaitable_test.cpp
+        TAGS uring unit
+)
+
+kio_add_test(operations_tests kio/operations_test.cpp
+        TAGS uring unit
+)
+
+kio_add_test(echo_tests kio/echo_test.cpp
+        TAGS uring integration
+)
+
+# Stale v1 tests: target the deleted core/io.h API (IO, run_blocking,
+# schedule()). Restore each one as its v2 counterpart lands.
+#  - context_remote_tests  (v1: IoContext workers, shared work queues)
+#  - shutdown_tests        (v1: grace period + drain_until_quiescent)
+#  - io_regression_tests   (v1: ring ownership, queue internals)
+#
+# kio_add_test(context_remote_tests kio/context_remote_test.cpp
+#         TAGS uring integration queue
+#         LIBS uring GTest::gtest GTest::gtest_main
+# )
+#
+# kio_add_test(shutdown_tests kio/shutdown_test.cpp
+#         TAGS uring integration shutdown
+#         LIBS uring GTest::gtest GTest::gtest_main
+# )
+#
+# kio_add_test(io_regression_tests kio/io_regression_test.cpp
+#         TAGS uring integration
+#         LIBS uring GTest::gtest GTest::gtest_main
+# )

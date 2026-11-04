@@ -1,0 +1,31 @@
+#pragma once
+
+#include "fd.hpp"
+#include "net.hpp"
+
+namespace kio
+{
+    struct TcpListener
+    {
+        /// @brief Creates, binds, and listens on a socket with high-performance defaults.
+        /// @param addr The SocketAddress to bind to (IPv4 or IPv6)
+        /// @param backlog Pending connection queue size (default: 4096)
+        /// @param reuse_port Set SO_REUSEPORT so several sockets (e.g. one per
+        ///        sharded Context) can listen on the same port, with the kernel
+        ///        load-balancing accepts across them. Off by default: with it
+        ///        on, a second process (same UID) binding a port already in use
+        ///        succeeds silently instead of failing with EADDRINUSE.
+        /// @return Result<io::UniqueFd> with the listening socket or error
+        static Result<io::UniqueFd> bind(const SocketAddress& addr, int backlog = 4096, bool reuse_port = false);
+
+        /// @brief Convenience overload that automatically detects IPv4 vs IPv6.
+        /// @param port Port number in host byte order
+        /// @param ip IP string (e.g., "0.0.0.0", "127.0.0.1", or "::1").
+        ///           Defaults to nullptr (INADDR_ANY / 0.0.0.0).
+        /// @param backlog Pending connection queue size
+        /// @param reuse_port See the SocketAddress overload.
+        /// @return Result<io::UniqueFd> with the listening socket or error
+        static Result<io::UniqueFd> bind(uint16_t port, const char* ip = nullptr, int backlog = 4096,
+                                         bool reuse_port = false);
+    };
+} // namespace kio
